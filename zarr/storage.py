@@ -1017,7 +1017,7 @@ class FSStore(MutableMapping):
     mode : str
         "w" for writable, "r" for read-only
     auto_mkidr : boolean
-        If True (default), create intermediate directories automatically when writing chunks.
+        If True (default), create intermediate directories automatically when creating new chunks.
     exceptions : list of Exception subclasses
         When accessing data, any of these exceptions will be treated
         as a missing key
