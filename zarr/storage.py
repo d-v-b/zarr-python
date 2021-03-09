@@ -1016,6 +1016,8 @@ class FSStore(MutableMapping):
         for data keys
     mode : str
         "w" for writable, "r" for read-only
+    auto_mkidr : boolean
+        If True (default), create intermediate directories automatically when writing chunks.
     exceptions : list of Exception subclasses
         When accessing data, any of these exceptions will be treated
         as a missing key
@@ -1027,11 +1029,12 @@ class FSStore(MutableMapping):
     def __init__(self, url, normalize_keys=True, key_separator='.',
                  mode='w',
                  exceptions=(KeyError, PermissionError, IOError),
+                 auto_mkdir=True,
                  **storage_options):
         import fsspec
         self.normalize_keys = normalize_keys
         self.key_separator = key_separator
-        self.map = fsspec.get_mapper(url, **storage_options)
+        self.map = fsspec.get_mapper(url, auto_mkdir=auto_mkdir, **storage_options)
         self.fs = self.map.fs  # for direct operations
         self.path = self.fs._strip_protocol(url)
         self.mode = mode
