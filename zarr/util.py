@@ -16,6 +16,71 @@ from numcodecs.blosc import cbuffer_sizes, cbuffer_metainfo
 
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 
+fill_value_registry = {np.dtype('bool_') : False,
+                       np.dtype('byte') : 0,
+                       np.dtype('short'): 0,
+                       np.dtype('intc') : 0,
+                       np.dtype('int_') : 0,
+                       np.dtype('longlong') : 0,
+                       np.dtype('unsignedinteger') : 0,
+                       np.dtype('ubyte'): 0,
+                       np.dtype('ushort') : 0,
+                       np.dtype('uintc'): 0,
+                       np.dtype('uint') : 0,
+                       np.dtype('ulonglong') : 0,
+                       np.dtype('half') : 0,
+                       np.dtype('single') : 0,
+                       np.dtype('double') : 0,
+                       np.dtype('longdouble'): 0,
+                       np.dtype('csingle') : complex(0),
+                       np.dtype('cdouble') : complex(0),
+                       np.dtype('clongdouble') : complex(0),
+                       np.dtype('datetime64') : np.datetime64(0, "D"),
+                       np.dtype('timedelta64') : np.timedelta64('nAt'),
+                       np.dtype('object') : None}
+
+
+def get_default_fill_value(dtype: np.dtype[Any]):
+    """
+    Get the default fill value for a dtype from the registry. Raises KeyError
+    if no value is found.
+
+    Parameters
+    ----------
+    dtype : Numpy datatype object
+
+    Returns
+    -------
+    A default fill value coercible to `dtype`
+    """
+
+    result = fill_value_registry.get(dtype)
+    if result == None:
+        raise KeyError(f'There is no value associated with key {dtype} in the fill value registry.')
+    return result
+
+
+def register_default_fill_value(dtype: np.dtype[Any], value: Any):
+    """
+    Register a default fill value for a datatype.
+
+    Parameters
+    ----------
+    dtype : Numpy dtype object
+
+    value : Default fill value associated with `dtype`
+
+    Notes
+    -----
+    This function maintains a mapping from numpy dtypes to default fill values.
+    """
+    try:
+        np.array([value], dtype=dtype)
+    except TypeError as e:
+        raise ValueError(f"Could not create a numpy array of {value} with dtype {dtype} ") from e
+
+    fill_value_registry[dtype] = value
+
 
 def flatten(arg: Iterable) -> Iterable:
     for element in arg:
