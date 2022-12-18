@@ -292,14 +292,14 @@ def _require_parent_group(
 
 def init_array(
     store: StoreLike,
-    shape: Tuple[int, ...],
+    shape: Union[int, Tuple[int, ...]],
+    path: Optional[Path] = None,
     chunks: Union[bool, int, Tuple[int, ...]] = True,
     dtype=None,
     compressor="default",
     fill_value=None,
     order: str = "C",
     overwrite: bool = False,
-    path: Optional[Path] = None,
     chunk_store: Optional[StoreLike] = None,
     filters=None,
     object_codec=None,
@@ -315,6 +315,8 @@ def init_array(
         A mapping that supports string keys and bytes-like values.
     shape : int or tuple of ints
         Array shape.
+    path : string, bytes, optional
+        Path under which array is stored.
     chunks : bool, int or tuple of ints, optional
         Chunk shape. If True, will be guessed from `shape` and `dtype`. If
         False, will be set to `shape`, i.e., single chunk for the whole array.
@@ -328,8 +330,6 @@ def init_array(
         Memory layout to be used within each chunk.
     overwrite : bool, optional
         If True, erase all data in `store` prior to initialisation.
-    path : string, bytes, optional
-        Path under which array is stored.
     chunk_store : Store, optional
         Separate storage for chunks. If not provided, `store` will be used
         for storage of both chunks and metadata.
@@ -675,7 +675,7 @@ def init_group(
 
 def _init_group_metadata(
     store: StoreLike,
-    overwrite: Optional[bool] = False,
+    overwrite: bool = False,
     path: Optional[str] = None,
     chunk_store: Optional[StoreLike] = None,
 ):
