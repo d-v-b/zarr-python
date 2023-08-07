@@ -1,7 +1,11 @@
+from abc import abstractmethod
 from collections.abc import MutableMapping
 from itertools import islice
-
+from dataclasses import dataclass
+import os
+from typing import Any, Generic, List, Literal, Mapping, Optional, Tuple, TypeVar, Union, Protocol
 import numpy as np
+from numcodecs.abc import Codec
 
 from zarr._storage.store import (
     _get_metadata_suffix,
@@ -55,8 +59,121 @@ from zarr.util import (
     normalize_storage_path,
 )
 
+TAttrs = TypeVar("TAttrs", bound=Mapping[str, Any])
+TNodes = TypeVar("TNodes", bound=Mapping[str, Union["ArraySpec", "GroupSpec"]])
 
-class Group(MutableMapping):
+
+@dataclass
+class NodeSpec(Protocol[TAttrs]):
+    attrs: TAttrs
+
+
+@dataclass
+class ArraySpec(NodeSpec[TAttrs]):
+    @abstractmethod
+    def to_storage(self, store: BaseStore, path: str) -> Array:
+        ...
+
+    @classmethod
+    @abstractmethod
+    def from_storage(cls, arr: Array) -> "ArraySpec":
+        ...
+
+
+@dataclass
+class GroupSpec(NodeSpec[TAttrs], Generic[TAttrs, TNodes]):
+    attrs: TAttrs
+    nodes: TNodes
+
+    @abstractmethod
+    def to_storage(self, store: BaseStore, path: str) -> "Group":
+        ...
+
+    @classmethod
+    @abstractmethod
+    def from_storage(cls, grp: "Group") -> "GroupSpec":
+        ...
+
+
+@dataclass
+class GroupSpecV2(GroupSpec):
+    zarr_version = 2
+
+    def to_storage(self, store: BaseStore, path: str, **kwargs) -> "Group":
+        g = group(store=store, path=path, **kwargs)
+        g.attrs.put(self.attrs)
+
+        for key, value in self.nodes.items():
+            value.to_storage(store, os.path.join(g.path, key))
+
+        return g
+
+    @classmethod
+    def from_storage(cls, grp: "Group") -> "GroupSpecV2":
+        nodes = {}
+        _node: Union["GroupSpecV2", ArraySpecV2]
+        for name, node in grp.items():
+            if isinstance(node, Array):
+                _node = ArraySpecV2.from_storage(node)
+            elif isinstance(node, Group):
+                _node = cls.from_storage(node)
+            else:
+                msg = (
+                    f"Unparsable object encountered: {type(node)}. "
+                    "Expected zarr array or zarr group."
+                )
+                raise ValueError(msg)
+            nodes[name] = _node
+
+        result = cls(attrs=dict(grp.attrs), nodes=nodes)
+        return result
+
+
+@dataclass
+class ArraySpecV2(ArraySpec):
+    shape: Tuple[int, ...]
+    dtype: np.dtype
+    chunks: Tuple[int, ...]
+    compressor: Optional[Codec]
+    filters: Optional[List[Codec]]
+    fill_value: Any
+    order: Literal["C", "F"]
+    dimension_separator: Literal[".", "/"]
+
+    def to_storage(self, store: BaseStore, path: str, **kwargs) -> Array:
+        arr = create(
+            store=store,
+            path=path,
+            shape=self.shape,
+            chunks=self.chunks,
+            dtype=self.dtype,
+            compressor=self.compressor,
+            filters=self.filters,
+            order=self.order,
+            fill_value=self.fill_value,
+            dimension_separator=self.dimension_separator,
+            **kwargs,
+        )
+
+        arr.attrs.put(self.attrs)
+        return arr
+
+    @classmethod
+    def from_storage(cls, arr: Array) -> "ArraySpecV2":
+        return cls(
+            shape=arr.shape,
+            chunks=arr.chunks,
+            dtype=arr.dtype,
+            compressor=arr.compressor,
+            filters=arr.filters,
+            order=arr.order,
+            fill_value=arr.fill_value,
+            dimension_separator=arr._dimension_separator,
+            attrs=arr.attrs.asdict(),
+        )
+
+
+class Group(MutableMapping[str, Union["Group", Array]]):
     """Instantiate a group from an initialized store.
 
     Parameters
@@ -145,7 +262,7 @@ class Group(MutableMapping):
         synchronizer=None,
         zarr_version=None,
         *,
-        meta_array=None
+        meta_array=None,
     ):
         store: BaseStore = _normalize_store_arg(store, zarr_version=zarr_version)
         if zarr_version is None:
@@ -1235,7 +1352,7 @@ class Group(MutableMapping):
             path=path,
             chunk_store=self._chunk_store,
             fill_value=fill_value,
-            **kwargs
+            **kwargs,
         )
 
     def array(self, name, data, **kwargs):
@@ -1360,7 +1477,7 @@ def group(
     synchronizer=None,
     path=None,
     *,
-    zarr_version=None
+    zarr_version=None,
 ):
     """Create a group.
 
@@ -1415,11 +1532,7 @@ def group(
 
     path = normalize_storage_path(path)
 
-    requires_init = None
-    if zarr_version == 2:
-        requires_init = overwrite or not contains_group(store)
-    elif zarr_version == 3:
-        requires_init = overwrite or not contains_group(store, path)
+    requires_init = overwrite or not contains_group(store, path)
 
     if requires_init:
         init_group(store, overwrite=overwrite, chunk_store=chunk_store, path=path)
@@ -1445,7 +1558,7 @@ def open_group(
     storage_options=None,
     *,
     zarr_version=None,
-    meta_array=None
+    meta_array=None,
 ):
     """Open a group using file-mode-like semantics.
 
