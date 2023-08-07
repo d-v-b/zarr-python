@@ -1,9 +1,20 @@
 from abc import abstractmethod
-from collections.abc import MutableMapping
 from itertools import islice
 from dataclasses import dataclass
 import os
-from typing import Any, Generic, List, Literal, Mapping, Optional, Tuple, TypeVar, Union, Protocol
+from typing import (
+    Any,
+    Generic,
+    List,
+    Literal,
+    Mapping,
+    MutableMapping,
+    Optional,
+    Tuple,
+    TypeVar,
+    Union,
+    Protocol,
+)
 import numpy as np
 from numcodecs.abc import Codec
 
@@ -82,7 +93,6 @@ class ArraySpec(NodeSpec[TAttrs]):
 
 @dataclass
 class GroupSpec(NodeSpec[TAttrs], Generic[TAttrs, TNodes]):
-    attrs: TAttrs
     nodes: TNodes
 
     @abstractmethod
