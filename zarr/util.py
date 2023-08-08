@@ -10,6 +10,7 @@ from typing import (
     Callable,
     Dict,
     Iterator,
+    Literal,
     Mapping,
     Optional,
     Tuple,
@@ -279,15 +280,17 @@ def human_readable_size(size) -> str:
         return "%.1fP" % (size / float(2**50))
 
 
-def normalize_order(order: str) -> str:
+def normalize_order(order: str) -> Literal["C", "F"]:
     order = str(order).upper()
     if order not in ["C", "F"]:
         raise ValueError("order must be either 'C' or 'F', found: %r" % order)
+    order = cast(Literal["C", "F"], order)
     return order
 
 
-def normalize_dimension_separator(sep: Optional[str]) -> Optional[str]:
+def normalize_dimension_separator(sep: Optional[str]) -> Optional[Literal[".", "/"]]:
     if sep in (".", "/", None):
+        sep = cast(Optional[Literal["/", "."]], sep)
         return sep
     else:
         raise ValueError("dimension_separator must be either '.' or '/', found: %r" % sep)

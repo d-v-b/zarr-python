@@ -1,17 +1,15 @@
 from abc import abstractmethod
 from itertools import islice
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import os
 from typing import (
     Any,
-    Generic,
     List,
     Literal,
     Mapping,
     MutableMapping,
     Optional,
     Tuple,
-    TypeVar,
     Union,
     Protocol,
 )
@@ -70,17 +68,8 @@ from zarr.util import (
     normalize_storage_path,
 )
 
-TAttrs = TypeVar("TAttrs", bound=Mapping[str, Any])
-TNodes = TypeVar("TNodes", bound=Mapping[str, Union["ArraySpec", "GroupSpec"]])
 
-
-@dataclass
-class NodeSpec(Protocol[TAttrs]):
-    attrs: TAttrs
-
-
-@dataclass
-class ArraySpec(NodeSpec[TAttrs]):
+class ArraySpec(Protocol):
     @abstractmethod
     def to_storage(self, store: BaseStore, path: str) -> Array:
         ...
@@ -91,10 +80,7 @@ class ArraySpec(NodeSpec[TAttrs]):
         ...
 
 
-@dataclass
-class GroupSpec(NodeSpec[TAttrs], Generic[TAttrs, TNodes]):
-    nodes: TNodes
-
+class GroupSpec(Protocol):
     @abstractmethod
     def to_storage(self, store: BaseStore, path: str) -> "Group":
         ...
@@ -107,6 +93,8 @@ class GroupSpec(NodeSpec[TAttrs], Generic[TAttrs, TNodes]):
 
 @dataclass
 class GroupSpecV2(GroupSpec):
+    attrs: Mapping[str, Any] = field(default_factory=dict)
+    nodes: Mapping[str, Union["ArraySpec", "GroupSpec"]] = {}
     zarr_version = 2
 
     def to_storage(self, store: BaseStore, path: str, **kwargs) -> "Group":
@@ -148,7 +136,8 @@ class ArraySpecV2(ArraySpec):
     filters: Optional[List[Codec]]
     fill_value: Any
     order: Literal["C", "F"]
-    dimension_separator: Literal[".", "/"]
+    dimension_separator: Literal[".", "/"] = "/"
+    attrs: Mapping[str, Any] = field(default_factory=dict)
 
     def to_storage(self, store: BaseStore, path: str, **kwargs) -> Array:
         arr = create(
