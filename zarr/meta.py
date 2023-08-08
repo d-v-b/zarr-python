@@ -9,7 +9,7 @@ from numcodecs.abc import Codec
 from zarr.errors import MetadataError
 from zarr.util import json_dumps, json_loads
 
-from typing import cast, Union, Any, List, Mapping as MappingType, Optional, TYPE_CHECKING
+from typing import Dict, MutableMapping, TypedDict, cast, Union, Any, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover
     from zarr._storage.store import StorageTransformer
@@ -43,7 +43,13 @@ _v3_datetime_types = set(
 )
 
 
-def get_extended_dtype_info(dtype) -> dict:
+class ExtendedDtypeInfo(TypedDict):
+    extension: str
+    type: Union[str, Any]
+    fallback: Any
+
+
+def get_extended_dtype_info(dtype: np.dtype[Any]) -> Dict[str, Any]:
     if dtype.str in _v3_complex_types:
         return dict(
             extension="https://zarr-specs.readthedocs.io/en/core-protocol-v3.0-dev/protocol/extensions/complex-dtypes/v1.0.html",  # noqa
@@ -88,7 +94,8 @@ class Metadata2:
     ZARR_FORMAT = ZARR_FORMAT
 
     @classmethod
-    def parse_metadata(cls, s: Union[MappingType, bytes, str]) -> MappingType[str, Any]:
+    def parse_metadata(cls,
+                       s: Union[MutableMapping[str, Any], bytes, str]) -> MutableMapping[str, Any]:
 
         # Here we allow that a store may return an already-parsed metadata object,
         # or a string of JSON that we will parse here. We allow for an already-parsed
@@ -106,7 +113,9 @@ class Metadata2:
         return meta
 
     @classmethod
-    def decode_array_metadata(cls, s: Union[MappingType, bytes, str]) -> MappingType[str, Any]:
+    def decode_array_metadata(cls,
+                              s: Union[MutableMapping[str, Any], bytes, str]
+                              ) -> MutableMapping[str, Any]:
         meta = cls.parse_metadata(s)
 
         # check metadata format
@@ -118,8 +127,6 @@ class Metadata2:
         try:
             dtype = cls.decode_dtype(meta["dtype"])
             if dtype.hasobject:
-                import numcodecs
-
                 object_codec = numcodecs.get_codec(meta["filters"][0])
             else:
                 object_codec = None
@@ -144,7 +151,7 @@ class Metadata2:
             return meta
 
     @classmethod
-    def encode_array_metadata(cls, meta: MappingType[str, Any]) -> bytes:
+    def encode_array_metadata(cls, meta: MutableMapping[str, Any]) -> bytes:
         dtype = meta["dtype"]
         sdshape = ()
         if dtype.subdtype is not None:
@@ -152,8 +159,6 @@ class Metadata2:
 
         dimension_separator = meta.get("dimension_separator")
         if dtype.hasobject:
-            import numcodecs
-
             object_codec = numcodecs.get_codec(meta["filters"][0])
         else:
             object_codec = None
@@ -174,14 +179,16 @@ class Metadata2:
         return json_dumps(meta)
 
     @classmethod
-    def encode_dtype(cls, d: np.dtype):
+    def encode_dtype(cls,
+                     d: np.dtype[Any]
+                     ) -> Union[List[Any], str]:
         if d.fields is None:
             return d.str
         else:
             return d.descr
 
     @classmethod
-    def _decode_dtype_descr(cls, d) -> List[Any]:
+    def _decode_dtype_descr(cls, d: Union[Any, List[Any]]) -> Any:
         # need to convert list of lists to list of tuples
         if isinstance(d, list):
             # recurse to handle nested structures
@@ -189,12 +196,14 @@ class Metadata2:
         return d
 
     @classmethod
-    def decode_dtype(cls, d) -> np.dtype:
+    def decode_dtype(cls, d: Any) -> np.dtype[Any]:
         d = cls._decode_dtype_descr(d)
         return np.dtype(d)
 
     @classmethod
-    def decode_group_metadata(cls, s: Union[MappingType, bytes, str]) -> MappingType[str, Any]:
+    def decode_group_metadata(cls,
+                              s: Union[MutableMapping[str, Any], bytes, str]
+                              ) -> MutableMapping[str, Any]:
         meta = cls.parse_metadata(s)
 
         # check metadata format version
@@ -213,7 +222,7 @@ class Metadata2:
         return json_dumps(meta)
 
     @classmethod
-    def decode_fill_value(cls, v: Any, dtype: np.dtype, object_codec: Any = None) -> Any:
+    def decode_fill_value(cls, v: Any, dtype: np.dtype[Any], object_codec: Any = None) -> Any:
         # early out
         if v is None:
             return v
@@ -261,7 +270,7 @@ class Metadata2:
             return np.array(v, dtype=dtype)[()]
 
     @classmethod
-    def encode_fill_value(cls, v: Any, dtype: np.dtype, object_codec: Any = None) -> Any:
+    def encode_fill_value(cls, v: Any, dtype: np.dtype[Any], object_codec: Any = None) -> Any:
         # early out
         if v is None:
             return v
@@ -306,7 +315,8 @@ class Metadata3(Metadata2):
     ZARR_FORMAT = ZARR_FORMAT_v3
 
     @classmethod
-    def decode_dtype(cls, d, validate=True):
+    def decode_dtype(cls,
+                     d: Any, validate: bool = True):
         if isinstance(d, dict):
             # extract the type from the extension info
             try:
@@ -325,7 +335,7 @@ class Metadata3(Metadata2):
         return dtype
 
     @classmethod
-    def encode_dtype(cls, d):
+    def encode_dtype(cls, d: np.dtype[Any]) -> Union[str, List[Any]]:
         s = d.str
         if s == "|b1":
             return "bool"
@@ -341,7 +351,9 @@ class Metadata3(Metadata2):
             return get_extended_dtype_info(np.dtype(d))
 
     @classmethod
-    def decode_group_metadata(cls, s: Union[MappingType, bytes, str]) -> MappingType[str, Any]:
+    def decode_group_metadata(cls,
+                              s: Union[MutableMapping[str, Any], bytes, str]
+                              ) -> MutableMapping[str, Any]:
         meta = cls.parse_metadata(s)
         # 1 / 0
         # # check metadata format version
@@ -379,7 +391,9 @@ class Metadata3(Metadata2):
         return json_dumps(meta)
 
     @classmethod
-    def decode_hierarchy_metadata(cls, s: Union[MappingType, bytes, str]) -> MappingType[str, Any]:
+    def decode_hierarchy_metadata(cls,
+                                  s: Union[MutableMapping[str, Any], bytes, str]
+                                  ) -> MutableMapping[str, Any]:
         meta = cls.parse_metadata(s)
         # check metadata format
         # zarr_format = meta.get("zarr_format", None)
@@ -422,7 +436,7 @@ class Metadata3(Metadata2):
         return meta
 
     @classmethod
-    def _decode_codec_metadata(cls, meta: Optional[Mapping]) -> Optional[Codec]:
+    def _decode_codec_metadata(cls, meta: Optional[MutableMapping[str, Any]]) -> Optional[Codec]:
         if meta is None:
             return None
 
@@ -443,14 +457,14 @@ class Metadata3(Metadata2):
         else:
             raise NotImplementedError
 
-        codec = numcodecs.get_codec(conf)
+        codec: Codec = numcodecs.get_codec(conf)
 
         return codec
 
     @classmethod
     def _encode_storage_transformer_metadata(
         cls, storage_transformer: "StorageTransformer"
-    ) -> Optional[Mapping]:
+    ) -> Optional[MutableMapping[str, Any]]:
         return {
             "extension": storage_transformer.extension_uri,
             "type": storage_transformer.type,
@@ -478,7 +492,9 @@ class Metadata3(Metadata2):
         return StorageTransformerCls.from_config(transformer_type, conf)
 
     @classmethod
-    def decode_array_metadata(cls, s: Union[MappingType, bytes, str]) -> MappingType[str, Any]:
+    def decode_array_metadata(cls,
+                              s: Union[MutableMapping[str, Any], bytes, str]
+                              ) -> MutableMapping[str, Any]:
         meta = cls.parse_metadata(s)
 
         # extract array metadata fields
@@ -524,7 +540,7 @@ class Metadata3(Metadata2):
             return meta
 
     @classmethod
-    def encode_array_metadata(cls, meta: MappingType[str, Any]) -> bytes:
+    def encode_array_metadata(cls, meta: MutableMapping[str, Any]) -> bytes:
         dtype = meta["data_type"]
         sdshape = ()
         if dtype.subdtype is not None:

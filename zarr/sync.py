@@ -1,18 +1,30 @@
+from abc import abstractmethod
 import os
 from collections import defaultdict
 from threading import Lock
+from typing import Dict, Protocol, Union, runtime_checkable
 
 import fasteners
 
 
-class ThreadSynchronizer:
+@runtime_checkable
+class SyncLike(Protocol):
+
+    @abstractmethod
+    def __getitem__(self, item: str) -> Union[Lock, fasteners.InterProcessLock]:
+        pass
+
+
+class ThreadSynchronizer(SyncLike):
     """Provides synchronization using thread locks."""
+    locks: Dict[str, Lock]
+    mutex: Lock
 
     def __init__(self):
         self.mutex = Lock()
         self.locks = defaultdict(Lock)
 
-    def __getitem__(self, item):
+    def __getitem__(self, item: str):
         with self.mutex:
             return self.locks[item]
 
@@ -24,7 +36,7 @@ class ThreadSynchronizer:
         self.__init__()
 
 
-class ProcessSynchronizer:
+class ProcessSynchronizer(SyncLike):
     """Provides synchronization using file locks via the
     `fasteners <https://fasteners.readthedocs.io/en/latest/api/inter_process/>`_
     package.
@@ -37,10 +49,10 @@ class ProcessSynchronizer:
 
     """
 
-    def __init__(self, path):
+    def __init__(self, path: str):
         self.path = path
 
-    def __getitem__(self, item):
+    def __getitem__(self, item: str):
         path = os.path.join(self.path, item)
         lock = fasteners.InterProcessLock(path)
         return lock

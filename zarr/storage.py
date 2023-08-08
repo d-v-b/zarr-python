@@ -757,7 +757,7 @@ class KVStore(Store):
     store which is likely to expose a MuttableMapping interface,
     """
 
-    def __init__(self, mutablemapping):
+    def __init__(self, mutablemapping: MutableMapping[str, bytes]):
         self._mutable_mapping = mutablemapping
 
     def __getitem__(self, key):

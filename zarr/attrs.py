@@ -1,11 +1,12 @@
 import warnings
-from collections.abc import MutableMapping
+from typing import Callable, Dict, MutableMapping, Any, Optional
 
-from zarr._storage.store import Store, StoreV3
+from zarr._storage.store import BaseStore, Store, StoreV3
+from zarr.sync import SyncLike
 from zarr.util import json_dumps
 
 
-class Attributes(MutableMapping):
+class Attributes(MutableMapping[str, Any]):
     """Class providing access to user attributes on an array or group. Should not be
     instantiated directly, will be available via the `.attrs` property of an array or
     group.
@@ -25,7 +26,21 @@ class Attributes(MutableMapping):
 
     """
 
-    def __init__(self, store, key=".zattrs", read_only=False, cache=True, synchronizer=None):
+    store: BaseStore
+    version: int
+    key: str
+    cache: bool
+    synchronizer: Optional[SyncLike]
+    _cached_asdict: Optional[Dict[str, Any]]
+
+    def __init__(
+        self,
+        store: Store,
+        key: str = ".zattrs",
+        read_only: bool = False,
+        cache: bool = True,
+        synchronizer: Optional[SyncLike] = None,
+    ):
 
         self._version = getattr(store, "_store_version", 2)
         _Store = Store if self._version == 2 else StoreV3
@@ -36,18 +51,18 @@ class Attributes(MutableMapping):
         self._cached_asdict = None
         self.synchronizer = synchronizer
 
-    def _get_nosync(self):
+    def _get_nosync(self) -> Dict[str, Any]:
+        d: Dict[str, Any] = {}
         try:
-            data = self.store[self.key]
+            data: bytes = self.store[self.key]
         except KeyError:
-            d = dict()
             if self._version > 2:
                 d["attributes"] = {}
         else:
-            d = self.store._metadata_class.parse_metadata(data)
+            d.update(**self.store._metadata_class.parse_metadata(data))
         return d
 
-    def asdict(self):
+    def asdict(self) -> Dict[str, Any]:
         """Retrieve all attributes as a dictionary."""
         if self.cache and self._cached_asdict is not None:
             return self._cached_asdict
@@ -66,13 +81,13 @@ class Attributes(MutableMapping):
             else:
                 self._cached_asdict = self._get_nosync()["attributes"]
 
-    def __contains__(self, x):
+    def __contains__(self, x: Any):
         return x in self.asdict()
 
-    def __getitem__(self, item):
+    def __getitem__(self, item: Any):
         return self.asdict()[item]
 
-    def _write_op(self, f, *args, **kwargs):
+    def _write_op(self, f: Callable[..., Any], *args: Any, **kwargs: Any):
 
         # guard condition
         if self.read_only:
@@ -85,10 +100,10 @@ class Attributes(MutableMapping):
             with self.synchronizer[self.key]:
                 return f(*args, **kwargs)
 
-    def __setitem__(self, item, value):
+    def __setitem__(self, item: str, value: Any):
         self._write_op(self._setitem_nosync, item, value)
 
-    def _setitem_nosync(self, item, value):
+    def _setitem_nosync(self, item: str, value: Any):
 
         # load existing data
         d = self._get_nosync()
@@ -102,10 +117,10 @@ class Attributes(MutableMapping):
         # _put modified data
         self._put_nosync(d)
 
-    def __delitem__(self, item):
+    def __delitem__(self, item: str):
         self._write_op(self._delitem_nosync, item)
 
-    def _delitem_nosync(self, key):
+    def _delitem_nosync(self, key: str):
 
         # load existing data
         d = self._get_nosync()
@@ -119,7 +134,7 @@ class Attributes(MutableMapping):
         # _put modified data
         self._put_nosync(d)
 
-    def put(self, d):
+    def put(self, d: Dict[str, Any]):
         """Overwrite all attributes with the key/value pairs in the provided dictionary
         `d` in a single operation."""
         if self._version == 2:
@@ -127,7 +142,7 @@ class Attributes(MutableMapping):
         else:
             self._write_op(self._put_nosync, dict(attributes=d))
 
-    def _put_nosync(self, d):
+    def _put_nosync(self, d: Dict[str, Any]):
 
         d_to_check = d if self._version == 2 else d["attributes"]
         if not all(isinstance(item, str) for item in d_to_check):
@@ -173,11 +188,11 @@ class Attributes(MutableMapping):
                 self._cached_asdict = d["attributes"]
 
     # noinspection PyMethodOverriding
-    def update(self, *args, **kwargs):
+    def update(self, *args: Any, **kwargs: Any):
         """Update the values of several attributes in a single operation."""
         self._write_op(self._update_nosync, *args, **kwargs)
 
-    def _update_nosync(self, *args, **kwargs):
+    def _update_nosync(self, *args: Any, **kwargs: Dict[str, Any]):
 
         # load existing data
         d = self._get_nosync()

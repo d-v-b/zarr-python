@@ -1,7 +1,7 @@
 import abc
 import os
 from collections import defaultdict
-from collections.abc import MutableMapping
+from typing import MutableMapping
 from copy import copy
 from string import ascii_letters, digits
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
@@ -32,7 +32,7 @@ def assert_zarr_v3_api_available():
         )  # pragma: no cover
 
 
-class BaseStore(MutableMapping):
+class BaseStore(MutableMapping[str, bytes]):
     """Abstract base class for store implementations.
 
     This is a thin wrapper over MutableMapping that provides methods to check
@@ -93,7 +93,7 @@ class BaseStore(MutableMapping):
         _rename_from_keys(self, src_path, dst_path)
 
     @staticmethod
-    def _ensure_store(store: Any):
+    def _ensure_store(store: Any) -> "BaseStore":
         """
         We want to make sure internally that zarr stores are always a class
         with a specific interface derived from ``BaseStore``, which is slightly
@@ -110,7 +110,7 @@ class BaseStore(MutableMapping):
                 )
             return store
         elif isinstance(store, MutableMapping):
-            return KVStore(store)
+            return KVStore(store)  # type: ignore
         else:
             for attr in [
                 "keys",
@@ -187,7 +187,7 @@ class StoreV3(BaseStore):
     _metadata_class = Metadata3
     _valid_key_characters = set(ascii_letters + digits + "/.-_")
 
-    def _valid_key(self, key: str) -> bool:
+    def _valid_key(self, key: Any) -> bool:
         """
         Verify that a key conforms to the specification.
 
@@ -201,7 +201,7 @@ class StoreV3(BaseStore):
             return False
         return True
 
-    def _validate_key(self, key: str):
+    def _validate_key(self, key: Any):
         """
         Verify that a key conforms to the v3 specification.
 
@@ -232,16 +232,16 @@ class StoreV3(BaseStore):
         if key.endswith("/"):
             raise ValueError("keys may not end in /")
 
-    def list_prefix(self, prefix):
+    def list_prefix(self, prefix: str):
         if prefix.startswith("/"):
             raise ValueError("prefix must not begin with /")
         # TODO: force prefix to end with /?
         return [k for k in self.list() if k.startswith(prefix)]
 
-    def erase(self, key):
+    def erase(self, key: str):
         self.__delitem__(key)
 
-    def erase_prefix(self, prefix):
+    def erase_prefix(self, prefix: str):
         assert prefix.endswith("/")
 
         if prefix == "/":
@@ -251,7 +251,7 @@ class StoreV3(BaseStore):
         for key in all_keys:
             self.erase(key)
 
-    def list_dir(self, prefix):
+    def list_dir(self, prefix: str) -> Tuple[List[str], List[str]]:
         """
         TODO: carefully test this with trailing/leading slashes
         """
@@ -260,8 +260,8 @@ class StoreV3(BaseStore):
 
         all_keys = self.list_prefix(prefix)
         len_prefix = len(prefix)
-        keys = []
-        prefixes = []
+        keys: List[str] = []
+        prefixes: List[str] = []
         for k in all_keys:
             trail = k[len_prefix:]
             if "/" not in trail:
@@ -273,7 +273,7 @@ class StoreV3(BaseStore):
     def list(self):
         return list(self.keys())
 
-    def __contains__(self, key):
+    def __contains__(self, key: Any):
         return key in self.list()
 
     @abc.abstractmethod
@@ -365,7 +365,7 @@ class StoreV3(BaseStore):
         return NotImplemented
 
     @staticmethod
-    def _ensure_store(store):
+    def _ensure_store(store: Any):
         """
         We want to make sure internally that zarr stores are always a class
         with a specific interface derived from ``Store``, which is slightly
@@ -375,14 +375,12 @@ class StoreV3(BaseStore):
         """
         from zarr._storage.v3 import KVStoreV3  # avoid circular import
 
-        if store is None:
-            return None
-        elif isinstance(store, StoreV3):
+        if isinstance(store, StoreV3):
             return store
         elif isinstance(store, Store):
             raise ValueError(f"cannot initialize a v3 store with a v{store._store_version} store")
         elif isinstance(store, MutableMapping):
-            return KVStoreV3(store)
+            return KVStoreV3(store)  # type: ignore
         else:
             for attr in [
                 "keys",
@@ -405,7 +403,7 @@ class StoreV3(BaseStore):
         )
 
 
-class StorageTransformer(MutableMapping, abc.ABC):
+class StorageTransformer(MutableMapping[str, bytes], abc.ABC):
     """Base class for storage transformers. The methods simply pass on the data as-is
     and should be overwritten by sub-classes."""
 
@@ -473,19 +471,19 @@ class StorageTransformer(MutableMapping, abc.ABC):
     def list(self):
         return list(self.keys())
 
-    def list_dir(self, prefix):
+    def list_dir(self, prefix: str):
         return StoreV3.list_dir(self, prefix)
 
-    def is_readable(self):
+    def is_readable(self) -> bool:
         return self.inner_store.is_readable()
 
-    def is_writeable(self):
+    def is_writeable(self) -> bool:
         return self.inner_store.is_writeable()
 
-    def is_listable(self):
+    def is_listable(self) -> bool:
         return self.inner_store.is_listable()
 
-    def is_erasable(self):
+    def is_erasable(self) -> bool:
         return self.inner_store.is_erasable()
 
     def clear(self):
