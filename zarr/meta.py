@@ -9,7 +9,7 @@ from numcodecs.abc import Codec
 from zarr.errors import MetadataError
 from zarr.util import json_dumps, json_loads
 
-from typing import Dict, MutableMapping, TypedDict, cast, Union, Any, List, Optional, TYPE_CHECKING
+from typing import Dict, MutableMapping, Tuple, TypedDict, cast, Union, Any, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover
     from zarr._storage.store import StorageTransformer
@@ -181,7 +181,7 @@ class Metadata2:
     @classmethod
     def encode_dtype(cls,
                      d: np.dtype[Any]
-                     ) -> Union[List[Any], str]:
+                     ) -> Union[List[Union[Tuple[str, str], Tuple[str, str, Tuple[int, ...]]]], str]:
         if d.fields is None:
             return d.str
         else:
