@@ -10,16 +10,17 @@ from typing import (
 
 import numcodecs
 import numpy as np
-from attr import asdict, evolve, frozen, field
+from dataclasses import asdict, dataclass, field, replace
 from numcodecs.blosc import Blosc
 
 from zarr.v3.abc.codec import BytesBytesCodec
 from zarr.v3.codecs.registry import register_codec
-from zarr.v3.common import BytesLike, to_thread
-from zarr.v3.metadata import CodecMetadata
+from zarr.v3.common import to_thread
+from zarr.v3.metadata.v3.array import CodecMetadata
+from zarr.v3.types import JSON, BytesLike
 
 if TYPE_CHECKING:
-    from zarr.v3.metadata import CoreArrayMetadata
+    from zarr.v3.metadata.v3.array import CoreArrayMetadata
 
 
 BloscShuffle = Literal["noshuffle", "shuffle", "bitshuffle"]
@@ -28,7 +29,7 @@ BloscShuffle = Literal["noshuffle", "shuffle", "bitshuffle"]
 numcodecs.blosc.use_threads = False
 
 
-@frozen
+@dataclass(frozen=True)
 class BloscCodecConfigurationMetadata:
     typesize: int
     cname: Literal["lz4", "lz4hc", "blosclz", "zstd", "snappy", "zlib"] = "zstd"
@@ -36,6 +37,15 @@ class BloscCodecConfigurationMetadata:
     shuffle: BloscShuffle = "noshuffle"
     blocksize: int = 0
 
+    @classmethod
+    def from_json(cls, json_data: Dict[str, JSON]):
+        return cls(
+            typesize=json_data['typesize'],
+            cname=json_data['cname'],
+            clevel=json_data['clevel'],
+            shuffle=json_data['shuffle'],
+            blocksize=json_data['blocksize'
+                                ])
 
 blosc_shuffle_int_to_str: Dict[int, BloscShuffle] = {
     0: "noshuffle",
@@ -44,18 +54,22 @@ blosc_shuffle_int_to_str: Dict[int, BloscShuffle] = {
 }
 
 
-@frozen
+@dataclass(frozen=True)
 class BloscCodecMetadata:
     configuration: BloscCodecConfigurationMetadata
     name: Literal["blosc"] = field(default="blosc", init=False)
 
+    @classmethod
+    def from_json(cls, json_data: Dict[str, JSON]):
+        return cls(
+            configuration=BloscCodecConfigurationMetadata.from_json(json_data['configuration']))
 
-@frozen
+@dataclass(frozen=True)
 class BloscCodec(BytesBytesCodec):
     array_metadata: CoreArrayMetadata
     configuration: BloscCodecConfigurationMetadata
     blosc_codec: Blosc
-    is_fixed_size = False
+    is_fixed_size = field(default=False, init=False)
 
     @classmethod
     def from_metadata(
@@ -64,7 +78,7 @@ class BloscCodec(BytesBytesCodec):
         assert isinstance(codec_metadata, BloscCodecMetadata)
         configuration = codec_metadata.configuration
         if configuration.typesize == 0:
-            configuration = evolve(configuration, typesize=array_metadata.data_type.byte_count)
+            configuration = replace(configuration, typesize=array_metadata.data_type.byte_count)
         config_dict = asdict(codec_metadata.configuration)
         config_dict.pop("typesize", None)
         map_shuffle_str_to_int = {"noshuffle": 0, "shuffle": 1, "bitshuffle": 2}

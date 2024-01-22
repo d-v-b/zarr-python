@@ -10,49 +10,60 @@
 # 2. Do we really need runtime_configuration? Specifically, the asyncio_loop seems problematic
 
 from __future__ import annotations
+from dataclasses import dataclass, replace
 
 import json
 from typing import Any, Dict, Iterable, Literal, Optional, Tuple, Union
 
 import numpy as np
-from attr import evolve, frozen
 
 from zarr.v3.abc.array import SynchronousArray, AsynchronousArray
 from zarr.v3.abc.codec import ArrayBytesCodecPartialDecodeMixin
 
-# from zarr.v3.array_v2 import ArrayV2
-from zarr.v3.codecs import CodecMetadata, CodecPipeline, bytes_codec
+from zarr.v3.codecs import CodecPipeline, bytes_codec
 from zarr.v3.common import (
     ZARR_JSON,
-    ChunkCoords,
-    Selection,
-    SliceSelection,
     concurrent_map,
 )
 from zarr.v3.indexing import BasicIndexer, all_chunk_coords, is_total_slice
-from zarr.v3.metadata import (
+from zarr.v3.common import (
+    RuntimeConfiguration,
+)
+from zarr.v3.codecs.sharding import ShardingCodec
+from zarr.v3.metadata.v3.array import (
     ArrayMetadata,
+    CodecMetadata,
     DataType,
     DefaultChunkKeyEncodingConfigurationMetadata,
     DefaultChunkKeyEncodingMetadata,
     RegularChunkGridConfigurationMetadata,
     RegularChunkGridMetadata,
-    RuntimeConfiguration,
     V2ChunkKeyEncodingConfigurationMetadata,
     V2ChunkKeyEncodingMetadata,
     dtype_to_data_type,
 )
-from zarr.v3.codecs.sharding import ShardingCodec
 from zarr.v3.store import StoreLike, StorePath, make_store_path
 from zarr.v3.sync import sync
+from zarr.v3.types import ChunkCoords, Selection, SliceSelection
 
 
-@frozen
 class AsyncArray(AsynchronousArray):
     metadata: ArrayMetadata
-    store_path: StorePath
+    _store_path: StorePath
     runtime_configuration: RuntimeConfiguration
     codec_pipeline: CodecPipeline
+
+    def __init__(
+            self, 
+            metadata: ArrayMetadata, 
+            store_path: StorePath, 
+            runtime_configuration: RuntimeConfiguration, 
+            codec_pipeline: CodecPipeline):
+        
+        self.metadata = metadata
+        self._store_path = store_path
+        self.runtime_configuration = runtime_configuration
+        self.codec_pipeline = codec_pipeline
 
     @classmethod
     async def create(
@@ -198,6 +209,10 @@ class AsyncArray(AsynchronousArray):
     @property
     def attrs(self) -> dict:
         return self.metadata.attributes
+    
+    @property
+    def store_path(self) -> str:
+        return self._store_path
 
     async def getitem(self, selection: Selection):
         indexer = BasicIndexer(
@@ -376,7 +391,7 @@ class AsyncArray(AsynchronousArray):
 
     async def resize(self, new_shape: ChunkCoords) -> AsyncArray:
         assert len(new_shape) == len(self.metadata.shape)
-        new_metadata = evolve(self.metadata, shape=new_shape)
+        new_metadata = replace(self.metadata, shape=new_shape)
 
         # Remove all chunks outside of the new shape
         chunk_shape = self.metadata.chunk_grid.configuration.chunk_shape
@@ -398,14 +413,14 @@ class AsyncArray(AsynchronousArray):
 
         # Write new metadata
         await (self.store_path / ZARR_JSON).set_async(new_metadata.to_bytes())
-        return evolve(self, metadata=new_metadata)
+        return replace(self, metadata=new_metadata)
 
     async def update_attributes(self, new_attributes: Dict[str, Any]) -> Array:
-        new_metadata = evolve(self.metadata, attributes=new_attributes)
+        new_metadata = replace(self.metadata, attributes=new_attributes)
 
         # Write new metadata
         await (self.store_path / ZARR_JSON).set_async(new_metadata.to_bytes())
-        return evolve(self, metadata=new_metadata)
+        return replace(self, metadata=new_metadata)
 
     def __repr__(self):
         return f"<AsyncArray {self.store_path} shape={self.shape} dtype={self.dtype}>"
@@ -414,7 +429,7 @@ class AsyncArray(AsynchronousArray):
         return NotImplemented
 
 
-@frozen
+@dataclass(frozen=True)
 class Array(SynchronousArray):
     _async_array: AsyncArray
 

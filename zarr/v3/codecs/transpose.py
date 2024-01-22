@@ -1,7 +1,9 @@
 from __future__ import annotations
+from dataclasses import dataclass, field
 
 from typing import (
     TYPE_CHECKING,
+    Dict,
     Literal,
     Optional,
     Tuple,
@@ -9,28 +11,36 @@ from typing import (
 )
 
 import numpy as np
-from attr import frozen, field
 
 from zarr.v3.abc.codec import ArrayArrayCodec
 from zarr.v3.codecs.registry import register_codec
-from zarr.v3.metadata import CodecMetadata
+from zarr.v3.metadata.v3.array import CodecMetadata
+from zarr.v3.types import JSON
 
 if TYPE_CHECKING:
-    from zarr.v3.metadata import CoreArrayMetadata
+    from zarr.v3.metadata.v3.array import CoreArrayMetadata
 
 
-@frozen
+@dataclass(frozen=True)
 class TransposeCodecConfigurationMetadata:
     order: Tuple[int, ...]
 
-
-@frozen
+    @classmethod
+    def from_json(cls, json_data: Dict[str, JSON]):
+        return cls(order=json_data['order'])
+        
+@dataclass(frozen=True)
 class TransposeCodecMetadata:
     configuration: TransposeCodecConfigurationMetadata
     name: Literal["transpose"] = field(default="transpose", init=False)
 
+    @classmethod
+    def from_json(cls, json_data: Dict[str, JSON]):
+        return cls(
+            configuration=TransposeCodecConfigurationMetadata.from_json(json_data['configuration'])
+            )
 
-@frozen
+@dataclass(frozen=True)
 class TransposeCodec(ArrayArrayCodec):
     array_metadata: CoreArrayMetadata
     order: Tuple[int, ...]
@@ -75,7 +85,7 @@ class TransposeCodec(ArrayArrayCodec):
         return TransposeCodecMetadata
 
     def resolve_metadata(self) -> CoreArrayMetadata:
-        from zarr.v3.metadata import CoreArrayMetadata
+        from zarr.v3.metadata.v3.array import CoreArrayMetadata
 
         return CoreArrayMetadata(
             shape=tuple(

@@ -5,16 +5,17 @@ from typing import Tuple, Any, Dict
 import numpy as np
 
 from zarr.v3.abc.store import ReadStore, WriteStore
-from zarr.v3.common import Selection
-
+from zarr.v3.types import Selection
 
 class BaseArray(ABC):
-    @abstractproperty
+    @property
+    @abstractmethod
     def store_path(self) -> str:  # TODO: rename to `path`?
         """Path to this array in the underlying store."""
         ...
 
-    @abstractproperty
+    @property
+    @abstractmethod
     def dtype(self) -> np.dtype:
         """Data type of the array elements.
 
@@ -25,7 +26,8 @@ class BaseArray(ABC):
         """
         ...
 
-    @abstractproperty
+    @property
+    @abstractmethod
     def ndim(self) -> int:
         """Number of array dimensions (axes).
 
@@ -36,7 +38,8 @@ class BaseArray(ABC):
         """
         ...
 
-    @abstractproperty
+    @property
+    @abstractmethod
     def shape(self) -> Tuple[int, ...]:
         """Array dimensions.
 
@@ -47,7 +50,8 @@ class BaseArray(ABC):
         """
         ...
 
-    @abstractproperty
+    @property
+    @abstractmethod
     def size(self) -> int:
         """Number of elements in the array.
 
@@ -57,7 +61,8 @@ class BaseArray(ABC):
             number of elements in an array.
         """
 
-    @abstractproperty
+    @property
+    @abstractmethod
     def attrs(self) -> Dict[str, Any]:
         """Array attributes.
 
@@ -68,7 +73,8 @@ class BaseArray(ABC):
         """
         ...
 
-    @abstractproperty
+    @property
+    @abstractmethod
     def info(self) -> Any:
         """Report some diagnostic information about the array.
 
@@ -77,7 +83,6 @@ class BaseArray(ABC):
         out
         """
         ...
-
 
 class AsynchronousArray(BaseArray):
     """This class can be implemented as a v2 or v3 array"""

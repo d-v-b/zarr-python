@@ -1,4 +1,4 @@
-from __future__ import annotations
+""" from __future__ import annotations
 
 import asyncio
 import json
@@ -6,29 +6,35 @@ from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Union
 
 import numcodecs
 import numpy as np
-from attr import evolve, frozen
 from numcodecs.compat import ensure_bytes, ensure_ndarray
 
 from zarr.v3.common import (
     ZARRAY_JSON,
     ZATTRS_JSON,
-    BytesLike,
-    ChunkCoords,
-    Selection,
-    SliceSelection,
     concurrent_map,
     to_thread,
 )
 from zarr.v3.indexing import BasicIndexer, all_chunk_coords, is_total_slice
-from zarr.v3.metadata import ArrayV2Metadata, RuntimeConfiguration
+from zarr.v3.common import RuntimeConfiguration
+from zarr.v3.metadata.v3.array import (
+    ArrayMetadata,
+    CodecMetadata,
+    DataType,
+    RegularChunkGridConfigurationMetadata,
+    RegularChunkGridMetadata,
+    V2ChunkKeyEncodingConfigurationMetadata,
+    V2ChunkKeyEncodingMetadata,
+    dtype_to_data_type,
+)
 from zarr.v3.store import StoreLike, StorePath, make_store_path
 from zarr.v3.sync import sync
+from zarr.v3.types import BytesLike, ChunkCoords, Selection, SliceSelection
 
 if TYPE_CHECKING:
     from zarr.v3.array import Array
 
 
-@frozen
+@dataclass(frozen=True)
 class _AsyncArrayProxy:
     array: ArrayV2
 
@@ -36,7 +42,7 @@ class _AsyncArrayProxy:
         return _AsyncArraySelectionProxy(self.array, selection)
 
 
-@frozen
+@dataclass(frozen=True)
 class _AsyncArraySelectionProxy:
     array: ArrayV2
     selection: Selection
@@ -48,9 +54,9 @@ class _AsyncArraySelectionProxy:
         return await self.array.set_async(self.selection, value)
 
 
-@frozen
+@dataclass(frozen=True)
 class ArrayV2:
-    metadata: ArrayV2Metadata
+    metadata: ArrayMetadata
     attributes: Optional[Dict[str, Any]]
     store_path: StorePath
     runtime_configuration: RuntimeConfiguration
@@ -76,7 +82,7 @@ class ArrayV2:
         if not exists_ok:
             assert not await (store_path / ZARRAY_JSON).exists_async()
 
-        metadata = ArrayV2Metadata(
+        metadata = ArrayMetadata(
             shape=shape,
             dtype=np.dtype(dtype),
             chunks=chunks,
@@ -172,7 +178,7 @@ class ArrayV2:
         zattrs_json: Optional[Any],
         runtime_configuration: RuntimeConfiguration = RuntimeConfiguration(),
     ) -> ArrayV2:
-        metadata = ArrayV2Metadata.from_json(zarray_json)
+        metadata = ArrayMetadata.from_json(zarray_json)
         out = cls(
             store_path=store_path,
             metadata=metadata,
@@ -440,23 +446,15 @@ class ArrayV2:
         from zarr.v3.array import Array
         from zarr.v3.common import ZARR_JSON
         from zarr.v3.metadata import (
-            ArrayMetadata,
             BloscCodecConfigurationMetadata,
             BloscCodecMetadata,
             BytesCodecConfigurationMetadata,
             BytesCodecMetadata,
-            CodecMetadata,
-            DataType,
             GzipCodecConfigurationMetadata,
             GzipCodecMetadata,
-            RegularChunkGridConfigurationMetadata,
-            RegularChunkGridMetadata,
             TransposeCodecConfigurationMetadata,
             TransposeCodecMetadata,
-            V2ChunkKeyEncodingConfigurationMetadata,
-            V2ChunkKeyEncodingMetadata,
             blosc_shuffle_int_to_str,
-            dtype_to_data_type,
         )
 
         data_type = DataType[dtype_to_data_type[self.metadata.dtype.str]]
@@ -523,7 +521,6 @@ class ArrayV2:
                 )
             ),
             codecs=codecs,
-            attributes=self.attributes or {},
         )
 
         new_metadata_bytes = new_metadata.to_bytes()
@@ -550,3 +547,4 @@ class ArrayV2:
 
     def __repr__(self):
         return f"<Array_v2 {self.store_path} shape={self.shape} dtype={self.dtype}>"
+ """

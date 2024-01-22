@@ -1,8 +1,10 @@
 from __future__ import annotations
+from dataclasses import dataclass, field
 
 from typing import (
     Awaitable,
     Callable,
+    Dict,
     Iterator,
     List,
     Literal,
@@ -13,7 +15,6 @@ from typing import (
     Tuple,
     Type,
 )
-from attr import field, frozen
 
 import numpy as np
 from zarr.v3.abc.codec import (
@@ -23,11 +24,8 @@ from zarr.v3.abc.codec import (
 )
 
 from zarr.v3.codecs import CodecPipeline
-from zarr.v3.codecs.registry import register_codec
+from zarr.v3.codecs.registry import get_codec_metadata_class, register_codec
 from zarr.v3.common import (
-    BytesLike,
-    ChunkCoords,
-    SliceSelection,
     concurrent_map,
     product,
 )
@@ -37,30 +35,48 @@ from zarr.v3.indexing import (
     is_total_slice,
     morton_order_iter,
 )
-from zarr.v3.metadata import (
+from zarr.v3.metadata.v3.array import (
     CoreArrayMetadata,
-    DataType,
-    CodecMetadata,
-    ShardingCodecIndexLocation,
 )
+from zarr.v3.metadata.v3.array import CodecMetadata, DataType, ShardingCodecIndexLocation
 from zarr.v3.store import StorePath
+from zarr.v3.types import JSON, BytesLike, ChunkCoords, SliceSelection
 
 MAX_UINT_64 = 2**64 - 1
 
 
-@frozen
+@dataclass(frozen=True)
 class ShardingCodecConfigurationMetadata:
     chunk_shape: ChunkCoords
     codecs: List["CodecMetadata"]
     index_codecs: List["CodecMetadata"]
     index_location: ShardingCodecIndexLocation = ShardingCodecIndexLocation.end
 
+    @classmethod
+    def from_json(cls, json_data: Dict[str, JSON]):
+        chunk_shape = json_data['chunk_shape']
+        codecs: List["CodecMetadata"] = []
+        for json_codec in json_data['codecs']:
+            codecs.append(get_codec_metadata_class(json_codec.name))
 
-@frozen
+        index_codecs: List["CodecMetadata"] = []
+        for json_codec in json_data['index_codecs']:
+            codecs.append(get_codec_metadata_class(json_codec.name))
+        return cls(
+            chunk_shape=chunk_shape,
+            codecs=codecs,
+            index_codecs=index_codecs, 
+            index_location=json_data['index_location']
+            )
+        
+@dataclass(frozen=True)
 class ShardingCodecMetadata:
     configuration: ShardingCodecConfigurationMetadata
     name: Literal["sharding_indexed"] = field(default="sharding_indexed", init=False)
 
+    @classmethod
+    def from_json(cls, json_data: Dict[str, JSON]):
+        return cls(configuration=ShardingCodecConfigurationMetadata.from_json(json_data['configuration']))
 
 class _ShardIndex(NamedTuple):
     # dtype uint64, shape (chunks_per_shard_0, chunks_per_shard_1, ..., 2)
@@ -211,7 +227,7 @@ class _ShardBuilder(_ShardProxy):
         return out_buf
 
 
-@frozen
+@dataclass(frozen=True)
 class ShardingCodec(
     ArrayBytesCodec, ArrayBytesCodecPartialDecodeMixin, ArrayBytesCodecPartialEncodeMixin
 ):

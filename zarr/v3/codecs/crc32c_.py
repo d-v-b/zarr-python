@@ -1,31 +1,35 @@
 from __future__ import annotations
+from dataclasses import dataclass, field
 
 from typing import (
     TYPE_CHECKING,
+    Dict,
     Literal,
     Optional,
     Type,
 )
 
 import numpy as np
-from attr import frozen, field
 from crc32c import crc32c
 
 from zarr.v3.abc.codec import BytesBytesCodec
 from zarr.v3.codecs.registry import register_codec
-from zarr.v3.common import BytesLike
-from zarr.v3.metadata import CodecMetadata
+from zarr.v3.types import JSON, BytesLike
+from zarr.v3.metadata.v3.array import CodecMetadata
 
 if TYPE_CHECKING:
-    from zarr.v3.metadata import CoreArrayMetadata
+    from zarr.v3.metadata.v3.array import CoreArrayMetadata
 
 
-@frozen
+@dataclass(frozen=True)
 class Crc32cCodecMetadata:
     name: Literal["crc32c"] = field(default="crc32c", init=False)
+    
+    @classmethod
+    def from_json(cls, json_data: Dict[str, JSON]):
+        return cls()
 
-
-@frozen
+@dataclass(frozen=True)
 class Crc32cCodec(BytesBytesCodec):
     array_metadata: CoreArrayMetadata
     is_fixed_size = True

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from dataclasses import dataclass
 
 from functools import reduce
 from typing import (
@@ -13,15 +14,15 @@ from typing import (
 from warnings import warn
 
 import numpy as np
-from attr import frozen
 
 from zarr.v3.abc.codec import Codec, ArrayArrayCodec, ArrayBytesCodec, BytesBytesCodec
-from zarr.v3.common import BytesLike
-from zarr.v3.metadata import CodecMetadata, ShardingCodecIndexLocation
+from zarr.v3.types import BytesLike
+from zarr.v3.metadata.v3.array import ShardingCodecIndexLocation
 from zarr.v3.codecs.registry import get_codec_class
+from zarr.v3.metadata.v3.array import CodecMetadata
 
 if TYPE_CHECKING:
-    from zarr.v3.metadata import CoreArrayMetadata
+    from zarr.v3.metadata.v3.array import CoreArrayMetadata
     from zarr.v3.codecs.sharding import ShardingCodecMetadata
     from zarr.v3.codecs.blosc import BloscCodecMetadata
     from zarr.v3.codecs.bytes import BytesCodecMetadata
@@ -31,7 +32,7 @@ if TYPE_CHECKING:
     from zarr.v3.codecs.crc32c_ import Crc32cCodecMetadata
 
 
-@frozen
+@dataclass(frozen=True)
 class CodecPipeline:
     codecs: List[Codec]
 

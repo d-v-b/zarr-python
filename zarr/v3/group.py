@@ -1,34 +1,27 @@
 from __future__ import annotations
-
+from dataclasses import dataclass, replace
 import json
-from typing import Any, Dict, Literal, Optional, Union
-
-from attr import asdict, evolve, field, frozen
 
 from zarr.v3.array import Array
-from zarr.v3.common import ZARR_JSON, make_cattr
-from zarr.v3.metadata import RuntimeConfiguration
+from zarr.v3.common import ZARR_JSON, RuntimeConfiguration
+import zarr.v3.metadata.v3 as MetaV3
+import zarr.v3.metadata.v2 as MetaV2
 from zarr.v3.store import StoreLike, StorePath, make_store_path
 from zarr.v3.sync import sync
 
+from typing import Any, Dict, Literal, Optional, Union
 
-@frozen
-class GroupMetadata:
-    attributes: Dict[str, Any] = field(factory=dict)
-    zarr_format: Literal[3] = 3
-    node_type: Literal["group"] = "group"
-
-    def to_bytes(self) -> bytes:
-        return json.dumps(asdict(self)).encode()
-
-    @classmethod
-    def from_json(cls, zarr_json: Any) -> GroupMetadata:
-        return make_cattr().structure(zarr_json, GroupMetadata)
+from zarr.v3.types import Attributes
 
 
-@frozen
+def group_metadata_from_json(data: Any):
+    data_dict = json.loads(data)
+
+
+@dataclass(frozen=True)
 class Group:
-    metadata: GroupMetadata
+    attributes: Attributes
+    metadata: Union[MetaV2.GroupMetadata, MetaV3.GroupMetadata]
     store_path: StorePath
     runtime_configuration: RuntimeConfiguration
 
@@ -37,15 +30,27 @@ class Group:
         cls,
         store: StoreLike,
         *,
-        attributes: Optional[Dict[str, Any]] = None,
+        version: Literal[2, 3] = 3,
+        attributes: Optional[Attributes] = None,
         exists_ok: bool = False,
         runtime_configuration: RuntimeConfiguration = RuntimeConfiguration(),
     ) -> Group:
         store_path = make_store_path(store)
+
         if not exists_ok:
             assert not await (store_path / ZARR_JSON).exists_async()
+
+        metadata: Union[MetaV2.GroupMetadata, MetaV3.GroupMetadata]
+
+        if version == 2:
+            metadata = MetaV2.GroupMetadata()
+
+        elif version == 3:
+            metadata = MetaV3.GroupMetadata()
+
         group = cls(
-            metadata=GroupMetadata(attributes=attributes or {}),
+            attributes=attributes,
+            metadata=metadata,
             store_path=store_path,
             runtime_configuration=runtime_configuration,
         )
@@ -57,6 +62,7 @@ class Group:
         cls,
         store: StoreLike,
         *,
+        version: Literal[2, 3] = 3,
         attributes: Optional[Dict[str, Any]] = None,
         exists_ok: bool = False,
         runtime_configuration: RuntimeConfiguration = RuntimeConfiguration(),
@@ -64,6 +70,7 @@ class Group:
         return sync(
             cls.create_async(
                 store,
+                version=version,
                 attributes=attributes,
                 exists_ok=exists_ok,
                 runtime_configuration=runtime_configuration,
@@ -97,11 +104,18 @@ class Group:
     def from_json(
         cls,
         store_path: StorePath,
-        zarr_json: Any,
+        zarr_json: Dict[str, Any],
         runtime_configuration: RuntimeConfiguration,
     ) -> Group:
+        zarr_version = zarr_json["zarr_format"]
+        if zarr_version == 2:
+            metadata = MetaV2.GroupMetadata()
+        elif zarr_version == 3:
+            metadata = MetaV3.GroupMetadata()
+        else:
+            raise ValueError(f"Invalid `zarr_format` property. Got {zarr_version}, expected 2 or 3")
         group = cls(
-            metadata=GroupMetadata.from_json(zarr_json),
+            metadata=metadata,
             store_path=store_path,
             runtime_configuration=runtime_configuration,
         )
@@ -163,11 +177,11 @@ class Group:
         )
 
     async def update_attributes_async(self, new_attributes: Dict[str, Any]) -> Group:
-        new_metadata = evolve(self.metadata, attributes=new_attributes)
+        new_metadata = replace(self.metadata, attributes=new_attributes)
 
         # Write new metadata
         await (self.store_path / ZARR_JSON).set_async(new_metadata.to_bytes())
-        return evolve(self, metadata=new_metadata)
+        return replace(self, metadata=new_metadata)
 
     def update_attributes(self, new_attributes: Dict[str, Any]) -> Group:
         return sync(

@@ -1,40 +1,48 @@
 from __future__ import annotations
+from dataclasses import dataclass, field
 
 from typing import (
     TYPE_CHECKING,
+    Dict,
     Literal,
     Optional,
     Type,
 )
 
-from attr import frozen, field
 from numcodecs.gzip import GZip
 
 from zarr.v3.abc.codec import BytesBytesCodec
 from zarr.v3.codecs.registry import register_codec
-from zarr.v3.common import BytesLike, to_thread
-from zarr.v3.metadata import CodecMetadata
+from zarr.v3.common import to_thread
+from zarr.v3.metadata.v3.array import CodecMetadata
+from zarr.v3.types import JSON, BytesLike
 
 if TYPE_CHECKING:
-    from zarr.v3.metadata import CoreArrayMetadata
+    from zarr.v3.metadata.v3.array import CoreArrayMetadata
 
 
-@frozen
+@dataclass(frozen=True)
 class GzipCodecConfigurationMetadata:
     level: int = 5
 
+    @classmethod
+    def from_json(cls, json_data: Dict[str, JSON]):
+        return cls(level=json_data['level'])
 
-@frozen
+@dataclass(frozen=True)
 class GzipCodecMetadata:
     configuration: GzipCodecConfigurationMetadata
     name: Literal["gzip"] = field(default="gzip", init=False)
 
+    @classmethod
+    def from_json(cls, json_data: Dict[str, JSON]):
+        return cls(configuration=GzipCodecConfigurationMetadata.from_json(json_data['configuration']))
 
-@frozen
+@dataclass(frozen=True)
 class GzipCodec(BytesBytesCodec):
     array_metadata: CoreArrayMetadata
     configuration: GzipCodecConfigurationMetadata
-    is_fixed_size = True
+    is_fixed_size = field(default=True, init=False)
 
     @classmethod
     def from_metadata(

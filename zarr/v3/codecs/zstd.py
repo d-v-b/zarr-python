@@ -1,37 +1,47 @@
 from __future__ import annotations
+from dataclasses import dataclass, field
 
 from typing import (
     TYPE_CHECKING,
+    Dict,
     Literal,
     Optional,
     Type,
 )
 
-from attr import frozen, field
 from zstandard import ZstdCompressor, ZstdDecompressor
 
 from zarr.v3.abc.codec import BytesBytesCodec
 from zarr.v3.codecs.registry import register_codec
-from zarr.v3.common import BytesLike, to_thread
-from zarr.v3.metadata import CodecMetadata
+from zarr.v3.common import to_thread
+from zarr.v3.metadata.v3.array import CodecMetadata
+from zarr.v3.types import JSON, BytesLike
 
 if TYPE_CHECKING:
-    from zarr.v3.metadata import CoreArrayMetadata
+    from zarr.v3.metadata.v3.array import CoreArrayMetadata
 
 
-@frozen
+@dataclass(frozen=True)
 class ZstdCodecConfigurationMetadata:
     level: int = 0
     checksum: bool = False
+    
+    @classmethod
+    def from_json(cls, json_data: Dict[str, JSON]):
+        return cls(
+            level=json_data['level'],
+            checksum=json_data['checksum'])
 
-
-@frozen
+@dataclass(frozen=True)
 class ZstdCodecMetadata:
     configuration: ZstdCodecConfigurationMetadata
     name: Literal["zstd"] = field(default="zstd", init=False)
 
+    @classmethod
+    def from_json(cls, json_data: Dict[str, JSON]):
+        return cls(configuration=ZstdCodecConfigurationMetadata.from_json(json_data['configuration']))
 
-@frozen
+@dataclass(frozen=True)
 class ZstdCodec(BytesBytesCodec):
     array_metadata: CoreArrayMetadata
     configuration: ZstdCodecConfigurationMetadata
