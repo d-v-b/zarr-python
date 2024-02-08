@@ -14,7 +14,7 @@ from typing import Any, Dict, Literal, Optional, Union
 from zarr.v3.types import Attributes
 
 
-def group_metadata_from_json(data: Any):
+def group_metadata_from_dict(data: Any):
     data_dict = json.loads(data)
 
 
@@ -87,7 +87,7 @@ class Group:
         store_path = make_store_path(store)
         zarr_json_bytes = await (store_path / ZARR_JSON).get_async()
         assert zarr_json_bytes is not None
-        return cls.from_json(store_path, json.loads(zarr_json_bytes), runtime_configuration)
+        return cls.from_dict(store_path, json.loads(zarr_json_bytes), runtime_configuration)
 
     @classmethod
     def open(
@@ -101,7 +101,7 @@ class Group:
         )
 
     @classmethod
-    def from_json(
+    def from_dict(
         cls,
         store_path: StorePath,
         zarr_json: Dict[str, Any],
@@ -133,9 +133,9 @@ class Group:
             raise KeyError
         zarr_json = json.loads(zarr_json_bytes)
         if zarr_json["node_type"] == "group":
-            return cls.from_json(store_path, zarr_json, runtime_configuration)
+            return cls.from_dict(store_path, zarr_json, runtime_configuration)
         if zarr_json["node_type"] == "array":
-            return Array.from_json(
+            return Array.from_dict(
                 store_path, zarr_json, runtime_configuration=runtime_configuration
             )
         raise KeyError

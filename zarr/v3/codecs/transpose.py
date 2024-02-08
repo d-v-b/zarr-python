@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 
 from typing import (
     TYPE_CHECKING,
+    Any,
     Dict,
     Literal,
     Optional,
@@ -14,37 +15,47 @@ import numpy as np
 
 from zarr.v3.abc.codec import ArrayArrayCodec
 from zarr.v3.codecs.registry import register_codec
-from zarr.v3.metadata.v3.array import CodecMetadata
+from zarr.v3.abc.codec import CodecMetadata
 from zarr.v3.types import JSON
 
 if TYPE_CHECKING:
     from zarr.v3.metadata.v3.array import CoreArrayMetadata
 
 
+def parse_order(data: Any) -> Tuple[int, ...]:
+    return tuple(data)
+
+
 @dataclass(frozen=True)
 class TransposeCodecConfigurationMetadata:
     order: Tuple[int, ...]
 
+    def __init__(self, order: Tuple[int, ...]):
+        order_parsed = parse_order(order)
+        object.__setattr__(self, "order", order_parsed)
+
     @classmethod
-    def from_json(cls, json_data: Dict[str, JSON]):
-        return cls(order=json_data['order'])
-        
+    def from_dict(cls, json_data: Dict[str, JSON]):
+        return cls(order=json_data["order"])
+
+
 @dataclass(frozen=True)
 class TransposeCodecMetadata:
     configuration: TransposeCodecConfigurationMetadata
     name: Literal["transpose"] = field(default="transpose", init=False)
 
     @classmethod
-    def from_json(cls, json_data: Dict[str, JSON]):
+    def from_dict(cls, json_data: Dict[str, JSON]):
         return cls(
-            configuration=TransposeCodecConfigurationMetadata.from_json(json_data['configuration'])
-            )
+            configuration=TransposeCodecConfigurationMetadata.from_dict(json_data["configuration"])
+        )
+
 
 @dataclass(frozen=True)
 class TransposeCodec(ArrayArrayCodec):
     array_metadata: CoreArrayMetadata
     order: Tuple[int, ...]
-    is_fixed_size = True
+    is_fixed_size: bool = field(init=False, default=True)
 
     @classmethod
     def from_metadata(

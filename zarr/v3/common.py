@@ -6,6 +6,7 @@ import contextvars
 from dataclasses import dataclass
 import functools
 from typing import (
+    Any,
     Awaitable,
     Callable,
     List,
@@ -66,3 +67,14 @@ def runtime_configuration(
     order: Literal["C", "F"], concurrency: Optional[int] = None
 ) -> RuntimeConfiguration:
     return RuntimeConfiguration(order=order, concurrency=concurrency)
+
+
+def parse_shape(data: Any) -> Tuple[int, ...]:
+    """
+    Parse the input into a tuple of ints
+    """
+    try:
+        return tuple(map(int, data))
+    except TypeError as e:
+        msg = f"Failed to parse object {data} with type {type(data)} as a tuple of integers"
+        raise TypeError(msg)

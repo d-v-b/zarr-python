@@ -15,5 +15,5 @@ class GroupMetadata:
         return json.dumps(asdict(self)).encode()
 
     @classmethod
-    def from_json(cls, zarr_json: Any) -> GroupMetadata:
+    def from_dict(cls, zarr_json: Any) -> GroupMetadata:
         return cls(**json.loads(zarr_json))

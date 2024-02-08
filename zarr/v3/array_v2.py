@@ -152,7 +152,7 @@ class ArrayV2:
             (store_path / ZATTRS_JSON).get_async(),
         )
         assert zarray_bytes is not None
-        return cls.from_json(
+        return cls.from_dict(
             store_path,
             zarray_json=json.loads(zarray_bytes),
             zattrs_json=json.loads(zattrs_bytes) if zattrs_bytes is not None else None,
@@ -171,14 +171,14 @@ class ArrayV2:
         )
 
     @classmethod
-    def from_json(
+    def from_dict(
         cls,
         store_path: StorePath,
         zarray_json: Any,
         zattrs_json: Optional[Any],
         runtime_configuration: RuntimeConfiguration = RuntimeConfiguration(),
     ) -> ArrayV2:
-        metadata = ArrayMetadata.from_json(zarray_json)
+        metadata = ArrayMetadata.from_dict(zarray_json)
         out = cls(
             store_path=store_path,
             metadata=metadata,
@@ -526,7 +526,7 @@ class ArrayV2:
         new_metadata_bytes = new_metadata.to_bytes()
         await (self.store_path / ZARR_JSON).set_async(new_metadata_bytes)
 
-        return Array.from_json(
+        return Array.from_dict(
             store_path=self.store_path,
             zarr_json=json.loads(new_metadata_bytes),
             runtime_configuration=self.runtime_configuration,

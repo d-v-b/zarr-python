@@ -3,7 +3,7 @@
 # 2. Inherit from abc (SynchronousArray, AsynchronousArray)
 # 3. Added .size and .attrs methods
 # 4. Temporarily disabled the creation of ArrayV2
-# 5. Added from_json to AsyncArray
+# 5. Added from_dict to AsyncArray
 
 # Questions to consider:
 # 1. Was splitting the array into two classes really necessary?
@@ -18,7 +18,7 @@ from typing import Any, Dict, Iterable, Literal, Optional, Tuple, Union
 import numpy as np
 
 from zarr.v3.abc.array import SynchronousArray, AsynchronousArray
-from zarr.v3.abc.codec import ArrayBytesCodecPartialDecodeMixin
+from zarr.v3.abc.codec import ArrayBytesCodecPartialDecodeMixin, CodecMetadata
 
 from zarr.v3.codecs import CodecPipeline, bytes_codec
 from zarr.v3.common import (
@@ -32,7 +32,6 @@ from zarr.v3.common import (
 from zarr.v3.codecs.sharding import ShardingCodec
 from zarr.v3.metadata.v3.array import (
     ArrayMetadata,
-    CodecMetadata,
     DataType,
     DefaultChunkKeyEncodingConfigurationMetadata,
     DefaultChunkKeyEncodingMetadata,
@@ -54,12 +53,13 @@ class AsyncArray(AsynchronousArray):
     codec_pipeline: CodecPipeline
 
     def __init__(
-            self, 
-            metadata: ArrayMetadata, 
-            store_path: StorePath, 
-            runtime_configuration: RuntimeConfiguration, 
-            codec_pipeline: CodecPipeline):
-        
+        self,
+        metadata: ArrayMetadata,
+        store_path: StorePath,
+        runtime_configuration: RuntimeConfiguration,
+        codec_pipeline: CodecPipeline,
+    ):
+
         self.metadata = metadata
         self._store_path = store_path
         self.runtime_configuration = runtime_configuration
@@ -139,13 +139,13 @@ class AsyncArray(AsynchronousArray):
         return array
 
     @classmethod
-    def from_json(
+    def from_dict(
         cls,
         store_path: StorePath,
         zarr_json: Any,
         runtime_configuration: RuntimeConfiguration,
     ) -> AsyncArray:
-        metadata = ArrayMetadata.from_json(zarr_json)
+        metadata = ArrayMetadata.from_dict(zarr_json, runtime_configuration=runtime_configuration)
         async_array = cls(
             metadata=metadata,
             store_path=store_path,
@@ -166,7 +166,7 @@ class AsyncArray(AsynchronousArray):
         store_path = make_store_path(store)
         zarr_json_bytes = await (store_path / ZARR_JSON).get_async()
         assert zarr_json_bytes is not None
-        return cls.from_json(
+        return cls.from_dict(
             store_path,
             json.loads(zarr_json_bytes),
             runtime_configuration=runtime_configuration,
@@ -181,7 +181,7 @@ class AsyncArray(AsynchronousArray):
         store_path = make_store_path(store)
         v3_metadata_bytes = await (store_path / ZARR_JSON).get_async()
         if v3_metadata_bytes is not None:
-            return cls.from_json(
+            return cls.from_dict(
                 store_path,
                 json.loads(v3_metadata_bytes),
                 runtime_configuration=runtime_configuration or RuntimeConfiguration(),
@@ -209,7 +209,7 @@ class AsyncArray(AsynchronousArray):
     @property
     def attrs(self) -> dict:
         return self.metadata.attributes
-    
+
     @property
     def store_path(self) -> str:
         return self._store_path
@@ -413,14 +413,24 @@ class AsyncArray(AsynchronousArray):
 
         # Write new metadata
         await (self.store_path / ZARR_JSON).set_async(new_metadata.to_bytes())
-        return replace(self, metadata=new_metadata)
+        return self.__class__(
+            metadata=new_metadata,
+            store_path=self.store_path,
+            runtime_configuration=self.runtime_configuration,
+            codec_pipeline=self.codec_pipeline,
+        )
 
     async def update_attributes(self, new_attributes: Dict[str, Any]) -> Array:
         new_metadata = replace(self.metadata, attributes=new_attributes)
 
         # Write new metadata
         await (self.store_path / ZARR_JSON).set_async(new_metadata.to_bytes())
-        return replace(self, metadata=new_metadata)
+        return self.__class__(
+            metadata=new_metadata,
+            store_path=self.store_path,
+            runtime_configuration=self.runtime_configuration,
+            codec_pipeline=self.codec_pipeline,
+        )
 
     def __repr__(self):
         return f"<AsyncArray {self.store_path} shape={self.shape} dtype={self.dtype}>"
@@ -471,13 +481,13 @@ class Array(SynchronousArray):
         return cls(async_array)
 
     @classmethod
-    def from_json(
+    def from_dict(
         cls,
         store_path: StorePath,
         zarr_json: Any,
         runtime_configuration: RuntimeConfiguration,
     ) -> Array:
-        async_array = AsyncArray.from_json(
+        async_array = AsyncArray.from_dict(
             store_path=store_path, zarr_json=zarr_json, runtime_configuration=runtime_configuration
         )
         return cls(async_array)

@@ -7,6 +7,7 @@ import numpy as np
 from zarr.v3.abc.store import ReadStore, WriteStore
 from zarr.v3.types import Selection
 
+
 class BaseArray(ABC):
     @property
     @abstractmethod
@@ -84,12 +85,13 @@ class BaseArray(ABC):
         """
         ...
 
+
 class AsynchronousArray(BaseArray):
     """This class can be implemented as a v2 or v3 array"""
 
     @classmethod
     @abstractmethod
-    async def from_json(cls, zarr_json: Any, store: ReadStore) -> AsynchronousArray:
+    async def from_dict(cls, zarr_json: Any, store: ReadStore) -> AsynchronousArray:
         ...
 
     @classmethod
@@ -118,7 +120,7 @@ class SynchronousArray(BaseArray):
 
     @classmethod
     @abstractmethod
-    def from_json(cls, zarr_json: Any, store: ReadStore) -> SynchronousArray:
+    def from_dict(cls, zarr_json: Any, store: ReadStore) -> SynchronousArray:
         ...
 
     @classmethod

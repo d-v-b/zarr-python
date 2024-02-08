@@ -14,7 +14,7 @@ from numcodecs.gzip import GZip
 from zarr.v3.abc.codec import BytesBytesCodec
 from zarr.v3.codecs.registry import register_codec
 from zarr.v3.common import to_thread
-from zarr.v3.metadata.v3.array import CodecMetadata
+from zarr.v3.abc.codec import CodecMetadata
 from zarr.v3.types import JSON, BytesLike
 
 if TYPE_CHECKING:
@@ -26,8 +26,9 @@ class GzipCodecConfigurationMetadata:
     level: int = 5
 
     @classmethod
-    def from_json(cls, json_data: Dict[str, JSON]):
-        return cls(level=json_data['level'])
+    def from_dict(cls, json_data: Dict[str, JSON]):
+        return cls(level=json_data["level"])
+
 
 @dataclass(frozen=True)
 class GzipCodecMetadata:
@@ -35,14 +36,17 @@ class GzipCodecMetadata:
     name: Literal["gzip"] = field(default="gzip", init=False)
 
     @classmethod
-    def from_json(cls, json_data: Dict[str, JSON]):
-        return cls(configuration=GzipCodecConfigurationMetadata.from_json(json_data['configuration']))
+    def from_dict(cls, json_data: Dict[str, JSON]):
+        return cls(
+            configuration=GzipCodecConfigurationMetadata.from_dict(json_data["configuration"])
+        )
+
 
 @dataclass(frozen=True)
 class GzipCodec(BytesBytesCodec):
     array_metadata: CoreArrayMetadata
     configuration: GzipCodecConfigurationMetadata
-    is_fixed_size = field(default=True, init=False)
+    is_fixed_size: bool = field(default=True, init=False)
 
     @classmethod
     def from_metadata(

@@ -14,7 +14,7 @@ from zstandard import ZstdCompressor, ZstdDecompressor
 from zarr.v3.abc.codec import BytesBytesCodec
 from zarr.v3.codecs.registry import register_codec
 from zarr.v3.common import to_thread
-from zarr.v3.metadata.v3.array import CodecMetadata
+from zarr.v3.abc.codec import CodecMetadata
 from zarr.v3.types import JSON, BytesLike
 
 if TYPE_CHECKING:
@@ -25,12 +25,11 @@ if TYPE_CHECKING:
 class ZstdCodecConfigurationMetadata:
     level: int = 0
     checksum: bool = False
-    
+
     @classmethod
-    def from_json(cls, json_data: Dict[str, JSON]):
-        return cls(
-            level=json_data['level'],
-            checksum=json_data['checksum'])
+    def from_dict(cls, json_data: Dict[str, JSON]):
+        return cls(level=json_data["level"], checksum=json_data["checksum"])
+
 
 @dataclass(frozen=True)
 class ZstdCodecMetadata:
@@ -38,8 +37,11 @@ class ZstdCodecMetadata:
     name: Literal["zstd"] = field(default="zstd", init=False)
 
     @classmethod
-    def from_json(cls, json_data: Dict[str, JSON]):
-        return cls(configuration=ZstdCodecConfigurationMetadata.from_json(json_data['configuration']))
+    def from_dict(cls, json_data: Dict[str, JSON]):
+        return cls(
+            configuration=ZstdCodecConfigurationMetadata.from_dict(json_data["configuration"])
+        )
+
 
 @dataclass(frozen=True)
 class ZstdCodec(BytesBytesCodec):

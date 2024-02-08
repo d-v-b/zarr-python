@@ -14,7 +14,7 @@ import numpy as np
 from zarr.v3.abc.codec import ArrayBytesCodec
 from zarr.v3.codecs.registry import register_codec
 from zarr.v3.types import JSON, BytesLike
-from zarr.v3.metadata.v3.array import CodecMetadata
+from zarr.v3.abc.codec import CodecMetadata
 
 if TYPE_CHECKING:
     from zarr.v3.metadata.v3.array import CoreArrayMetadata
@@ -25,17 +25,21 @@ class BytesCodecConfigurationMetadata:
     endian: Optional[Literal["big", "little"]] = "little"
 
     @classmethod
-    def from_json(cls, json_data: Dict[str, JSON]):
-        return cls(endian=json_data['endian'])
+    def from_dict(cls, json_data: Dict[str, JSON]):
+        return cls(endian=json_data["endian"])
+
 
 @dataclass(frozen=True)
 class BytesCodecMetadata:
     configuration: BytesCodecConfigurationMetadata
     name: Literal["bytes"] = field(default="bytes", init=False)
-    
+
     @classmethod
-    def from_json(cls, json_data: Dict[str, JSON]):
-        return cls(configuration=BytesCodecConfigurationMetadata.from_json(json_data['configuration']))
+    def from_dict(cls, json_data: Dict[str, JSON]):
+        return cls(
+            configuration=BytesCodecConfigurationMetadata.from_dict(json_data["configuration"])
+        )
+
 
 @dataclass(frozen=True)
 class BytesCodec(ArrayBytesCodec):

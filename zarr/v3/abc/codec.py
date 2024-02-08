@@ -11,18 +11,27 @@
 from __future__ import annotations
 
 from abc import abstractmethod, ABC
-from typing import TYPE_CHECKING, Optional, Type
-
+from typing import TYPE_CHECKING, Dict, Optional, Protocol, Type
+from typing_extensions import Self
 import numpy as np
 
-from zarr.v3.types import SliceSelection
-from zarr.v3.metadata.v3.array import CodecMetadata
+from zarr.v3.types import JSON, SliceSelection
 from zarr.v3.store import StorePath
 from zarr.v3.types import BytesLike
 
 
 if TYPE_CHECKING:
     from zarr.v3.metadata.v3.array import CoreArrayMetadata
+
+
+class CodecMetadata(Protocol):
+    @property
+    def name(self) -> str:
+        pass
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, JSON]) -> Self:
+        pass
 
 
 class Codec(ABC):

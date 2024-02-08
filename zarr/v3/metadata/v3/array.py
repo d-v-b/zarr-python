@@ -3,25 +3,20 @@ from codecs import Codec
 from dataclasses import asdict, dataclass, field
 
 from cattr import Converter
+from zarr.v3.abc.codec import CodecMetadata
 from zarr.v3.codecs.registry import get_codec_class, get_codec_metadata_class
 from zarr.v3.common import RuntimeConfiguration
 
 
 import numpy as np
-import attr
-
+import numpy.typing as npt
 
 import json
 from enum import Enum
-from typing import Any, Dict, List, Literal, Optional, Protocol, Tuple, Union
+from typing import Any, Dict, Iterable, List, Literal, Optional, Tuple, Union
+from zarr.v3.common import parse_shape
 
 from zarr.v3.types import JSON, Attributes, ChunkCoords
-
-
-class CodecMetadata(Protocol):
-    @property
-    def name(self) -> str:
-        pass
 
 
 class DataType(Enum):
@@ -75,32 +70,52 @@ class DataType(Enum):
 class RegularChunkGridConfigurationMetadata:
     chunk_shape: ChunkCoords
 
+    def __init__(self, chunk_shape: Any):
+        chunk_shape_parsed = parse_shape(chunk_shape)
+        object.__setattr__(self, "chunk_shape", chunk_shape_parsed)
+
     @classmethod
-    def from_json(cls, json_data: Dict[str, JSON]):
-        return cls(chunk_shape=json_data['chunk_shape'])
+    def from_dict(cls, data: Dict[str, JSON]):
+        return cls(chunk_shape=data["chunk_shape"])
+
 
 @dataclass(frozen=True)
 class RegularChunkGridMetadata:
     configuration: RegularChunkGridConfigurationMetadata
     name: Literal["regular"] = field(default="regular", init=False)
 
-    def from_json(cls, json_data: Dict[str, JSON]):
-        if 'name' not in json_data:
-            raise ValueError('Invalid `name`: `name` property is missing from the metadata document.')
-        if name := json_data.get('name') is not 'regular':
+    @classmethod
+    def from_dict(cls, data: Dict[str, JSON]):
+        if "name" not in data:
+            raise ValueError(
+                "Invalid `name`: `name` property is missing from the metadata document."
+            )
+        if (name := data.get("name")) != "regular":
             msg = f'Invalid `name` property; expected "regular", got {name}'
             raise ValueError(msg)
         return cls(
-            configuration=RegularChunkGridConfigurationMetadata.from_json(json_data['configuration'])
-            )
+            configuration=RegularChunkGridConfigurationMetadata.from_dict(data["configuration"])
+        )
+
+
+def parse_separator(data: Any) -> Literal[".", "/"]:
+    if data not in (".", "/"):
+        msg = f'Expected one of {(".", "/")}, got {data} instead.'
+        raise ValueError(msg)
+    return data
+
 
 @dataclass(frozen=True)
 class DefaultChunkKeyEncodingConfigurationMetadata:
     separator: Literal[".", "/"] = "/"
 
+    def __init__(self, separator: Literal[".", "/"] = "/"):
+        separator_parsed = parse_separator(separator)
+        object.__setattr__(self, "separator", separator_parsed)
+
     @classmethod
-    def from_json(cls, json_data: Dict[str, JSON]):
-        return cls(separator=json_data.get('separator'))
+    def from_dict(cls, data: Dict[str, JSON]):
+        return cls(separator=data.get("separator"))
 
 
 @dataclass(frozen=True)
@@ -109,11 +124,14 @@ class DefaultChunkKeyEncodingMetadata:
         DefaultChunkKeyEncodingConfigurationMetadata()
     )
     name: Literal["default"] = field(default="default", init=False)
-    
+
     @classmethod
-    def from_json(cls, json_data: Dict[str, JSON]):
+    def from_dict(cls, data: Dict[str, JSON]):
         return cls(
-            configuration=DefaultChunkKeyEncodingConfigurationMetadata.from_json(json_data['configuration']))
+            configuration=DefaultChunkKeyEncodingConfigurationMetadata.from_dict(
+                data["configuration"]
+            )
+        )
 
     def decode_chunk_key(self, chunk_key: str) -> ChunkCoords:
         if chunk_key == "c":
@@ -128,9 +146,14 @@ class DefaultChunkKeyEncodingMetadata:
 class V2ChunkKeyEncodingConfigurationMetadata:
     separator: Literal[".", "/"] = "."
 
+    def __init__(self, separator: Literal[".", "/"]):
+        separator_parsed = parse_separator(separator)
+        object.__setattr__(self, "separator", separator_parsed)
+
     @classmethod
-    def from_json(cls, json_data: Dict[str, JSON]):
-        return cls(separator=json_data['separator'])
+    def from_dict(cls, data: Dict[str, JSON]):
+        return cls(separator=data["separator"])
+
 
 @dataclass(frozen=True)
 class V2ChunkKeyEncodingMetadata:
@@ -147,82 +170,13 @@ class V2ChunkKeyEncodingMetadata:
         return "0" if chunk_identifier == "" else chunk_identifier
 
     @classmethod
-    def from_json(cls, json_data: Dict[str, JSON]):
-        return cls(configuration=V2ChunkKeyEncodingConfigurationMetadata.from_json(json_data['configuration']))
-    
+    def from_dict(cls, data: Dict[str, JSON]):
+        return cls(
+            configuration=V2ChunkKeyEncodingConfigurationMetadata.from_dict(data["configuration"])
+        )
+
+
 ChunkKeyEncodingMetadata = Union[DefaultChunkKeyEncodingMetadata, V2ChunkKeyEncodingMetadata]
-
-
-""" def make_cattr():
-    from zarr.v3.metadata.v3.array import (
-        ChunkKeyEncodingMetadata,
-    )
-    from zarr.v3.codecs.registry import get_codec_metadata_class
-
-    converter = Converter()
-
-    def _structure_chunk_key_encoding_metadata(d: Dict[str, Any], _t) -> ChunkKeyEncodingMetadata:
-        if d["name"] == "default":
-            return converter.structure(d, DefaultChunkKeyEncodingMetadata)
-        if d["name"] == "v2":
-            return converter.structure(d, V2ChunkKeyEncodingMetadata)
-        raise KeyError
-
-    converter.register_structure_hook(
-        ChunkKeyEncodingMetadata, _structure_chunk_key_encoding_metadata
-    )
-
-    def _structure_codec_metadata(d: Dict[str, Any], _t=None) -> CodecMetadata:
-        codec_metadata_cls = get_codec_metadata_class(d["name"])
-        return converter.structure(d, codec_metadata_cls)
-
-    converter.register_structure_hook(CodecMetadata, _structure_codec_metadata)
-
-    converter.register_structure_hook_factory(
-        lambda t: str(t) == "ForwardRef('CodecMetadata')",
-        lambda t: _structure_codec_metadata,
-    )
-
-    def _structure_order(d: Any, _t=None) -> Union[Literal["C", "F"], Tuple[int, ...]]:
-        if d == "C":
-            return "C"
-        if d == "F":
-            return "F"
-        if isinstance(d, list):
-            return tuple(d)
-        raise KeyError
-
-    converter.register_structure_hook_factory(
-        lambda t: str(t) == "typing.Union[typing.Literal['C', 'F'], typing.Tuple[int, ...]]",
-        lambda t: _structure_order,
-    )
-
-    # Needed for v2 fill_value
-    def _structure_fill_value(d: Any, _t=None) -> Union[None, int, float]:
-        if d is None:
-            return None
-        try:
-            return int(d)
-        except ValueError:
-            pass
-        try:
-            return float(d)
-        except ValueError:
-            pass
-        raise ValueError
-
-    converter.register_structure_hook_factory(
-        lambda t: str(t) == "typing.Union[NoneType, int, float]",
-        lambda t: _structure_fill_value,
-    )
-
-    # Needed for v2 dtype
-    converter.register_structure_hook(
-        np.dtype,
-        lambda d, _: np.dtype(d),
-    )
-
-    return converter """
 
 
 @dataclass(frozen=True)
@@ -242,6 +196,72 @@ class CoreArrayMetadata:
         return len(self.shape)
 
 
+def parse_data_type(data):
+    return data
+
+
+def parse_chunk_grid(data):
+    return data
+
+
+def parse_chunk_key_encoding(data):
+    return data
+
+# todo: handle None
+def parse_fill_value(data):
+    return data
+
+
+def parse_codec(data: Any) -> Codec:
+    if "name" in data:
+        return get_codec_metadata_class(data["name"]).from_dict(data)
+    msg = f'Expected a key called "name" in {data}, but it was not found.'
+    raise ValueError(msg)
+
+
+def parse_codecs_json(data: Dict[str, JSON]):
+    if "codecs" not in data:
+        msg = 'Expected key "codecs" was not found.'
+        raise ValueError(msg)
+    codecs_in = data["codecs"]
+    if not isinstance(codecs_in, list):
+        msg = f"Codecs must be a list, got {type(codecs_in)}"
+        raise TypeError(msg)
+
+
+def parse_codecs(data: Any) -> List[Codec]:
+    if not isinstance(data, Iterable):
+        msg = f"Expected an Iterable, got {type(data)}"
+        raise TypeError(msg)
+    return list(map(parse_codec, data))
+
+
+def parse_dimension_names(data):
+    if data is not None:
+        return tuple(data)
+    return data
+
+def validate_dimensionality(
+        shape: Tuple[int, ...], 
+        chunk_grid: RegularChunkGridMetadata, 
+        dimension_names: Optional[Tuple[str, ...]]):
+    if len(shape) != len(chunk_grid.configuration.chunk_shape):
+       msg = ("`chunk_grid.configuration.chunk_shape` and `shape` do not have the same length."
+              f"`chunk_grid.configuration.chunk_shape` has length={len(chunk_grid.configuration.chunk_shape)}"
+              f"but `shape` has length={len(shape)}")
+       raise ValueError(msg)
+    if dimension_names is not None and len(shape) != len(dimension_names):
+        msg 
+def _validate_metadata(self) -> None:
+    assert len(self.metadata.shape) == len(
+        self.metadata.chunk_grid.configuration.chunk_shape
+    ), "`chunk_shape` and `shape` need to have the same number of dimensions."
+    assert self.metadata.dimension_names is None or len(self.metadata.shape) == len(
+        self.metadata.dimension_names
+    ), "`dimension_names` and `shape` need to have the same number of dimensions."
+    assert self.metadata.fill_value is not None, "`fill_value` is required."
+
+
 @dataclass(frozen=True)
 class ArrayMetadata:
     shape: ChunkCoords
@@ -255,6 +275,35 @@ class ArrayMetadata:
     zarr_format: Literal[3] = field(default=3, init=False)
     node_type: Literal["array"] = field(default="array", init=False)
 
+    def __init__(
+        self,
+        shape: ChunkCoords,
+        data_type: npt.DtypeLike,
+        chunk_grid: RegularChunkGridMetadata,
+        chunk_key_encoding: ChunkKeyEncodingMetadata,
+        fill_value: Any,
+        codecs: List[CodecMetadata],
+        dimension_names: Optional[Tuple[str, ...]] = None,
+        attributes: Optional[Attributes] = field(default_factory=dict),
+    ):
+
+        shape_parsed = parse_shape(shape)
+        object.__setattr__(self, "shape", shape_parsed)
+        data_type_parsed = parse_data_type(data_type)
+        object.__setattr__(self, "data_type", data_type_parsed)
+        chunk_grid_parsed = parse_chunk_grid(chunk_grid)
+
+        object.__setattr__(self, "chunk_grid", chunk_grid_parsed)
+        chunk_key_encoding_parsed = parse_chunk_key_encoding(chunk_key_encoding)
+        object.__setattr__(self, "chunk_key_encoding", chunk_key_encoding_parsed)
+        fill_value_parsed = parse_fill_value(fill_value)
+        object.__setattr__(self, "fill_value", fill_value_parsed)
+        codecs_parsed = parse_codecs(codecs)
+        object.__setattr__(self, "codecs", codecs_parsed)
+        dimension_names_parsed = parse_dimension_names(dimension_names)
+        object.__setattr__(self, "dimension_names", dimension_names_parsed)
+        object.__setattr__(self, "attributes", attributes)
+
     @property
     def dtype(self) -> np.dtype:
         return np.dtype(self.data_type.value)
@@ -263,9 +312,7 @@ class ArrayMetadata:
     def ndim(self) -> int:
         return len(self.shape)
 
-    def get_core_metadata(
-            self, 
-            runtime_configuration: RuntimeConfiguration) -> CoreArrayMetadata:
+    def get_core_metadata(self, runtime_configuration: RuntimeConfiguration) -> CoreArrayMetadata:
         return CoreArrayMetadata(
             shape=self.shape,
             chunk_shape=self.chunk_grid.configuration.chunk_shape,
@@ -279,39 +326,35 @@ class ArrayMetadata:
             if isinstance(o, Enum):
                 return o.name
             raise TypeError
+
         self_dict = asdict(self)
         if self.dimension_names is None:
-            self_dict.pop('dimension_names')
-        return json.dumps(
-            self_dict, 
-            default=_json_convert
-            ).encode()
+            self_dict.pop("dimension_names")
+        return json.dumps(self_dict, default=_json_convert).encode()
 
     @classmethod
-    def from_json(cls, json_data: Dict[str, JSON], runtime_configuration: RuntimeConfiguration) -> ArrayMetadata:
-        node_type = json_data.pop('node_type', None)
-        zarr_format = json_data.pop('zarr_format', None)
-        if node_type is not None and zarr_format is not None:
-            data_type = DataType(json_data.get('data_type'))
-            chunk_grid = RegularChunkGridMetadata.from_json(json_data=['chunk_grid'])
-            shape=json_data['shape']
-            dimension_names = json_data.get('dimension_names', None)
-            fill_value = json_data['fill_value']
-            attributes = json_data.get('attributes', None)
+    def from_dict(
+        cls, data: Dict[str, JSON], runtime_configuration: RuntimeConfiguration
+    ) -> ArrayMetadata:
+        node_type = data.pop("node_type", None)
+        zarr_format = data.pop("zarr_format", None)
+        if node_type in ("array", "group") and zarr_format is 3:
+            data_type = DataType(data.get("data_type"))
+            chunk_grid = RegularChunkGridMetadata.from_dict(data["chunk_grid"])
+            shape = data["shape"]
+            dimension_names = data.get("dimension_names", None)
+            fill_value = data["fill_value"]
+            attributes = data.get("attributes", None)
             array_metadata = CoreArrayMetadata(
                 shape=shape,
-                chunk_shape=chunk_grid.configuration.chunk_shape 
+                chunk_shape=chunk_grid.configuration.chunk_shape,
                 fill_value=fill_value,
                 data_type=data_type,
-                runtime_configuration=runtime_configuration)
-            codecs: List[Codec] = []
-            for json_codec in json_data['codecs']:
-                codec_metadata = get_codec_metadata_class(json_codec['name']).from_json(json_codec)
-                codec_class = get_codec_class(json_codec['name'])
-                codecs.append(
-                    codec_class.from_metadata(
-                        codec_metadata=codec_metadata,
-                        array_metadata=array_metadata))
+                runtime_configuration=runtime_configuration,
+            )
+            codecs = parse_codecs(data["codecs"])
+            chunk_key_encoding = parse_chunk_key_encoding_json(data["chunk_key_encoding"])
+
             return cls(
                 shape=shape,
                 data_type=data_type,
@@ -319,14 +362,13 @@ class ArrayMetadata:
                 fill_value=fill_value,
                 codecs=codecs,
                 dimension_names=dimension_names,
-                attributes=attributes
-                )
-        raise ValueError('The JSON document provided is invalid for a Zarr V3 array.')
+                attributes=attributes,
+                chunk_key_encoding=chunk_key_encoding,
+            )
+        raise ValueError("The JSON document provided is invalid for a Zarr V3 array.")
 
 
-class ShardingCodecIndexLocation(Enum):
-    start = "start"
-    end = "end"
+ShardingCodecIndexLocation = Literal["start", "end"]
 
 
 dtype_to_data_type = {
@@ -343,3 +385,15 @@ dtype_to_data_type = {
     "<f4": "float32",
     "<f8": "float64",
 }
+
+
+def parse_chunk_key_encoding_json(data: Dict[str, JSON]) -> ChunkKeyEncodingMetadata:
+    name = data["name"]
+    if name == "v2":
+        return V2ChunkKeyEncodingMetadata.from_dict(data)
+    elif name == "default":
+        return DefaultChunkKeyEncodingMetadata.from_dict(data)
+    msg = (
+        f'Invalid `chunk_grid.name` property in JSON. Expected one of ["v2", "default"], got {name}'
+    )
+    raise ValueError(msg)

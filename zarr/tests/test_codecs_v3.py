@@ -8,11 +8,12 @@ import numpy as np
 import pytest
 import zarr
 from zarr.v3 import codecs
+from zarr.v3.abc.codec import CodecMetadata
 from zarr.v3.array import Array, AsyncArray
 from zarr.v3.types import Selection
 from zarr.v3.indexing import morton_order_iter
 from zarr.v3.common import runtime_configuration
-from zarr.v3.metadata.v3.array import CodecMetadata, ShardingCodecIndexLocation
+from zarr.v3.metadata.v3.array import ShardingCodecIndexLocation
 
 from zarr.v3.store import MemoryStore, Store
 
@@ -47,9 +48,7 @@ def sample_data() -> np.ndarray:
     return np.arange(0, 128 * 128 * 128, dtype="uint16").reshape((128, 128, 128), order="F")
 
 
-@pytest.mark.parametrize(
-    "index_location", [ShardingCodecIndexLocation.start, ShardingCodecIndexLocation.end]
-)
+@pytest.mark.parametrize("index_location", ["start", "end"])
 def test_sharding(
     store: Store, sample_data: np.ndarray, index_location: ShardingCodecIndexLocation
 ):
@@ -79,9 +78,7 @@ def test_sharding(
     assert np.array_equal(sample_data, read_data)
 
 
-@pytest.mark.parametrize(
-    "index_location", [ShardingCodecIndexLocation.start, ShardingCodecIndexLocation.end]
-)
+@pytest.mark.parametrize("index_location", ["start", "end"])
 def test_sharding_partial(
     store: Store, sample_data: np.ndarray, index_location: ShardingCodecIndexLocation
 ):
@@ -114,9 +111,7 @@ def test_sharding_partial(
     assert np.array_equal(sample_data, read_data)
 
 
-@pytest.mark.parametrize(
-    "index_location", [ShardingCodecIndexLocation.start, ShardingCodecIndexLocation.end]
-)
+@pytest.mark.parametrize("index_location", ["start", "end"])
 def test_sharding_partial_read(
     store: Store, sample_data: np.ndarray, index_location: ShardingCodecIndexLocation
 ):
@@ -143,9 +138,7 @@ def test_sharding_partial_read(
     assert np.all(read_data == 1)
 
 
-@pytest.mark.parametrize(
-    "index_location", [ShardingCodecIndexLocation.start, ShardingCodecIndexLocation.end]
-)
+@pytest.mark.parametrize("index_location", ["start", "end"])
 def test_sharding_partial_overwrite(
     store: Store, sample_data: np.ndarray, index_location: ShardingCodecIndexLocation
 ):
@@ -183,11 +176,11 @@ def test_sharding_partial_overwrite(
 
 @pytest.mark.parametrize(
     "outer_index_location",
-    [ShardingCodecIndexLocation.start, ShardingCodecIndexLocation.end],
+    ["start", "end"],
 )
 @pytest.mark.parametrize(
     "inner_index_location",
-    [ShardingCodecIndexLocation.start, ShardingCodecIndexLocation.end],
+    ["start", "end"],
 )
 def test_nested_sharding(
     store: Store,
