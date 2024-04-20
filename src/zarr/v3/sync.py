@@ -4,6 +4,7 @@ import asyncio
 import threading
 from typing import (
     Any,
+    AsyncGenerator,
     AsyncIterator,
     Coroutine,
     List,
@@ -44,6 +45,20 @@ async def _runner(event: threading.Event, coro: Coroutine, result_box: List[Opti
     finally:
         event.set()
 
+def iter_over_async(
+        data: AsyncGenerator[Any, None, None], 
+        loop: asyncio.AbstractEventLoop | None = None):
+    async def _next():
+        try:
+            obj = await anext(data)
+            return False, obj
+        except StopAsyncIteration:
+            return True, None
+    while True:
+        done, obj = loop.run_until_complete(_next())
+        if done:
+            break
+        yield obj
 
 def sync(coro: Coroutine, loop: Optional[asyncio.AbstractEventLoop] = None):
     """

@@ -428,7 +428,7 @@ async def test_asyncgroup_update_attributes(
     agroup_new_attributes = await agroup.update_attributes(attributes_new)
     assert agroup_new_attributes.attrs == attributes_new
 
-
+@pytest.mark.asyncio
 @pytest.mark.parametrize("store", ("local", "memory"), indirect=["store"])
 @pytest.mark.parametrize("zarr_format", (2, 3))
 @pytest.mark.parametrize(
@@ -437,7 +437,7 @@ async def test_asyncgroup_update_attributes(
 async def test_group_init(
     store: LocalStore | MemoryStore, zarr_format: ZarrFormat, sync_configuration: SyncConfiguration
 ) -> None:
-    agroup = sync(AsyncGroup.create(store=store, zarr_format=zarr_format))
+    agroup = await AsyncGroup.create(store=store, zarr_format=zarr_format)
     group = Group(_async_group=agroup, _sync_configuration=sync_configuration)
     assert group._async_group == agroup
     assert group._sync_configuration == sync_configuration

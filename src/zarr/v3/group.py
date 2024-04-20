@@ -165,7 +165,9 @@ class AsyncGroup:
         # calling list_dir here is a big performance loss. We should try to find a way around
         # this.
         # see https://github.com/zarr-developers/zarr-python/pull/1743#issuecomment-2058681807
-        if key not in await store_path.store.list_dir(self.store_path.path):
+        prefixes = [x async for x in store_path.store.list_dir(self.store_path.path)]
+
+        if key not in prefixes:
             raise KeyError(key)
 
         if self.metadata.zarr_format == 3:
@@ -302,7 +304,7 @@ class AsyncGroup:
             )
 
             raise ValueError(msg)
-        subkeys = await self.store_path.store.list_dir(self.store_path.path)
+        subkeys = [x async for x in self.store_path.store.list_dir(self.store_path.path)]
         # would be nice to make these special keys accessible programmatically,
         # and scoped to specific zarr versions
         subkeys_filtered = filter(lambda v: v not in ("zarr.json", ".zgroup", ".zattrs"), subkeys)

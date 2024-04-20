@@ -416,9 +416,9 @@ class StoreTests:
 
         # test list_dir (optional)
         if store.supports_listing:
-            assert set(await store.list_dir(self.root)) == {"a", "b", "c"}
-            assert set(await store.list_dir(self.root + "c")) == {"d", "e"}
-            assert set(await store.list_dir(self.root + "c/e")) == {"f", "g"}
+            assert set([x async for x in store.list_dir(self.root)]) == {"a", "b", "c"}
+            assert set([x async for x in store.list_dir(self.root + "c")]) == {"d", "e"}
+            assert set([x async for x in store.list_dir(self.root + "c/e")]) == {"f", "g"}
             # no exception raised if path does not exist or is leaf
             assert await store.list_dir(self.root + "x") == []
             assert await store.list_dir(self.root + "a/x") == []
