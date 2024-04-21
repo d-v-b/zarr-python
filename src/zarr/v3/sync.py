@@ -7,6 +7,7 @@ from typing import (
     AsyncGenerator,
     AsyncIterator,
     Coroutine,
+    Generator,
     List,
     Optional,
     TypeVar,
@@ -45,20 +46,38 @@ async def _runner(event: threading.Event, coro: Coroutine, result_box: List[Opti
     finally:
         event.set()
 
-def iter_over_async(
-        data: AsyncGenerator[Any, None, None], 
-        loop: asyncio.AbstractEventLoop | None = None):
+
+# todo: bake this into sync
+def _syncify_async_generator(
+    data: AsyncGenerator[Any, Any], loop: asyncio.AbstractEventLoop | None = None
+) -> Generator[Any, Any, Any]:
+    """
+    Convert an `AsyncGenerator` to a `Generator`.
+    """
+    if loop is None:
+        loop = asyncio.get_event_loop()
+    if loop is None or loop.is_closed():
+        raise RuntimeError("Loop is not running")
+    try:
+        loop0 = asyncio.events.get_running_loop()
+        if loop0 is loop:
+            raise NotImplementedError("Calling sync() from within a running loop")
+    except RuntimeError:
+        pass
+
     async def _next():
         try:
             obj = await anext(data)
             return False, obj
         except StopAsyncIteration:
             return True, None
+
     while True:
         done, obj = loop.run_until_complete(_next())
         if done:
             break
         yield obj
+
 
 def sync(coro: Coroutine, loop: Optional[asyncio.AbstractEventLoop] = None):
     """

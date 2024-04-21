@@ -157,7 +157,6 @@ class LocalStore(Store):
             if p.is_file():
                 yield str(p)
 
-
     async def list_prefix(self, prefix: str) -> AsyncGenerator[str, None]:
         """Retrieve all keys in the store with a given prefix.
 
@@ -172,7 +171,6 @@ class LocalStore(Store):
         for p in (self.root / prefix).rglob("*"):
             if p.is_file():
                 yield str(p)
-
 
     async def list_dir(self, prefix: str) -> AsyncGenerator[str, None]:
         """
@@ -189,12 +187,8 @@ class LocalStore(Store):
         """
         base = self.root / prefix
         to_strip = str(base) + "/"
-        
         try:
-            key_iter = base.iterdir()
+            for key in base.iterdir():
+                yield str(key).replace(to_strip, "")
         except (FileNotFoundError, NotADirectoryError):
-            key_iter = []
-
-        for key in key_iter:
-            yield str(key).replace(to_strip, "")
-
+            pass

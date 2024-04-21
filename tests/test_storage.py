@@ -308,7 +308,7 @@ class StoreTests:
         await store.set(self.root + "foo", b"bar")
         await store.set(self.root + "baz", b"quux")
         # n = len(store)
-        keys = sorted(await store.list())
+        keys = sorted([x async for x in store.list()])
 
         # round-trip through pickle
         dump = pickle.dumps(store)
@@ -321,7 +321,7 @@ class StoreTests:
 
         # verify
         # assert n == len(store2)
-        assert keys == sorted(await store2.list())
+        assert keys == sorted([x async for x in store2.list()])
         assert await store2.get(self.root + "foo") == b"bar"
         assert await store2.get(self.root + "baz") == b"quux"
 
@@ -420,13 +420,13 @@ class StoreTests:
             assert set([x async for x in store.list_dir(self.root + "c")]) == {"d", "e"}
             assert set([x async for x in store.list_dir(self.root + "c/e")]) == {"f", "g"}
             # no exception raised if path does not exist or is leaf
-            assert await store.list_dir(self.root + "x") == []
-            assert await store.list_dir(self.root + "a/x") == []
-            assert await store.list_dir(self.root + "c/x") == []
-            assert await store.list_dir(self.root + "c/x/y") == []
-            assert await store.list_dir(self.root + "c/d/y") == []
-            assert await store.list_dir(self.root + "c/d/y/z") == []
-            assert await store.list_dir(self.root + "c/e/f") == []
+            assert [x async for x in store.list_dir(self.root + "x")] == []
+            assert [x async for x in store.list_dir(self.root + "a/x")] == []
+            assert [x async for x in store.list_dir(self.root + "c/x")] == []
+            assert [x async for x in store.list_dir(self.root + "c/x/y")] == []
+            assert [x async for x in store.list_dir(self.root + "c/d/y")] == []
+            assert [x async for x in store.list_dir(self.root + "c/d/y/z")] == []
+            assert [x async for x in store.list_dir(self.root + "c/e/f")] == []
 
 
 #         # test rename (optional)
