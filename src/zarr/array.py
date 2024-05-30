@@ -17,6 +17,8 @@ from typing import Any, Literal
 import numpy as np
 import numpy.typing as npt
 
+import zarr.metadata.v2 as meta_v2
+import zarr.metadata.v3 as meta_v3
 from zarr.abc.codec import Codec
 from zarr.abc.store import set_or_delete
 from zarr.attributes import Attributes
@@ -34,33 +36,33 @@ from zarr.common import (
     ZarrFormat,
     concurrent_map,
 )
-from zarr.config import config
+from zarr.config import config, parse_indexing_order
 from zarr.indexing import BasicIndexer
-from zarr.metadata import ArrayMetadata, ArrayV2Metadata, ArrayV3Metadata, parse_indexing_order
+from zarr.metadata.common import ArrayMetadataBase
 from zarr.store import StoreLike, StorePath, make_store_path
 from zarr.sync import sync
 
 
-def parse_array_metadata(data: Any) -> ArrayMetadata:
-    if isinstance(data, ArrayMetadata):
+def parse_array_metadata(data: Any) -> ArrayMetadataBase:
+    if isinstance(data, ArrayMetadataBase):
         return data
     elif isinstance(data, dict):
         if data["zarr_format"] == 3:
-            return ArrayV3Metadata.from_dict(data)
+            return meta_v3.ArrayMetadata.from_dict(data)
         elif data["zarr_format"] == 2:
-            return ArrayV2Metadata.from_dict(data)
+            return meta_v2.ArrayMetadata.from_dict(data)
     raise TypeError
 
 
 @dataclass(frozen=True)
 class AsyncArray:
-    metadata: ArrayMetadata
+    metadata: ArrayMetadataBase
     store_path: StorePath
     order: Literal["C", "F"]
 
     def __init__(
         self,
-        metadata: ArrayMetadata,
+        metadata: ArrayMetadataBase,
         store_path: StorePath,
         order: Literal["C", "F"] | None = None,
     ):
@@ -208,7 +210,7 @@ class AsyncArray:
                 else DefaultChunkKeyEncoding(separator=chunk_key_encoding[1])
             )
 
-        metadata = ArrayV3Metadata(
+        metadata = meta_v3.ArrayMetadata(
             shape=shape,
             data_type=dtype,
             chunk_grid=RegularChunkGrid(chunk_shape=chunk_shape),
@@ -251,7 +253,7 @@ class AsyncArray:
         if dimension_separator is None:
             dimension_separator = "."
 
-        metadata = ArrayV2Metadata(
+        metadata = meta_v2.ArrayMetadata(
             shape=shape,
             dtype=np.dtype(dtype),
             chunks=chunks,
@@ -326,13 +328,13 @@ class AsyncArray:
             zarray_dict = json.loads(zarray_bytes.to_bytes())
             zattrs_dict = json.loads(zattrs_bytes.to_bytes()) if zattrs_bytes is not None else {}
             zarray_dict["attributes"] = zattrs_dict
-            return cls(store_path=store_path, metadata=ArrayV2Metadata.from_dict(zarray_dict))
+            return cls(store_path=store_path, metadata=meta_v2.ArrayMetadata.from_dict(zarray_dict))
         else:
             # V3 arrays are comprised of a zarr.json object
             assert zarr_json_bytes is not None
             return cls(
                 store_path=store_path,
-                metadata=ArrayV3Metadata.from_dict(json.loads(zarr_json_bytes.to_bytes())),
+                metadata=meta_v3.ArrayMetadata.from_dict(json.loads(zarr_json_bytes.to_bytes())),
             )
 
     @property
@@ -387,7 +389,7 @@ class AsyncArray:
         )
         return out.as_ndarray_like()
 
-    async def _save_metadata(self, metadata: ArrayMetadata) -> None:
+    async def _save_metadata(self, metadata: ArrayMetadataBase) -> None:
         to_save = metadata.to_buffer_dict()
         awaitables = [set_or_delete(self.store_path / key, value) for key, value in to_save.items()]
         await gather(*awaitables)
@@ -571,7 +573,7 @@ class Array:
         return Attributes(self)
 
     @property
-    def metadata(self) -> ArrayMetadata:
+    def metadata(self) -> ArrayMetadataBase:
         return self._async_array.metadata
 
     @property

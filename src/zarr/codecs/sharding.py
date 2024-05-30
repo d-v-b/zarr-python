@@ -39,7 +39,8 @@ from zarr.indexing import (
     c_order_iter,
     morton_order_iter,
 )
-from zarr.metadata import ArrayMetadata, parse_codecs
+from zarr.metadata.common import ArrayMetadataBase
+from zarr.metadata.v3 import parse_codecs
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
@@ -360,7 +361,7 @@ class ShardingCodec(
             return replace(self, codecs=evolved_codecs)
         return self
 
-    def validate(self, array_metadata: ArrayMetadata) -> None:
+    def validate(self, array_metadata: ArrayMetadataBase) -> None:
         if len(self.chunk_shape) != array_metadata.ndim:
             raise ValueError(
                 "The shard's `chunk_shape` and array's `shape` need to have the same number of dimensions."

@@ -7,21 +7,21 @@ from typing import TYPE_CHECKING, Generic, TypeVar
 from zarr.abc.metadata import Metadata
 from zarr.abc.store import ByteGetter, ByteSetter
 from zarr.buffer import Buffer, NDBuffer
-from zarr.common import concurrent_map
+from zarr.common import JSON, concurrent_map
 from zarr.config import config
 
 if TYPE_CHECKING:
     from typing_extensions import Self
 
     from zarr.common import ArraySpec, SliceSelection
-    from zarr.metadata import ArrayMetadata
+    from zarr.metadata.common import ArrayMetadataBase
 
 
 CodecInput = TypeVar("CodecInput", bound=NDBuffer | Buffer)
 CodecOutput = TypeVar("CodecOutput", bound=NDBuffer | Buffer)
 
 
-class _Codec(Generic[CodecInput, CodecOutput], Metadata):
+class _Codec(Generic[CodecInput, CodecOutput], Metadata[dict[str, JSON]]):
     """Generic base class for codecs.
     Please use ArrayArrayCodec, ArrayBytesCodec or BytesBytesCodec for subclassing.
 
@@ -75,7 +75,7 @@ class _Codec(Generic[CodecInput, CodecOutput], Metadata):
         """
         return self
 
-    def validate(self, array_metadata: ArrayMetadata) -> None:
+    def validate(self, array_metadata: ArrayMetadataBase) -> None:
         """Validates that the codec configuration is compatible with the array metadata.
         Raises errors when the codec configuration is not compatible.
 
@@ -229,7 +229,7 @@ class ArrayBytesCodecPartialEncodeMixin:
         )
 
 
-class CodecPipeline(Metadata):
+class CodecPipeline(Metadata[dict[str, JSON]]):
     """Base class for implementing CodecPipeline.
     A CodecPipeline implements the read and write paths for chunk data.
     On the read path, it is responsible for fetching chunks from a store (via ByteGetter),
@@ -275,7 +275,7 @@ class CodecPipeline(Metadata):
     def supports_partial_encode(self) -> bool: ...
 
     @abstractmethod
-    def validate(self, array_metadata: ArrayMetadata) -> None:
+    def validate(self, array_metadata: ArrayMetadataBase) -> None:
         """Validates that all codec configurations are compatible with the array metadata.
         Raises errors when a codec configuration is not compatible.
 

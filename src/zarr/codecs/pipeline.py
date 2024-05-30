@@ -22,7 +22,7 @@ from zarr.codecs.registry import get_codec_class
 from zarr.common import JSON, concurrent_map, parse_named_configuration
 from zarr.config import config
 from zarr.indexing import is_total_slice
-from zarr.metadata import ArrayMetadata
+from zarr.metadata.common import ArrayMetadataBase
 
 if TYPE_CHECKING:
     from typing_extensions import Self
@@ -181,7 +181,7 @@ class BatchedCodecPipeline(CodecPipeline):
         yield self.array_bytes_codec
         yield from self.bytes_bytes_codecs
 
-    def validate(self, array_metadata: ArrayMetadata) -> None:
+    def validate(self, array_metadata: ArrayMetadataBase) -> None:
         for codec in self:
             codec.validate(array_metadata)
 

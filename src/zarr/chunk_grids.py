@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
-class ChunkGrid(Metadata):
+class ChunkGrid(Metadata[dict[str, JSON]]):
     @classmethod
     def from_dict(cls, data: dict[str, JSON] | ChunkGrid) -> ChunkGrid:
         if isinstance(data, ChunkGrid):
