@@ -35,7 +35,7 @@ from zarr.common import (
     concurrent_map,
     product,
 )
-from zarr.config import config
+from zarr.config import config, parse_indexing_order
 from zarr.indexing import (
     BasicIndexer,
     BasicSelection,
@@ -52,16 +52,16 @@ from zarr.indexing import (
     OrthogonalIndexer,
     OrthogonalSelection,
     VIndex,
+    check_fields,
     check_no_multi_fields,
     is_pure_fancy_indexing,
     is_pure_orthogonal_indexing,
     is_scalar,
     pop_fields,
 )
-from zarr.metadata import ArrayMetadata, ArrayV2Metadata, ArrayV3Metadata, parse_indexing_order
+from zarr.metadata import ArrayMetadata, ArrayV2Metadata, ArrayV3Metadata
 from zarr.store import StoreLike, StorePath, make_store_path
 from zarr.sync import sync
-from zarr.v2.indexing import check_fields
 
 
 def parse_array_metadata(data: Any) -> ArrayMetadata:
@@ -533,8 +533,8 @@ class AsyncArray:
     def __repr__(self) -> str:
         return f"<AsyncArray {self.store_path} shape={self.shape} dtype={self.dtype}>"
 
-    async def info(self):
-        return NotImplemented
+    async def info(self) -> None:
+        raise NotImplementedError
 
 
 @dataclass(frozen=True)
@@ -645,23 +645,18 @@ class Array:
     def __getitem__(self, selection: Selection) -> NDArrayLike:
         fields, pure_selection = pop_fields(selection)
         if is_pure_fancy_indexing(pure_selection, self.ndim):
-            result = self.vindex[cast(CoordinateSelection | MaskSelection, selection)]
+            return self.vindex[cast(CoordinateSelection | MaskSelection, selection)]
         elif is_pure_orthogonal_indexing(pure_selection, self.ndim):
-            result = self.get_orthogonal_selection(
-                cast(OrthogonalSelection, pure_selection), fields=fields
-            )
+            return self.get_orthogonal_selection(pure_selection, fields=fields)
         else:
-            result = self.get_basic_selection(cast(BasicSelection, pure_selection), fields=fields)
-        return result
+            return self.get_basic_selection(cast(BasicSelection, pure_selection), fields=fields)
 
     def __setitem__(self, selection: Selection, value: NDArrayLike) -> None:
         fields, pure_selection = pop_fields(selection)
         if is_pure_fancy_indexing(pure_selection, self.ndim):
             self.vindex[cast(CoordinateSelection | MaskSelection, selection)] = value
         elif is_pure_orthogonal_indexing(pure_selection, self.ndim):
-            self.set_orthogonal_selection(
-                cast(OrthogonalSelection, pure_selection), value, fields=fields
-            )
+            self.set_orthogonal_selection(pure_selection, value, fields=fields)
         else:
             self.set_basic_selection(cast(BasicSelection, pure_selection), value, fields=fields)
 
@@ -722,11 +717,11 @@ class Array:
         fields: Fields | None = None,
     ) -> NDArrayLike:
         indexer = CoordinateIndexer(selection, self.shape, self.metadata.chunk_grid)
-        out = sync(self._async_array._get_selection(indexer=indexer, out=out, fields=fields))
+        out_array = sync(self._async_array._get_selection(indexer=indexer, out=out, fields=fields))
 
         # restore shape
-        out = out.reshape(indexer.sel_shape)
-        return out
+        out_array = out_array.reshape(indexer.sel_shape)
+        return out_array
 
     def set_coordinate_selection(
         self, selection: CoordinateSelection, value: NDArrayLike, fields: Fields | None = None
@@ -767,15 +762,15 @@ class Array:
         sync(self._async_array._set_selection(indexer, value, fields=fields))
 
     @property
-    def vindex(self) -> Any:
+    def vindex(self) -> VIndex:
         return VIndex(self)
 
     @property
-    def oindex(self) -> Any:
+    def oindex(self) -> OIndex:
         return OIndex(self)
 
     @property
-    def blocks(self) -> Any:
+    def blocks(self) -> BlockIndex:
         return BlockIndex(self)
 
     def resize(self, new_shape: ChunkCoords) -> Array:
@@ -795,7 +790,7 @@ class Array:
     def __repr__(self) -> str:
         return f"<Array {self.store_path} shape={self.shape} dtype={self.dtype}>"
 
-    def info(self):
+    def info(self) -> None:
         return sync(
             self._async_array.info(),
         )

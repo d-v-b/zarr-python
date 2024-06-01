@@ -6,19 +6,16 @@ from itertools import islice
 from typing import TYPE_CHECKING, TypeVar
 from warnings import warn
 
-from numpy import newaxis
-
 from zarr.abc.codec import (
     ArrayArrayCodec,
     ArrayBytesCodec,
     ArrayBytesCodecPartialDecodeMixin,
     ArrayBytesCodecPartialEncodeMixin,
-    ByteGetter,
     BytesBytesCodec,
-    ByteSetter,
     Codec,
     CodecPipeline,
 )
+from zarr.abc.store import ByteGetter, ByteSetter
 from zarr.buffer import Buffer, NDBuffer
 from zarr.codecs.registry import get_codec_class
 from zarr.common import JSON, concurrent_map, parse_named_configuration
@@ -330,11 +327,49 @@ class BatchedCodecPipeline(CodecPipeline):
             ):
                 if chunk_array is not None:
                     tmp = chunk_array[chunk_selection]
-                    if drop_axes:
+                    if drop_axes != ():
                         tmp = tmp.squeeze(axis=drop_axes)
                     out[out_selection] = tmp
                 else:
                     out[out_selection] = chunk_spec.fill_value
+
+    def _merge_chunk_array(
+        self,
+        existing_chunk_array: NDBuffer | None,
+        value: NDBuffer,
+        out_selection: SelectorTuple,
+        chunk_spec: ArraySpec,
+        chunk_selection: SelectorTuple,
+        drop_axes: tuple[int, ...],
+    ) -> NDBuffer:
+        if is_total_slice(chunk_selection, chunk_spec.shape) and value.shape == chunk_spec.shape:
+            return value
+        if existing_chunk_array is None:
+            chunk_array = NDBuffer.create(
+                shape=chunk_spec.shape,
+                dtype=chunk_spec.dtype,
+                order=chunk_spec.order,
+                fill_value=chunk_spec.fill_value,
+            )
+        else:
+            chunk_array = existing_chunk_array.copy()  # make a writable copy
+        if chunk_selection == ():
+            chunk_value = value
+        elif is_scalar(value.as_ndarray_like(), chunk_spec.dtype):
+            chunk_value = value
+        else:
+            chunk_value = value[out_selection]
+            # handle missing singleton dimensions
+            if drop_axes != ():
+                item = tuple(
+                    None  # equivalent to np.newaxis
+                    if idx in drop_axes
+                    else slice(None)
+                    for idx in range(chunk_spec.ndim)
+                )
+                chunk_value = chunk_value[item]
+        chunk_array[chunk_selection] = chunk_value
+        return chunk_array
 
     async def write_batch(
         self,
@@ -375,45 +410,8 @@ class BatchedCodecPipeline(CodecPipeline):
                 ],
             )
 
-            def _merge_chunk_array(
-                existing_chunk_array: NDBuffer | None,
-                value: NDBuffer,
-                out_selection: SelectorTuple,
-                chunk_spec: ArraySpec,
-                chunk_selection: SelectorTuple,
-                drop_axes: tuple[int, ...],
-            ) -> NDBuffer:
-                if (
-                    is_total_slice(chunk_selection, chunk_spec.shape)
-                    and value.shape == chunk_spec.shape
-                ):
-                    return value
-                if existing_chunk_array is None:
-                    chunk_array = NDBuffer.create(
-                        shape=chunk_spec.shape,
-                        dtype=chunk_spec.dtype,
-                        order=chunk_spec.order,
-                        fill_value=chunk_spec.fill_value,
-                    )
-                else:
-                    chunk_array = existing_chunk_array.copy()  # make a writable copy
-                if chunk_selection == ():
-                    chunk_value = value
-                elif is_scalar(value.as_ndarray_like(), chunk_spec.dtype):
-                    chunk_value = value
-                else:
-                    chunk_value = value[out_selection]
-                    # handle missing singleton dimensions
-                    item = tuple(
-                        newaxis if idx in drop_axes else slice(None)
-                        for idx in range(chunk_spec.ndim)
-                    )
-                    chunk_value = chunk_value[item]
-                chunk_array[chunk_selection] = chunk_value
-                return chunk_array
-
             chunk_array_batch = [
-                _merge_chunk_array(
+                self._merge_chunk_array(
                     chunk_array, value, out_selection, chunk_spec, chunk_selection, drop_axes
                 )
                 for chunk_array, (_, chunk_spec, chunk_selection, out_selection) in zip(
