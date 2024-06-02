@@ -3,13 +3,15 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from enum import Enum
 from functools import cached_property
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numcodecs
-from numcodecs.blosc import Blosc
+from numcodecs import blosc
+from numpy import dtype
 
-from zarr.abc.codec import BytesBytesCodec
+from zarr.abc.codec import BytesBytesCodec, PartialCodec
 from zarr.buffer import Buffer, as_numpy_array_wrapper
+from zarr.chunk_grids import ChunkGrid
 from zarr.codecs.registry import register_codec
 from zarr.common import parse_enum, parse_named_configuration, to_thread
 
@@ -77,10 +79,10 @@ def parse_blocksize(data: JSON) -> int:
 class BloscCodec(BytesBytesCodec):
     is_fixed_size = False
 
-    typesize: int | None
+    typesize: int
     cname: BloscCname = BloscCname.zstd
     clevel: int = 5
-    shuffle: BloscShuffle | None = BloscShuffle.noshuffle
+    shuffle: BloscShuffle = BloscShuffle.noshuffle
     blocksize: int = 0
 
     def __init__(
@@ -92,10 +94,10 @@ class BloscCodec(BytesBytesCodec):
         shuffle: BloscShuffle | str | None = None,
         blocksize: int = 0,
     ) -> None:
-        typesize_parsed = parse_typesize(typesize) if typesize is not None else None
+        typesize_parsed = parse_typesize(typesize)
         cname_parsed = parse_enum(cname, BloscCname)
         clevel_parsed = parse_clevel(clevel)
-        shuffle_parsed = parse_enum(shuffle, BloscShuffle) if shuffle is not None else None
+        shuffle_parsed = parse_enum(shuffle, BloscShuffle)
         blocksize_parsed = parse_blocksize(blocksize)
 
         object.__setattr__(self, "typesize", typesize_parsed)
@@ -142,7 +144,7 @@ class BloscCodec(BytesBytesCodec):
         return new_codec
 
     @cached_property
-    def _blosc_codec(self) -> Blosc:
+    def _blosc_codec(self) -> blosc.Blosc:
         if self.shuffle is None:
             raise ValueError("`shuffle` needs to be set for decoding and encoding.")
         map_shuffle_str_to_int = {
@@ -156,7 +158,7 @@ class BloscCodec(BytesBytesCodec):
             "shuffle": map_shuffle_str_to_int[self.shuffle],
             "blocksize": self.blocksize,
         }
-        return Blosc.from_config(config_dict)
+        return blosc.Blosc.from_config(config_dict)
 
     async def _decode_single(
         self,
@@ -179,6 +181,50 @@ class BloscCodec(BytesBytesCodec):
 
     def compute_encoded_size(self, _input_byte_length: int, _chunk_spec: ArraySpec) -> int:
         raise NotImplementedError
+
+
+@dataclass(frozen=True)
+class Blosc(PartialCodec[BloscCodec]):
+    _codec = BloscCodec
+
+    is_fixed_size = False
+    typesize: int | None
+    cname: BloscCname = BloscCname.zstd
+    clevel: int = 5
+    shuffle: BloscShuffle | None = BloscShuffle.noshuffle
+    blocksize: int = 0
+
+    def __init__(
+        self,
+        *,
+        typesize: int | None = None,
+        cname: BloscCname | str = BloscCname.zstd,
+        clevel: int = 5,
+        shuffle: BloscShuffle | str | None = None,
+        blocksize: int = 0,
+    ) -> None:
+        typesize_parsed = parse_typesize(typesize) if typesize is not None else typesize
+        cname_parsed = parse_enum(cname, BloscCname)
+        clevel_parsed = parse_clevel(clevel)
+        shuffle_parsed = parse_enum(shuffle, BloscShuffle) if shuffle is not None else shuffle
+        blocksize_parsed = parse_blocksize(blocksize)
+
+        object.__setattr__(self, "typesize", typesize_parsed)
+        object.__setattr__(self, "cname", cname_parsed)
+        object.__setattr__(self, "clevel", clevel_parsed)
+        object.__setattr__(self, "shuffle", shuffle_parsed)
+        object.__setattr__(self, "blocksize", blocksize_parsed)
+
+    def to_codec(
+        self, *, shape: tuple[int, ...], dtype: dtype[Any], chunk_grid: ChunkGrid
+    ) -> BloscCodec:
+        return BloscCodec(
+            typesize=dtype.itemsize,
+            cname=self.cname,
+            clevel=self.clevel,
+            shuffle=self.shuffle,
+            blocksize=self.blocksize,
+        )
 
 
 register_codec("blosc", BloscCodec)

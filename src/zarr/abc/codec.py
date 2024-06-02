@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from abc import abstractmethod
 from collections.abc import Awaitable, Callable, Iterable
-from typing import TYPE_CHECKING, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeVar
+
+import numpy as np
 
 from zarr.abc.metadata import Metadata
 from zarr.abc.store import ByteGetter, ByteSetter
 from zarr.buffer import Buffer, NDBuffer
-from zarr.common import concurrent_map
+from zarr.chunk_grids import ChunkGrid
+from zarr.common import ChunkCoords, concurrent_map
 from zarr.config import config
 
 if TYPE_CHECKING:
@@ -403,3 +406,18 @@ def noop_for_none(
         return await func(chunk, chunk_spec)
 
     return wrap
+
+
+C = TypeVar("C", bound=Codec)
+
+
+class PartialCodec(Generic[C]):
+    """
+    A class that represents a partially initialized codec.
+    """
+
+    _codec: type[C]
+
+    @abstractmethod
+    def to_codec(self, *, shape: ChunkCoords, dtype: np.dtype[Any], chunk_grid: ChunkGrid) -> C:
+        raise NotImplementedError
