@@ -172,7 +172,7 @@ class _ShardReader(ShardMapping):
     def create_empty(cls, chunks_per_shard: ChunkCoords) -> _ShardReader:
         index = _ShardIndex.create_empty(chunks_per_shard)
         obj = cls()
-        obj.buf = Buffer.create_zero_length()
+        obj.buf = Buffer.create_zero_length(ndim=1)
         obj.index = index
         return obj
 
@@ -217,7 +217,7 @@ class _ShardBuilder(_ShardReader, ShardMutableMapping):
     @classmethod
     def create_empty(cls, chunks_per_shard: ChunkCoords) -> _ShardBuilder:
         obj = cls()
-        obj.buf = Buffer.create_zero_length()
+        obj.buf = Buffer.create_zero_length(ndim=1)
         obj.index = _ShardIndex.create_empty(chunks_per_shard)
         return obj
 

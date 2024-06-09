@@ -264,9 +264,9 @@ class ArrayV3Metadata(ArrayMetadata):
                 config: dict[str, Any] = o.get_config()
                 return config
             raise TypeError
-
+        data = json.dumps(self.to_dict(), default=_json_convert).encode()
         return {
-            ZARR_JSON: Buffer.from_bytes(json.dumps(self.to_dict(), default=_json_convert).encode())
+            ZARR_JSON: Buffer.from_bytes(data, shape=(len(data),))
         }
 
     @classmethod

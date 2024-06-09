@@ -8,6 +8,7 @@ from typing import (
     Literal,
     Protocol,
     SupportsIndex,
+    TypeVar,
     runtime_checkable,
 )
 
@@ -40,9 +41,10 @@ class ArrayLike(Protocol):
 
     def __setitem__(self, key: slice, value: Any) -> None: ...
 
-
+from typing import Generic
+TShape = TypeVar('TShape', bound=tuple[int, ...])
 @runtime_checkable
-class NDArrayLike(Protocol):
+class NDArrayLike(Protocol, Generic[TShape]):
     """Protocol for the nd-array-like type that underlie NDBuffer"""
 
     @property
@@ -55,7 +57,7 @@ class NDArrayLike(Protocol):
     def size(self) -> int: ...
 
     @property
-    def shape(self) -> ChunkCoords: ...
+    def shape(self) -> TShape: ...
 
     def __len__(self) -> int: ...
 
@@ -151,7 +153,7 @@ class Factory:
             """
 
 
-class Buffer:
+class xBuffer:
     """A flat contiguous memory block
 
     We use Buffer throughout Zarr to represent a contiguous block of memory.
@@ -278,7 +280,7 @@ class Buffer:
         )
 
 
-class NDBuffer:
+class NDBuffer(Generic[TShape]):
     """A n-dimensional memory block
 
     We use NDBuffer throughout Zarr to represent a n-dimensional memory block.
@@ -303,7 +305,8 @@ class NDBuffer:
         ndarray-like object that is convertible to a regular Numpy array.
     """
 
-    def __init__(self, array: NDArrayLike):
+    def __init__(self, 
+        array: NDArrayLike[TShape]):
         assert array.ndim > 0
         assert array.dtype != object
         self._data = array
@@ -346,7 +349,7 @@ class NDBuffer:
         return ret
 
     @classmethod
-    def from_ndarray_like(cls, ndarray_like: NDArrayLike) -> Self:
+    def from_ndarray_like(cls, ndarray_like: NDArrayLike[TShape]) -> Self:
         """Create a new buffer of a ndarray-like object
 
         Parameters
@@ -375,7 +378,7 @@ class NDBuffer:
         """
         return cls.from_ndarray_like(np.asanyarray(array_like))
 
-    def as_ndarray_like(self) -> NDArrayLike:
+    def as_ndarray_like(self) -> NDArrayLike[TShape]:
         """Return the underlying array (host or device memory) of this buffer
 
         This will never copy data.
@@ -399,12 +402,37 @@ class NDBuffer:
         """
         return np.asanyarray(self._data)
 
+    @classmethod
+    def from_bytes(cls, bytes_like: BytesLike, shape: TShape, dtype: npt.DTypeLike = 'b') -> Self:
+        """Create a new buffer of a bytes-like object (host memory)
+
+        Parameters
+        ----------
+        bytes_like
+           bytes-like object
+
+        Return
+        ------
+            New buffer representing `bytes_like`
+        """
+        return cls.from_ndarray_like(np.frombuffer(bytes_like, dtype=dtype).reshape(shape))
+
+    @classmethod
+    def create_zero_length(cls, ndim: int, dtype: npt.DTypeLike = 'b') -> Self:
+        """Create an empty buffer with length zero
+
+        Return
+        ------
+            New empty 0-length buffer
+        """
+        return cls(np.expand_dims(np.array([], dtype=dtype), tuple(range(ndim))))
+
     @property
     def dtype(self) -> np.dtype[Any]:
         return self._data.dtype
 
     @property
-    def shape(self) -> tuple[int, ...]:
+    def shape(self) -> TShape:
         return self._data.shape
 
     @property
@@ -447,6 +475,7 @@ class NDBuffer:
     def transpose(self, axes: SupportsIndex | Sequence[SupportsIndex] | None) -> Self:
         return self.__class__(self._data.transpose(axes))
 
+Buffer = NDBuffer[tuple[int]]
 
 def as_numpy_array_wrapper(func: Callable[[npt.NDArray[Any]], bytes], buf: Buffer) -> Buffer:
     """Converts the input of `func` to a numpy array and the output back to `Buffer`.

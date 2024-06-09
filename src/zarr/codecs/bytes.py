@@ -66,7 +66,7 @@ class BytesCodec(ArrayBytesCodec):
         chunk_bytes: Buffer,
         chunk_spec: ArraySpec,
     ) -> NDBuffer:
-        assert isinstance(chunk_bytes, Buffer)
+        assert isinstance(chunk_bytes, NDBuffer) and len(chunk_bytes.shape) == 1
         if chunk_spec.dtype.itemsize > 0:
             if self.endian == Endian.little:
                 prefix = "<"
@@ -76,7 +76,7 @@ class BytesCodec(ArrayBytesCodec):
         else:
             dtype = np.dtype(f"|{chunk_spec.dtype.str[1:]}")
 
-        as_array_like = chunk_bytes.as_array_like()
+        as_array_like = chunk_bytes.as_ndarray_like()
         if isinstance(as_array_like, NDArrayLike):
             as_nd_array_like = as_array_like
         else:
@@ -106,7 +106,7 @@ class BytesCodec(ArrayBytesCodec):
         as_nd_array_like = chunk_array.as_ndarray_like()
         # Flatten the nd-array (only copy if needed)
         as_nd_array_like = as_nd_array_like.ravel().view(dtype="b")
-        return Buffer.from_array_like(as_nd_array_like)
+        return Buffer.from_ndarray_like(as_nd_array_like)
 
     def compute_encoded_size(self, input_byte_length: int, _chunk_spec: ArraySpec) -> int:
         return input_byte_length

@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator, MutableMapping
 
 from zarr.abc.store import Store
-from zarr.buffer import Buffer
+from zarr.buffer import Buffer, NDBuffer
 from zarr.common import OpenMode, concurrent_map
 from zarr.store.core import _normalize_interval_index
 
@@ -55,7 +55,7 @@ class MemoryStore(Store):
         if isinstance(value, bytes | bytearray):  # type:ignore[unreachable]
             # TODO: to support the v2 tests, we convert bytes to Buffer here
             value = Buffer.from_bytes(value)  # type:ignore[unreachable]
-        if not isinstance(value, Buffer):
+        if not isinstance(value, NDBuffer):
             raise TypeError(f"Expected Buffer. Got {type(value)}.")
 
         if byte_range is not None:
