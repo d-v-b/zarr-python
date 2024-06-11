@@ -14,7 +14,8 @@ from zarr.buffer import NDArrayLike
 from zarr.chunk_key_encodings import ChunkKeyEncoding
 from zarr.common import JSON, ChunkCoords, MemoryOrder, OpenMode, ZarrFormat
 from zarr.group import AsyncGroup
-from zarr.metadata import ArrayV2Metadata, ArrayV3Metadata
+from zarr.metadata.v2 import ArrayMetadata
+from zarr.metadata.v3 import ArrayMetadata
 from zarr.store import (
     StoreLike,
     make_store_path,
@@ -59,11 +60,11 @@ def _like_args(a: ArrayLike, kwargs: dict[str, Any]) -> dict[str, Any]:
 
     if isinstance(a, AsyncArray):
         new["order"] = a.order
-        if isinstance(a.metadata, ArrayV2Metadata):
+        if isinstance(a.metadata, ArrayMetadata):
             new["compressor"] = a.metadata.compressor
             new["filters"] = a.metadata.filters
 
-        if isinstance(a.metadata, ArrayV3Metadata):
+        if isinstance(a.metadata, ArrayMetadata):
             new["codecs"] = a.metadata.codecs
         else:
             raise ValueError(f"Unsupported zarr format: {a.metadata.zarr_format}")
