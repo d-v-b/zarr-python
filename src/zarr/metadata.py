@@ -45,6 +45,32 @@ _bool = bool
 __all__ = ["ArrayMetadata"]
 
 
+dtype_to_data_type = {
+    "|b1": "bool",
+    "bool": "bool",
+    "|i1": "int8",
+    "<i2": "int16",
+    "<i4": "int32",
+    "<i8": "int64",
+    "|u1": "uint8",
+    "<u2": "uint16",
+    "<u4": "uint32",
+    "<u8": "uint64",
+    "<f4": "float32",
+    "<f8": "float64",
+    "<c8": "complex64",
+    "<c16": "complex128",
+    "|S1": "r8",
+    "|S2": "r16",
+    "|S3": "r24",
+    "|S4": "r32",
+    "|S5": "r40",
+    "|S6": "r48",
+    "|S7": "r56",
+    "|S8": "r64",
+}
+
+
 class DataType(Enum):
     bool = "bool"
     int8 = "int8"
@@ -57,6 +83,16 @@ class DataType(Enum):
     uint64 = "uint64"
     float32 = "float32"
     float64 = "float64"
+    complex64 = "complex64"
+    complex128 = "complex128"
+    r8 = "r8"
+    r16 = "r16"
+    r24 = "r24"
+    r32 = "r32"
+    r40 = "r40"
+    r48 = "r48"
+    r56 = "r56"
+    r64 = "r64"
 
     @property
     def byte_count(self) -> int:
@@ -98,20 +134,6 @@ class DataType(Enum):
 
     @classmethod
     def from_dtype(cls, dtype: np.dtype[Any]) -> DataType:
-        dtype_to_data_type = {
-            "|b1": "bool",
-            "bool": "bool",
-            "|i1": "int8",
-            "<i2": "int16",
-            "<i4": "int32",
-            "<i8": "int64",
-            "|u1": "uint8",
-            "<u2": "uint16",
-            "<u4": "uint32",
-            "<u8": "uint64",
-            "<f4": "float32",
-            "<f8": "float64",
-        }
         return DataType[dtype_to_data_type[dtype.str]]
 
 
