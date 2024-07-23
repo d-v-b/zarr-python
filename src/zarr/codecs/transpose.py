@@ -94,7 +94,8 @@ class TransposeCodec(ArrayArrayCodec):
         order = self.order
         for chunk_array in chunks:
             result += (chunk_array.transpose(order),)
-    
+        return result
+
     def sdecode(self, chunks: tuple[NDBuffer, ...], prototype: BufferPrototype) -> tuple[NDBuffer, ...]:
         result: tuple[NDBuffer, ...] = ()
         inverse_order = np.argsort(self.order)
