@@ -96,6 +96,14 @@ class StoreTests(Generic[S]):
         expected = data_buf[start : start + length]
         assert_bytes_equal(observed, expected)
 
+    async def test_get_missing(
+        self, store: S) -> None:
+        """
+        Ensure that missing keys result in a KeyError.
+        """
+        with pytest.raises(KeyError):
+            observed = await store.get('does_not_exist', prototype=default_buffer_prototype)
+
     @pytest.mark.parametrize("key", ["zarr.json", "c/0", "foo/c/0.0", "foo/0/0"])
     @pytest.mark.parametrize("data", [b"\x01\x02\x03\x04", b""])
     async def test_set(self, store: S, key: str, data: bytes) -> None:

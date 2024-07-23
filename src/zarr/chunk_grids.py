@@ -31,7 +31,7 @@ class ChunkGrid(Metadata):
 
         name_parsed, _ = parse_named_configuration(data)
         if name_parsed == "regular":
-            return RegularChunkGrid._from_dict(data)
+            return RegularGrid._from_dict(data)
         raise ValueError(f"Unknown chunk grid. Got {name_parsed}.")
 
     @abstractmethod
@@ -44,7 +44,7 @@ class ChunkGrid(Metadata):
 
 
 @dataclass(frozen=True)
-class RegularChunkGrid(ChunkGrid):
+class RegularGrid(ChunkGrid):
     chunk_shape: ChunkCoords
 
     def __init__(self, *, chunk_shape: ChunkCoordsLike) -> None:

@@ -8,7 +8,7 @@ import numpy as np
 
 from zarr.abc.codec import ArrayArrayCodec
 from zarr.array_spec import ArraySpec
-from zarr.buffer import NDBuffer
+from zarr.buffer import BufferPrototype, NDBuffer
 from zarr.chunk_grids import ChunkGrid
 from zarr.codecs.registry import register_codec
 from zarr.common import JSON, ChunkCoordsLike, parse_named_configuration
@@ -89,6 +89,21 @@ class TransposeCodec(ArrayArrayCodec):
             prototype=chunk_spec.prototype,
         )
 
+    def sencode(self, chunks: tuple[NDBuffer, ...], prototype: BufferPrototype) -> tuple[NDBuffer, ...]:
+        result: tuple[NDBuffer, ...] = ()
+        order = self.order
+        for chunk_array in chunks:
+            result += (chunk_array.transpose(order),)
+    
+    def sdecode(self, chunks: tuple[NDBuffer, ...], prototype: BufferPrototype) -> tuple[NDBuffer, ...]:
+        result: tuple[NDBuffer, ...] = ()
+        inverse_order = np.argsort(self.order)
+        for chunk_array in chunks:
+            result += (chunk_array.transpose(inverse_order),)
+        
+        return result
+
+
     async def _decode_single(
         self,
         chunk_array: NDBuffer,
@@ -102,7 +117,7 @@ class TransposeCodec(ArrayArrayCodec):
         self,
         chunk_array: NDBuffer,
         _chunk_spec: ArraySpec,
-    ) -> NDBuffer | None:
+    ) -> NDBuffer:
         chunk_array = chunk_array.transpose(self.order)
         return chunk_array
 

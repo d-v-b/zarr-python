@@ -18,14 +18,15 @@ import numpy as np
 import numpy.typing as npt
 
 from zarr.abc.codec import Codec, CodecPipeline
-from zarr.abc.store import set_or_delete
+from zarr.abc.store import Store, set_or_delete
 from zarr.attributes import Attributes
-from zarr.buffer import BufferPrototype, NDArrayLike, NDBuffer, default_buffer_prototype
-from zarr.chunk_grids import RegularChunkGrid
+from zarr.buffer import Buffer, BufferPrototype, NDArrayLike, NDBuffer, default_buffer_prototype
+from zarr.chunk_grids import RegularGrid
 from zarr.chunk_key_encodings import ChunkKeyEncoding, DefaultChunkKeyEncoding, V2ChunkKeyEncoding
 from zarr.codecs import BytesCodec
 from zarr.codecs._v2 import V2Compressor, V2Filters
 from zarr.codecs.pipeline import BatchedCodecPipeline
+from zarr.codecs.sharding import ShardingCodec
 from zarr.common import (
     JSON,
     ZARR_JSON,
@@ -61,6 +62,7 @@ from zarr.indexing import (
     pop_fields,
 )
 from zarr.metadata import ArrayMetadata, ArrayV2Metadata, ArrayV3Metadata
+from zarr.models.models import ArrayModel
 from zarr.store import StoreLike, StorePath, make_store_path
 from zarr.sync import sync
 
@@ -86,12 +88,34 @@ def create_codec_pipeline(metadata: ArrayV2Metadata | ArrayV3Metadata) -> Batche
     else:
         raise AssertionError
 
+async def write_chunks(
+        array: AsyncArray, 
+        indexer: Indexer,
+        buffer_prototype: BufferPrototype, 
+        value: npt.ArrayLike) -> None:
+
+    # assign input values to output chunk objects
+    for chunk_coords, chunk_selection, out_selection in indexer:
+        chunk_path = array.store_path / array.metadata.encode_chunk_key(chunk_coords)
+        print(f'\n{chunk_coords=}, {chunk_selection=}, {out_selection=}')
+        chunk_shape = array.chunks
+        subchunk_shape = array.subchunks
+        # chunk_model = ArrayModel.from_array(array, shape=chunk_shape)
+        shard_chunk_grid = RegularGrid(chunk_shape=subchunk_shape)
+        
+        subindexer = BasicIndexer(
+            selection=chunk_selection, 
+            shape=chunk_shape, 
+            chunk_grid=shard_chunk_grid)
+        
+        for sub_chunk_coord, sub_chunk_selection, sub_out_selection in subindexer:
+            print(f'\t{sub_chunk_coord=}, {sub_chunk_selection=}, {sub_out_selection=}')
 
 @dataclass(frozen=True)
 class AsyncArray:
     metadata: ArrayMetadata
     store_path: StorePath
-    codec_pipeline: CodecPipeline = field(init=False)
+    codec_pipeline: BatchedCodecPipeline = field(init=False)
     order: Literal["C", "F"]
 
     def __init__(
@@ -248,7 +272,7 @@ class AsyncArray:
         metadata = ArrayV3Metadata(
             shape=shape,
             data_type=dtype,
-            chunk_grid=RegularChunkGrid(chunk_shape=chunk_shape),
+            chunk_grid=RegularGrid(chunk_shape=chunk_shape),
             chunk_key_encoding=chunk_key_encoding,
             fill_value=fill_value,
             codecs=codecs,
@@ -326,31 +350,38 @@ class AsyncArray:
         zarr_format: ZarrFormat | None = 3,
     ) -> AsyncArray:
         store_path = make_store_path(store)
-
+        zarr_json_bytes_maybe: Buffer | BaseException
         if zarr_format == 2:
-            zarray_bytes, zattrs_bytes = await gather(
-                (store_path / ZARRAY_JSON).get(), (store_path / ZATTRS_JSON).get()
-            )
-            if zarray_bytes is None:
+            zarray_bytes_maybe, zattrs_bytes_maybe = await gather(
+                (store_path / ZARRAY_JSON).get(), (store_path / ZATTRS_JSON).get(),
+            return_exceptions=True)
+            if isinstance(zarray_bytes_maybe, BaseException):
                 raise KeyError(store_path)  # filenotfounderror?
+
         elif zarr_format == 3:
-            zarr_json_bytes = await (store_path / ZARR_JSON).get()
-            if zarr_json_bytes is None:
+            try:
+                zarr_json_bytes = await (store_path / ZARR_JSON).get()
+            except BaseException:
                 raise KeyError(store_path)  # filenotfounderror?
+
         elif zarr_format is None:
-            zarr_json_bytes, zarray_bytes, zattrs_bytes = await gather(
+            zarr_json_bytes_maybe, zarray_bytes_maybe, zattrs_bytes_maybe = await gather(
                 (store_path / ZARR_JSON).get(),
                 (store_path / ZARRAY_JSON).get(),
                 (store_path / ZATTRS_JSON).get(),
+                return_exceptions=True
             )
-            if zarr_json_bytes is not None and zarray_bytes is not None:
+
+            if isinstance(zarr_json_bytes_maybe, Buffer) and isinstance(zarray_bytes_maybe, Buffer):
                 # TODO: revisit this exception type
                 # alternatively, we could warn and favor v3
                 raise ValueError("Both zarr.json and .zarray objects exist")
-            if zarr_json_bytes is None and zarray_bytes is None:
+            if isinstance(zarr_json_bytes_maybe, BaseException) and isinstance(zarray_bytes_maybe, BaseException):
                 raise KeyError(store_path)  # filenotfounderror?
+            
             # set zarr_format based on which keys were found
-            if zarr_json_bytes is not None:
+            if isinstance(zarr_json_bytes_maybe, Buffer):
+                zarr_json_bytes = zarr_json_bytes_maybe
                 zarr_format = 3
             else:
                 zarr_format = 2
@@ -358,15 +389,20 @@ class AsyncArray:
             raise ValueError(f"unexpected zarr_format: {zarr_format}")
 
         if zarr_format == 2:
-            # V2 arrays are comprised of a .zarray and .zattrs objects
-            assert zarray_bytes is not None
-            zarray_dict = json.loads(zarray_bytes.to_bytes())
-            zattrs_dict = json.loads(zattrs_bytes.to_bytes()) if zattrs_bytes is not None else {}
+            if not isinstance(zarray_bytes_maybe, BaseException):
+                zarray_dict = json.loads(zarray_bytes_maybe.to_bytes())
+            else:
+                raise zarray_bytes_maybe
+
+            if not isinstance(zattrs_bytes_maybe, BaseException):
+                zattrs_dict = json.loads(zattrs_bytes_maybe.to_bytes())
+            else:
+                zattrs_dict = {}
+
             zarray_dict["attributes"] = zattrs_dict
             return cls(store_path=store_path, metadata=ArrayV2Metadata.from_dict(zarray_dict))
         else:
-            # V3 arrays are comprised of a zarr.json object
-            assert zarr_json_bytes is not None
+            zarr_json_bytes 
             return cls(
                 store_path=store_path,
                 metadata=ArrayV3Metadata.from_dict(json.loads(zarr_json_bytes.to_bytes())),
@@ -382,12 +418,19 @@ class AsyncArray:
 
     @property
     def chunks(self) -> ChunkCoords:
-        if isinstance(self.metadata.chunk_grid, RegularChunkGrid):
+        if isinstance(self.metadata.chunk_grid, RegularGrid):
             return self.metadata.chunk_grid.chunk_shape
         else:
             raise ValueError(
                 f"chunk attribute is only available for RegularChunkGrid, this array has a {self.metadata.chunk_grid}"
             )
+
+    @property
+    def subchunks(self) -> ChunkCoords:
+        result = self.chunks
+        if isinstance(self.codec_pipeline.array_bytes_codec, ShardingCodec):
+            result = self.codec_pipeline.array_bytes_codec.chunk_shape
+        return result
 
     @property
     def size(self) -> int:
@@ -506,9 +549,6 @@ class AsyncArray:
         else:
             if not hasattr(value, "shape"):
                 value = np.asarray(value, self.metadata.dtype)
-            # assert (
-            #     value.shape == indexer.shape
-            # ), f"shape of value doesn't match indexer shape. Expected {indexer.shape}, got {value.shape}"
             if not hasattr(value, "dtype") or value.dtype.name != self.metadata.dtype.name:
                 value = np.array(value, dtype=self.metadata.dtype, order="A")
         value = cast(NDArrayLike, value)
@@ -516,7 +556,11 @@ class AsyncArray:
         # to a NDBuffer (or subclass). From this point onwards, we only pass
         # Buffer and NDBuffer between components.
         value_buffer = prototype.nd_buffer.from_ndarray_like(value)
-
+        await write_chunks(
+            self, 
+            indexer, 
+            buffer_prototype=default_buffer_prototype,
+            value=value)
         # merging with existing data and encoding chunks
         await self.codec_pipeline.write(
             [

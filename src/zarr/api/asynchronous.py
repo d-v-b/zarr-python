@@ -196,7 +196,7 @@ async def open(
 
     try:
         return await open_array(store=store_path, zarr_format=zarr_format, **kwargs)
-    except KeyError:
+    except FileExistsError:
         return await open_group(store=store_path, zarr_format=zarr_format, **kwargs)
 
 
@@ -315,7 +315,7 @@ async def save_group(
     for k, arr in kwargs.items():
         _path = f"{path}/{k}" if path is not None else k
         aws.append(save_array(store, arr, zarr_format=zarr_format, path=_path))
-    await asyncio.gather(*aws)
+    await asyncio.gather(*aws, return_exceptions=True)
 
 
 async def tree(*args: Any, **kwargs: Any) -> None:
@@ -859,7 +859,6 @@ async def open_array(
         store_path = store_path / path
 
     zarr_format = _handle_zarr_version_or_format(zarr_version=zarr_version, zarr_format=zarr_format)
-
     try:
         return await AsyncArray.open(store_path, zarr_format=zarr_format)
     except KeyError as e:

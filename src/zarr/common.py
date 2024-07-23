@@ -45,10 +45,10 @@ V = TypeVar("V")
 
 
 async def concurrent_map(
-    items: list[T], func: Callable[..., Awaitable[V]], limit: int | None = None
+    items: list[T], func: Callable[..., Awaitable[V]], limit: int | None = None, return_exceptions: bool = True
 ) -> list[V]:
     if limit is None:
-        return await asyncio.gather(*[func(*item) for item in items])
+        return await asyncio.gather(*[func(*item) for item in items], return_exceptions=True)
 
     else:
         sem = asyncio.Semaphore(limit)
@@ -57,7 +57,7 @@ async def concurrent_map(
             async with sem:
                 return await func(*item)
 
-        return await asyncio.gather(*[asyncio.ensure_future(run(item)) for item in items])
+        return await asyncio.gather(*[asyncio.ensure_future(run(item)) for item in items], return_exceptions=return_exceptions)
 
 
 P = ParamSpec("P")

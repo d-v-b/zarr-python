@@ -197,10 +197,10 @@ def is_pure_orthogonal_indexing(selection: Selection, ndim: int) -> TypeGuard[Or
 
 
 def get_chunk_shape(chunk_grid: ChunkGrid) -> ChunkCoords:
-    from zarr.chunk_grids import RegularChunkGrid
+    from zarr.chunk_grids import RegularGrid
 
     assert isinstance(
-        chunk_grid, RegularChunkGrid
+        chunk_grid, RegularGrid
     ), "Only regular chunk grid is supported, currently."
     return chunk_grid.chunk_shape
 
@@ -328,7 +328,7 @@ class SliceDimIndexer:
             if dim_chunk_nitems == 0:
                 continue
 
-            dim_out_sel = slice(dim_out_offset, dim_out_offset + dim_chunk_nitems)
+            dim_out_sel = slice(dim_out_offset, dim_out_offset + dim_chunk_nitems, self.step)
 
             yield ChunkDimProjection(dim_chunk_ix, dim_chunk_sel, dim_out_sel)
 

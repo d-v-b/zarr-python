@@ -13,7 +13,7 @@ import numpy.typing as npt
 from zarr.abc.codec import ArrayArrayCodec, ArrayBytesCodec, BytesBytesCodec, Codec, CodecPipeline
 from zarr.abc.metadata import Metadata
 from zarr.buffer import Buffer, BufferPrototype, default_buffer_prototype
-from zarr.chunk_grids import ChunkGrid, RegularChunkGrid
+from zarr.chunk_grids import ChunkGrid, RegularGrid
 from zarr.chunk_key_encodings import ChunkKeyEncoding, parse_separator
 from zarr.codecs.registry import get_codec_class
 from zarr.config import config
@@ -213,7 +213,7 @@ class ArrayV3Metadata(ArrayMetadata):
         self._validate_metadata()
 
     def _validate_metadata(self) -> None:
-        if isinstance(self.chunk_grid, RegularChunkGrid) and len(self.shape) != len(
+        if isinstance(self.chunk_grid, RegularGrid) and len(self.shape) != len(
             self.chunk_grid.chunk_shape
         ):
             raise ValueError(
@@ -240,7 +240,7 @@ class ArrayV3Metadata(ArrayMetadata):
         self, _chunk_coords: ChunkCoords, order: Literal["C", "F"], prototype: BufferPrototype
     ) -> ArraySpec:
         assert isinstance(
-            self.chunk_grid, RegularChunkGrid
+            self.chunk_grid, RegularGrid
         ), "Currently, only regular chunk grid is supported"
         return ArraySpec(
             shape=self.chunk_grid.chunk_shape,
@@ -316,7 +316,7 @@ class ArrayV3Metadata(ArrayMetadata):
 @dataclass(frozen=True, kw_only=True)
 class ArrayV2Metadata(ArrayMetadata):
     shape: ChunkCoords
-    chunk_grid: RegularChunkGrid
+    chunk_grid: RegularGrid
     data_type: np.dtype[Any]
     fill_value: None | int | float = 0
     order: Literal["C", "F"] = "C"
@@ -354,7 +354,7 @@ class ArrayV2Metadata(ArrayMetadata):
 
         object.__setattr__(self, "shape", shape_parsed)
         object.__setattr__(self, "data_type", data_type_parsed)
-        object.__setattr__(self, "chunk_grid", RegularChunkGrid(chunk_shape=chunks_parsed))
+        object.__setattr__(self, "chunk_grid", RegularGrid(chunk_shape=chunks_parsed))
         object.__setattr__(self, "compressor", compressor_parsed)
         object.__setattr__(self, "order", order_parsed)
         object.__setattr__(self, "dimension_separator", dimension_separator_parsed)

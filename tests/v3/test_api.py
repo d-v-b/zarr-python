@@ -6,9 +6,10 @@ import zarr
 from zarr import Array, Group
 from zarr.abc.store import Store
 from zarr.api.synchronous import create, load, open, open_group, save, save_array, save_group
+from zarr.store.memory import MemoryStore
 
 
-def test_create_array(memory_store: Store) -> None:
+def test_create_array(memory_store: MemoryStore) -> None:
     store = memory_store
 
     # create array
@@ -29,7 +30,7 @@ def test_create_array(memory_store: Store) -> None:
     assert z.chunks == (40,)
 
 
-def test_open_array(memory_store: Store) -> None:
+def test_open_array(memory_store: MemoryStore) -> None:
     store = memory_store
 
     # open array, create if doesn't exist
@@ -51,7 +52,7 @@ def test_open_array(memory_store: Store) -> None:
     assert z.read_only
 
     # path not found
-    with pytest.raises(ValueError):
+    with pytest.raises(KeyError):
         open(store="doesnotexist", mode="r")
 
 

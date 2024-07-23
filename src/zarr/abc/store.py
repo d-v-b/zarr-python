@@ -34,7 +34,7 @@ class Store(ABC):
         key: str,
         prototype: BufferPrototype,
         byte_range: tuple[int | None, int | None] | None = None,
-    ) -> Buffer | None:
+    ) -> Buffer:
         """Retrieve the value associated with a given key.
 
         Parameters
@@ -53,7 +53,7 @@ class Store(ABC):
         self,
         prototype: BufferPrototype,
         key_ranges: list[tuple[str, tuple[int | None, int | None]]],
-    ) -> list[Buffer | None]:
+    ) -> list[Buffer]:
         """Retrieve possibly partial values from given key_ranges.
 
         Parameters
@@ -182,14 +182,14 @@ class Store(ABC):
 class ByteGetter(Protocol):
     async def get(
         self, prototype: BufferPrototype, byte_range: tuple[int, int | None] | None = None
-    ) -> Buffer | None: ...
+    ) -> Buffer: ...
 
 
 @runtime_checkable
 class ByteSetter(Protocol):
     async def get(
         self, prototype: BufferPrototype, byte_range: tuple[int, int | None] | None = None
-    ) -> Buffer | None: ...
+    ) -> Buffer: ...
 
     async def set(self, value: Buffer, byte_range: tuple[int, int] | None = None) -> None: ...
 

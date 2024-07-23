@@ -85,7 +85,7 @@ class RemoteStore(Store):
         key: str,
         prototype: BufferPrototype,
         byte_range: tuple[int | None, int | None] | None = None,
-    ) -> Buffer | None:
+    ) -> Buffer:
         path = _dereference_path(self.path, key)
 
         try:
@@ -108,7 +108,8 @@ class RemoteStore(Store):
             return value
 
         except self.allowed_exceptions:
-            return None
+            # allowed_exceptions all denote conditions in which a key should be interpreted as missing
+            raise KeyError
         except OSError as e:
             if "not satisfiable" in str(e):
                 # this is an s3-specific condition we probably don't want to leak
@@ -133,10 +134,8 @@ class RemoteStore(Store):
         path = _dereference_path(self.path, key)
         try:
             await self._fs._rm(path)
-        except FileNotFoundError:
-            pass
         except self.allowed_exceptions:
-            pass
+            raise FileNotFoundError
 
     async def exists(self, key: str) -> bool:
         path = _dereference_path(self.path, key)
@@ -147,7 +146,7 @@ class RemoteStore(Store):
         self,
         prototype: BufferPrototype,
         key_ranges: list[tuple[str, tuple[int | None, int | None]]],
-    ) -> list[Buffer | None]:
+    ) -> list[Buffer]:
         if key_ranges:
             paths, starts, stops = zip(
                 *(
@@ -170,7 +169,7 @@ class RemoteStore(Store):
             if isinstance(r, Exception) and not isinstance(r, self.allowed_exceptions):
                 raise r
 
-        return [None if isinstance(r, Exception) else prototype.buffer.from_bytes(r) for r in res]
+        return [prototype.buffer.from_bytes(r) for r in res]
 
     async def set_partial_values(self, key_start_values: list[tuple[str, int, BytesLike]]) -> None:
         raise NotImplementedError

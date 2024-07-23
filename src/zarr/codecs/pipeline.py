@@ -176,9 +176,8 @@ class BatchedCodecPipeline(CodecPipeline):
 
     async def decode_batch(
         self,
-        chunk_bytes_and_specs: Iterable[tuple[Buffer | None, ArraySpec]],
-    ) -> Iterable[NDBuffer | None]:
-        chunk_bytes_batch: Iterable[Buffer | None]
+        chunk_bytes_and_specs: Iterable[tuple[Buffer, ArraySpec]],
+    ) -> Iterable[NDBuffer]:
         chunk_bytes_batch, chunk_specs = _unzip2(chunk_bytes_and_specs)
 
         (
@@ -207,16 +206,16 @@ class BatchedCodecPipeline(CodecPipeline):
     async def decode_partial_batch(
         self,
         batch_info: Iterable[tuple[ByteGetter, SelectorTuple, ArraySpec]],
-    ) -> Iterable[NDBuffer | None]:
+    ) -> Iterable[NDBuffer]:
         assert self.supports_partial_decode
         assert isinstance(self.array_bytes_codec, ArrayBytesCodecPartialDecodeMixin)
         return await self.array_bytes_codec.decode_partial(batch_info)
 
     async def encode_batch(
         self,
-        chunk_arrays_and_specs: Iterable[tuple[NDBuffer | None, ArraySpec]],
-    ) -> Iterable[Buffer | None]:
-        chunk_array_batch: Iterable[NDBuffer | None]
+        chunk_arrays_and_specs: Iterable[tuple[NDBuffer, ArraySpec]],
+    ) -> Iterable[Buffer]:
+        chunk_array_batch: Iterable[NDBuffer]
         chunk_specs: Iterable[ArraySpec]
         chunk_array_batch, chunk_specs = _unzip2(chunk_arrays_and_specs)
 
@@ -348,13 +347,11 @@ class BatchedCodecPipeline(CodecPipeline):
         else:
             # Read existing bytes if not total slice
             async def _read_key(
-                byte_setter: ByteSetter | None, prototype: BufferPrototype
-            ) -> Buffer | None:
-                if byte_setter is None:
-                    return None
+                byte_setter: ByteSetter, prototype: BufferPrototype
+            ) -> Buffer:
                 return await byte_setter.get(prototype=prototype)
 
-            chunk_bytes_batch: Iterable[Buffer | None]
+            chunk_bytes_batch: Iterable[Buffer]
             chunk_bytes_batch = await concurrent_map(
                 [
                     (
@@ -386,7 +383,7 @@ class BatchedCodecPipeline(CodecPipeline):
 
             chunk_array_batch = [
                 None
-                if chunk_array is None or chunk_array.all_equal(chunk_spec.fill_value)
+                if chunk_array.all_equal(chunk_spec.fill_value)
                 else chunk_array
                 for chunk_array, (_, chunk_spec, _, _) in zip(
                     chunk_array_batch, batch_info, strict=False
@@ -421,18 +418,18 @@ class BatchedCodecPipeline(CodecPipeline):
 
     async def decode(
         self,
-        chunk_bytes_and_specs: Iterable[tuple[Buffer | None, ArraySpec]],
-    ) -> Iterable[NDBuffer | None]:
-        output: list[NDBuffer | None] = []
+        chunk_bytes_and_specs: Iterable[tuple[Buffer, ArraySpec]],
+    ) -> Iterable[NDBuffer]:
+        output: list[NDBuffer] = []
         for batch_info in batched(chunk_bytes_and_specs, self.batch_size):
             output.extend(await self.decode_batch(batch_info))
         return output
 
     async def encode(
         self,
-        chunk_arrays_and_specs: Iterable[tuple[NDBuffer | None, ArraySpec]],
-    ) -> Iterable[Buffer | None]:
-        output: list[Buffer | None] = []
+        chunk_arrays_and_specs: Iterable[tuple[NDBuffer, ArraySpec]],
+    ) -> Iterable[Buffer]:
+        output: list[Buffer] = []
         for single_batch_info in batched(chunk_arrays_and_specs, self.batch_size):
             output.extend(await self.encode_batch(single_batch_info))
         return output

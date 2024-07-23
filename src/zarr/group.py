@@ -150,8 +150,8 @@ class AsyncGroup:
 
         if zarr_format == 2:
             zgroup_bytes, zattrs_bytes = await asyncio.gather(
-                (store_path / ZGROUP_JSON).get(), (store_path / ZATTRS_JSON).get()
-            )
+                (store_path / ZGROUP_JSON).get(), (store_path / ZATTRS_JSON).get(),
+            return_exceptions=True)
             if zgroup_bytes is None:
                 raise FileNotFoundError(store_path)
         elif zarr_format == 3:
@@ -163,6 +163,7 @@ class AsyncGroup:
                 (store_path / ZARR_JSON).get(),
                 (store_path / ZGROUP_JSON).get(),
                 (store_path / ZATTRS_JSON).get(),
+                return_exceptions=True,
             )
             if zarr_json_bytes is not None and zgroup_bytes is not None:
                 # TODO: revisit this exception type
@@ -235,6 +236,7 @@ class AsyncGroup:
                 (store_path / ZGROUP_JSON).get(),
                 (store_path / ZARRAY_JSON).get(),
                 (store_path / ZATTRS_JSON).get(),
+                return_exceptions=True
             )
 
             if zgroup_bytes is None and zarray_bytes is None:
@@ -269,14 +271,14 @@ class AsyncGroup:
                 (store_path / ZGROUP_JSON).delete(),  # TODO: missing_ok=False
                 (store_path / ZARRAY_JSON).delete(),  # TODO: missing_ok=False
                 (store_path / ZATTRS_JSON).delete(),  # TODO: missing_ok=True
-            )
+            return_exceptions=True)
         else:
             raise ValueError(f"unexpected zarr_format: {self.metadata.zarr_format}")
 
     async def _save_metadata(self) -> None:
         to_save = self.metadata.to_buffer_dict()
         awaitables = [set_or_delete(self.store_path / key, value) for key, value in to_save.items()]
-        await asyncio.gather(*awaitables)
+        await asyncio.gather(*awaitables, return_exceptions=True)
 
     @property
     def path(self) -> str:
@@ -539,7 +541,7 @@ class Group(SyncMixin):
         # Write new metadata
         to_save = new_metadata.to_buffer_dict()
         awaitables = [set_or_delete(self.store_path / key, value) for key, value in to_save.items()]
-        await asyncio.gather(*awaitables)
+        await asyncio.gather(*awaitables, return_exceptions=True)
 
         async_group = replace(self._async_group, metadata=new_metadata)
         return replace(self, _async_group=async_group)

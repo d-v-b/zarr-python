@@ -8,7 +8,7 @@ from zstandard import ZstdCompressor, ZstdDecompressor
 
 from zarr.abc.codec import BytesBytesCodec
 from zarr.array_spec import ArraySpec
-from zarr.buffer import Buffer, as_numpy_array_wrapper
+from zarr.buffer import Buffer, BufferPrototype, as_numpy_array_wrapper
 from zarr.codecs.registry import register_codec
 from zarr.common import JSON, parse_named_configuration, to_thread
 
@@ -69,11 +69,23 @@ class ZstdCodec(BytesBytesCodec):
             as_numpy_array_wrapper, self._decompress, chunk_bytes, chunk_spec.prototype
         )
 
+    def sencode(self, chunks: tuple[Buffer, ...], prototype: BufferPrototype) -> tuple[Buffer, ...]:
+        result: tuple[Buffer, ...] = ()
+        for chunk_bytes in chunks:
+            result += (as_numpy_array_wrapper(self._compress, chunk_bytes, prototype),)
+        return result
+    
+    def sdecode(self, chunks: tuple[Buffer, ...], prototype: BufferPrototype) -> tuple[Buffer, ...]:
+        result: tuple[Buffer, ...] = ()
+        for chunk_bytes in chunks:
+            result += (as_numpy_array_wrapper(self._decompress, chunk_bytes, prototype),)
+        return result
+
     async def _encode_single(
         self,
         chunk_bytes: Buffer,
         chunk_spec: ArraySpec,
-    ) -> Buffer | None:
+    ) -> Buffer:
         return await to_thread(
             as_numpy_array_wrapper, self._compress, chunk_bytes, chunk_spec.prototype
         )

@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from typing_extensions import Self
 
 
-class MyNDArrayLike(np.ndarray):
+class MyNDArrayLike(np.ndarray[Any, Any]):
     """An example of a ndarray-like class"""
 
 
@@ -74,14 +74,14 @@ class MyStore(MemoryStore):
         return ret
 
 
-def test_nd_array_like(xp):
+def test_nd_array_like(xp) -> None:
     ary = xp.arange(10)
     assert isinstance(ary, ArrayLike)
     assert isinstance(ary, NDArrayLike)
 
 
 @pytest.mark.asyncio
-async def test_async_array_prototype():
+async def test_async_array_prototype() -> None:
     """Test the use of a custom buffer prototype"""
 
     expect = np.zeros((9, 9), dtype="uint16", order="F")

@@ -93,20 +93,20 @@ class LocalStore(Store):
         key: str,
         prototype: BufferPrototype,
         byte_range: tuple[int | None, int | None] | None = None,
-    ) -> Buffer | None:
+    ) -> Buffer:
         assert isinstance(key, str)
         path = self.root / key
 
         try:
             return await to_thread(_get, path, prototype, byte_range)
         except (FileNotFoundError, IsADirectoryError, NotADirectoryError):
-            return None
+            raise KeyError
 
     async def get_partial_values(
         self,
         prototype: BufferPrototype,
         key_ranges: list[tuple[str, tuple[int | None, int | None]]],
-    ) -> list[Buffer | None]:
+    ) -> list[Buffer]:
         """
         Read byte ranges from multiple keys.
 

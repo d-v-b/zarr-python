@@ -7,7 +7,7 @@ from numcodecs.gzip import GZip
 
 from zarr.abc.codec import BytesBytesCodec
 from zarr.array_spec import ArraySpec
-from zarr.buffer import Buffer, as_numpy_array_wrapper
+from zarr.buffer import Buffer, BufferPrototype, as_numpy_array_wrapper
 from zarr.codecs.registry import register_codec
 from zarr.common import JSON, parse_named_configuration, to_thread
 
@@ -53,11 +53,23 @@ class GzipCodec(BytesBytesCodec):
             as_numpy_array_wrapper, GZip(self.level).decode, chunk_bytes, chunk_spec.prototype
         )
 
+    def sencode(self, chunks: tuple[Buffer, ...], prototype: BufferPrototype) -> tuple[Buffer, ...]:
+        results: tuple[Buffer, ...] = ()
+        for chunk_bytes in chunks:
+            results += (as_numpy_array_wrapper(GZip(self.level).encode, chunk_bytes, prototype=prototype),)
+        return results
+    
+    def sdecode(self, chunks: tuple[Buffer, ...], prototype: BufferPrototype) -> tuple[Buffer, ...]:
+        results: tuple[Buffer, ...] = ()
+        for chunk_bytes in chunks:
+            results += (as_numpy_array_wrapper(GZip(self.level).decode, chunk_bytes, prototype=prototype),)
+        return results
+    
     async def _encode_single(
         self,
         chunk_bytes: Buffer,
         chunk_spec: ArraySpec,
-    ) -> Buffer | None:
+    ) -> Buffer:
         return await to_thread(
             as_numpy_array_wrapper, GZip(self.level).encode, chunk_bytes, chunk_spec.prototype
         )

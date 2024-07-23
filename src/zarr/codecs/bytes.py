@@ -9,7 +9,7 @@ import numpy as np
 
 from zarr.abc.codec import ArrayBytesCodec
 from zarr.array_spec import ArraySpec
-from zarr.buffer import Buffer, NDArrayLike, NDBuffer
+from zarr.buffer import Buffer, BufferPrototype, NDArrayLike, NDBuffer
 from zarr.codecs.registry import register_codec
 from zarr.common import JSON, parse_enum, parse_named_configuration
 
@@ -60,6 +60,54 @@ class BytesCodec(ArrayBytesCodec):
             )
         return self
 
+    def sdecode(self, chunks: tuple[Buffer, ...], prototype: BufferPrototype, shape: tuple[int, ...], dtype: np.dtype) -> tuple[NDBuffer, ...]:
+        results: tuple[NDBuffer, ...] = ()
+        if dtype.itemsize > 0:
+            if self.endian == Endian.little:
+                prefix = "<"
+            else:
+                prefix = ">"
+            dtype = np.dtype(f"{prefix}{dtype.str[1:]}")
+        else:
+            dtype = np.dtype(f"|{dtype.str[1:]}")
+        
+        for chunk_bytes in chunks:
+            as_array_like = chunk_bytes.as_array_like()
+            if isinstance(as_array_like, NDArrayLike):
+                as_nd_array_like = as_array_like
+            else:
+                as_nd_array_like = np.asanyarray(as_array_like)
+            chunk_array = prototype.nd_buffer.from_ndarray_like(
+                as_nd_array_like.view(dtype=dtype)
+            )
+
+            # ensure correct chunk shape
+            if chunk_array.shape != shape:
+                chunk_array = chunk_array.reshape(
+                    shape,
+                )
+            results += (chunk_array,)
+        return results
+
+    def sencode(self, chunks: tuple[NDBuffer, ...], prototype: BufferPrototype) -> tuple[Buffer, ...]:
+        results: tuple[Buffer, ...] = ()
+        for chunk_array in chunks:
+            if (
+                chunk_array.dtype.itemsize > 1
+                and self.endian is not None
+                and self.endian != chunk_array.byteorder
+            ):
+                # type-ignore is a numpy bug
+                # see https://github.com/numpy/numpy/issues/26473
+                new_dtype = chunk_array.dtype.newbyteorder(self.endian.name)  # type: ignore[arg-type]
+                chunk_array = chunk_array.astype(new_dtype)
+
+            nd_array = chunk_array.as_ndarray_like()
+            # Flatten the nd-array (only copy if needed) and reinterpret as bytes
+            nd_array = nd_array.ravel().view(dtype="b")
+            results += (prototype.buffer.from_array_like(nd_array),)
+        return results
+
     async def _decode_single(
         self,
         chunk_bytes: Buffer,
@@ -95,7 +143,7 @@ class BytesCodec(ArrayBytesCodec):
         self,
         chunk_array: NDBuffer,
         chunk_spec: ArraySpec,
-    ) -> Buffer | None:
+    ) -> Buffer:
         assert isinstance(chunk_array, NDBuffer)
         if (
             chunk_array.dtype.itemsize > 1

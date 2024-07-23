@@ -34,22 +34,19 @@ class MemoryStore(Store):
         key: str,
         prototype: BufferPrototype,
         byte_range: tuple[int | None, int | None] | None = None,
-    ) -> Buffer | None:
+    ) -> Buffer:
         assert isinstance(key, str)
-        try:
-            value = self._store_dict[key]
-            start, length = _normalize_interval_index(value, byte_range)
-            return prototype.buffer.from_buffer(value[start : start + length])
-        except KeyError:
-            return None
+        value = self._store_dict[key]
+        start, length = _normalize_interval_index(value, byte_range)
+        return prototype.buffer.from_buffer(value[start : start + length])
 
     async def get_partial_values(
         self,
         prototype: BufferPrototype,
         key_ranges: list[tuple[str, tuple[int | None, int | None]]],
-    ) -> list[Buffer | None]:
+    ) -> list[Buffer]:
         # All the key-ranges arguments goes with the same prototype
-        async def _get(key: str, byte_range: tuple[int, int | None]) -> Buffer | None:
+        async def _get(key: str, byte_range: tuple[int, int | None]) -> Buffer:
             return await self.get(key, prototype=prototype, byte_range=byte_range)
 
         vals = await concurrent_map(key_ranges, _get, limit=None)
@@ -73,10 +70,7 @@ class MemoryStore(Store):
 
     async def delete(self, key: str) -> None:
         self._check_writable()
-        try:
-            del self._store_dict[key]
-        except KeyError:
-            pass  # Q(JH): why not raise?
+        del self._store_dict[key]
 
     async def set_partial_values(self, key_start_values: list[tuple[str, int, bytes]]) -> None:
         raise NotImplementedError

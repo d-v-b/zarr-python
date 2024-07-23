@@ -8,7 +8,7 @@ from crc32c import crc32c
 
 from zarr.abc.codec import BytesBytesCodec
 from zarr.array_spec import ArraySpec
-from zarr.buffer import Buffer
+from zarr.buffer import Buffer, BufferPrototype
 from zarr.codecs.registry import register_codec
 from zarr.common import JSON, parse_named_configuration
 
@@ -27,6 +27,29 @@ class Crc32cCodec(BytesBytesCodec):
 
     def to_dict(self) -> dict[str, JSON]:
         return {"name": "crc32c"}
+
+    def sencode(self, chunks: tuple[Buffer, ...], prototype: BufferPrototype) -> tuple[Buffer, ...]:
+        results: tuple[Buffer, ...] = ()
+        for chunk_bytes in chunks:
+            data = chunk_bytes.as_numpy_array()
+            checksum = np.array([crc32c(data)], dtype=np.uint32)
+            results += (prototype.buffer.from_array_like(np.append(data, checksum.view("b"))),)
+        return results
+
+    def sdecode(self, chunks: tuple[Buffer, ...], prototype: BufferPrototype) -> tuple[Buffer, ...]:
+        result: tuple[Buffer, ...] = ()
+        for chunk_bytes in chunks:
+            data = chunk_bytes.as_numpy_array()
+            crc32_bytes = data[-4:]
+            inner_bytes = data[:-4]
+            computed_checksum = np.uint32(crc32c(inner_bytes)).tobytes()
+            stored_checksum = bytes(crc32_bytes)
+            if computed_checksum != stored_checksum:
+                raise ValueError(
+                    f"Stored and computed checksum do not match. Stored: {stored_checksum!r}. Computed: {computed_checksum!r}."
+                )
+            result += (prototype.buffer.from_array_like(inner_bytes),)
+        return result
 
     async def _decode_single(
         self,
@@ -49,7 +72,7 @@ class Crc32cCodec(BytesBytesCodec):
         self,
         chunk_bytes: Buffer,
         chunk_spec: ArraySpec,
-    ) -> Buffer | None:
+    ) -> Buffer:
         data = chunk_bytes.as_numpy_array()
         # Calculate the checksum and "cast" it to a numpy array
         checksum = np.array([crc32c(data)], dtype=np.uint32)

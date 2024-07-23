@@ -10,7 +10,7 @@ from numcodecs.blosc import Blosc
 
 from zarr.abc.codec import BytesBytesCodec
 from zarr.array_spec import ArraySpec
-from zarr.buffer import Buffer, as_numpy_array_wrapper
+from zarr.buffer import Buffer, BufferPrototype, as_numpy_array_wrapper
 from zarr.codecs.registry import register_codec
 from zarr.common import JSON, parse_enum, parse_named_configuration, to_thread
 
@@ -154,6 +154,18 @@ class BloscCodec(BytesBytesCodec):
         }
         return Blosc.from_config(config_dict)
 
+    def sencode(self, chunks: tuple[Buffer, ...], prototype: BufferPrototype) -> tuple[Buffer, ...]:
+        results: tuple[Buffer, ...] = ()
+        for chunk_bytes in chunks:
+            results += (as_numpy_array_wrapper(self._blosc_codec.encode, chunk_bytes, prototype=prototype),)
+        return results
+    
+    def sdecode(self, chunks: tuple[Buffer, ...], prototype: BufferPrototype) -> tuple[Buffer, ...]:
+        results: tuple[Buffer, ...] = ()
+        for chunk_bytes in chunks:
+            results += (as_numpy_array_wrapper(self._blosc_codec.decode, chunk_bytes, prototype=prototype),)
+        return results
+
     async def _decode_single(
         self,
         chunk_bytes: Buffer,
@@ -167,7 +179,7 @@ class BloscCodec(BytesBytesCodec):
         self,
         chunk_bytes: Buffer,
         chunk_spec: ArraySpec,
-    ) -> Buffer | None:
+    ) -> Buffer:
         # Since blosc only support host memory, we convert the input and output of the encoding
         # between numpy array and buffer
         return await to_thread(
