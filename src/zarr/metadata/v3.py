@@ -1,22 +1,28 @@
 from __future__ import annotations
 
 import json
-from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Literal, cast, overload
+from typing import TYPE_CHECKING, Any, Final, Literal, TypedDict, TypeGuard, cast, overload
 
 import numpy as np
 import numpy.typing as npt
 
-from zarr.abc.codec import ArrayArrayCodec, ArrayBytesCodec, BytesBytesCodec, Codec, CodecPipeline
+from zarr.abc.codec import ArrayArrayCodec, ArrayBytesCodec, BytesBytesCodec, Codec
 from zarr.abc.metadata import Metadata
 from zarr.buffer import Buffer, BufferPrototype, default_buffer_prototype
-from zarr.chunk_grids import ChunkGrid, RegularChunkGrid
-from zarr.chunk_key_encodings import ChunkKeyEncoding, parse_separator
 from zarr.config import config
-from zarr.registry import get_codec_class, get_pipeline_class
+from zarr.metadata.common import (
+    ArrayMetadataBase,
+    SeparatorLiteral,
+    parse_attributes,
+    parse_separator,
+)
+from zarr.registry import get_codec_class
+
+ChunkKeyEncodingName = Literal["v2", "default"]
+CHUNK_KEY_ENCODING_NAMES: Final = ("v2", "default")
 
 if TYPE_CHECKING:
     from typing_extensions import Self
@@ -27,20 +33,66 @@ from zarr.array_spec import ArraySpec
 from zarr.common import (
     JSON,
     ZARR_JSON,
-    ZARRAY_JSON,
-    ZATTRS_JSON,
     ChunkCoords,
-    ZarrFormat,
+    ChunkCoordsLike,
     parse_dtype,
     parse_named_configuration,
     parse_shapelike,
 )
-from zarr.config import parse_indexing_order
 
 # For type checking
 _bool = bool
 
-__all__ = ["ArrayMetadata"]
+
+def unpack_named_configuration(
+    data: Any, allow_missing_config: bool = True
+) -> tuple[str, dict[str, object] | None]:
+    """
+    Unpack a dict-like object with a `{'name': str, 'configuration': Any}` structure
+    into a tuple where the first element is the value associated with the `name` key, and the
+    second element is the value associated with the `configuration` key.
+
+    Parameters
+    ----------
+    data: Any
+        The data to be unpacked
+
+    allow_missing_config: bool, default=False
+        Whether a missing 'configuration' key is allowed. If this parameter is set to `False` and
+        the `configuration` key is missing from `data`, then a KeyError will be raised. If this
+        parameter is set to `True`, then the `configuration` will be assigned to `None`.
+
+    Returns
+    -------
+    tuple
+        A tuple containing the values associated with the `name` and `configuration` keys of `data`,
+        respectively.
+    """
+    try:
+        name = data["name"]
+        if not isinstance(name, str):
+            msg = (
+                "The value associated with the `name` key must be a string."
+                f"Got an object with type {type(name)} instead."
+            )
+            raise TypeError(msg)
+        if "configuration" in data or allow_missing_config:
+            config = data.get("configuration", None)
+            return name, config
+        else:
+            msg = (
+                f"Required key 'configuration' was missing from {data}."
+                "Either add that key to your data, or "
+                "call this function with `allow_missing_config` set to `True`"
+                "to interpret a missing 'configuration' key as `None`."
+            )
+            raise KeyError(msg)
+    except (KeyError, TypeError) as e:
+        msg = (
+            f"Data {data} is not structured correctly."
+            "Ensure that it is a mapping with a 'name' key and a 'configuration' key."
+        )
+        raise ValueError(msg) from e
 
 
 class DataType(Enum):
@@ -113,57 +165,175 @@ class DataType(Enum):
         return DataType[dtype_to_data_type[dtype.str]]
 
 
+class RegularChunkGridConfigDict(TypedDict):
+    chunk_shape: tuple[int, ...]
+
+
+class RegularChunkGridDict(TypedDict):
+    name: Literal["regular"]
+    configuration: RegularChunkGridConfigDict
+
+
+@dataclass(frozen=True)
+class RegularChunkGridConfig(Metadata):
+    chunk_shape: ChunkCoords
+
+    def __init__(self, *, chunk_shape: ChunkCoordsLike) -> None:
+        chunk_shape_parsed = parse_shapelike(chunk_shape)
+        object.__setattr__(self, "chunk_shape", chunk_shape_parsed)
+
+    def to_dict(self) -> RegularChunkGridConfigDict:
+        return {"chunk_shape": self.chunk_shape}
+
+
+def parse_regular_chunk_grid_config(data: object) -> RegularChunkGridConfig:
+    if isinstance(data, RegularChunkGridConfig):
+        return data
+    try:
+        chunk_shape = data["chunk_shape"]  # type: ignore[index]
+        return RegularChunkGridConfig(chunk_shape=chunk_shape)
+    except TypeError as e:
+        msg = (
+            "Invalid configuration for regular chunk grid."
+            f"Got type {type(data)}, expected an object supporting dict-style indexing."
+        )
+        raise ValueError(msg) from e
+    except KeyError as e:
+        msg = (
+            "Invalid configuration for regular chunk grid."
+            f"Required key `chunk_shape` is missing from {data}"
+        )
+        raise ValueError(msg) from e
+
+
+@dataclass(frozen=True)
+class RegularChunkGrid(Metadata):
+    name: Literal["regular"] = field(init=False, default="regular")
+    configuration: RegularChunkGridConfig
+
+    def __init__(self, *, configuration: RegularChunkGridConfig | RegularChunkGridConfigDict):
+        config_parsed = parse_regular_chunk_grid_config(configuration)
+        object.__setattr__(self, "configuration", config_parsed)
+
+    @classmethod
+    def _from_dict(cls, data: dict[str, JSON]) -> Self:
+        _, configuration_parsed = parse_named_configuration(data, "regular")
+
+        return cls(**configuration_parsed)  # type: ignore[arg-type]
+
+    def to_dict(self) -> RegularChunkGridDict:
+        return super().to_dict()
+
+
+def parse_chunk_grid(data: Any) -> RegularChunkGrid:
+    if isinstance(data, RegularChunkGrid):
+        return data
+
+    name, config = unpack_named_configuration(data, allow_missing_config=False)
+
+    if name == "regular":
+        return RegularChunkGrid(configuration=config)  # type: ignore
+
+    else:
+        msg = f'Invalid chunk grid name. Got {name}, expected "regular".'
+        raise ValueError(msg)
+
+
+class ChunkKeyConfigDict(TypedDict):
+    separator: SeparatorLiteral
+
+
+class ChunkKeyEncodingDict(TypedDict):
+    name: Literal["v2", "default"]
+    configuration: ChunkKeyConfigDict
+
+
+@dataclass(frozen=True)
+class ChunkKeyConfig(Metadata):
+    separator: SeparatorLiteral
+
+    def __init__(self, *, separator: SeparatorLiteral):
+        separator_parsed = parse_separator(separator)
+        object.__setattr__(self, "separator", separator_parsed)
+
+    def to_dict(self) -> ChunkKeyConfigDict:
+        return super().to_dict()
+
+
+def parse_chunk_key_config(data: object) -> ChunkKeyConfig:
+    if isinstance(data, ChunkKeyConfig):
+        return data
+    if data is None:
+        separator = "/"
+    else:
+        try:
+            separator = data["separator"]
+        except TypeError as e:
+            msg = (
+                "Invalid configuration for chunk key encoding."
+                f"Got type {type(config)}, expected an object supporting dict-style indexing."
+            )
+            raise ValueError(msg) from e
+        except KeyError as e:
+            msg = (
+                "Invalid configuration for chunk key encoding."
+                f"Required key `separator` is missing from {config}"
+            )
+            raise ValueError(msg) from e
+
+    return ChunkKeyConfig(separator=separator)
+
+
+@dataclass(frozen=True)
+class ChunkKeyEncoding(Metadata):
+    name: Literal["v2", "default"]
+    configuration: ChunkKeyConfig
+
+    def __init__(
+        self, *, name: ChunkKeyEncodingName, configuration: ChunkKeyConfigDict | ChunkKeyConfig
+    ) -> None:
+        name_parsed = parse_chunk_key_encoding_name(name)
+        config_parsed = parse_chunk_key_config(configuration)
+
+        object.__setattr__(self, "name", name_parsed)
+        object.__setattr__(self, "configuration", config_parsed)
+
+    def to_dict(self) -> ChunkKeyEncodingDict:
+        return super().to_dict()
+
+
+def is_chunk_key_encoding_name(data: object) -> TypeGuard[ChunkKeyEncodingName]:
+    return data in CHUNK_KEY_ENCODING_NAMES
+
+
+def parse_chunk_key_encoding_name(data: object) -> ChunkKeyEncodingName:
+    if is_chunk_key_encoding_name(data):
+        return data
+    msg = (
+        f"Invalid chunk key encoding name. Expected one of {CHUNK_KEY_ENCODING_NAMES}."
+        f"Got {data} instead."
+    )
+    raise ValueError(msg)
+
+
+def parse_chunk_key_encoding(data: object) -> ChunkKeyEncoding:
+    if isinstance(data, ChunkKeyEncoding):
+        return data
+
+    name, config = unpack_named_configuration(data)
+    return ChunkKeyEncoding(name=name, configuration=config)  # type: ignore
+
+
 @dataclass(frozen=True, kw_only=True)
-class ArrayMetadata(Metadata, ABC):
-    shape: ChunkCoords
-    fill_value: Any
-    chunk_grid: ChunkGrid
-    attributes: dict[str, JSON]
-    zarr_format: ZarrFormat
-
-    @property
-    @abstractmethod
-    def dtype(self) -> np.dtype[Any]:
-        pass
-
-    @property
-    @abstractmethod
-    def ndim(self) -> int:
-        pass
-
-    @abstractmethod
-    def get_chunk_spec(
-        self, _chunk_coords: ChunkCoords, order: Literal["C", "F"], prototype: BufferPrototype
-    ) -> ArraySpec:
-        pass
-
-    @abstractmethod
-    def encode_chunk_key(self, chunk_coords: ChunkCoords) -> str:
-        pass
-
-    @abstractmethod
-    def to_buffer_dict(self, prototype: BufferPrototype) -> dict[str, Buffer]:
-        pass
-
-    @abstractmethod
-    def update_shape(self, shape: ChunkCoords) -> Self:
-        pass
-
-    @abstractmethod
-    def update_attributes(self, attributes: dict[str, JSON]) -> Self:
-        pass
-
-
-@dataclass(frozen=True, kw_only=True)
-class ArrayV3Metadata(ArrayMetadata):
+class ArrayV3Metadata(ArrayMetadataBase):
     shape: ChunkCoords
     data_type: np.dtype[Any]
-    chunk_grid: ChunkGrid
+    chunk_grid: RegularChunkGrid
     chunk_key_encoding: ChunkKeyEncoding
     fill_value: Any
     codecs: tuple[Codec, ...]
-    attributes: dict[str, Any] = field(default_factory=dict)
-    dimension_names: tuple[str, ...] | None = None
+    attributes: Mapping[str, Any] = field(default_factory=dict)
+    dimension_names: tuple[str | None, ...] | None
     zarr_format: Literal[3] = field(default=3, init=False)
     node_type: Literal["array"] = field(default="array", init=False)
 
@@ -172,22 +342,22 @@ class ArrayV3Metadata(ArrayMetadata):
         *,
         shape: Iterable[int],
         data_type: npt.DTypeLike,
-        chunk_grid: dict[str, JSON] | ChunkGrid,
+        chunk_grid: dict[str, JSON] | RegularChunkGrid,
         chunk_key_encoding: dict[str, JSON] | ChunkKeyEncoding,
         fill_value: Any,
         codecs: Iterable[Codec | dict[str, JSON]],
+        dimension_names: Iterable[str | None] | None,
         attributes: None | dict[str, JSON],
-        dimension_names: None | Iterable[str],
     ) -> None:
         """
         Because the class is a frozen dataclass, we set attributes using object.__setattr__
         """
         shape_parsed = parse_shapelike(shape)
         data_type_parsed = parse_dtype(data_type)
-        chunk_grid_parsed = ChunkGrid.from_dict(chunk_grid)
-        chunk_key_encoding_parsed = ChunkKeyEncoding.from_dict(chunk_key_encoding)
+        chunk_grid_parsed = parse_chunk_grid(chunk_grid)
+        chunk_key_encoding_parsed = parse_chunk_key_encoding(chunk_key_encoding)
         dimension_names_parsed = parse_dimension_names(dimension_names)
-        fill_value_parsed = parse_fill_value_v3(fill_value, dtype=data_type_parsed)
+        fill_value_parsed = parse_fill_value(fill_value, dtype=data_type_parsed)
         attributes_parsed = parse_attributes(attributes)
         codecs_parsed_partial = parse_codecs(codecs)
 
@@ -198,7 +368,8 @@ class ArrayV3Metadata(ArrayMetadata):
             order="C",  # TODO: order is not needed here.
             prototype=default_buffer_prototype(),  # TODO: prototype is not needed here.
         )
-        codecs_parsed = [c.evolve_from_array_spec(array_spec) for c in codecs_parsed_partial]
+
+        codecs_parsed = tuple(c.evolve_from_array_spec(array_spec) for c in codecs_parsed_partial)
 
         object.__setattr__(self, "shape", shape_parsed)
         object.__setattr__(self, "data_type", data_type_parsed)
@@ -212,18 +383,20 @@ class ArrayV3Metadata(ArrayMetadata):
         self._validate_metadata()
 
     def _validate_metadata(self) -> None:
-        if isinstance(self.chunk_grid, RegularChunkGrid) and len(self.shape) != len(
-            self.chunk_grid.chunk_shape
-        ):
+        if len(self.shape) != len(self.chunk_grid.configuration.chunk_shape):
             raise ValueError(
                 "`chunk_shape` and `shape` need to have the same number of dimensions."
             )
         if self.dimension_names is not None and len(self.shape) != len(self.dimension_names):
-            raise ValueError(
-                "`dimension_names` and `shape` need to have the same number of dimensions."
+            msg = (
+                "Invalid metadata. The length of the `dimension_names` attribute must match the "
+                f"length of the `shape` attribute. Got `dimension_names`={self.dimension_names}, "
+                f"with length={len(self.dimension_names)}, and `shape`={self.shape} with "
+                f"length={len(self.shape)}"
             )
-        if self.fill_value is None:
-            raise ValueError("`fill_value` is required.")
+
+            raise ValueError(msg)
+
         for codec in self.codecs:
             codec.validate(shape=self.shape, dtype=self.data_type, chunk_grid=self.chunk_grid)
 
@@ -242,15 +415,12 @@ class ArrayV3Metadata(ArrayMetadata):
             self.chunk_grid, RegularChunkGrid
         ), "Currently, only regular chunk grid is supported"
         return ArraySpec(
-            shape=self.chunk_grid.chunk_shape,
+            shape=self.chunk_grid.configuration.chunk_shape,
             dtype=self.dtype,
             fill_value=self.fill_value,
             order=order,
             prototype=prototype,
         )
-
-    def encode_chunk_key(self, chunk_coords: ChunkCoords) -> str:
-        return self.chunk_key_encoding.encode_chunk_key(chunk_coords)
 
     def to_buffer_dict(self, prototype: BufferPrototype) -> dict[str, Buffer]:
         def _json_convert(o: Any) -> Any:
@@ -283,21 +453,23 @@ class ArrayV3Metadata(ArrayMetadata):
 
     @classmethod
     def from_dict(cls, data: dict[str, JSON]) -> ArrayV3Metadata:
+        data_copy = data.copy()
         # TODO: Remove the type: ignores[] comments below and use a TypedDict to type `data`
         # check that the zarr_format attribute is correct
-        _ = parse_zarr_format_v3(data.pop("zarr_format"))  # type: ignore[arg-type]
+        _ = parse_zarr_format(data_copy.pop("zarr_format"))  # type: ignore[arg-type]
         # check that the node_type attribute is correct
-        _ = parse_node_type_array(data.pop("node_type"))  # type: ignore[arg-type]
+        _ = validate_node_type_array(data_copy.pop("node_type"))  # type: ignore[arg-type]
 
-        data["dimension_names"] = data.pop("dimension_names", None)
+        # dimension_names is an optional key. If it is not present, then we set it to `None`
+        data_copy["dimension_names"] = data_copy.pop("dimension_names", None)
 
-        return cls(**data)  # type: ignore[arg-type]
+        # attributes is an optional key. If it is not present, then we set it to None
+        data_copy["attributes"] = data_copy.pop("attributes", None)
+
+        return cls(**data_copy)  # type: ignore[arg-type]
 
     def to_dict(self) -> dict[str, Any]:
         out_dict = super().to_dict()
-
-        if not isinstance(out_dict, dict):
-            raise TypeError(f"Expected dict. Got {type(out_dict)}.")
 
         # if `dimension_names` is `None`, we do not include it in
         # the metadata document
@@ -308,207 +480,30 @@ class ArrayV3Metadata(ArrayMetadata):
     def update_shape(self, shape: ChunkCoords) -> Self:
         return replace(self, shape=shape)
 
-    def update_attributes(self, attributes: dict[str, JSON]) -> Self:
+    def update_attributes(self, attributes: Mapping[str, JSON]) -> Self:
         return replace(self, attributes=attributes)
 
 
-@dataclass(frozen=True, kw_only=True)
-class ArrayV2Metadata(ArrayMetadata):
-    shape: ChunkCoords
-    chunk_grid: RegularChunkGrid
-    data_type: np.dtype[Any]
-    fill_value: None | int | float = 0
-    order: Literal["C", "F"] = "C"
-    filters: list[dict[str, JSON]] | None = None
-    dimension_separator: Literal[".", "/"] = "."
-    compressor: dict[str, JSON] | None = None
-    attributes: dict[str, JSON] = field(default_factory=dict)
-    zarr_format: Literal[2] = field(init=False, default=2)
-
-    def __init__(
-        self,
-        *,
-        shape: ChunkCoords,
-        dtype: npt.DTypeLike,
-        chunks: ChunkCoords,
-        fill_value: Any,
-        order: Literal["C", "F"],
-        dimension_separator: Literal[".", "/"] = ".",
-        compressor: dict[str, JSON] | None = None,
-        filters: list[dict[str, JSON]] | None = None,
-        attributes: dict[str, JSON] | None = None,
-    ):
-        """
-        Metadata for a Zarr version 2 array.
-        """
-        shape_parsed = parse_shapelike(shape)
-        data_type_parsed = parse_dtype(dtype)
-        chunks_parsed = parse_shapelike(chunks)
-        compressor_parsed = parse_compressor(compressor)
-        order_parsed = parse_indexing_order(order)
-        dimension_separator_parsed = parse_separator(dimension_separator)
-        filters_parsed = parse_filters(filters)
-        fill_value_parsed = parse_fill_value_v2(fill_value, dtype=data_type_parsed)
-        attributes_parsed = parse_attributes(attributes)
-
-        object.__setattr__(self, "shape", shape_parsed)
-        object.__setattr__(self, "data_type", data_type_parsed)
-        object.__setattr__(self, "chunk_grid", RegularChunkGrid(chunk_shape=chunks_parsed))
-        object.__setattr__(self, "compressor", compressor_parsed)
-        object.__setattr__(self, "order", order_parsed)
-        object.__setattr__(self, "dimension_separator", dimension_separator_parsed)
-        object.__setattr__(self, "filters", filters_parsed)
-        object.__setattr__(self, "fill_value", fill_value_parsed)
-        object.__setattr__(self, "attributes", attributes_parsed)
-
-        # ensure that the metadata document is consistent
-        _ = parse_v2_metadata(self)
-
-    @property
-    def ndim(self) -> int:
-        return len(self.shape)
-
-    @property
-    def dtype(self) -> np.dtype[Any]:
-        return self.data_type
-
-    @property
-    def chunks(self) -> ChunkCoords:
-        return self.chunk_grid.chunk_shape
-
-    def to_buffer_dict(self, prototype: BufferPrototype) -> dict[str, Buffer]:
-        def _json_convert(
-            o: Any,
-        ) -> Any:
-            if isinstance(o, np.dtype):
-                if o.fields is None:
-                    return o.str
-                else:
-                    return o.descr
-            if np.isscalar(o):
-                # convert numpy scalar to python type, and pass
-                # python types through
-                return getattr(o, "item", lambda: o)()
-            raise TypeError
-
-        zarray_dict = self.to_dict()
-        assert isinstance(zarray_dict, dict)
-        zattrs_dict = zarray_dict.pop("attributes", {})
-        assert isinstance(zattrs_dict, dict)
-        json_indent = config.get("json_indent")
-        return {
-            ZARRAY_JSON: prototype.buffer.from_bytes(
-                json.dumps(zarray_dict, default=_json_convert, indent=json_indent).encode()
-            ),
-            ZATTRS_JSON: prototype.buffer.from_bytes(
-                json.dumps(zattrs_dict, indent=json_indent).encode()
-            ),
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> ArrayV2Metadata:
-        # check that the zarr_format attribute is correct
-        _ = parse_zarr_format_v2(data.pop("zarr_format"))
-        return cls(**data)
-
-    def to_dict(self) -> JSON:
-        zarray_dict = super().to_dict()
-
-        assert isinstance(zarray_dict, dict)
-
-        _ = zarray_dict.pop("chunk_grid")
-        zarray_dict["chunks"] = self.chunk_grid.chunk_shape
-
-        _ = zarray_dict.pop("data_type")
-        zarray_dict["dtype"] = self.data_type.str
-
-        return zarray_dict
-
-    def get_chunk_spec(
-        self, _chunk_coords: ChunkCoords, order: Literal["C", "F"], prototype: BufferPrototype
-    ) -> ArraySpec:
-        return ArraySpec(
-            shape=self.chunk_grid.chunk_shape,
-            dtype=self.dtype,
-            fill_value=self.fill_value,
-            order=order,
-            prototype=prototype,
-        )
-
-    def encode_chunk_key(self, chunk_coords: ChunkCoords) -> str:
-        chunk_identifier = self.dimension_separator.join(map(str, chunk_coords))
-        return "0" if chunk_identifier == "" else chunk_identifier
-
-    def update_shape(self, shape: ChunkCoords) -> Self:
-        return replace(self, shape=shape)
-
-    def update_attributes(self, attributes: dict[str, JSON]) -> Self:
-        return replace(self, attributes=attributes)
-
-
-def parse_dimension_names(data: None | Iterable[str]) -> tuple[str, ...] | None:
+def parse_dimension_names(data: Any) -> tuple[str | None, ...] | None:
     if data is None:
-        return data
-    elif all(isinstance(x, str) for x in data):
+        return None
+    elif all(isinstance(x, (str, type(None))) for x in data):
         return tuple(data)
     else:
-        msg = f"Expected either None or a iterable of str, got {type(data)}"
+        msg = f"Expected either None or a iterable of strings or `None`. Got {type(data)} instead."
         raise TypeError(msg)
 
 
-def parse_attributes(data: None | Mapping[str, JSON]) -> Mapping[str, JSON]:
-    if data is None:
-        return {}
-
-    return data
-
-
-# todo: move to its own module and drop _v3 suffix
-# todo: consider folding all the literal parsing into a single function
-# that takes 2 arguments
-def parse_zarr_format_v3(data: Literal[3]) -> Literal[3]:
+def parse_zarr_format(data: Literal[3]) -> Literal[3]:
     if data == 3:
-        return data
+        return 3
     raise ValueError(f"Invalid value. Expected 3. Got {data}.")
 
 
-# todo: move to its own module and drop _v2 suffix
-def parse_zarr_format_v2(data: Literal[2]) -> Literal[2]:
-    if data == 2:
-        return data
-    raise ValueError(f"Invalid value. Expected 2. Got {data}.")
-
-
-def parse_node_type_array(data: Literal["array"]) -> Literal["array"]:
+def validate_node_type_array(data: Literal["array"]) -> Literal["array"]:
     if data == "array":
-        return data
+        return "array"
     raise ValueError(f"Invalid value. Expected 'array'. Got {data}.")
-
-
-# todo: real validation
-def parse_filters(data: list[dict[str, JSON]] | None) -> list[dict[str, JSON]] | None:
-    return data
-
-
-# todo: real validation
-def parse_compressor(data: dict[str, JSON] | None) -> dict[str, JSON] | None:
-    return data
-
-
-def parse_v2_metadata(data: ArrayV2Metadata) -> ArrayV2Metadata:
-    if (l_chunks := len(data.chunks)) != (l_shape := len(data.shape)):
-        msg = (
-            f"The `shape` and `chunks` attributes must have the same length. "
-            f"`chunks` has length {l_chunks}, but `shape` has length {l_shape}."
-        )
-        raise ValueError(msg)
-    return data
-
-
-def create_pipeline(data: Iterable[Codec | JSON]) -> CodecPipeline:
-    if not isinstance(data, Iterable):
-        raise TypeError(f"Expected iterable, got {type(data)}")
-    return get_pipeline_class().from_dict(data)
 
 
 def parse_codecs(data: Iterable[Codec | dict[str, JSON]]) -> tuple[Codec, ...]:
@@ -527,27 +522,6 @@ def parse_codecs(data: Iterable[Codec | dict[str, JSON]]) -> tuple[Codec, ...]:
             out += (get_codec_class(name_parsed).from_dict(c),)
 
     return out
-
-
-def parse_fill_value_v2(fill_value: Any, dtype: np.dtype[Any]) -> Any:
-    """
-    Parse a potential fill value into a value that is compatible with the provided dtype.
-
-    This is a light wrapper around zarr.v2.util.normalize_fill_value.
-
-    Parameters
-    ----------
-    fill_value: Any
-        A potential fill value.
-    dtype: np.dtype[Any]
-        A numpy dtype.
-
-    Returns
-        An instance of `dtype`, or `None`, or any python object (in the case of an object dtype)
-    """
-    from zarr.v2.util import normalize_fill_value
-
-    return normalize_fill_value(fill_value=fill_value, dtype=dtype)
 
 
 BOOL = np.bool_
@@ -573,22 +547,22 @@ COMPLEX = np.complex64 | np.complex128
 
 
 @overload
-def parse_fill_value_v3(fill_value: Any, dtype: BOOL_DTYPE) -> BOOL: ...
+def parse_fill_value(fill_value: Any, dtype: BOOL_DTYPE) -> BOOL: ...
 
 
 @overload
-def parse_fill_value_v3(fill_value: Any, dtype: INTEGER_DTYPE) -> INTEGER: ...
+def parse_fill_value(fill_value: Any, dtype: INTEGER_DTYPE) -> INTEGER: ...
 
 
 @overload
-def parse_fill_value_v3(fill_value: Any, dtype: FLOAT_DTYPE) -> FLOAT: ...
+def parse_fill_value(fill_value: Any, dtype: FLOAT_DTYPE) -> FLOAT: ...
 
 
 @overload
-def parse_fill_value_v3(fill_value: Any, dtype: COMPLEX_DTYPE) -> COMPLEX: ...
+def parse_fill_value(fill_value: Any, dtype: COMPLEX_DTYPE) -> COMPLEX: ...
 
 
-def parse_fill_value_v3(
+def parse_fill_value(
     fill_value: Any, dtype: BOOL_DTYPE | INTEGER_DTYPE | FLOAT_DTYPE | COMPLEX_DTYPE
 ) -> BOOL | INTEGER | FLOAT | COMPLEX:
     """
