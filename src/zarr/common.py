@@ -4,7 +4,7 @@ import asyncio
 import contextvars
 import functools
 import operator
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from enum import Enum
 from typing import (
     TYPE_CHECKING,
@@ -31,7 +31,7 @@ BytesLike = bytes | bytearray | memoryview
 ChunkCoords = tuple[int, ...]
 ChunkCoordsLike = Iterable[int]
 ZarrFormat = Literal[2, 3]
-JSON = None | str | int | float | Enum | dict[str, "JSON"] | list["JSON"] | tuple["JSON", ...]
+JSON = None | str | int | float | Enum | Mapping[str, "JSON"] | list["JSON"] | tuple["JSON", ...]
 MemoryOrder = Literal["C", "F"]
 AccessModeLiteral = Literal["r", "r+", "a", "w", "w-"]
 

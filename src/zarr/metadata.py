@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from abc import ABC, abstractmethod
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, cast, overload
@@ -456,8 +456,7 @@ def parse_dimension_names(data: None | Iterable[str]) -> tuple[str, ...] | None:
         raise TypeError(msg)
 
 
-# todo: real validation
-def parse_attributes(data: None | dict[str, JSON]) -> dict[str, JSON]:
+def parse_attributes(data: None | Mapping[str, JSON]) -> Mapping[str, JSON]:
     if data is None:
         return {}
 
