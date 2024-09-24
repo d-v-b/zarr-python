@@ -359,31 +359,41 @@ def test_group_create_array(
     method: Literal["create_array", "array"],
 ) -> None:
     """
-    Test `Group.from_store`
+    Ensure that `Group.create_array` successfully creates an array, as well intermediate groups
+    between the parent group and that array.
     """
     group = Group.from_store(store, zarr_format=zarr_format)
     shape = (10, 10)
     dtype = "uint8"
     data = np.arange(np.prod(shape)).reshape(shape).astype(dtype)
+    sub_groups = ("foo", "foo/bar")
+    array_name = "/".join([sub_groups[-1], "array"])
 
     if method == "create_array":
-        array = group.create_array(name="array", shape=shape, dtype=dtype, data=data)
+        array = group.create_array(name=array_name, shape=shape, dtype=dtype, data=data)
     elif method == "array":
         with pytest.warns(DeprecationWarning):
-            array = group.array(name="array", shape=shape, dtype=dtype, data=data)
+            array = group.array(name=array_name, shape=shape, dtype=dtype, data=data)
     else:
         raise AssertionError
 
     if not exists_ok:
         if method == "create_array":
             with pytest.raises(ContainsArrayError):
-                group.create_array(name="array", shape=shape, dtype=dtype, data=data)
+                group.create_array(name=array_name, shape=shape, dtype=dtype, data=data)
         elif method == "array":
             with pytest.raises(ContainsArrayError), pytest.warns(DeprecationWarning):
-                group.array(name="array", shape=shape, dtype=dtype, data=data)
+                group.array(name=array_name, shape=shape, dtype=dtype, data=data)
+
     assert array.shape == shape
     assert array.dtype == np.dtype(dtype)
     assert np.array_equal(array[:], data)
+
+    read_only_store = store.with_mode("r")
+
+    for sub_group in sub_groups:
+        breakpoint()
+        g = Group.open(read_only_store, zarr_format=zarr_format)
 
 
 def test_group_array_creation(

@@ -11,6 +11,8 @@ from zarr.store._utils import _normalize_interval_index
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, MutableMapping
 
+    from typing_extensions import Self
+
     from zarr.core.buffer import BufferPrototype
     from zarr.core.common import AccessModeLiteral
 
@@ -150,6 +152,12 @@ class MemoryStore(Store):
 
         for key in keys_unique:
             yield key
+
+    def with_mode(self, mode: AccessModeLiteral) -> Self:
+        """
+        Create a new MemoryStore with a different access mode.
+        """
+        return self.__class__(store_dict=self._store_dict, mode=mode)
 
 
 class GpuMemoryStore(MemoryStore):

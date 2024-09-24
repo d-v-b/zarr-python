@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
 
     from fsspec.asyn import AsyncFileSystem
+    from typing_extensions import Self
 
     from zarr.core.buffer import Buffer, BufferPrototype
     from zarr.core.common import AccessModeLiteral, BytesLike
@@ -236,3 +237,8 @@ class RemoteStore(Store):
         find_str = "/".join([self.path, prefix])
         for onefile in await self.fs._find(find_str, detail=False, maxdepth=None, withdirs=False):
             yield onefile.removeprefix(find_str)
+
+    def with_mode(self, mode: AccessModeLiteral) -> Self:
+        return self.__class__(
+            fs=self.fs, mode=mode, path=self.path, allowed_exceptions=self.allowed_exceptions
+        )

@@ -253,6 +253,11 @@ class Store(ABC):
         """Close the store."""
         self._is_open = False
 
+    @abstractmethod
+    def with_mode(self, mode: AccessModeLiteral) -> Self:
+        """Create a new store with a different access mode."""
+        ...
+
 
 @runtime_checkable
 class ByteGetter(Protocol):

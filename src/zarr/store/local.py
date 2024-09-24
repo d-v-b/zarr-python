@@ -13,6 +13,8 @@ from zarr.core.common import concurrent_map, to_thread
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
 
+    from typing_extensions import Self
+
     from zarr.core.buffer import BufferPrototype
     from zarr.core.common import AccessModeLiteral
 
@@ -235,3 +237,9 @@ class LocalStore(Store):
                 yield str(key).replace(to_strip, "")
         except (FileNotFoundError, NotADirectoryError):
             pass
+
+    def with_mode(self, mode: AccessModeLiteral) -> Self:
+        """
+        Create a new LocalStore with a different access mode.
+        """
+        return self.__class__(root=self.root, mode=mode)
