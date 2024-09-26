@@ -1,7 +1,9 @@
+from collections.abc import Iterator
+
 from zarr.core.buffer import Buffer
 
 
-def _normalize_interval_index(
+def normalize_interval_index(
     data: Buffer, interval: None | tuple[int | None, int | None]
 ) -> tuple[int, int]:
     """
@@ -23,3 +25,11 @@ def _normalize_interval_index(
             length = maybe_len
 
     return (start, length)
+
+
+def get_intermediate_nodes(key: str) -> Iterator[str]:
+    """
+    Given a nested path like foo/bar/baz, return an iterator that yields foo, foo/bar, foo/bar/baz
+    """
+    nodes = key.split("/")
+    return ("/".join(nodes[: i + 1]) for i in range(len(nodes)))

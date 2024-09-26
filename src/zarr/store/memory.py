@@ -7,7 +7,7 @@ from typing_extensions import Self
 from zarr.abc.store import Store
 from zarr.core.buffer import Buffer, gpu
 from zarr.core.common import concurrent_map
-from zarr.store._utils import _normalize_interval_index
+from zarr.store.utils import normalize_interval_index
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, MutableMapping
@@ -78,7 +78,7 @@ class MemoryStore(Store):
         assert isinstance(key, str)
         try:
             value = self._store_dict[key]
-            start, length = _normalize_interval_index(value, byte_range)
+            start, length = normalize_interval_index(value, byte_range)
             return prototype.buffer.from_buffer(value[start : start + length])
         except KeyError:
             return None
@@ -161,12 +161,6 @@ class MemoryStore(Store):
 
         for key in keys_unique:
             yield key
-
-    def with_mode(self, mode: AccessModeLiteral) -> Self:
-        """
-        Create a new MemoryStore with a different access mode.
-        """
-        return self.__class__(store_dict=self._store_dict, mode=mode)
 
 
 class GpuMemoryStore(MemoryStore):

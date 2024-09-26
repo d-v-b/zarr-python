@@ -156,10 +156,7 @@ async def ensure_no_existing_node(store_path: StorePath, zarr_format: ZarrFormat
     ------
     ContainsArrayError, ContainsGroupError, ContainsArrayAndGroupError
     """
-    extant_node = await contains_node(
-        store_path=store_path, 
-        zarr_format=zarr_format
-        )
+    extant_node = await contains_node(store_path=store_path, zarr_format=zarr_format)
     if extant_node == "array":
         raise ContainsArrayError(store_path.store, store_path.path)
     elif extant_node == "group":
@@ -305,9 +302,10 @@ async def contains_group(store_path: StorePath, zarr_format: ZarrFormat) -> bool
     msg = f"Invalid zarr_format provided. Got {zarr_format}, expected 2 or 3"  # type: ignore[unreachable]
     raise ValueError(msg)
 
+
 async def contains_node(
-        store_path: StorePath, 
-        zarr_format: ZarrFormat) -> Literal["array", "group", None]:
+    store_path: StorePath, zarr_format: ZarrFormat
+) -> Literal["array", "group", None]:
     """
     Check if array or group exists at a given StorePath, for a given Zarr format.
 
@@ -330,5 +328,5 @@ async def contains_node(
         return await _contains_node_v3(store_path)
     elif zarr_format == 2:
         return await _contains_node_v2(store_path)
-    msg = f"Invalid zarr_format provided. Got {zarr_format}, expected 2 or 3"
+    msg = f"Invalid zarr_format provided. Got {zarr_format}, expected 2 or 3"  # type: ignore[unreachable]
     raise ValueError(msg)

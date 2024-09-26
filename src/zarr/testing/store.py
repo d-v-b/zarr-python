@@ -7,7 +7,7 @@ from zarr.abc.store import AccessMode, Store
 from zarr.core.buffer import Buffer, default_buffer_prototype
 from zarr.core.common import AccessModeLiteral
 from zarr.core.sync import _collect_aiterator
-from zarr.store._utils import _normalize_interval_index
+from zarr.store.utils import normalize_interval_index
 from zarr.testing.utils import assert_bytes_equal
 
 __all__ = ["StoreTests"]
@@ -108,7 +108,7 @@ class StoreTests(Generic[S, B]):
         data_buf = self.buffer_cls.from_bytes(data)
         self.set(store, key, data_buf)
         observed = await store.get(key, prototype=default_buffer_prototype(), byte_range=byte_range)
-        start, length = _normalize_interval_index(data_buf, interval=byte_range)
+        start, length = normalize_interval_index(data_buf, interval=byte_range)
         expected = data_buf[start : start + length]
         assert_bytes_equal(observed, expected)
 

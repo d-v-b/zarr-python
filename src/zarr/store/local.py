@@ -242,9 +242,3 @@ class LocalStore(Store):
                 yield str(key).replace(to_strip, "")
         except (FileNotFoundError, NotADirectoryError):
             pass
-
-    def with_mode(self, mode: AccessModeLiteral) -> Self:
-        """
-        Create a new LocalStore with a different access mode.
-        """
-        return self.__class__(root=self.root, mode=mode)

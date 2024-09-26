@@ -16,6 +16,7 @@ from zarr.core.sync import sync
 from zarr.errors import ContainsArrayError, ContainsGroupError
 from zarr.store import LocalStore, MemoryStore, StorePath
 from zarr.store.common import make_store_path
+from zarr.store.utils import get_intermediate_nodes
 
 from .conftest import parse_store
 
@@ -366,8 +367,8 @@ def test_group_create_array(
     shape = (10, 10)
     dtype = "uint8"
     data = np.arange(np.prod(shape)).reshape(shape).astype(dtype)
-    sub_groups = ("foo", "foo/bar")
-    array_name = "/".join([sub_groups[-1], "array"])
+    array_name = "foo/bar/array"
+    *sub_group_paths, _ = get_intermediate_nodes(array_name)
 
     if method == "create_array":
         array = group.create_array(name=array_name, shape=shape, dtype=dtype, data=data)
@@ -391,9 +392,9 @@ def test_group_create_array(
 
     read_only_store = store.with_mode("r")
 
-    for sub_group in sub_groups:
-        breakpoint()
-        g = Group.open(read_only_store, zarr_format=zarr_format)
+    # ensure that the interediate groups were created
+    for sub_group_path in sub_group_paths:
+        Group.open(StorePath(store=read_only_store, path=sub_group_path), zarr_format=zarr_format)
 
 
 def test_group_array_creation(

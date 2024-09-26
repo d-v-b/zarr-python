@@ -251,21 +251,3 @@ class ZipStore(Store):
                     if k not in seen:
                         seen.add(k)
                         yield k
-
-    def with_mode(self, mode: ZipStoreAccessModeLiteral) -> Self:
-        """
-        Create a new ZipStore with a different access mode.
-
-        Parameters
-        ----------
-        mode : AccessModeLiteral
-            One of 'r', 'w', 'a'.
-
-        Returns
-        -------
-        ZipStore
-            New ZipStore with the specified access mode.
-        """
-        return self.__class__(
-            path=self.path, mode=mode, compression=self.compression, allowZip64=self.allowZip64
-        )

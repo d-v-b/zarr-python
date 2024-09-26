@@ -247,8 +247,3 @@ class RemoteStore(Store):
         find_str = f"{self.path}/{prefix}"
         for onefile in await self.fs._find(find_str, detail=False, maxdepth=None, withdirs=False):
             yield onefile.removeprefix(find_str)
-
-    def with_mode(self, mode: AccessModeLiteral) -> Self:
-        return self.__class__(
-            fs=self.fs, mode=mode, path=self.path, allowed_exceptions=self.allowed_exceptions
-        )

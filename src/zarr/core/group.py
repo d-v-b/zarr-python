@@ -29,8 +29,10 @@ from zarr.core.common import (
 )
 from zarr.core.config import config
 from zarr.core.sync import SyncMixin, sync
+from zarr.errors import ContainsArrayError
 from zarr.store import StoreLike, StorePath, make_store_path
-from zarr.store.common import ensure_no_existing_node
+from zarr.store.common import contains_node, ensure_no_existing_node
+from zarr.store.utils import get_intermediate_nodes
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Generator, Iterable, Iterator
@@ -336,12 +338,47 @@ class AsyncGroup:
         attributes: dict[str, Any] | None = None,
     ) -> AsyncGroup:
         attributes = attributes or {}
-        return await type(self).from_store(
-            self.store_path / name,
+
+        # check if intermediate groups / arrays already exist
+        # if any arrays exist then we have to raise an exception
+        # if none exist, they must be created
+
+        *igroup_names, final_group_name = get_intermediate_nodes(name)
+        to_create: tuple[str, ...] = ()
+
+        node_check = await asyncio.gather(
+            *tuple(
+                contains_node(self.store_path / v, zarr_format=self.metadata.zarr_format)
+                for v in igroup_names
+            )
+        )
+
+        for igroup, result in zip(igroup_names, node_check, strict=False):
+            if result is None:
+                to_create += (igroup,)
+            elif result == "array":
+                raise ContainsArrayError
+
+        # coroutines for creation of the intermediate groups
+        ig_coros = (
+            type(self).from_store(
+                self.store_path / ig_name,
+                zarr_format=self.metadata.zarr_format,
+            )
+            for ig_name in igroup_names
+        )
+
+        # coroutine for creating the final group
+        fg_coro = type(self).from_store(
+            self.store_path / final_group_name,
             attributes=attributes,
             exists_ok=exists_ok,
             zarr_format=self.metadata.zarr_format,
         )
+
+        *_, final_group = await asyncio.gather(*ig_coros, fg_coro)
+
+        return final_group
 
     async def require_group(self, name: str, overwrite: bool = False) -> AsyncGroup:
         """Obtain a sub-group, creating one if it doesn't exist.
@@ -357,6 +394,7 @@ class AsyncGroup:
         -------
         g : AsyncGroup
         """
+
         if overwrite:
             # TODO: check that exists_ok=True errors if an array exists where the group is being created
             grp = await self.create_group(name, exists_ok=True)
