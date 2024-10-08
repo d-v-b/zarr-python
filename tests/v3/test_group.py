@@ -177,13 +177,15 @@ def test_group(store: Store, zarr_format: ZarrFormat) -> None:
     assert dict(bar3.attrs) == {"baz": "qux", "name": "bar"}
 
 
-def test_group_create(store: Store, exists_ok: bool, zarr_format: ZarrFormat) -> None:
+@pytest.mark.parametrize("path", ["foo", "foo/bar"])
+def test_group_create(store: Store, path: str, exists_ok: bool, zarr_format: ZarrFormat) -> None:
     """
     Test that `Group.from_store` works as expected.
     """
+    spath = StorePath(store=store, path=path)
     attributes = {"foo": 100}
     group = Group.from_store(
-        store, attributes=attributes, zarr_format=zarr_format, exists_ok=exists_ok
+        spath, attributes=attributes, zarr_format=zarr_format, exists_ok=exists_ok
     )
 
     assert group.attrs == attributes
@@ -191,7 +193,7 @@ def test_group_create(store: Store, exists_ok: bool, zarr_format: ZarrFormat) ->
     if not exists_ok:
         with pytest.raises(ContainsGroupError):
             group = Group.from_store(
-                store, attributes=attributes, exists_ok=exists_ok, zarr_format=zarr_format
+                spath, attributes=attributes, exists_ok=exists_ok, zarr_format=zarr_format
             )
 
 
