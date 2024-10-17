@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from asyncio import gather
 from collections.abc import AsyncGenerator, Iterable
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Generic, NamedTuple, Protocol, TypeVar, runtime_checkable
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Iterable
@@ -37,6 +37,153 @@ class AccessMode(NamedTuple):
                 update=mode in ("r+", "a"),
             )
         raise ValueError("mode must be one of 'r', 'r+', 'w', 'w-', 'a'")
+
+class SessionAccessMode(NamedTuple):
+    str: AccessModeLiteral
+    write: bool
+
+    @classmethod
+    def from_literal(cls, mode: AccessModeLiteral) -> Self:
+        if mode in ("r", "r+", "a", "w", "w-"):
+            return cls(
+                str=mode,
+                write=mode in ("w", "w-", "a"),
+            )
+        raise ValueError("mode must be one of 'r', 'r+', 'w', 'w-', 'a'")
+
+
+class Session(ABC):
+    store: Store
+    mode: SessionAccessMode
+    def __init__(self, store: Store) -> None:
+        self.store = store
+
+    def _check_writable(self) -> None:
+        if not self.mode.write:
+            raise ValueError("session does not support writing")
+
+    @abstractmethod
+    async def open(self) -> None:
+        """Open the session."""
+        ...
+
+    @abstractmethod
+    async def close(self) -> None:
+        """Close the session."""
+        ...
+
+    async def __aenter__(self) -> Self:
+        """
+        Open the session and return an instance.
+        """
+        await self.open()
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        await self.close()
+
+    @abstractmethod
+    async def exists(self, key: str) -> bool:
+        """Check if a key exists in the store.
+
+        Parameters
+        ----------
+        key : str
+
+        Returns
+        -------
+        bool
+        """
+        ...
+
+    @abstractmethod
+    async def set(self, key: str, value: Buffer) -> None:
+        """Store a (key, value) pair.
+
+        Parameters
+        ----------
+        key : str
+        value : Buffer
+        """
+        ...
+
+    async def set_if_not_exists(self, key: str, value: Buffer) -> None:
+        """
+        Store a key to ``value`` if the key is not already present.
+
+        Parameters
+        -----------
+        key : str
+        value : Buffer
+        """
+        # Note for implementers: the default implementation provided here
+        # is not safe for concurrent writers. There's a race condition between
+        # the `exists` check and the `set` where another writer could set some
+        # value at `key` or delete `key`.
+        if not await self.exists(key):
+            await self.set(key, value)
+
+    async def _set_many(self, values: Iterable[tuple[str, Buffer]]) -> None:
+        """
+        Insert multiple (key, value) pairs into storage.
+        """
+        await gather(*(self.set(key, value) for key, value in values))
+        return
+
+    @abstractmethod
+    async def get(
+        self,
+        key: str,
+        prototype: BufferPrototype,
+        byte_range: ByteRangeRequest | None = None,
+    ) -> Buffer | None:
+        """Retrieve the value associated with a given key.
+
+        Parameters
+        ----------
+        key : str
+        byte_range : tuple[int | None, int | None], optional
+
+        Returns
+        -------
+        Buffer
+        """
+        ...
+
+    @abstractmethod
+    async def get_partial_values(
+        self,
+        prototype: BufferPrototype,
+        key_ranges: Iterable[tuple[str, ByteRangeRequest]],
+    ) -> list[Buffer | None]:
+        """Retrieve possibly partial values from given key_ranges.
+
+        Parameters
+        ----------
+        key_ranges : Iterable[tuple[str, tuple[int | None, int | None]]]
+            Ordered set of key, range pairs, a key may occur multiple times with different ranges
+
+        Returns
+        -------
+        list of values, in the order of the key_ranges, may contain null/none for missing keys
+        """
+        ...
+
+    async def _get_many(
+        self, requests: Iterable[tuple[str, BufferPrototype, ByteRangeRequest | None]]
+    ) -> AsyncGenerator[tuple[str, Buffer | None], None]:
+        """
+        Retrieve a collection of objects from storage. In general this method does not guarantee
+        that objects will be retrieved in the order in which they were requested, so this method
+        yields tuple[str, Buffer | None] instead of just Buffer | None
+        """
+        for req in requests:
+            yield (req[0], await self.get(*req))
 
 
 class Store(ABC):
@@ -316,7 +463,6 @@ class Store(ABC):
         """
         for req in requests:
             yield (req[0], await self.get(*req))
-
 
 @runtime_checkable
 class ByteGetter(Protocol):

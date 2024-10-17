@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Self
 
-from zarr.abc.store import ByteRangeRequest, Store
+from zarr.abc.store import ByteRangeRequest, ReadSession, Session, Store
 from zarr.core.buffer import Buffer, gpu
 from zarr.core.common import concurrent_map
 from zarr.storage._utils import _normalize_interval_index
@@ -13,6 +13,108 @@ if TYPE_CHECKING:
     from zarr.core.buffer import BufferPrototype
     from zarr.core.common import AccessModeLiteral
 
+
+class MemorySession(Session):
+    store: MemoryStore
+    def __init__(self, store: MemoryStore) -> None:
+        super().__init__(store)
+    
+    async def open(self) -> None:        
+        pass
+
+    async def close(self) -> None:
+        pass
+
+    async def get(
+        self,
+        key: str,
+        prototype: BufferPrototype,
+        byte_range: tuple[int | None, int | None] | None = None,
+    ) -> Buffer | None:
+        assert isinstance(key, str)
+        try:
+            value = self.store._store_dict[key]
+            start, length = _normalize_interval_index(value, byte_range)
+            return prototype.buffer.from_buffer(value[start : start + length])
+        except KeyError:
+            return None
+
+    async def get_partial_values(
+        self,
+        prototype: BufferPrototype,
+        key_ranges: Iterable[tuple[str, ByteRangeRequest]],
+    ) -> list[Buffer | None]:
+        return [self.store._store_dict[key] for key, _ in key_ranges]
+    
+    async def exists(self, key: str) -> bool:
+        return key in self.store._store_dict
+
+    async def set(self, key: str, value: Buffer, byte_range: tuple[int, int] | None = None) -> None:
+        self._check_writable()
+        assert isinstance(key, str)
+        if not isinstance(value, Buffer):
+            raise TypeError(f"Expected Buffer. Got {type(value)}.")
+
+        if byte_range is not None:
+            buf = self.store._store_dict[key]
+            buf[byte_range[0] : byte_range[1]] = value
+            self.store._store_dict[key] = buf
+        else:
+            self.store._store_dict[key] = value
+
+    async def set_if_not_exists(self, key: str, value: Buffer) -> None:
+        self._check_writable()
+        self.store._store_dict.setdefault(key, value)
+
+    async def delete(self, key: str) -> None:
+        self._check_writable()
+        try:
+            del self.store._store_dict[key]
+        except KeyError:
+            pass  # Q(JH): why not raise?
+
+    async def set_partial_values(self, key_start_values: Iterable[tuple[str, int, bytes]]) -> None:
+        raise NotImplementedError
+
+    async def list(self) -> AsyncGenerator[str, None]:
+        for key in self.store._store_dict:
+            yield key
+
+    async def list_prefix(self, prefix: str) -> AsyncGenerator[str, None]:
+        for key in self.store._store_dict:
+            if key.startswith(prefix):
+                yield key.removeprefix(prefix)
+
+    async def list_dir(self, prefix: str) -> AsyncGenerator[str, None]:
+        """
+        Retrieve all keys in the store that begin with a given prefix. Keys are returned with the
+        common leading prefix removed.
+
+        Parameters
+        ----------
+        prefix : str
+
+        Returns
+        -------
+        AsyncGenerator[str, None]
+        """
+        if prefix.endswith("/"):
+            prefix = prefix[:-1]
+
+        if prefix == "":
+            keys_unique = {k.split("/")[0] for k in self.store._store_dict}
+        else:
+            # Our dictionary doesn't contain directory markers, but we want to include
+            # a pseudo directory when there's a nested item and we're listing an
+            # intermediate level.
+            keys_unique = {
+                key.removeprefix(prefix + "/").split("/")[0]
+                for key in self.store._store_dict
+                if key.startswith(prefix + "/") and key != prefix
+            }
+
+        for key in keys_unique:
+            yield key
 
 # TODO: this store could easily be extended to wrap any MutableMapping store from v2
 # When that is done, the `MemoryStore` will just be a store that wraps a dict.
