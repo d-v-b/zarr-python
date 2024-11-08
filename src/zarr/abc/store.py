@@ -3,7 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from asyncio import gather
 from itertools import starmap
-from typing import TYPE_CHECKING, NamedTuple, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Generic, NamedTuple, Protocol, TypeVar, runtime_checkable
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Iterable
@@ -58,16 +58,23 @@ class AccessMode(NamedTuple):
         raise ValueError("mode must be one of 'r', 'r+', 'w', 'w-', 'a'")
 
 
-class Store(ABC):
+T_Buffer = TypeVar("T_Buffer", bound="Buffer")
+
+
+class Store(ABC, Generic[T_Buffer]):
     """
     Abstract base class for Zarr stores.
     """
 
     _mode: AccessMode
     _is_open: bool
+    _buffer_cls: type[T_Buffer]
 
-    def __init__(self, *args: Any, mode: AccessModeLiteral = "r", **kwargs: Any) -> None:
+    def __init__(
+        self, *args: Any, mode: AccessModeLiteral = "r", buffer_cls: type[T_Buffer], **kwargs: Any
+    ) -> None:
         self._is_open = False
+        self._buffer_cls = buffer_cls
         self._mode = AccessMode.from_literal(mode)
 
     @classmethod
@@ -197,9 +204,8 @@ class Store(ABC):
     async def get(
         self,
         key: str,
-        prototype: BufferPrototype,
         byte_range: ByteRangeRequest | None = None,
-    ) -> Buffer | None:
+    ) -> T_Buffer | None:
         """Retrieve the value associated with a given key.
 
         Parameters
@@ -216,9 +222,8 @@ class Store(ABC):
     @abstractmethod
     async def get_partial_values(
         self,
-        prototype: BufferPrototype,
         key_ranges: Iterable[tuple[str, ByteRangeRequest]],
-    ) -> list[Buffer | None]:
+    ) -> list[T_Buffer | None]:
         """Retrieve possibly partial values from given key_ranges.
 
         Parameters
@@ -253,7 +258,7 @@ class Store(ABC):
         ...
 
     @abstractmethod
-    async def set(self, key: str, value: Buffer) -> None:
+    async def set(self, key: str, value: T_Buffer) -> None:
         """Store a (key, value) pair.
 
         Parameters
@@ -263,7 +268,7 @@ class Store(ABC):
         """
         ...
 
-    async def set_if_not_exists(self, key: str, value: Buffer) -> None:
+    async def set_if_not_exists(self, key: str, value: T_Buffer) -> None:
         """
         Store a key to ``value`` if the key is not already present.
 
@@ -279,7 +284,7 @@ class Store(ABC):
         if not await self.exists(key):
             await self.set(key, value)
 
-    async def _set_many(self, values: Iterable[tuple[str, Buffer]]) -> None:
+    async def _set_many(self, values: Iterable[tuple[str, T_Buffer]]) -> None:
         """
         Insert multiple (key, value) pairs into storage.
         """
@@ -395,8 +400,8 @@ class Store(ABC):
         self._is_open = False
 
     async def _get_many(
-        self, requests: Iterable[tuple[str, BufferPrototype, ByteRangeRequest | None]]
-    ) -> AsyncGenerator[tuple[str, Buffer | None], None]:
+        self, requests: Iterable[tuple[str, ByteRangeRequest | None]]
+    ) -> AsyncGenerator[tuple[str, T_Buffer | None], None]:
         """
         Retrieve a collection of objects from storage. In general this method does not guarantee
         that objects will be retrieved in the order in which they were requested, so this method

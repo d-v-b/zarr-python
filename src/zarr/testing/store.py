@@ -4,7 +4,7 @@ from typing import Any, Generic, TypeVar, cast
 import pytest
 
 from zarr.abc.store import AccessMode, Store
-from zarr.core.buffer import Buffer, default_buffer_prototype
+from zarr.core.buffer import Buffer
 from zarr.core.common import AccessModeLiteral
 from zarr.core.sync import _collect_aiterator
 from zarr.storage._utils import _normalize_interval_index
@@ -116,7 +116,7 @@ class StoreTests(Generic[S, B]):
         """
         data_buf = self.buffer_cls.from_bytes(data)
         await self.set(store, key, data_buf)
-        observed = await store.get(key, prototype=default_buffer_prototype(), byte_range=byte_range)
+        observed = await store.get(key, byte_range=byte_range)
         start, length = _normalize_interval_index(data_buf, interval=byte_range)
         expected = data_buf[start : start + length]
         assert_bytes_equal(observed, expected)
@@ -133,7 +133,6 @@ class StoreTests(Generic[S, B]):
             store._get_many(
                 zip(
                     keys,
-                    (default_buffer_prototype(),) * len(keys),
                     (None,) * len(keys),
                     strict=False,
                 )
@@ -184,9 +183,7 @@ class StoreTests(Generic[S, B]):
             await self.set(store, key, self.buffer_cls.from_bytes(bytes(key, encoding="utf-8")))
 
         # read back just part of it
-        observed_maybe = await store.get_partial_values(
-            prototype=default_buffer_prototype(), key_ranges=key_ranges
-        )
+        observed_maybe = await store.get_partial_values(key_ranges=key_ranges)
 
         observed: list[Buffer] = []
         expected: list[Buffer] = []
@@ -197,9 +194,7 @@ class StoreTests(Generic[S, B]):
 
         for idx in range(len(observed)):
             key, byte_range = key_ranges[idx]
-            result = await store.get(
-                key, prototype=default_buffer_prototype(), byte_range=byte_range
-            )
+            result = await store.get(key, byte_range=byte_range)
             assert result is not None
             expected.append(result)
 
@@ -316,20 +311,20 @@ class StoreTests(Generic[S, B]):
             assert isinstance(clone, type(store))
 
             # earlier writes are visible
-            result = await clone.get("key", default_buffer_prototype())
+            result = await clone.get("key")
             assert result is not None
             assert result.to_bytes() == data
 
             # writes to original after with_mode is visible
             await self.set(store, "key-2", self.buffer_cls.from_bytes(data))
-            result = await clone.get("key-2", default_buffer_prototype())
+            result = await clone.get("key-2")
             assert result is not None
             assert result.to_bytes() == data
 
             if mode == "a":
                 # writes to clone is visible in the original
                 await clone.set("key-3", self.buffer_cls.from_bytes(data))
-                result = await clone.get("key-3", default_buffer_prototype())
+                result = await clone.get("key-3")
                 assert result is not None
                 assert result.to_bytes() == data
 
@@ -345,10 +340,10 @@ class StoreTests(Generic[S, B]):
         new = self.buffer_cls.from_bytes(b"1111")
         await store.set_if_not_exists("k", new)  # no error
 
-        result = await store.get(key, default_buffer_prototype())
+        result = await store.get(key)
         assert result == data_buf
 
         await store.set_if_not_exists("k2", new)  # no error
 
-        result = await store.get("k2", default_buffer_prototype())
+        result = await store.get("k2")
         assert result == new

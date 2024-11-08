@@ -1,24 +1,25 @@
 from __future__ import annotations
 
 from logging import getLogger
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Self, TypeVar
 
 from zarr.abc.store import ByteRangeRequest, Store
-from zarr.core.buffer import Buffer, gpu
+from zarr.core.buffer import Buffer, cpu, gpu
 from zarr.core.common import concurrent_map
 from zarr.storage._utils import _normalize_interval_index
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable, MutableMapping
 
-    from zarr.core.buffer import BufferPrototype
     from zarr.core.common import AccessModeLiteral
 
 
 logger = getLogger(__name__)
 
+T_Buffer = TypeVar("T_Buffer", bound=Buffer)
 
-class MemoryStore(Store):
+
+class MemoryStore(Store[T_Buffer]):
     """
     In-memory store for testing purposes.
 
@@ -42,15 +43,16 @@ class MemoryStore(Store):
     supports_partial_writes: bool = True
     supports_listing: bool = True
 
-    _store_dict: MutableMapping[str, Buffer]
+    _store_dict: MutableMapping[str, T_Buffer]
 
     def __init__(
         self,
-        store_dict: MutableMapping[str, Buffer] | None = None,
+        store_dict: MutableMapping[str, T_Buffer] | None = None,
+        buffer_cls: type[T_Buffer] = cpu.Buffer,
         *,
         mode: AccessModeLiteral = "r",
     ) -> None:
-        super().__init__(mode=mode)
+        super().__init__(mode=mode, buffer_cls=buffer_cls)
         if store_dict is None:
             store_dict = {}
         self._store_dict = store_dict
@@ -83,9 +85,8 @@ class MemoryStore(Store):
     async def get(
         self,
         key: str,
-        prototype: BufferPrototype,
         byte_range: tuple[int | None, int | None] | None = None,
-    ) -> Buffer | None:
+    ) -> T_Buffer | None:
         # docstring inherited
         if not self._is_open:
             await self._open()
@@ -93,20 +94,19 @@ class MemoryStore(Store):
         try:
             value = self._store_dict[key]
             start, length = _normalize_interval_index(value, byte_range)
-            return prototype.buffer.from_buffer(value[start : start + length])
+            return self._buffer_cls.from_buffer(value[start : start + length])
         except KeyError:
             return None
 
     async def get_partial_values(
         self,
-        prototype: BufferPrototype,
         key_ranges: Iterable[tuple[str, ByteRangeRequest]],
-    ) -> list[Buffer | None]:
+    ) -> list[T_Buffer | None]:
         # docstring inherited
 
         # All the key-ranges arguments goes with the same prototype
-        async def _get(key: str, byte_range: ByteRangeRequest) -> Buffer | None:
-            return await self.get(key, prototype=prototype, byte_range=byte_range)
+        async def _get(key: str, byte_range: ByteRangeRequest) -> T_Buffer | None:
+            return await self.get(key, byte_range=byte_range)
 
         return await concurrent_map(key_ranges, _get, limit=None)
 
@@ -114,7 +114,9 @@ class MemoryStore(Store):
         # docstring inherited
         return key in self._store_dict
 
-    async def set(self, key: str, value: Buffer, byte_range: tuple[int, int] | None = None) -> None:
+    async def set(
+        self, key: str, value: T_Buffer, byte_range: tuple[int, int] | None = None
+    ) -> None:
         # docstring inherited
         self._check_writable()
         await self._ensure_open()
