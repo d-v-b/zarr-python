@@ -781,9 +781,7 @@ async def test_special_complex_fill_values_roundtrip(fill_value: Any, expected: 
 @pytest.mark.parametrize("shape", [(1,), (2, 3), (4, 5, 6)])
 @pytest.mark.parametrize("dtype", ["uint8", "float32"])
 @pytest.mark.parametrize("array_type", ["async", "sync"])
-async def test_nbytes(
-    shape: tuple[int, ...], dtype: str, array_type: Literal["async", "sync"]
-) -> None:
+def test_nbytes(shape: tuple[int, ...], dtype: str, array_type: Literal["async", "sync"]) -> None:
     """
     Test that the ``nbytes`` attribute of an Array or AsyncArray correctly reports the capacity of
     the chunks of that array.
