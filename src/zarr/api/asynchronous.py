@@ -33,7 +33,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
 
     from zarr.abc.codec import Codec
-    from zarr.core.chunk_key_encodings import ChunkKeyEncoding
+    from zarr.core.chunk_key_encodings import ChunkKeyEncodingLike
     from zarr.storage import StoreLike
 
     # TODO: this type could use some more thought
@@ -847,12 +847,7 @@ async def create(
     attributes: dict[str, JSON] | None = None,
     # v3 only
     chunk_shape: ChunkCoords | int | None = None,
-    chunk_key_encoding: (
-        ChunkKeyEncoding
-        | tuple[Literal["default"], Literal[".", "/"]]
-        | tuple[Literal["v2"], Literal[".", "/"]]
-        | None
-    ) = None,
+    chunk_key_encoding: ChunkKeyEncodingLike | None = None,
     codecs: Iterable[Codec | dict[str, JSON]] | None = None,
     dimension_names: Iterable[str] | None = None,
     storage_options: dict[str, Any] | None = None,

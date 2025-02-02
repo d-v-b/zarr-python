@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     )
     from zarr.core.array_spec import ArrayConfig, ArrayConfigLike
     from zarr.core.buffer import NDArrayLike
-    from zarr.core.chunk_key_encodings import ChunkKeyEncoding, ChunkKeyEncodingLike
+    from zarr.core.chunk_key_encodings import ChunkKeyEncodingLike
     from zarr.core.common import (
         JSON,
         AccessModeLiteral,
@@ -616,12 +616,7 @@ def create(
     attributes: dict[str, JSON] | None = None,
     # v3 only
     chunk_shape: ChunkCoords | int | None = None,
-    chunk_key_encoding: (
-        ChunkKeyEncoding
-        | tuple[Literal["default"], Literal[".", "/"]]
-        | tuple[Literal["v2"], Literal[".", "/"]]
-        | None
-    ) = None,
+    chunk_key_encoding: ChunkKeyEncodingLike | None = None,
     codecs: Iterable[Codec | dict[str, JSON]] | None = None,
     dimension_names: Iterable[str] | None = None,
     storage_options: dict[str, Any] | None = None,
@@ -757,7 +752,7 @@ def create_array(
     order: MemoryOrder | None = None,
     zarr_format: ZarrFormat | None = 3,
     attributes: dict[str, JSON] | None = None,
-    chunk_key_encoding: ChunkKeyEncoding | ChunkKeyEncodingLike | None = None,
+    chunk_key_encoding: ChunkKeyEncodingLike | None = None,
     dimension_names: Iterable[str] | None = None,
     storage_options: dict[str, Any] | None = None,
     overwrite: bool = False,

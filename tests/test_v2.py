@@ -15,6 +15,7 @@ import zarr.storage
 from zarr import config
 from zarr.abc.store import Store
 from zarr.core.buffer.core import default_buffer_prototype
+from zarr.core.chunk_key_encodings import DEFAULT_V3_SEPARATOR
 from zarr.core.sync import sync
 from zarr.storage import MemoryStore, StorePath
 
@@ -118,7 +119,7 @@ async def test_v2_encode_decode(dtype, expected_dtype, fill_value, fill_value_en
             "order": "C",
             "shape": [3],
             "zarr_format": 2,
-            "dimension_separator": ".",
+            "dimension_separator": DEFAULT_V3_SEPARATOR,
         }
         assert serialized == expected
 
@@ -219,11 +220,13 @@ def test_v2_non_contiguous(
     a = np.arange(arr.shape[0] * arr.shape[1]).reshape(arr.shape, order=data_order)
     arr[6:9, 3:6] = a[6:9, 3:6]  # The slice on the RHS is important
     np.testing.assert_array_equal(arr[6:9, 3:6], a[6:9, 3:6])
-
     np.testing.assert_array_equal(
         a[6:9, 3:6],
         np.frombuffer(
-            sync(store.get("2.1", default_buffer_prototype())).to_bytes(), dtype="float64"
+            sync(
+                store.get(arr.metadata.encode_chunk_key((2, 1)), default_buffer_prototype())
+            ).to_bytes(),
+            dtype="float64",
         ).reshape((3, 3), order=array_order),
     )
     if memory_order == "F":

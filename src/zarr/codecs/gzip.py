@@ -2,18 +2,16 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar, Literal
 
 from numcodecs.gzip import GZip
 
 from zarr.abc.codec import BytesBytesCodec
 from zarr.core.buffer.cpu import as_numpy_array_wrapper
-from zarr.core.common import JSON, parse_named_configuration
+from zarr.core.common import JSON
 from zarr.registry import register_codec
 
 if TYPE_CHECKING:
-    from typing import Self
-
     from zarr.core.array_spec import ArraySpec
     from zarr.core.buffer import Buffer
 
@@ -30,22 +28,13 @@ def parse_gzip_level(data: JSON) -> int:
 
 @dataclass(frozen=True)
 class GzipCodec(BytesBytesCodec):
-    is_fixed_size = False
-
+    is_fixed_size: ClassVar[Literal[False]] = False
+    name: ClassVar[Literal["gzip"]] = "gzip"
     level: int = 5
 
     def __init__(self, *, level: int = 5) -> None:
         level_parsed = parse_gzip_level(level)
-
         object.__setattr__(self, "level", level_parsed)
-
-    @classmethod
-    def from_dict(cls, data: dict[str, JSON]) -> Self:
-        _, configuration_parsed = parse_named_configuration(data, "gzip")
-        return cls(**configuration_parsed)  # type: ignore[arg-type]
-
-    def to_dict(self) -> dict[str, JSON]:
-        return {"name": "gzip", "configuration": {"level": self.level}}
 
     async def _decode_single(
         self,

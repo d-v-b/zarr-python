@@ -10,6 +10,7 @@ import zarr.api.asynchronous
 import zarr.storage
 from zarr.core.buffer import cpu
 from zarr.core.buffer.core import default_buffer_prototype
+from zarr.core.chunk_key_encodings import DEFAULT_V3_SEPARATOR
 from zarr.core.group import ConsolidatedMetadata, GroupMetadata
 from zarr.core.metadata import ArrayV2Metadata
 from zarr.core.metadata.v2 import parse_zarr_format
@@ -74,7 +75,7 @@ def test_metadata_to_dict(
         observed.pop("attributes")
 
     if dimension_separator is None:
-        expected_dimension_sep = "."
+        expected_dimension_sep = DEFAULT_V3_SEPARATOR
         assert observed["dimension_separator"] == expected_dimension_sep
         observed.pop("dimension_separator")
 
@@ -204,7 +205,6 @@ class TestConsolidated:
                     dtype=np.dtype("int16"),
                     order="C",
                     filters=None,
-                    dimension_separator=".",
                     compressor=None,
                 ),
                 "time": ArrayV2Metadata(
@@ -221,7 +221,6 @@ class TestConsolidated:
                     dtype=np.dtype("float32"),
                     order="C",
                     filters=None,
-                    dimension_separator=".",
                     compressor=None,
                 ),
                 "nested": GroupMetadata(
@@ -239,7 +238,6 @@ class TestConsolidated:
                                 dtype=np.dtype("float32"),
                                 order="C",
                                 filters=None,
-                                dimension_separator=".",
                                 compressor=None,
                             )
                         }

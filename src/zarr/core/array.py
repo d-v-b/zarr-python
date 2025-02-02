@@ -40,10 +40,12 @@ from zarr.core.buffer import (
 )
 from zarr.core.chunk_grids import RegularChunkGrid, _auto_partition, normalize_chunks
 from zarr.core.chunk_key_encodings import (
+    DEFAULT_V3_SEPARATOR,
     ChunkKeyEncoding,
     ChunkKeyEncodingLike,
     DefaultChunkKeyEncoding,
     V2ChunkKeyEncoding,
+    parse_chunk_key_encoding,
 )
 from zarr.core.common import (
     JSON,
@@ -679,9 +681,9 @@ class AsyncArray(Generic[T_ArrayMetadata]):
         codecs = list(codecs) if codecs is not None else _get_default_codecs(np.dtype(dtype))
         chunk_key_encoding_parsed: ChunkKeyEncodingLike
         if chunk_key_encoding is None:
-            chunk_key_encoding_parsed = {"name": "default", "separator": "/"}
+            chunk_key_encoding_parsed = DefaultChunkKeyEncoding()
         else:
-            chunk_key_encoding_parsed = chunk_key_encoding
+            chunk_key_encoding_parsed = parse_chunk_key_encoding(chunk_key_encoding)
 
         if dtype.kind in "UTS":
             warn(
@@ -1725,12 +1727,7 @@ class Array:
         attributes: dict[str, JSON] | None = None,
         # v3 only
         chunk_shape: ChunkCoords | None = None,
-        chunk_key_encoding: (
-            ChunkKeyEncoding
-            | tuple[Literal["default"], Literal[".", "/"]]
-            | tuple[Literal["v2"], Literal[".", "/"]]
-            | None
-        ) = None,
+        chunk_key_encoding: (ChunkKeyEncodingLike | None) = None,
         codecs: Iterable[Codec | dict[str, JSON]] | None = None,
         dimension_names: Iterable[str] | None = None,
         # v2 only
@@ -1854,12 +1851,7 @@ class Array:
         attributes: dict[str, JSON] | None = None,
         # v3 only
         chunk_shape: ChunkCoords | None = None,
-        chunk_key_encoding: (
-            ChunkKeyEncoding
-            | tuple[Literal["default"], Literal[".", "/"]]
-            | tuple[Literal["v2"], Literal[".", "/"]]
-            | None
-        ) = None,
+        chunk_key_encoding: ChunkKeyEncodingLike | None = None,
         codecs: Iterable[Codec | dict[str, JSON]] | None = None,
         dimension_names: Iterable[str] | None = None,
         # v2 only
@@ -3903,9 +3895,15 @@ async def init_array(
 
     dtype_parsed = parse_dtype(dtype, zarr_format=zarr_format)
     shape_parsed = parse_shapelike(shape)
-    chunk_key_encoding_parsed = _parse_chunk_key_encoding(
-        chunk_key_encoding, zarr_format=zarr_format
-    )
+
+    chunk_key_encoding_parsed: V2ChunkKeyEncoding | DefaultChunkKeyEncoding
+    if chunk_key_encoding is None:
+        if zarr_format == 2:
+            chunk_key_encoding_parsed = V2ChunkKeyEncoding(separator=DEFAULT_V3_SEPARATOR)
+        else:
+            chunk_key_encoding_parsed = DefaultChunkKeyEncoding(separator=DEFAULT_V3_SEPARATOR)
+    else:
+        chunk_key_encoding_parsed = parse_chunk_key_encoding(chunk_key_encoding)
 
     if overwrite:
         if store_path.store.supports_deletes:
@@ -4170,30 +4168,6 @@ async def create_array(
             data_parsed,
             prototype=default_buffer_prototype(),
         )
-    return result
-
-
-def _parse_chunk_key_encoding(
-    data: ChunkKeyEncodingLike | None, zarr_format: ZarrFormat
-) -> ChunkKeyEncoding:
-    """
-    Take an implicit specification of a chunk key encoding and parse it into a ChunkKeyEncoding object.
-    """
-    if data is None:
-        if zarr_format == 2:
-            result = ChunkKeyEncoding.from_dict({"name": "v2", "separator": "."})
-        else:
-            result = ChunkKeyEncoding.from_dict({"name": "default", "separator": "/"})
-    elif isinstance(data, ChunkKeyEncoding):
-        result = data
-    else:
-        result = ChunkKeyEncoding.from_dict(data)
-    if zarr_format == 2 and result.name != "v2":
-        msg = (
-            "Invalid chunk key encoding. For Zarr format 2 arrays, the `name` field of the "
-            f"chunk key encoding must be 'v2'. Got `name` = {result.name} instead."
-        )
-        raise ValueError(msg)
     return result
 
 

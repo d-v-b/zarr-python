@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar, Literal
 from warnings import warn
 
 import numpy as np
@@ -26,6 +26,8 @@ _vlen_bytes_codec = VLenBytes()
 
 @dataclass(frozen=True)
 class VLenUTF8Codec(ArrayBytesCodec):
+    name: ClassVar[Literal["vlen-utf8"]] = "vlen-utf8"
+
     def __init__(self) -> None:
         warn(
             "The codec `vlen-utf8` is currently not part in the Zarr format 3 specification. It "
@@ -34,17 +36,6 @@ class VLenUTF8Codec(ArrayBytesCodec):
             stacklevel=2,
         )
         super().__init__()
-
-    @classmethod
-    def from_dict(cls, data: dict[str, JSON]) -> Self:
-        _, configuration_parsed = parse_named_configuration(
-            data, "vlen-utf8", require_configuration=False
-        )
-        configuration_parsed = configuration_parsed or {}
-        return cls(**configuration_parsed)
-
-    def to_dict(self) -> dict[str, JSON]:
-        return {"name": "vlen-utf8", "configuration": {}}
 
     def evolve_from_array_spec(self, array_spec: ArraySpec) -> Self:
         return self

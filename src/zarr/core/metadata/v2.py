@@ -26,7 +26,7 @@ import numpy as np
 
 from zarr.core.array_spec import ArrayConfig, ArraySpec
 from zarr.core.chunk_grids import RegularChunkGrid
-from zarr.core.chunk_key_encodings import parse_separator
+from zarr.core.chunk_key_encodings import DEFAULT_V3_SEPARATOR, parse_separator
 from zarr.core.common import JSON, ZARRAY_JSON, ZATTRS_JSON, MemoryOrder, parse_shapelike
 from zarr.core.config import config, parse_indexing_order
 from zarr.core.metadata.common import parse_attributes
@@ -49,7 +49,7 @@ class ArrayV2Metadata(Metadata):
     fill_value: int | float | str | bytes | None = 0
     order: MemoryOrder = "C"
     filters: tuple[numcodecs.abc.Codec, ...] | None = None
-    dimension_separator: Literal[".", "/"] = "."
+    dimension_separator: Literal[".", "/"]
     compressor: numcodecs.abc.Codec | None = None
     attributes: dict[str, JSON] = field(default_factory=dict)
     zarr_format: Literal[2] = field(init=False, default=2)
@@ -62,7 +62,7 @@ class ArrayV2Metadata(Metadata):
         chunks: ChunkCoords,
         fill_value: Any,
         order: MemoryOrder,
-        dimension_separator: Literal[".", "/"] = ".",
+        dimension_separator: Literal[".", "/"] = DEFAULT_V3_SEPARATOR,
         compressor: numcodecs.abc.Codec | dict[str, JSON] | None = None,
         filters: Iterable[numcodecs.abc.Codec | dict[str, JSON]] | None = None,
         attributes: dict[str, JSON] | None = None,

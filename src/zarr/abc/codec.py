@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from abc import abstractmethod
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar
 
-from zarr.abc.metadata import Metadata
+from zarr.abc.metadata import NamedConfig
 from zarr.core.buffer import Buffer, NDBuffer
 from zarr.core.common import ChunkCoords, concurrent_map
 from zarr.core.config import config
@@ -35,7 +35,7 @@ CodecInput = TypeVar("CodecInput", bound=NDBuffer | Buffer)
 CodecOutput = TypeVar("CodecOutput", bound=NDBuffer | Buffer)
 
 
-class BaseCodec(Metadata, Generic[CodecInput, CodecOutput]):
+class BaseCodec(NamedConfig, Generic[CodecInput, CodecOutput]):
     """Generic base class for codecs.
 
     Codecs can be registered via zarr.codecs.registry.
@@ -46,7 +46,7 @@ class BaseCodec(Metadata, Generic[CodecInput, CodecOutput]):
     ArrayArrayCodec, ArrayBytesCodec or BytesBytesCodec for subclassing.
     """
 
-    is_fixed_size: bool
+    is_fixed_size: ClassVar[bool]
 
     @abstractmethod
     def compute_encoded_size(self, input_byte_length: int, chunk_spec: ArraySpec) -> int:

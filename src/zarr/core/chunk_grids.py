@@ -6,26 +6,24 @@ import numbers
 import operator
 import warnings
 from abc import abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import reduce
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, TypeAlias, TypedDict
 
 import numpy as np
 
-from zarr.abc.metadata import Metadata
+from zarr.abc.metadata import NamedConfig
 from zarr.core.common import (
-    JSON,
     ChunkCoords,
     ChunkCoordsLike,
     ShapeLike,
-    parse_named_configuration,
     parse_shapelike,
 )
 from zarr.core.indexing import ceildiv
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
-    from typing import Self
 
     from zarr.core.array import ShardsLike
 
@@ -147,18 +145,16 @@ def normalize_chunks(chunks: Any, shape: tuple[int, ...], typesize: int) -> tupl
     return tuple(int(c) for c in chunks)
 
 
-@dataclass(frozen=True)
-class ChunkGrid(Metadata):
-    @classmethod
-    def from_dict(cls, data: dict[str, JSON] | ChunkGrid) -> ChunkGrid:
-        if isinstance(data, ChunkGrid):
-            return data
+def parse_chunk_grid(data: ChunkGridLike) -> ChunkGrid:
+    if isinstance(data, ChunkGrid):
+        return data
+    if isinstance(data, Mapping):
+        return RegularChunkGrid.from_dict(data)
+    else:
+        return RegularChunkGrid(chunk_shape=data)
 
-        name_parsed, _ = parse_named_configuration(data)
-        if name_parsed == "regular":
-            return RegularChunkGrid._from_dict(data)
-        raise ValueError(f"Unknown chunk grid. Got {name_parsed}.")
 
+class ChunkGrid:
     @abstractmethod
     def all_chunk_coords(self, array_shape: ChunkCoords) -> Iterator[ChunkCoords]:
         pass
@@ -168,23 +164,23 @@ class ChunkGrid(Metadata):
         pass
 
 
-@dataclass(frozen=True)
-class RegularChunkGrid(ChunkGrid):
+class RegularChunkGridConfig(TypedDict):
+    chunk_shape: ChunkCoords
+
+
+class RegularChunkGridMetadata(TypedDict):
+    name: Literal["regular"]
+    configuration: RegularChunkGridConfig
+
+
+@dataclass(frozen=True, kw_only=True)
+class RegularChunkGrid(ChunkGrid, NamedConfig[RegularChunkGridMetadata], config_required=True):
+    name: ClassVar[Literal["regular"]] = "regular"
     chunk_shape: ChunkCoords
 
     def __init__(self, *, chunk_shape: ChunkCoordsLike) -> None:
         chunk_shape_parsed = parse_shapelike(chunk_shape)
-
         object.__setattr__(self, "chunk_shape", chunk_shape_parsed)
-
-    @classmethod
-    def _from_dict(cls, data: dict[str, JSON]) -> Self:
-        _, configuration_parsed = parse_named_configuration(data, "regular")
-
-        return cls(**configuration_parsed)  # type: ignore[arg-type]
-
-    def to_dict(self) -> dict[str, JSON]:
-        return {"name": "regular", "configuration": {"chunk_shape": tuple(self.chunk_shape)}}
 
     def all_chunk_coords(self, array_shape: ChunkCoords) -> Iterator[ChunkCoords]:
         return itertools.product(
@@ -197,6 +193,9 @@ class RegularChunkGrid(ChunkGrid):
             itertools.starmap(ceildiv, zip(array_shape, self.chunk_shape, strict=True)),
             1,
         )
+
+
+ChunkGridLike: TypeAlias = ChunkGrid | RegularChunkGridMetadata | ShapeLike
 
 
 def _auto_partition(

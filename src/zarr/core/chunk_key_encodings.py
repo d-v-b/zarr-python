@@ -1,20 +1,29 @@
 from __future__ import annotations
 
-from abc import abstractmethod
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, TypeAlias, TypedDict, cast
+from typing import (
+    TYPE_CHECKING,
+    ClassVar,
+    Literal,
+    TypeAlias,
+    TypedDict,
+    cast,
+)
 
 if TYPE_CHECKING:
     from typing import NotRequired
 
-from zarr.abc.metadata import Metadata
-from zarr.core.common import (
-    JSON,
-    ChunkCoords,
-    parse_named_configuration,
-)
+    from zarr.core.common import (
+        JSON,
+        ChunkCoords,
+    )
+
+from zarr.abc.metadata import NamedConfig
 
 SeparatorLiteral = Literal[".", "/"]
+DEFAULT_V3_SEPARATOR: SeparatorLiteral = "/"
+DEFAULT_V2_SEPARATOR: SeparatorLiteral = "."
 
 
 def parse_separator(data: JSON) -> SeparatorLiteral:
@@ -23,51 +32,21 @@ def parse_separator(data: JSON) -> SeparatorLiteral:
     return cast(SeparatorLiteral, data)
 
 
-class ChunkKeyEncodingParams(TypedDict):
-    name: Literal["v2", "default"]
-    separator: NotRequired[SeparatorLiteral]
+def parse_chunk_key_encoding(
+    data: ChunkKeyEncodingLike,
+) -> V2ChunkKeyEncoding | DefaultChunkKeyEncoding:
+    if isinstance(data, V2ChunkKeyEncoding | DefaultChunkKeyEncoding):
+        return data
+    name = data["name"]
+    if name == "default":
+        return DefaultChunkKeyEncoding.from_dict(data)  # type: ignore[arg-type]
+    elif name == "v2":
+        return V2ChunkKeyEncoding.from_dict(data)  # type: ignore[arg-type]
+    msg = f"Unknown chunk key encoding. Got {name}, expected one of ('v2', 'default')."  # type: ignore[unreachable]
+    raise ValueError(msg)
 
 
-@dataclass(frozen=True)
-class ChunkKeyEncoding(Metadata):
-    name: str
-    separator: SeparatorLiteral = "."
-
-    def __init__(self, *, separator: SeparatorLiteral) -> None:
-        separator_parsed = parse_separator(separator)
-
-        object.__setattr__(self, "separator", separator_parsed)
-
-    @classmethod
-    def from_dict(cls, data: dict[str, JSON] | ChunkKeyEncodingLike) -> ChunkKeyEncoding:
-        if isinstance(data, ChunkKeyEncoding):
-            return data
-
-        # handle ChunkKeyEncodingParams
-        if "name" in data and "separator" in data:
-            data = {"name": data["name"], "configuration": {"separator": data["separator"]}}
-
-        # TODO: remove this cast when we are statically typing the JSON metadata completely.
-        data = cast(dict[str, JSON], data)
-
-        # configuration is optional for chunk key encodings
-        name_parsed, config_parsed = parse_named_configuration(data, require_configuration=False)
-        if name_parsed == "default":
-            if config_parsed is None:
-                # for default, normalize missing configuration to use the "/" separator.
-                config_parsed = {"separator": "/"}
-            return DefaultChunkKeyEncoding(**config_parsed)  # type: ignore[arg-type]
-        if name_parsed == "v2":
-            if config_parsed is None:
-                # for v2, normalize missing configuration to use the "." separator.
-                config_parsed = {"separator": "."}
-            return V2ChunkKeyEncoding(**config_parsed)  # type: ignore[arg-type]
-        msg = f"Unknown chunk key encoding. Got {name_parsed}, expected one of ('v2', 'default')."
-        raise ValueError(msg)
-
-    def to_dict(self) -> dict[str, JSON]:
-        return {"name": self.name, "configuration": {"separator": self.separator}}
-
+class ChunkKeyEncoding(ABC):
     @abstractmethod
     def decode_chunk_key(self, chunk_key: str) -> ChunkCoords:
         pass
@@ -77,25 +56,56 @@ class ChunkKeyEncoding(Metadata):
         pass
 
 
-ChunkKeyEncodingLike: TypeAlias = ChunkKeyEncodingParams | ChunkKeyEncoding
+class DefaultChunkKeyEncodingConfig(TypedDict):
+    separator: SeparatorLiteral
 
 
-@dataclass(frozen=True)
-class DefaultChunkKeyEncoding(ChunkKeyEncoding):
-    name: Literal["default"] = "default"
+class DefaultChunkKeyEncodingMetadata(TypedDict):
+    name: Literal["default"]
+    configuration: NotRequired[DefaultChunkKeyEncodingConfig]
+
+
+@dataclass(frozen=True, kw_only=True)
+class DefaultChunkKeyEncoding(
+    ChunkKeyEncoding, NamedConfig[Literal["default"], DefaultChunkKeyEncodingMetadata]
+):
+    """
+    The default Zarr V3 chunk key encoding. Read the specification here:
+    https://zarr-specs.readthedocs.io/en/latest/v3/core/v3.0.html#chunk-key-encoding
+    """
+
+    name: ClassVar[Literal["default"]] = "default"
+    separator: SeparatorLiteral = "/"
 
     def decode_chunk_key(self, chunk_key: str) -> ChunkCoords:
         if chunk_key == "c":
             return ()
-        return tuple(map(int, chunk_key[1:].split(self.separator)))
+        # map c/0/0 or c.0.0 to (0, 0)
+        _, *rest = chunk_key.split(self.separator)
+        return tuple(map(int, rest))
 
     def encode_chunk_key(self, chunk_coords: ChunkCoords) -> str:
         return self.separator.join(map(str, ("c",) + chunk_coords))
 
 
-@dataclass(frozen=True)
-class V2ChunkKeyEncoding(ChunkKeyEncoding):
-    name: Literal["v2"] = "v2"
+class V2ChunkKeyEncodingConfig(TypedDict):
+    separator: SeparatorLiteral
+
+
+class V2ChunkKeyEncodingMetadata(TypedDict):
+    name: Literal["v2"]
+    configuration: NotRequired[V2ChunkKeyEncodingConfig]
+
+
+@dataclass(frozen=True, kw_only=True)
+class V2ChunkKeyEncoding(ChunkKeyEncoding, NamedConfig[V2ChunkKeyEncodingMetadata]):
+    """
+    A chunk key encoding for Zarr V2 compatibility. Read the specification here:
+    https://zarr-specs.readthedocs.io/en/latest/v3/core/v3.0.html#chunk-key-encoding
+    """
+
+    name: ClassVar[Literal["v2"]] = "v2"
+    separator: SeparatorLiteral = "."
 
     def decode_chunk_key(self, chunk_key: str) -> ChunkCoords:
         return tuple(map(int, chunk_key.split(self.separator)))
@@ -103,3 +113,11 @@ class V2ChunkKeyEncoding(ChunkKeyEncoding):
     def encode_chunk_key(self, chunk_coords: ChunkCoords) -> str:
         chunk_identifier = self.separator.join(map(str, chunk_coords))
         return "0" if chunk_identifier == "" else chunk_identifier
+
+
+ChunkKeyEncodingLike: TypeAlias = (
+    V2ChunkKeyEncodingMetadata
+    | DefaultChunkKeyEncodingMetadata
+    | V2ChunkKeyEncoding
+    | DefaultChunkKeyEncoding
+)

@@ -9,7 +9,12 @@ import pytest
 
 from zarr.codecs.bytes import BytesCodec
 from zarr.core.buffer import default_buffer_prototype
-from zarr.core.chunk_key_encodings import DefaultChunkKeyEncoding, V2ChunkKeyEncoding
+from zarr.core.chunk_key_encodings import (
+    DEFAULT_V2_SEPARATOR,
+    DEFAULT_V3_SEPARATOR,
+    DefaultChunkKeyEncoding,
+    V2ChunkKeyEncoding,
+)
 from zarr.core.config import config
 from zarr.core.group import GroupMetadata, parse_node_type
 from zarr.core.metadata.v3 import (
@@ -296,9 +301,9 @@ def test_metadata_to_dict(
 
     if dimension_separator is None:
         if chunk_key_encoding == "default":
-            expected_cke_dict = DefaultChunkKeyEncoding(separator="/").to_dict()
+            expected_cke_dict = DefaultChunkKeyEncoding(separator=DEFAULT_V3_SEPARATOR).to_dict()
         else:
-            expected_cke_dict = V2ChunkKeyEncoding(separator=".").to_dict()
+            expected_cke_dict = V2ChunkKeyEncoding(separator=DEFAULT_V2_SEPARATOR).to_dict()
         assert observed["chunk_key_encoding"] == expected_cke_dict
         observed.pop("chunk_key_encoding")
         expected.pop("chunk_key_encoding")

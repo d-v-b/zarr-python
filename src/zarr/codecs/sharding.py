@@ -5,7 +5,7 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 from functools import lru_cache
 from operator import itemgetter
-from typing import TYPE_CHECKING, Any, NamedTuple, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, NamedTuple, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -39,7 +39,6 @@ from zarr.core.common import (
     ChunkCoords,
     ChunkCoordsLike,
     parse_enum,
-    parse_named_configuration,
     parse_shapelike,
     product,
 )
@@ -331,6 +330,7 @@ class _MergingShardBuilder(ShardMutableMapping):
 class ShardingCodec(
     ArrayBytesCodec, ArrayBytesCodecPartialDecodeMixin, ArrayBytesCodecPartialEncodeMixin
 ):
+    name: ClassVar[Literal["sharding_indexed"]] = "sharding_indexed"
     chunk_shape: ChunkCoords
     codecs: tuple[Codec, ...]
     index_codecs: tuple[Codec, ...]
@@ -375,25 +375,9 @@ class ShardingCodec(
         object.__setattr__(self, "_get_index_chunk_spec", lru_cache()(self._get_index_chunk_spec))
         object.__setattr__(self, "_get_chunks_per_shard", lru_cache()(self._get_chunks_per_shard))
 
-    @classmethod
-    def from_dict(cls, data: dict[str, JSON]) -> Self:
-        _, configuration_parsed = parse_named_configuration(data, "sharding_indexed")
-        return cls(**configuration_parsed)  # type: ignore[arg-type]
-
     @property
     def codec_pipeline(self) -> CodecPipeline:
         return get_pipeline_class().from_codecs(self.codecs)
-
-    def to_dict(self) -> dict[str, JSON]:
-        return {
-            "name": "sharding_indexed",
-            "configuration": {
-                "chunk_shape": self.chunk_shape,
-                "codecs": tuple(s.to_dict() for s in self.codecs),
-                "index_codecs": tuple(s.to_dict() for s in self.index_codecs),
-                "index_location": self.index_location.value,
-            },
-        }
 
     def evolve_from_array_spec(self, array_spec: ArraySpec) -> Self:
         shard_spec = self._get_chunk_spec(array_spec)

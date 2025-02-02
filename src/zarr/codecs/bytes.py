@@ -3,13 +3,13 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar, Literal
 
 import numpy as np
 
 from zarr.abc.codec import ArrayBytesCodec
 from zarr.core.buffer import Buffer, NDArrayLike, NDBuffer
-from zarr.core.common import JSON, parse_enum, parse_named_configuration
+from zarr.core.common import JSON, parse_enum
 from zarr.registry import register_codec
 
 if TYPE_CHECKING:
@@ -32,8 +32,8 @@ default_system_endian = Endian(sys.byteorder)
 
 @dataclass(frozen=True)
 class BytesCodec(ArrayBytesCodec):
-    is_fixed_size = True
-
+    name: ClassVar[Literal["bytes"]] = "bytes"
+    is_fixed_size: ClassVar[bool] = True
     endian: Endian | None
 
     def __init__(self, *, endian: Endian | str | None = default_system_endian) -> None:
@@ -41,19 +41,11 @@ class BytesCodec(ArrayBytesCodec):
 
         object.__setattr__(self, "endian", endian_parsed)
 
-    @classmethod
-    def from_dict(cls, data: dict[str, JSON]) -> Self:
-        _, configuration_parsed = parse_named_configuration(
-            data, "bytes", require_configuration=False
-        )
-        configuration_parsed = configuration_parsed or {}
-        return cls(**configuration_parsed)  # type: ignore[arg-type]
-
     def to_dict(self) -> dict[str, JSON]:
+        out = super().to_dict()
         if self.endian is None:
-            return {"name": "bytes"}
-        else:
-            return {"name": "bytes", "configuration": {"endian": self.endian.value}}
+            out.pop("configuration")
+        return out
 
     def evolve_from_array_spec(self, array_spec: ArraySpec) -> Self:
         if array_spec.dtype.itemsize == 0:

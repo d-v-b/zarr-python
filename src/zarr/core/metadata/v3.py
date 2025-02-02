@@ -26,8 +26,12 @@ import numpy.typing as npt
 
 from zarr.abc.codec import ArrayArrayCodec, ArrayBytesCodec, BytesBytesCodec, Codec
 from zarr.core.array_spec import ArrayConfig, ArraySpec
-from zarr.core.chunk_grids import ChunkGrid, RegularChunkGrid
-from zarr.core.chunk_key_encodings import ChunkKeyEncoding, ChunkKeyEncodingLike
+from zarr.core.chunk_grids import ChunkGrid, RegularChunkGrid, parse_chunk_grid
+from zarr.core.chunk_key_encodings import (
+    ChunkKeyEncoding,
+    ChunkKeyEncodingLike,
+    parse_chunk_key_encoding,
+)
 from zarr.core.common import (
     JSON,
     ZARR_JSON,
@@ -228,8 +232,10 @@ class ArrayV3MetadataDict(TypedDict):
     """
     A typed dictionary model for zarr v3 metadata.
     """
-
+    shape: tuple[int, ...]
     zarr_format: Literal[3]
+    data_type: str
+    chunk_grid: str
     attributes: dict[str, JSON]
 
 
@@ -265,8 +271,8 @@ class ArrayV3Metadata(Metadata):
         """
         shape_parsed = parse_shapelike(shape)
         data_type_parsed = DataType.parse(data_type)
-        chunk_grid_parsed = ChunkGrid.from_dict(chunk_grid)
-        chunk_key_encoding_parsed = ChunkKeyEncoding.from_dict(chunk_key_encoding)
+        chunk_grid_parsed = parse_chunk_grid(chunk_grid)
+        chunk_key_encoding_parsed = parse_chunk_key_encoding(chunk_key_encoding)
         dimension_names_parsed = parse_dimension_names(dimension_names)
         if fill_value is None:
             fill_value = default_fill_value(data_type_parsed)

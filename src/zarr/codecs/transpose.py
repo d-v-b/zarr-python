@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, ClassVar, Literal, cast
 
 import numpy as np
 
 from zarr.abc.codec import ArrayArrayCodec
 from zarr.core.array_spec import ArraySpec
-from zarr.core.common import JSON, ChunkCoordsLike, parse_named_configuration
+from zarr.core.common import JSON, ChunkCoordsLike
 from zarr.registry import register_codec
 
 if TYPE_CHECKING:
@@ -28,7 +28,8 @@ def parse_transpose_order(data: JSON | Iterable[int]) -> tuple[int, ...]:
 
 @dataclass(frozen=True)
 class TransposeCodec(ArrayArrayCodec):
-    is_fixed_size = True
+    name: ClassVar[Literal["transpose"]] = "transpose"
+    is_fixed_size: ClassVar[Literal[True]] = True
 
     order: tuple[int, ...]
 
@@ -36,14 +37,6 @@ class TransposeCodec(ArrayArrayCodec):
         order_parsed = parse_transpose_order(order)
 
         object.__setattr__(self, "order", order_parsed)
-
-    @classmethod
-    def from_dict(cls, data: dict[str, JSON]) -> Self:
-        _, configuration_parsed = parse_named_configuration(data, "transpose")
-        return cls(**configuration_parsed)  # type: ignore[arg-type]
-
-    def to_dict(self) -> dict[str, JSON]:
-        return {"name": "transpose", "configuration": {"order": tuple(self.order)}}
 
     def validate(self, shape: tuple[int, ...], dtype: np.dtype[Any], chunk_grid: ChunkGrid) -> None:
         if len(self.order) != len(shape):

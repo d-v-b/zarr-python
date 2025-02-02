@@ -4,14 +4,14 @@ import asyncio
 from dataclasses import dataclass, replace
 from enum import Enum
 from functools import cached_property
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar, Literal
 
 import numcodecs
 from numcodecs.blosc import Blosc
 
 from zarr.abc.codec import BytesBytesCodec
 from zarr.core.buffer.cpu import as_numpy_array_wrapper
-from zarr.core.common import JSON, parse_enum, parse_named_configuration
+from zarr.core.common import JSON, parse_enum
 from zarr.registry import register_codec
 
 if TYPE_CHECKING:
@@ -85,7 +85,8 @@ def parse_blocksize(data: JSON) -> int:
 
 @dataclass(frozen=True)
 class BloscCodec(BytesBytesCodec):
-    is_fixed_size = False
+    name: ClassVar[Literal["blosc"]] = "blosc"
+    is_fixed_size: ClassVar[bool] = False
 
     typesize: int | None
     cname: BloscCname = BloscCname.zstd
@@ -114,26 +115,12 @@ class BloscCodec(BytesBytesCodec):
         object.__setattr__(self, "shuffle", shuffle_parsed)
         object.__setattr__(self, "blocksize", blocksize_parsed)
 
-    @classmethod
-    def from_dict(cls, data: dict[str, JSON]) -> Self:
-        _, configuration_parsed = parse_named_configuration(data, "blosc")
-        return cls(**configuration_parsed)  # type: ignore[arg-type]
-
     def to_dict(self) -> dict[str, JSON]:
         if self.typesize is None:
             raise ValueError("`typesize` needs to be set for serialization.")
         if self.shuffle is None:
             raise ValueError("`shuffle` needs to be set for serialization.")
-        return {
-            "name": "blosc",
-            "configuration": {
-                "typesize": self.typesize,
-                "cname": self.cname.value,
-                "clevel": self.clevel,
-                "shuffle": self.shuffle.value,
-                "blocksize": self.blocksize,
-            },
-        }
+        return super().to_dict()
 
     def evolve_from_array_spec(self, array_spec: ArraySpec) -> Self:
         dtype = array_spec.dtype
