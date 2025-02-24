@@ -262,18 +262,112 @@ class Complex128(ZarrDType):
     to_numpy = np.dtype("complex128")
 
 
-class TimeDelta(ZarrDType):
-    name = "numpy/timedelta64"
-    byte_count = 8
-    to_numpy = np.dtype("timedelta64")
-
-
 DateUnit = Literal["Y", "M", "W", "D"]
 TimeUnit = Literal["h", "m", "s", "ms", "us", "μs", "ns", "ps", "fs", "as"]
 
 
-class DateTime(ZarrDType):
+class DateTime64Y(ZarrDType):
     name = "numpy/datetime64"
     byte_count = 8
-    unit: DateUnit | TimeUnit
-    to_numpy = np.dtype("datetime64")
+    unit: Literal["Y"] = "Y"
+    to_numpy = np.dtype("datetime64[Y]")
+
+
+class DateTime64M(ZarrDType):
+    name = "numpy/datetime64"
+    byte_count = 8
+    unit: Literal["M"] = "M"
+    to_numpy = np.dtype("datetime64[M]")
+
+
+class DateTime64W(ZarrDType):
+    name = "numpy/datetime64"
+    byte_count = 8
+    unit: Literal["W"] = "W"
+    to_numpy = np.dtype("datetime64[W]")
+
+
+class DateTime64D(ZarrDType):
+    name = "numpy/datetime64"
+    byte_count = 8
+    unit: Literal["D"] = "D"
+    to_numpy = np.dtype("datetime64[D]")
+
+
+class DateTime64H(ZarrDType):
+    name = "numpy/datetime64"
+    byte_count = 8
+    unit: Literal["h"] = "h"
+    to_numpy = np.dtype("datetime64[h]")
+
+
+class DateTime64m(ZarrDType):
+    name = "numpy/datetime64"
+    byte_count = 8
+    unit: Literal["m"] = "m"
+    to_numpy = np.dtype("datetime64[m]")
+
+
+class DateTime64s(ZarrDType):
+    name = "numpy/datetime64"
+    byte_count = 8
+    unit: Literal["s"] = "s"
+    to_numpy = np.dtype("datetime64[s]")
+
+
+class DateTime64ms(ZarrDType):
+    name = "numpy/datetime64"
+    byte_count = 8
+    unit: Literal["ms"] = "ms"
+    to_numpy = np.dtype("datetime64[ms]")
+
+
+class DateTime64us(ZarrDType):
+    name = "numpy/datetime64"
+    byte_count = 8
+    unit: Literal["us"] = "us"
+    to_numpy = np.dtype("datetime64[us]")
+
+
+class DateTime64ns(ZarrDType):
+    name = "numpy/datetime64"
+    byte_count = 8
+    unit: Literal["ns"] = "ns"
+    to_numpy = np.dtype("datetime64[ns]")
+
+
+class DateTime64ps(ZarrDType):
+    name = "numpy/datetime64"
+    byte_count = 8
+    unit: Literal["ps"] = "ps"
+    to_numpy = np.dtype("datetime64[ps]")
+
+
+class DateTime64fs(ZarrDType):
+    name = "numpy/datetime64"
+    byte_count = 8
+    unit: Literal["fs"] = "fs"
+    to_numpy = np.dtype("datetime64[fs]")
+
+
+class DateTime64as(ZarrDType):
+    name = "numpy/datetime64"
+    byte_count = 8
+    unit: Literal["as"] = "as"
+    to_numpy = np.dtype("datetime64[as]")
+
+
+def get_fixed_length_bytestring_dtype(length: int) -> type[ZarrDType]:
+    return type(
+        f"Bytes{length}",
+        (ZarrDType,),
+        {"name": "numpy/bytes", "byte_count": length, "to_numpy": np.dtype(f"S{length}")},
+    )
+
+
+def get_fixed_length_void_dtype(length: int) -> type[ZarrDType]:
+    return type(
+        f"Bytes{length}",
+        (ZarrDType,),
+        {"name": "numpy/void", "byte_count": length, "to_numpy": np.dtype(f"V{length}")},
+    )
