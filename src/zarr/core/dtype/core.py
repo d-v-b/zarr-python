@@ -132,10 +132,9 @@ class Int4(ZarrDType):
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any, Literal
 
-if TYPE_CHECKING:
-    import numpy as np
+import numpy as np
 
 
 # perhaps over-complicating, but I don't want to allow the attributes to be patched
@@ -150,7 +149,6 @@ Endianness = Literal["big", "little"]
 
 class ZarrDType(metaclass=FrozenClassVariables):
     name: str
-    endianness: Endianness | None  # None indicates not defined i.e. single byte or byte strings
     byte_count: int | None  # None indicates variable count
     to_numpy: np.dtype[Any]  # may involve installing a a numpy extension e.g. ml_dtypes;
 
@@ -168,12 +166,6 @@ class ZarrDType(metaclass=FrozenClassVariables):
             if not hasattr(cls, attr):
                 raise ValueError(f"{attr} is a required attribute for a Zarr dtype.")
 
-        cls._zarr_spec_identifier = (
-            "big_" + cls.__qualname__.lower()
-            if cls.endianness == "big"
-            else cls.__qualname__.lower()
-        )  # how this dtype is identified in core spec; convention is prefix with big_ for big-endian
-
         cls._validate()  # sanity check on basic requirements
 
         super().__init_subclass__(**kwargs)
@@ -184,5 +176,104 @@ class ZarrDType(metaclass=FrozenClassVariables):
         if cls.byte_count is not None and cls.byte_count <= 0:
             raise ValueError("byte_count must be a positive integer.")
 
-        if cls.byte_count == 1 and cls.endianness is not None:
-            raise ValueError("Endianness must be None for single-byte types.")
+
+# create numpy dtypes
+class Bool(ZarrDType):
+    name = "bool"
+    byte_count = 1
+    to_numpy = np.dtype("bool_")
+
+
+class Int8(ZarrDType):
+    name = "int8"
+    byte_count = 1
+    to_numpy = np.dtype("int8")
+
+
+class Uint8(ZarrDType):
+    name = "uint8"
+    byte_count = 1
+    to_numpy = np.dtype("uint8")
+
+
+class Int16(ZarrDType):
+    name = "int16"
+    byte_count = 2
+    to_numpy = np.dtype("int16")
+
+
+class Uint16(ZarrDType):
+    name = "uint16"
+    byte_count = 2
+    to_numpy = np.dtype("uint16")
+
+
+class Int32(ZarrDType):
+    name = "int32"
+    byte_count = 4
+    to_numpy = np.dtype("int32")
+
+
+class Uint32(ZarrDType):
+    name = "uint32"
+    byte_count = 4
+    to_numpy = np.dtype("uint32")
+
+
+class Int64(ZarrDType):
+    name = "int64"
+    byte_count = 8
+    to_numpy = np.dtype("int64")
+
+
+class Uint64(ZarrDType):
+    name = "uint64"
+    byte_count = 8
+    to_numpy = np.dtype("uint64")
+
+
+class Float16(ZarrDType):
+    name = "float16"
+    byte_count = 2
+    to_numpy = np.dtype("float16")
+
+
+class Float32(ZarrDType):
+    name = "float32"
+    byte_count = 4
+    to_numpy = np.dtype("float32")
+
+
+class Float64(ZarrDType):
+    name = "float64"
+    byte_count = 8
+    to_numpy = np.dtype("float64")
+
+
+class Complex64(ZarrDType):
+    name = "complex64"
+    byte_count = 8
+    to_numpy = np.dtype("complex64")
+
+
+class Complex128(ZarrDType):
+    name = "complex128"
+    byte_count = 16
+    to_numpy = np.dtype("complex128")
+
+
+class TimeDelta(ZarrDType):
+    name = "numpy/timedelta64"
+    byte_count = 8
+    to_numpy = np.dtype("timedelta64")
+
+
+DateUnit = Literal["Y", "M", "W", "D"]
+TimeUnit = Literal["h", "m", "s", "ms", "us", "μs", "ns", "ps", "fs", "as"]
+
+
+class DateTime(ZarrDType):
+    name = "numpy/datetime64"
+    byte_count = 8
+    unit: DateUnit | TimeUnit
+    to_numpy = np.dtype("datetime64")
