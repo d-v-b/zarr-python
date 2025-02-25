@@ -359,7 +359,7 @@ class DateTime64as(ZarrDType):
 
 def get_fixed_length_bytestring_dtype(length: int) -> type[ZarrDType]:
     return type(
-        f"Bytes{length}",
+        f"FixedLengthString{length}",
         (ZarrDType,),
         {"name": "numpy/bytes", "byte_count": length, "to_numpy": np.dtype(f"S{length}")},
     )
@@ -367,7 +367,7 @@ def get_fixed_length_bytestring_dtype(length: int) -> type[ZarrDType]:
 
 def get_fixed_length_void_dtype(length: int) -> type[ZarrDType]:
     return type(
-        f"Bytes{length}",
+        f"Void{length}",
         (ZarrDType,),
         {"name": "numpy/void", "byte_count": length, "to_numpy": np.dtype(f"V{length}")},
     )
