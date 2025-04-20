@@ -1,0 +1,1 @@
+Adjusted docstring of ``Group.create_hierarchy`` to clarify that the function is lazy.
