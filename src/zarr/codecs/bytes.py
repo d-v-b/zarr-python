@@ -10,6 +10,7 @@ import numpy as np
 from zarr.abc.codec import ArrayBytesCodec
 from zarr.core.buffer import Buffer, NDArrayLike, NDBuffer
 from zarr.core.common import JSON, parse_enum, parse_named_configuration
+from zarr.core.dtype.common import HasEndianness
 from zarr.core.dtype.npy.common import endianness_to_numpy_str
 from zarr.registry import register_codec
 
@@ -58,10 +59,7 @@ class BytesCodec(ArrayBytesCodec):
             return {"name": "bytes", "configuration": {"endian": self.endian.value}}
 
     def evolve_from_array_spec(self, array_spec: ArraySpec) -> Self:
-        # Note: this check is numpy-dtype-specific
-        # For single-byte (e.g., uint8) or 0-byte (e.g., S0) dtypes,
-        # endianness does not apply.
-        if array_spec.dtype.to_dtype().itemsize < 2:
+        if not isinstance(array_spec.dtype, HasEndianness):
             if self.endian is not None:
                 return replace(self, endian=None)
         elif self.endian is None:
@@ -81,7 +79,7 @@ class BytesCodec(ArrayBytesCodec):
             "Endianness | None", self.endian.value if self.endian is not None else None
         )
         new_byte_order = endianness_to_numpy_str(endian_str)
-        dtype = chunk_spec.dtype.to_dtype().newbyteorder(new_byte_order)
+        dtype = chunk_spec.dtype.to_native_dtype().newbyteorder(new_byte_order)
 
         as_array_like = chunk_bytes.as_array_like()
         if isinstance(as_array_like, NDArrayLike):

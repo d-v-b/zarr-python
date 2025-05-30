@@ -10,7 +10,9 @@ from itertools import starmap
 from typing import (
     TYPE_CHECKING,
     Any,
+    Generic,
     Literal,
+    TypedDict,
     TypeVar,
     cast,
     overload,
@@ -38,6 +40,14 @@ JSON = str | int | float | Mapping[str, "JSON"] | Sequence["JSON"] | None
 MemoryOrder = Literal["C", "F"]
 AccessModeLiteral = Literal["r", "r+", "a", "w", "w-"]
 DimensionNames = Iterable[str | None] | None
+
+TName = TypeVar("TName", bound=str)
+TConfig = TypeVar("TConfig", bound=Mapping[str, object])
+
+
+class NamedConfig(TypedDict, Generic[TName, TConfig]):
+    name: TName
+    configuration: TConfig
 
 
 def product(tup: ChunkCoords) -> int:
@@ -155,7 +165,7 @@ def parse_fill_value(data: Any) -> Any:
 
 def parse_order(data: Any) -> Literal["C", "F"]:
     if data in ("C", "F"):
-        return cast(Literal["C", "F"], data)
+        return cast("Literal['C', 'F']", data)
     raise ValueError(f"Expected one of ('C', 'F'), got {data} instead.")
 
 
@@ -189,4 +199,4 @@ def _warn_order_kwarg() -> None:
 
 def _default_zarr_format() -> ZarrFormat:
     """Return the default zarr_version"""
-    return cast(ZarrFormat, int(zarr_config.get("default_zarr_format", 3)))
+    return cast("ZarrFormat", int(zarr_config.get("default_zarr_format", 3)))

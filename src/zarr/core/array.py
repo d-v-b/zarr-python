@@ -5,7 +5,6 @@ import warnings
 from asyncio import gather
 from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
-from functools import cached_property
 from itertools import starmap
 from logging import getLogger
 from typing import (
@@ -32,7 +31,7 @@ from zarr.abc.store import Store, set_or_delete
 from zarr.codecs._v2 import V2Codec
 from zarr.codecs.bytes import BytesCodec
 from zarr.core._info import ArrayInfo
-from zarr.core.array_spec import ArrayConfig, ArrayConfigLike, ArraySpec, parse_array_config
+from zarr.core.array_spec import ArrayConfig, ArrayConfigLike, parse_array_config
 from zarr.core.attributes import Attributes
 from zarr.core.buffer import (
     BufferPrototype,
@@ -42,7 +41,7 @@ from zarr.core.buffer import (
     default_buffer_prototype,
 )
 from zarr.core.buffer.cpu import buffer_prototype as cpu_buffer_prototype
-from zarr.core.chunk_grids import ChunkGrid, RegularChunkGrid, _auto_partition, normalize_chunks
+from zarr.core.chunk_grids import RegularChunkGrid, _auto_partition, normalize_chunks
 from zarr.core.chunk_key_encodings import (
     ChunkKeyEncoding,
     ChunkKeyEncodingLike,
@@ -73,6 +72,7 @@ from zarr.core.dtype import (
     ZDTypeLike,
     parse_data_type,
 )
+from zarr.core.dtype.common import HasEndianness, HasItemSize
 from zarr.core.indexing import (
     BasicIndexer,
     BasicSelection,
@@ -587,11 +587,13 @@ class AsyncArray(Generic[T_ArrayMetadata]):
 
         if chunks is not None and chunk_shape is not None:
             raise ValueError("Only one of chunk_shape or chunks can be provided.")
-
+        item_size = 1
+        if isinstance(dtype_parsed, HasItemSize):
+            item_size = dtype_parsed.item_size
         if chunks:
-            _chunks = normalize_chunks(chunks, shape, dtype_parsed.to_dtype().itemsize)
+            _chunks = normalize_chunks(chunks, shape, item_size)
         else:
-            _chunks = normalize_chunks(chunk_shape, shape, dtype_parsed.to_dtype().itemsize)
+            _chunks = normalize_chunks(chunk_shape, shape, item_size)
         config_parsed = parse_array_config(config)
 
         result: AsyncArray[ArrayV3Metadata] | AsyncArray[ArrayV2Metadata]
@@ -698,7 +700,7 @@ class AsyncArray(Generic[T_ArrayMetadata]):
 
         if fill_value is None:
             # v3 spec will not allow a null fill value
-            fill_value_parsed = dtype.default_value()
+            fill_value_parsed = dtype.default_scalar()
         else:
             fill_value_parsed = fill_value
 
@@ -779,7 +781,8 @@ class AsyncArray(Generic[T_ArrayMetadata]):
     ) -> ArrayV2Metadata:
         if dimension_separator is None:
             dimension_separator = "."
-
+        if fill_value is None:
+            fill_value = dtype.default_scalar()  # type: ignore[assignment]
         return ArrayV2Metadata(
             shape=shape,
             dtype=dtype,
@@ -907,7 +910,7 @@ class AsyncArray(Generic[T_ArrayMetadata]):
         store_path = await make_store_path(store)
         metadata_dict = await get_array_metadata(store_path, zarr_format=zarr_format)
         # TODO: remove this cast when we have better type hints
-        _metadata_dict = cast(ArrayV3MetadataDict, metadata_dict)
+        _metadata_dict = cast("ArrayV3MetadataDict", metadata_dict)
         return cls(store_path=store_path, metadata=_metadata_dict)
 
     @property
@@ -950,13 +953,6 @@ class AsyncArray(Generic[T_ArrayMetadata]):
             The chunk shape of the Array.
         """
         return self.metadata.chunks
-
-    @cached_property
-    def chunk_grid(self) -> ChunkGrid:
-        if self.metadata.zarr_format == 2:
-            return RegularChunkGrid(chunk_shape=self.chunks)
-        else:
-            return self.metadata.chunk_grid
 
     @property
     def shards(self) -> ChunkCoords | None:
@@ -1060,7 +1056,7 @@ class AsyncArray(Generic[T_ArrayMetadata]):
         np.dtype
             Data type of the array
         """
-        return self._zdtype.to_dtype()
+        return self._zdtype.to_native_dtype()
 
     @property
     def order(self) -> MemoryOrder:
@@ -1281,20 +1277,6 @@ class AsyncArray(Generic[T_ArrayMetadata]):
         """
         return self.size * self.dtype.itemsize
 
-    def get_chunk_spec(
-        self, _chunk_coords: ChunkCoords, array_config: ArrayConfig, prototype: BufferPrototype
-    ) -> ArraySpec:
-        assert isinstance(self.chunk_grid, RegularChunkGrid), (
-            "Currently, only regular chunk grid is supported"
-        )
-        return ArraySpec(
-            shape=self.chunk_grid.chunk_shape,
-            dtype=self._zdtype,
-            fill_value=self.metadata.fill_value,
-            config=array_config,
-            prototype=prototype,
-        )
-
     async def _get_selection(
         self,
         indexer: Indexer,
@@ -1334,7 +1316,7 @@ class AsyncArray(Generic[T_ArrayMetadata]):
                 [
                     (
                         self.store_path / self.metadata.encode_chunk_key(chunk_coords),
-                        self.get_chunk_spec(chunk_coords, _config, prototype=prototype),
+                        self.metadata.get_chunk_spec(chunk_coords, _config, prototype=prototype),
                         chunk_selection,
                         out_selection,
                         is_complete_chunk,
@@ -1389,7 +1371,7 @@ class AsyncArray(Generic[T_ArrayMetadata]):
         indexer = BasicIndexer(
             selection,
             shape=self.metadata.shape,
-            chunk_grid=self.chunk_grid,
+            chunk_grid=self.metadata.chunk_grid,
         )
         return await self._get_selection(indexer, prototype=prototype)
 
@@ -1434,7 +1416,7 @@ class AsyncArray(Generic[T_ArrayMetadata]):
             if isinstance(array_like, np._typing._SupportsArrayFunc):
                 # TODO: need to handle array types that don't support __array_function__
                 # like PyTorch and JAX
-                array_like_ = cast(np._typing._SupportsArrayFunc, array_like)
+                array_like_ = cast("np._typing._SupportsArrayFunc", array_like)
             value = np.asanyarray(value, dtype=self.dtype, like=array_like_)
         else:
             if not hasattr(value, "shape"):
@@ -1448,7 +1430,8 @@ class AsyncArray(Generic[T_ArrayMetadata]):
                     value = value.astype(dtype=self.dtype, order="A")
                 else:
                     value = np.array(value, dtype=self.dtype, order="A")
-        value = cast(NDArrayLike, value)
+        value = cast("NDArrayLike", value)
+
         # We accept any ndarray like object from the user and convert it
         # to a NDBuffer (or subclass). From this point onwards, we only pass
         # Buffer and NDBuffer between components.
@@ -1464,7 +1447,7 @@ class AsyncArray(Generic[T_ArrayMetadata]):
             [
                 (
                     self.store_path / self.metadata.encode_chunk_key(chunk_coords),
-                    self.get_chunk_spec(chunk_coords, _config, prototype),
+                    self.metadata.get_chunk_spec(chunk_coords, _config, prototype),
                     chunk_selection,
                     out_selection,
                     is_complete_chunk,
@@ -1519,7 +1502,7 @@ class AsyncArray(Generic[T_ArrayMetadata]):
         indexer = BasicIndexer(
             selection,
             shape=self.metadata.shape,
-            chunk_grid=self.chunk_grid,
+            chunk_grid=self.metadata.chunk_grid,
         )
         return await self._set_selection(indexer, value, prototype=prototype)
 
@@ -1556,8 +1539,8 @@ class AsyncArray(Generic[T_ArrayMetadata]):
 
         if delete_outside_chunks:
             # Remove all chunks outside of the new shape
-            old_chunk_coords = set(self.chunk_grid.all_chunk_coords(self.metadata.shape))
-            new_chunk_coords = set(self.chunk_grid.all_chunk_coords(new_shape))
+            old_chunk_coords = set(self.metadata.chunk_grid.all_chunk_coords(self.metadata.shape))
+            new_chunk_coords = set(self.metadata.chunk_grid.all_chunk_coords(new_shape))
 
             async def _delete_key(key: str) -> None:
                 await (self.store_path / key).delete()
@@ -1731,6 +1714,7 @@ class AsyncArray(Generic[T_ArrayMetadata]):
         return ArrayInfo(
             _zarr_format=self.metadata.zarr_format,
             _data_type=self._zdtype,
+            _fill_value=self.metadata.fill_value,
             _shape=self.shape,
             _order=self.order,
             _shard_shape=self.shards,
@@ -2465,11 +2449,11 @@ class Array:
         """
         fields, pure_selection = pop_fields(selection)
         if is_pure_fancy_indexing(pure_selection, self.ndim):
-            return self.vindex[cast(CoordinateSelection | MaskSelection, selection)]
+            return self.vindex[cast("CoordinateSelection | MaskSelection", selection)]
         elif is_pure_orthogonal_indexing(pure_selection, self.ndim):
             return self.get_orthogonal_selection(pure_selection, fields=fields)
         else:
-            return self.get_basic_selection(cast(BasicSelection, pure_selection), fields=fields)
+            return self.get_basic_selection(cast("BasicSelection", pure_selection), fields=fields)
 
     def __setitem__(self, selection: Selection, value: npt.ArrayLike) -> None:
         """Modify data for an item or region of the array.
@@ -2564,11 +2548,11 @@ class Array:
         """
         fields, pure_selection = pop_fields(selection)
         if is_pure_fancy_indexing(pure_selection, self.ndim):
-            self.vindex[cast(CoordinateSelection | MaskSelection, selection)] = value
+            self.vindex[cast("CoordinateSelection | MaskSelection", selection)] = value
         elif is_pure_orthogonal_indexing(pure_selection, self.ndim):
             self.set_orthogonal_selection(pure_selection, value, fields=fields)
         else:
-            self.set_basic_selection(cast(BasicSelection, pure_selection), value, fields=fields)
+            self.set_basic_selection(cast("BasicSelection", pure_selection), value, fields=fields)
 
     @_deprecate_positional_args
     def get_basic_selection(
@@ -2687,7 +2671,7 @@ class Array:
             prototype = default_buffer_prototype()
         return sync(
             self._async_array._get_selection(
-                BasicIndexer(selection, self.shape, self._async_array.chunk_grid),
+                BasicIndexer(selection, self.shape, self.metadata.chunk_grid),
                 out=out,
                 fields=fields,
                 prototype=prototype,
@@ -2787,7 +2771,7 @@ class Array:
         """
         if prototype is None:
             prototype = default_buffer_prototype()
-        indexer = BasicIndexer(selection, self.shape, self._async_array.chunk_grid)
+        indexer = BasicIndexer(selection, self.shape, self.metadata.chunk_grid)
         sync(self._async_array._set_selection(indexer, value, fields=fields, prototype=prototype))
 
     @_deprecate_positional_args
@@ -2908,7 +2892,7 @@ class Array:
         """
         if prototype is None:
             prototype = default_buffer_prototype()
-        indexer = OrthogonalIndexer(selection, self.shape, self._async_array.chunk_grid)
+        indexer = OrthogonalIndexer(selection, self.shape, self.metadata.chunk_grid)
         return sync(
             self._async_array._get_selection(
                 indexer=indexer, out=out, fields=fields, prototype=prototype
@@ -3021,7 +3005,7 @@ class Array:
         """
         if prototype is None:
             prototype = default_buffer_prototype()
-        indexer = OrthogonalIndexer(selection, self.shape, self._async_array.chunk_grid)
+        indexer = OrthogonalIndexer(selection, self.shape, self.metadata.chunk_grid)
         return sync(
             self._async_array._set_selection(indexer, value, fields=fields, prototype=prototype)
         )
@@ -3102,7 +3086,7 @@ class Array:
 
         if prototype is None:
             prototype = default_buffer_prototype()
-        indexer = MaskIndexer(mask, self.shape, self._async_array.chunk_grid)
+        indexer = MaskIndexer(mask, self.shape, self.metadata.chunk_grid)
         return sync(
             self._async_array._get_selection(
                 indexer=indexer, out=out, fields=fields, prototype=prototype
@@ -3185,7 +3169,7 @@ class Array:
         """
         if prototype is None:
             prototype = default_buffer_prototype()
-        indexer = MaskIndexer(mask, self.shape, self._async_array.chunk_grid)
+        indexer = MaskIndexer(mask, self.shape, self.metadata.chunk_grid)
         sync(self._async_array._set_selection(indexer, value, fields=fields, prototype=prototype))
 
     @_deprecate_positional_args
@@ -3266,7 +3250,7 @@ class Array:
         """
         if prototype is None:
             prototype = default_buffer_prototype()
-        indexer = CoordinateIndexer(selection, self.shape, self._async_array.chunk_grid)
+        indexer = CoordinateIndexer(selection, self.shape, self.metadata.chunk_grid)
         out_array = sync(
             self._async_array._get_selection(
                 indexer=indexer, out=out, fields=fields, prototype=prototype
@@ -3352,7 +3336,7 @@ class Array:
         if prototype is None:
             prototype = default_buffer_prototype()
         # setup indexer
-        indexer = CoordinateIndexer(selection, self.shape, self._async_array.chunk_grid)
+        indexer = CoordinateIndexer(selection, self.shape, self.metadata.chunk_grid)
 
         # handle value - need ndarray-like flatten value
         if not is_scalar(value, self.dtype):
@@ -3468,7 +3452,7 @@ class Array:
         """
         if prototype is None:
             prototype = default_buffer_prototype()
-        indexer = BlockIndexer(selection, self.shape, self._async_array.chunk_grid)
+        indexer = BlockIndexer(selection, self.shape, self.metadata.chunk_grid)
         return sync(
             self._async_array._get_selection(
                 indexer=indexer, out=out, fields=fields, prototype=prototype
@@ -3562,7 +3546,7 @@ class Array:
         """
         if prototype is None:
             prototype = default_buffer_prototype()
-        indexer = BlockIndexer(selection, self.shape, self._async_array.chunk_grid)
+        indexer = BlockIndexer(selection, self.shape, self.metadata.chunk_grid)
         sync(self._async_array._set_selection(indexer, value, fields=fields, prototype=prototype))
 
     @property
@@ -3686,7 +3670,7 @@ class Array:
         # TODO: remove this cast when type inference improves
         new_array = sync(self._async_array.update_attributes(new_attributes))
         # TODO: remove this cast when type inference improves
-        _new_array = cast(AsyncArray[ArrayV2Metadata] | AsyncArray[ArrayV3Metadata], new_array)
+        _new_array = cast("AsyncArray[ArrayV2Metadata] | AsyncArray[ArrayV3Metadata]", new_array)
         return type(self)(_new_array)
 
     def __repr__(self) -> str:
@@ -4215,7 +4199,7 @@ async def init_array(
 
     from zarr.codecs.sharding import ShardingCodec, ShardingCodecIndexLocation
 
-    dtype_wrapped = parse_data_type(dtype, zarr_format=zarr_format)
+    zdtype = parse_data_type(dtype, zarr_format=zarr_format)
     shape_parsed = parse_shapelike(shape)
     chunk_key_encoding_parsed = _parse_chunk_key_encoding(
         chunk_key_encoding, zarr_format=zarr_format
@@ -4229,11 +4213,15 @@ async def init_array(
     else:
         await ensure_no_existing_node(store_path, zarr_format=zarr_format)
 
+    item_size = 1
+    if isinstance(zdtype, HasItemSize):
+        item_size = zdtype.item_size
+
     shard_shape_parsed, chunk_shape_parsed = _auto_partition(
         array_shape=shape_parsed,
         shard_shape=shards,
         chunk_shape=chunks,
-        item_size=dtype_wrapped.to_dtype().itemsize,
+        item_size=item_size,
     )
     chunks_out: tuple[int, ...]
     meta: ArrayV2Metadata | ArrayV3Metadata
@@ -4249,7 +4237,7 @@ async def init_array(
             raise ValueError("Zarr format 2 arrays do not support `serializer`.")
 
         filters_parsed, compressor_parsed = _parse_chunk_encoding_v2(
-            compressor=compressors, filters=filters, dtype=dtype_wrapped
+            compressor=compressors, filters=filters, dtype=zdtype
         )
         if dimension_names is not None:
             raise ValueError("Zarr format 2 arrays do not support dimension names.")
@@ -4260,7 +4248,7 @@ async def init_array(
 
         meta = AsyncArray._create_metadata_v2(
             shape=shape_parsed,
-            dtype=dtype_wrapped,
+            dtype=zdtype,
             chunks=chunk_shape_parsed,
             dimension_separator=chunk_key_encoding_parsed.separator,
             fill_value=fill_value,
@@ -4274,9 +4262,9 @@ async def init_array(
             compressors=compressors,
             filters=filters,
             serializer=serializer,
-            dtype=dtype_wrapped,
+            dtype=zdtype,
         )
-        sub_codecs = cast(tuple[Codec, ...], (*array_array, array_bytes, *bytes_bytes))
+        sub_codecs = cast("tuple[Codec, ...]", (*array_array, array_bytes, *bytes_bytes))
         codecs_out: tuple[Codec, ...]
         if shard_shape_parsed is not None:
             index_location = None
@@ -4289,7 +4277,7 @@ async def init_array(
             )
             sharding_codec.validate(
                 shape=chunk_shape_parsed,
-                dtype=dtype_wrapped,
+                dtype=zdtype,
                 chunk_grid=RegularChunkGrid(chunk_shape=shard_shape_parsed),
             )
             codecs_out = (sharding_codec,)
@@ -4305,7 +4293,7 @@ async def init_array(
 
         meta = AsyncArray._create_metadata_v3(
             shape=shape_parsed,
-            dtype=dtype_wrapped,
+            dtype=zdtype,
             fill_value=fill_value,
             chunk_shape=chunks_out,
             chunk_key_encoding=chunk_key_encoding_parsed,
@@ -4547,7 +4535,7 @@ def _parse_keep_array_attr(
                 compressors = "auto"
         if serializer == "keep":
             if zarr_format == 3 and data.metadata.zarr_format == 3:
-                serializer = cast(SerializerLike, data.serializer)
+                serializer = cast("SerializerLike", data.serializer)
             else:
                 serializer = "auto"
         if fill_value is None:
@@ -4713,7 +4701,7 @@ def _parse_chunk_encoding_v3(
         if isinstance(filters, dict | Codec):
             maybe_array_array = (filters,)
         else:
-            maybe_array_array = cast(Iterable[Codec | dict[str, JSON]], filters)
+            maybe_array_array = cast("Iterable[Codec | dict[str, JSON]]", filters)
         out_array_array = tuple(_parse_array_array_codec(c) for c in maybe_array_array)
 
     if serializer == "auto":
@@ -4733,7 +4721,7 @@ def _parse_chunk_encoding_v3(
         if isinstance(compressors, dict | Codec):
             maybe_bytes_bytes = (compressors,)
         else:
-            maybe_bytes_bytes = cast(Iterable[Codec | dict[str, JSON]], compressors)
+            maybe_bytes_bytes = cast("Iterable[Codec | dict[str, JSON]]", compressors)
 
         out_bytes_bytes = tuple(_parse_bytes_bytes_codec(c) for c in maybe_bytes_bytes)
 
@@ -4745,7 +4733,7 @@ def _parse_chunk_encoding_v3(
     # TODO: ensure that the serializer is compatible with the ndarray produced by the
     # array-array codecs. For example, if a sequence of array-array codecs produces an
     # array with a single-byte data type, then the serializer should not specify endiannesss.
-    if isinstance(out_array_bytes, BytesCodec) and dtype.to_dtype().itemsize == 1:
+    if isinstance(out_array_bytes, BytesCodec) and not isinstance(dtype, HasEndianness):
         # The default endianness in the bytescodec might not be None, so we need to replace it
         out_array_bytes = replace(out_array_bytes, endian=None)
     return out_array_array, out_array_bytes, out_bytes_bytes

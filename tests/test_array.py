@@ -18,6 +18,7 @@ from packaging.version import Version
 
 import zarr.api.asynchronous
 import zarr.api.synchronous as sync_api
+from tests.conftest import skip_object_dtype
 from zarr import Array, AsyncArray, Group
 from zarr.abc.store import Store
 from zarr.codecs import (
@@ -43,8 +44,8 @@ from zarr.core.common import JSON, MemoryOrder, ZarrFormat
 from zarr.core.dtype import get_data_type_from_native_dtype
 from zarr.core.dtype.common import Endianness
 from zarr.core.dtype.npy.common import endianness_from_numpy_str
-from zarr.core.dtype.npy.float import Float64
-from zarr.core.dtype.npy.int import Int16
+from zarr.core.dtype.npy.float import Float32, Float64
+from zarr.core.dtype.npy.int import Int16, UInt8
 from zarr.core.dtype.npy.sized import (
     Structured,
 )
@@ -162,7 +163,7 @@ def test_array_name_properties_no_group(
     store: LocalStore | MemoryStore, zarr_format: ZarrFormat
 ) -> None:
     arr = zarr.create_array(
-        store=store, shape=(100,), chunks=(10,), zarr_format=zarr_format, dtype="i4"
+        store=store, shape=(100,), chunks=(10,), zarr_format=zarr_format, dtype=">i4"
     )
     assert arr.path == ""
     assert arr.name == "/"
@@ -188,6 +189,7 @@ def test_array_name_properties_with_group(
     assert spam.basename == "spam"
 
 
+@pytest.mark.filterwarnings("ignore::zarr.core.dtype.common.UnstableSpecificationWarning")
 @pytest.mark.parametrize("store", ["memory"], indirect=True)
 @pytest.mark.parametrize("specifiy_fill_value", [True, False])
 @pytest.mark.parametrize(
@@ -198,7 +200,7 @@ def test_array_fill_value_default(
 ) -> None:
     """
     Test that creating an array with the fill_value parameter set to None, or unspecified,
-    results in the expected fill_value attribute of the array, i.e. 0 cast to the array's dtype.
+    results in the expected fill_value attribute of the array, i.e. the default value of the dtype
     """
     shape = (10,)
     if specifiy_fill_value:
@@ -212,7 +214,7 @@ def test_array_fill_value_default(
         )
     else:
         arr = zarr.create_array(store=store, shape=shape, dtype=zdtype, zarr_format=3, chunks=shape)
-    expected_fill_value = zdtype.default_value()
+    expected_fill_value = zdtype.default_scalar()
     if isinstance(expected_fill_value, np.datetime64 | np.timedelta64):
         if np.isnat(expected_fill_value):
             assert np.isnat(arr.fill_value)
@@ -368,7 +370,7 @@ def test_storage_transformers(store: MemoryStore, zarr_format: ZarrFormat | str)
             "zarr_format": zarr_format,
             "shape": (10,),
             "chunks": (1,),
-            "dtype": "uint8",
+            "dtype": "|u1",
             "dimension_separator": ".",
             "codecs": (BytesCodec().to_dict(),),
             "fill_value": 0,
@@ -500,6 +502,7 @@ class TestInfo:
         expected = ArrayInfo(
             _zarr_format=2,
             _data_type=arr._async_array._zdtype,
+            _fill_value=arr.fill_value,
             _shape=(8, 8),
             _chunk_shape=chunks,
             _shard_shape=None,
@@ -517,6 +520,7 @@ class TestInfo:
         expected = ArrayInfo(
             _zarr_format=3,
             _data_type=arr._async_array._zdtype,
+            _fill_value=arr.fill_value,
             _shape=(8, 8),
             _chunk_shape=chunks,
             _shard_shape=shards,
@@ -542,6 +546,7 @@ class TestInfo:
         expected = ArrayInfo(
             _zarr_format=3,
             _data_type=arr._async_array._zdtype,
+            _fill_value=arr.fill_value,
             _shape=(8, 8),
             _chunk_shape=chunks,
             _shard_shape=shards,
@@ -577,6 +582,7 @@ class TestInfo:
         expected = ArrayInfo(
             _zarr_format=2,
             _data_type=Float64(),
+            _fill_value=arr.metadata.fill_value,
             _shape=(8, 8),
             _chunk_shape=(2, 2),
             _shard_shape=None,
@@ -602,6 +608,7 @@ class TestInfo:
         expected = ArrayInfo(
             _zarr_format=3,
             _data_type=arr._zdtype,
+            _fill_value=arr.metadata.fill_value,
             _shape=(8, 8),
             _chunk_shape=chunks,
             _shard_shape=shards,
@@ -629,6 +636,7 @@ class TestInfo:
         expected = ArrayInfo(
             _zarr_format=3,
             _data_type=arr._zdtype,
+            _fill_value=arr.metadata.fill_value,
             _shape=(8, 8),
             _chunk_shape=chunks,
             _shard_shape=shards,
@@ -993,31 +1001,35 @@ class TestCreateArray:
 
     @staticmethod
     @pytest.mark.parametrize("dtype", zdtype_examples)
+    @pytest.mark.filterwarnings("ignore::zarr.core.dtype.common.UnstableSpecificationWarning")
     def test_default_fill_value(dtype: ZDType[Any, Any], store: Store) -> None:
         """
         Test that the fill value of an array is set to the default value for the dtype object
         """
         a = zarr.create_array(store, shape=(5,), chunks=(5,), dtype=dtype)
         if isinstance(dtype, DateTime64 | TimeDelta64) and np.isnat(a.fill_value):
-            assert np.isnat(dtype.default_value())
+            assert np.isnat(dtype.default_scalar())
         else:
-            assert a.fill_value == dtype.default_value()
+            assert a.fill_value == dtype.default_scalar()
 
     @staticmethod
+    @pytest.mark.filterwarnings("ignore::zarr.core.dtype.common.UnstableSpecificationWarning")
     @pytest.mark.parametrize("dtype", zdtype_examples)
     def test_dtype_forms(dtype: ZDType[Any, Any], store: Store, zarr_format: ZarrFormat) -> None:
         """
         Test that the same array is produced from a ZDType instance, a numpy dtype, or a numpy string
         """
+        skip_object_dtype(dtype)
         a = zarr.create_array(
             store, name="a", shape=(5,), chunks=(5,), dtype=dtype, zarr_format=zarr_format
         )
+
         b = zarr.create_array(
             store,
             name="b",
             shape=(5,),
             chunks=(5,),
-            dtype=dtype.to_dtype(),
+            dtype=dtype.to_native_dtype(),
             zarr_format=zarr_format,
         )
         assert a.dtype == b.dtype
@@ -1032,7 +1044,7 @@ class TestCreateArray:
                     name="c",
                     shape=(5,),
                     chunks=(5,),
-                    dtype=dtype.to_dtype().char,
+                    dtype=dtype.to_native_dtype().char,
                     zarr_format=zarr_format,
                 )
             else:
@@ -1041,12 +1053,13 @@ class TestCreateArray:
                     name="c",
                     shape=(5,),
                     chunks=(5,),
-                    dtype=dtype.to_dtype().str,
+                    dtype=dtype.to_native_dtype().str,
                     zarr_format=zarr_format,
                 )
             assert a.dtype == c.dtype
 
     @staticmethod
+    @pytest.mark.filterwarnings("ignore::zarr.core.dtype.common.UnstableSpecificationWarning")
     @pytest.mark.parametrize("dtype", zdtype_examples)
     def test_dtype_roundtrip(
         dtype: ZDType[Any, Any], store: Store, zarr_format: ZarrFormat
@@ -1054,12 +1067,13 @@ class TestCreateArray:
         """
         Test that creating an array, then opening it, gets the same array.
         """
+        skip_object_dtype(dtype)
         a = zarr.create_array(store, shape=(5,), chunks=(5,), dtype=dtype, zarr_format=zarr_format)
         b = zarr.open_array(store)
         assert a.dtype == b.dtype
 
     @staticmethod
-    @pytest.mark.parametrize("dtype", ["uint8", "float32", "str", "U3", "S4", "V1"])
+    @pytest.mark.parametrize("dtype", ["uint8", "float32", "U3", "S4", "V1"])
     @pytest.mark.parametrize(
         "compressors",
         [
@@ -1244,7 +1258,7 @@ class TestCreateArray:
             zarr.create(store=store, dtype="uint8", shape=(10,), zarr_format=3, **kwargs)
 
     @staticmethod
-    @pytest.mark.parametrize("dtype", ["uint8", "float32", "str"])
+    @pytest.mark.parametrize("dtype", ["uint8", "float32", "str", "U10", "S10", ">M8[10s]"])
     @pytest.mark.parametrize(
         "compressors",
         [
@@ -1284,17 +1298,17 @@ class TestCreateArray:
         assert arr.filters == filters_expected
 
     @staticmethod
-    @pytest.mark.parametrize("dtype_str", ["uint8", "float32", "str"])
+    @pytest.mark.parametrize("dtype", [UInt8(), Float32(), VariableLengthString()])
     async def test_default_filters_compressors(
-        store: MemoryStore, dtype_str: str, zarr_format: ZarrFormat
+        store: MemoryStore, dtype: UInt8 | Float32 | VariableLengthString, zarr_format: ZarrFormat
     ) -> None:
         """
         Test that the default ``filters`` and ``compressors`` are used when ``create_array`` is invoked with ``filters`` and ``compressors`` unspecified.
         """
-        zdtype = get_data_type_from_native_dtype(dtype_str)
+
         arr = await create_array(
             store=store,
-            dtype=dtype_str,
+            dtype=dtype,  # type: ignore[arg-type]
             shape=(10,),
             zarr_format=zarr_format,
         )
@@ -1306,14 +1320,14 @@ class TestCreateArray:
                 compressors=sig.parameters["compressors"].default,
                 filters=sig.parameters["filters"].default,
                 serializer=sig.parameters["serializer"].default,
-                dtype=zdtype,
+                dtype=dtype,  # type: ignore[arg-type]
             )
 
         elif zarr_format == 2:
             default_filters, default_compressors = _parse_chunk_encoding_v2(
                 compressor=sig.parameters["compressors"].default,
                 filters=sig.parameters["filters"].default,
-                dtype=zdtype,
+                dtype=dtype,  # type: ignore[arg-type]
             )
             if default_filters is None:
                 expected_filters = ()
@@ -1363,7 +1377,7 @@ class TestCreateArray:
         elif impl == "async":
             arr = await create_array(store, name=name, data=data, zarr_format=3)
             stored = await arr._get_selection(
-                BasicIndexer(..., shape=arr.shape, chunk_grid=arr.chunk_grid),
+                BasicIndexer(..., shape=arr.shape, chunk_grid=arr.metadata.chunk_grid),
                 prototype=default_buffer_prototype(),
             )
         else:
@@ -1487,7 +1501,7 @@ class TestCreateArray:
             for parent_path in parents:
                 # this will raise if these groups were not created
                 _ = await zarr.api.asynchronous.open_group(
-                    store=store, path=parent_path, mode="r", zarr_format=zarr_format
+                    store=store, path=parent_path, zarr_format=zarr_format
                 )
 
     @staticmethod
@@ -1687,7 +1701,7 @@ def test_roundtrip_numcodecs() -> None:
 
     BYTES_CODEC = {"name": "bytes", "configuration": {"endian": "little"}}
     # Read in the array again and check compressor config
-    root = zarr.open_group(store, mode="r")
+    root = zarr.open_group(store)
     metadata = root["test"].metadata.to_dict()
     expected = (*filters, BYTES_CODEC, *compressors)
     assert metadata["codecs"] == expected

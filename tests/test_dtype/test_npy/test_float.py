@@ -2,15 +2,26 @@ from __future__ import annotations
 
 import numpy as np
 
-from tests.test_dtype.test_wrapper import _TestZDType
+from tests.test_dtype.test_wrapper import BaseTestZDType, V2JsonTestParams
 from zarr.core.dtype.npy.float import Float16, Float32, Float64
 
 
-class _BaseTestFloat(_TestZDType):
+class _BaseTestFloat(BaseTestZDType):
     def scalar_equals(self, scalar1: object, scalar2: object) -> bool:
         if np.isnan(scalar1) and np.isnan(scalar2):  # type: ignore[call-overload]
             return True
         return super().scalar_equals(scalar1, scalar2)
+
+    hex_string_params: tuple[tuple[str, float], ...] = ()
+
+    def test_hex_encoding(self, hex_string_params: tuple[str, float]) -> None:
+        """
+        Test that hexadecimal strings can be read as NaN values
+        """
+        hex_string, expected = hex_string_params
+        zdtype = self.test_cls()
+        observed = zdtype.from_json_scalar(hex_string, zarr_format=3)
+        assert self.scalar_equals(observed, expected)
 
 
 class TestFloat16(_BaseTestFloat):
@@ -21,8 +32,8 @@ class TestFloat16(_BaseTestFloat):
         np.dtype(np.uint16),
         np.dtype(np.float32),
     )
-    valid_json_v2 = Float16._zarr_v2_names
-    valid_json_v3 = (Float16._zarr_v3_name,)
+    valid_json_v2 = (V2JsonTestParams(dtype=">f2"), V2JsonTestParams(dtype="<f2"))
+    valid_json_v3 = ("float16",)
     invalid_json_v2 = (
         "|f2",
         "float16",
@@ -52,6 +63,9 @@ class TestFloat16(_BaseTestFloat):
         (Float16(), "NaN", np.float16("NaN")),
     )
 
+    hex_string_params = (("0x7fc0", np.nan), ("0x7fc1", np.nan), ("0x3c00", 1.0))
+    item_size_params = (Float16(),)
+
 
 class TestFloat32(_BaseTestFloat):
     test_cls = Float32
@@ -62,8 +76,8 @@ class TestFloat32(_BaseTestFloat):
         np.dtype(np.uint16),
         np.dtype(np.float64),
     )
-    valid_json_v2 = Float32._zarr_v2_names
-    valid_json_v3 = (Float32._zarr_v3_name,)
+    valid_json_v2 = (V2JsonTestParams(dtype=">f4"), V2JsonTestParams(dtype="<f4"))
+    valid_json_v3 = ("float32",)
     invalid_json_v2 = (
         "|f4",
         "float32",
@@ -94,6 +108,9 @@ class TestFloat32(_BaseTestFloat):
         (Float32(), "NaN", np.float32("NaN")),
     )
 
+    hex_string_params = (("0x7fc00000", np.nan), ("0x7fc00001", np.nan), ("0x3f800000", 1.0))
+    item_size_params = (Float32(),)
+
 
 class TestFloat64(_BaseTestFloat):
     test_cls = Float64
@@ -103,8 +120,8 @@ class TestFloat64(_BaseTestFloat):
         np.dtype(np.uint16),
         np.dtype(np.float32),
     )
-    valid_json_v2 = Float64._zarr_v2_names
-    valid_json_v3 = (Float64._zarr_v3_name,)
+    valid_json_v2 = (V2JsonTestParams(dtype=">f8"), V2JsonTestParams(dtype="<f8"))
+    valid_json_v3 = ("float64",)
     invalid_json_v2 = (
         "|f8",
         "float64",
@@ -134,3 +151,10 @@ class TestFloat64(_BaseTestFloat):
         (Float64(), -1.0, np.float64(-1.0)),
         (Float64(), "NaN", np.float64("NaN")),
     )
+
+    hex_string_params = (
+        ("0x7ff8000000000000", np.nan),
+        ("0x7ff8000000000001", np.nan),
+        ("0x3ff0000000000000", 1.0),
+    )
+    item_size_params = (Float64(),)

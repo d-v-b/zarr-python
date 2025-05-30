@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import numpy as np
 
-from tests.test_dtype.test_wrapper import _TestZDType
+from tests.test_dtype.test_wrapper import BaseTestZDType, V2JsonTestParams
 from zarr.core.dtype.npy.int import Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64
 
 
-class TestInt8(_TestZDType):
+class TestInt8(BaseTestZDType):
     test_cls = Int8
     scalar_type = np.int8
     valid_dtype = (np.dtype(np.int8),)
@@ -15,7 +15,7 @@ class TestInt8(_TestZDType):
         np.dtype(np.uint16),
         np.dtype(np.float64),
     )
-    valid_json_v2 = ("|i1",)
+    valid_json_v2 = (V2JsonTestParams(dtype="|i1"),)
     valid_json_v3 = ("int8",)
     invalid_json_v2 = (
         ">i1",
@@ -34,9 +34,10 @@ class TestInt8(_TestZDType):
         (Int8(), 1, np.int8(1)),
         (Int8(), -1, np.int8(-1)),
     )
+    item_size_params = (Int8(),)
 
 
-class TestInt16(_TestZDType):
+class TestInt16(BaseTestZDType):
     test_cls = Int16
     scalar_type = np.int16
     valid_dtype = (np.dtype(">i2"), np.dtype("<i2"))
@@ -45,7 +46,7 @@ class TestInt16(_TestZDType):
         np.dtype(np.uint16),
         np.dtype(np.float64),
     )
-    valid_json_v2 = (">i2", "<i2")
+    valid_json_v2 = (V2JsonTestParams(dtype=">i2"), V2JsonTestParams(dtype="<i2"))
     valid_json_v3 = ("int16",)
     invalid_json_v2 = (
         "|i2",
@@ -65,8 +66,10 @@ class TestInt16(_TestZDType):
         (Int16(), -1, np.int16(-1)),
     )
 
+    item_size_params = (Int16(),)
 
-class TestInt32(_TestZDType):
+
+class TestInt32(BaseTestZDType):
     test_cls = Int32
     scalar_type = np.int32
     valid_dtype = (np.dtype(">i4"), np.dtype("<i4"))
@@ -75,7 +78,7 @@ class TestInt32(_TestZDType):
         np.dtype(np.uint16),
         np.dtype(np.float64),
     )
-    valid_json_v2 = (">i4", "<i4")
+    valid_json_v2 = (V2JsonTestParams(dtype=">i4"), V2JsonTestParams(dtype="<i4"))
     valid_json_v3 = ("int32",)
     invalid_json_v2 = (
         "|i4",
@@ -94,9 +97,10 @@ class TestInt32(_TestZDType):
         (Int32(), 1, np.int32(1)),
         (Int32(), -1, np.int32(-1)),
     )
+    item_size_params = (Int32(),)
 
 
-class TestInt64(_TestZDType):
+class TestInt64(BaseTestZDType):
     test_cls = Int64
     scalar_type = np.int64
     valid_dtype = (np.dtype(">i8"), np.dtype("<i8"))
@@ -105,7 +109,7 @@ class TestInt64(_TestZDType):
         np.dtype(np.uint16),
         np.dtype(np.float64),
     )
-    valid_json_v2 = (">i8", "<i8")
+    valid_json_v2 = (V2JsonTestParams(dtype=">i8"), V2JsonTestParams(dtype="<i8"))
     valid_json_v3 = ("int64",)
     invalid_json_v2 = (
         "|i8",
@@ -124,9 +128,10 @@ class TestInt64(_TestZDType):
         (Int64(), 1, np.int64(1)),
         (Int64(), -1, np.int64(-1)),
     )
+    item_size_params = (Int64(),)
 
 
-class TestUInt8(_TestZDType):
+class TestUInt8(BaseTestZDType):
     test_cls = UInt8
     scalar_type = np.uint8
     valid_dtype = (np.dtype(np.uint8),)
@@ -135,7 +140,7 @@ class TestUInt8(_TestZDType):
         np.dtype(np.int16),
         np.dtype(np.float64),
     )
-    valid_json_v2 = ("|u1",)
+    valid_json_v2 = (V2JsonTestParams(dtype="|u1"),)
     valid_json_v3 = ("uint8",)
     invalid_json_v2 = (
         "|u1",
@@ -154,9 +159,10 @@ class TestUInt8(_TestZDType):
         (UInt8(), 1, np.uint8(1)),
         (UInt8(), 0, np.uint8(0)),
     )
+    item_size_params = (UInt8(),)
 
 
-class TestUInt16(_TestZDType):
+class TestUInt16(BaseTestZDType):
     test_cls = UInt16
     scalar_type = np.uint16
     valid_dtype = (np.dtype(">u2"), np.dtype("<u2"))
@@ -165,7 +171,7 @@ class TestUInt16(_TestZDType):
         np.dtype(np.int16),
         np.dtype(np.float64),
     )
-    valid_json_v2 = (">u2", "<u2")
+    valid_json_v2 = (V2JsonTestParams(dtype=">u2"), V2JsonTestParams(dtype="<u2"))
     valid_json_v3 = ("uint16",)
     invalid_json_v2 = (
         "|u2",
@@ -184,9 +190,10 @@ class TestUInt16(_TestZDType):
         (UInt16(), 1, np.uint16(1)),
         (UInt16(), 0, np.uint16(0)),
     )
+    item_size_params = (UInt16(),)
 
 
-class TestUInt32(_TestZDType):
+class TestUInt32(BaseTestZDType):
     test_cls = UInt32
     scalar_type = np.uint32
     valid_dtype = (np.dtype(">u4"), np.dtype("<u4"))
@@ -195,7 +202,7 @@ class TestUInt32(_TestZDType):
         np.dtype(np.int16),
         np.dtype(np.float64),
     )
-    valid_json_v2 = (">u4", "<u4")
+    valid_json_v2 = (V2JsonTestParams(dtype=">u4"), V2JsonTestParams(dtype="<u4"))
     valid_json_v3 = ("uint32",)
     invalid_json_v2 = (
         "|u4",
@@ -214,9 +221,10 @@ class TestUInt32(_TestZDType):
         (UInt32(), 1, np.uint32(1)),
         (UInt32(), 0, np.uint32(0)),
     )
+    item_size_params = (UInt32(),)
 
 
-class TestUInt64(_TestZDType):
+class TestUInt64(BaseTestZDType):
     test_cls = UInt64
     scalar_type = np.uint64
     valid_dtype = (np.dtype(">u8"), np.dtype("<u8"))
@@ -225,7 +233,7 @@ class TestUInt64(_TestZDType):
         np.dtype(np.int16),
         np.dtype(np.float64),
     )
-    valid_json_v2 = (">u8", "<u8")
+    valid_json_v2 = (V2JsonTestParams(dtype=">u8"), V2JsonTestParams(dtype="<u8"))
     valid_json_v3 = ("uint64",)
     invalid_json_v2 = (
         "|u8",
@@ -244,3 +252,4 @@ class TestUInt64(_TestZDType):
         (UInt64(), 1, np.uint64(1)),
         (UInt64(), 0, np.uint64(0)),
     )
+    item_size_params = (UInt64(),)

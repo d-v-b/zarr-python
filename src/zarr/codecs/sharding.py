@@ -117,7 +117,7 @@ class _ShardIndex(NamedTuple):
     def chunks_per_shard(self) -> ChunkCoords:
         result = tuple(self.offsets_and_lengths.shape[0:-1])
         # The cast is required until https://github.com/numpy/numpy/pull/27211 is merged
-        return cast(ChunkCoords, result)
+        return cast("ChunkCoords", result)
 
     def _localize_chunk(self, chunk_coords: ChunkCoords) -> ChunkCoords:
         return tuple(
@@ -452,7 +452,7 @@ class ShardingCodec(
         # setup output array
         out = chunk_spec.prototype.nd_buffer.create(
             shape=shard_shape,
-            dtype=shard_spec.dtype.to_dtype(),
+            dtype=shard_spec.dtype.to_native_dtype(),
             order=shard_spec.order,
             fill_value=0,
         )
@@ -499,7 +499,7 @@ class ShardingCodec(
         # setup output array
         out = shard_spec.prototype.nd_buffer.create(
             shape=indexer.shape,
-            dtype=shard_spec.dtype.to_dtype(),
+            dtype=shard_spec.dtype.to_native_dtype(),
             order=shard_spec.order,
             fill_value=0,
         )

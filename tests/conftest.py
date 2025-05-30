@@ -23,6 +23,7 @@ from zarr.core.config import config as zarr_config
 from zarr.core.dtype import (
     get_data_type_from_native_dtype,
 )
+from zarr.core.dtype.common import HasItemSize
 from zarr.core.metadata.v2 import ArrayV2Metadata
 from zarr.core.metadata.v3 import ArrayV3Metadata
 from zarr.core.sync import sync
@@ -38,6 +39,7 @@ if TYPE_CHECKING:
     from zarr.core.array import CompressorsLike, FiltersLike, SerializerLike, ShardsLike
     from zarr.core.chunk_key_encodings import ChunkKeyEncoding, ChunkKeyEncodingLike
     from zarr.core.common import ChunkCoords, MemoryOrder, ShapeLike, ZarrFormat
+    from zarr.core.dtype.wrapper import ZDType
 
 
 async def parse_store(
@@ -268,12 +270,14 @@ def create_array_metadata(
     chunk_key_encoding_parsed = _parse_chunk_key_encoding(
         chunk_key_encoding, zarr_format=zarr_format
     )
-
+    item_size = 1
+    if isinstance(dtype_parsed, HasItemSize):
+        item_size = dtype_parsed.item_size
     shard_shape_parsed, chunk_shape_parsed = _auto_partition(
         array_shape=shape_parsed,
         shard_shape=shards,
         chunk_shape=chunks,
-        item_size=dtype_parsed.to_dtype().itemsize,
+        item_size=item_size,
     )
 
     if order is None:
@@ -414,3 +418,12 @@ def meta_from_array(
         chunk_key_encoding=chunk_key_encoding,
         dimension_names=dimension_names,
     )
+
+
+def skip_object_dtype(dtype: ZDType[Any, Any]) -> None:
+    if dtype.dtype_cls is type(np.dtype("O")):
+        msg = (
+            f"{dtype} uses the numpy object data type, which is not a valid target for data "
+            "type resolution"
+        )
+        pytest.skip(msg)

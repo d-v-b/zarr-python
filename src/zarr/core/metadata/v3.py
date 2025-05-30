@@ -7,7 +7,7 @@ from zarr.core.buffer.core import default_buffer_prototype
 from zarr.core.dtype import (
     VariableLengthString,
     ZDType,
-    get_data_type_from_json,
+    get_data_type_from_json_v3,
 )
 
 if TYPE_CHECKING:
@@ -175,7 +175,7 @@ class ArrayV3Metadata(Metadata):
         chunk_key_encoding_parsed = ChunkKeyEncoding.from_dict(chunk_key_encoding)
         dimension_names_parsed = parse_dimension_names(dimension_names)
         # Note: relying on a type method is numpy-specific
-        fill_value_parsed = data_type.to_dtype().type(fill_value)
+        fill_value_parsed = data_type.cast_scalar(fill_value)
         attributes_parsed = parse_attributes(attributes)
         codecs_parsed_partial = parse_codecs(codecs)
         storage_transformers_parsed = parse_storage_transformers(storage_transformers)
@@ -269,6 +269,20 @@ class ArrayV3Metadata(Metadata):
                 return self.codecs[0].codecs
         return self.codecs
 
+    def get_chunk_spec(
+        self, _chunk_coords: ChunkCoords, array_config: ArrayConfig, prototype: BufferPrototype
+    ) -> ArraySpec:
+        assert isinstance(self.chunk_grid, RegularChunkGrid), (
+            "Currently, only regular chunk grid is supported"
+        )
+        return ArraySpec(
+            shape=self.chunk_grid.chunk_shape,
+            dtype=self.dtype,
+            fill_value=self.fill_value,
+            config=array_config,
+            prototype=prototype,
+        )
+
     def encode_chunk_key(self, chunk_coords: ChunkCoords) -> str:
         return self.chunk_key_encoding.encode_chunk_key(chunk_coords)
 
@@ -292,10 +306,14 @@ class ArrayV3Metadata(Metadata):
         _ = parse_node_type_array(_data.pop("node_type"))
 
         data_type_json = _data.pop("data_type")
-        data_type = get_data_type_from_json(data_type_json, zarr_format=3)
+        data_type = get_data_type_from_json_v3(data_type_json)
 
         # check that the fill value is consistent with the data type
-        fill_value_parsed = data_type.from_json_value(_data.pop("fill_value"), zarr_format=3)
+        try:
+            fill = _data.pop("fill_value")
+            fill_value_parsed = data_type.from_json_scalar(fill, zarr_format=3)
+        except ValueError as e:
+            raise TypeError(f"Invalid fill_value: {fill!r}") from e
 
         # dimension_names key is optional, normalize missing to `None`
         _data["dimension_names"] = _data.pop("dimension_names", None)
@@ -307,7 +325,7 @@ class ArrayV3Metadata(Metadata):
 
     def to_dict(self) -> dict[str, JSON]:
         out_dict = super().to_dict()
-        out_dict["fill_value"] = self.data_type.to_json_value(
+        out_dict["fill_value"] = self.data_type.to_json_scalar(
             self.fill_value, zarr_format=self.zarr_format
         )
         if not isinstance(out_dict, dict):

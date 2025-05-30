@@ -31,7 +31,7 @@ from zarr.core.common import (
     _warn_order_kwarg,
     _warn_write_empty_chunks_kwarg,
 )
-from zarr.core.dtype import get_data_type_from_native_dtype
+from zarr.core.dtype import ZDTypeLike, get_data_type_from_native_dtype, parse_data_type
 from zarr.core.group import (
     AsyncGroup,
     ConsolidatedMetadata,
@@ -39,7 +39,7 @@ from zarr.core.group import (
     create_hierarchy,
 )
 from zarr.core.metadata import ArrayMetadataDict, ArrayV2Metadata, ArrayV3Metadata
-from zarr.errors import NodeTypeValidationError
+from zarr.errors import GroupNotFoundError, NodeTypeValidationError
 from zarr.storage._common import make_store_path
 
 if TYPE_CHECKING:
@@ -88,7 +88,7 @@ __all__ = [
 
 _READ_MODES: tuple[AccessModeLiteral, ...] = ("r", "r+", "a")
 _CREATE_MODES: tuple[AccessModeLiteral, ...] = ("a", "w", "w-")
-_OVERWRITE_MODES: tuple[AccessModeLiteral, ...] = ("a", "r+", "w")
+_OVERWRITE_MODES: tuple[AccessModeLiteral, ...] = ("w",)
 
 
 def _infer_overwrite(mode: AccessModeLiteral) -> bool:
@@ -328,7 +328,7 @@ async def open(
         try:
             metadata_dict = await get_array_metadata(store_path, zarr_format=zarr_format)
             # TODO: remove this cast when we fix typing for array metadata dicts
-            _metadata_dict = cast(ArrayMetadataDict, metadata_dict)
+            _metadata_dict = cast("ArrayMetadataDict", metadata_dict)
             # for v2, the above would already have raised an exception if not an array
             zarr_format = _metadata_dict["zarr_format"]
             is_v3_array = zarr_format == 3 and _metadata_dict.get("node_type") == "array"
@@ -817,7 +817,6 @@ async def open_group(
         warnings.warn("chunk_store is not yet implemented", RuntimeWarning, stacklevel=2)
 
     store_path = await make_store_path(store, mode=mode, storage_options=storage_options, path=path)
-
     if attributes is None:
         attributes = {}
 
@@ -837,14 +836,14 @@ async def open_group(
             overwrite=overwrite,
             attributes=attributes,
         )
-    raise FileNotFoundError(f"Unable to find group: {store_path}")
+    raise GroupNotFoundError(store, store_path.path)
 
 
 async def create(
     shape: ChunkCoords | int,
     *,  # Note: this is a change from v2
     chunks: ChunkCoords | int | None = None,  # TODO: v2 allowed chunks=True
-    dtype: npt.DTypeLike | None = None,
+    dtype: ZDTypeLike | None = None,
     compressor: CompressorLike = "auto",
     fill_value: Any | None = 0,  # TODO: need type
     order: MemoryOrder | None = None,
@@ -991,11 +990,11 @@ async def create(
         _handle_zarr_version_or_format(zarr_version=zarr_version, zarr_format=zarr_format)
         or _default_zarr_format()
     )
-    dtype_wrapped = get_data_type_from_native_dtype(dtype)
+    zdtype = parse_data_type(dtype, zarr_format=zarr_format)
     if zarr_format == 2:
         if chunks is None:
             chunks = shape
-        default_filters, default_compressor = _get_default_chunk_encoding_v2(dtype_wrapped)
+        default_filters, default_compressor = _get_default_chunk_encoding_v2(zdtype)
         if not filters:
             filters = default_filters  # type: ignore[assignment]
         if compressor == "auto":
@@ -1057,7 +1056,7 @@ async def create(
         store_path,
         shape=shape,
         chunks=chunks,
-        dtype=dtype_wrapped,
+        dtype=zdtype,
         compressor=compressor,
         fill_value=fill_value,
         overwrite=overwrite,

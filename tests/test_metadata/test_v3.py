@@ -12,7 +12,7 @@ from zarr.core.buffer import default_buffer_prototype
 from zarr.core.chunk_key_encodings import DefaultChunkKeyEncoding, V2ChunkKeyEncoding
 from zarr.core.config import config
 from zarr.core.dtype import get_data_type_from_native_dtype
-from zarr.core.dtype.npy.common import check_json_complex_float
+from zarr.core.dtype.npy.string import _NUMPY_SUPPORTS_VLEN_STRING
 from zarr.core.dtype.npy.time import DateTime64
 from zarr.core.group import GroupMetadata, parse_node_type
 from zarr.core.metadata.v3 import (
@@ -20,15 +20,14 @@ from zarr.core.metadata.v3 import (
     parse_dimension_names,
     parse_zarr_format,
 )
-from zarr.core.strings import _NUMPY_SUPPORTS_VLEN_STRING
-from zarr.errors import MetadataValidationError
+from zarr.errors import MetadataValidationError, NodeTypeValidationError
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from typing import Any
 
     from zarr.abc.codec import Codec
-    from zarr.core.common import JSON, ZarrFormat
+    from zarr.core.common import JSON
 
 
 from zarr.core.metadata.v3 import (
@@ -74,7 +73,8 @@ dtypes = (
 @pytest.mark.parametrize("data", [None, 1, 2, 4, 5, "3"])
 def test_parse_zarr_format_invalid(data: Any) -> None:
     with pytest.raises(
-        ValueError, match=f"Invalid value for 'zarr_format'. Expected '3'. Got '{data}'."
+        MetadataValidationError,
+        match=f"Invalid value for 'zarr_format'. Expected '3'. Got '{data}'.",
     ):
         parse_zarr_format(data)
 
@@ -100,7 +100,8 @@ def test_parse_node_type_invalid(node_type: Any) -> None:
 @pytest.mark.parametrize("data", [None, "group"])
 def test_parse_node_type_array_invalid(data: Any) -> None:
     with pytest.raises(
-        ValueError, match=f"Invalid value for 'node_type'. Expected 'array'. Got '{data}'."
+        NodeTypeValidationError,
+        match=f"Invalid value for 'node_type'. Expected 'array'. Got '{data}'.",
     ):
         parse_node_type_array(data)
 
@@ -129,18 +130,10 @@ def test_jsonify_fill_value_complex(fill_value: Any, dtype_str: str) -> None:
     """
     zarr_format = 3
     dtype = get_data_type_from_native_dtype(dtype_str)
-    expected = dtype.to_dtype().type(complex(*fill_value))
-    observed = dtype.from_json_value(fill_value, zarr_format=zarr_format)
+    expected = dtype.to_native_dtype().type(complex(*fill_value))
+    observed = dtype.from_json_scalar(fill_value, zarr_format=zarr_format)
     assert observed == expected
-    assert dtype.to_json_value(observed, zarr_format=zarr_format) == tuple(fill_value)
-
-
-@pytest.mark.parametrize("data", [[1.0, 0.0, 3.0], [0, 1, 3], [1]])
-def test_complex_to_json_invalid(data: object, zarr_format: ZarrFormat) -> None:
-    assert not check_json_complex_float(data, zarr_format=zarr_format)
-    # match = f"Invalid type: {data}. Expected a sequence of two numbers."
-    # with pytest.raises(TypeError, match=re.escape(match)):
-    # complex_float_from_json(data=data, zarr_format=3)
+    assert dtype.to_json_scalar(observed, zarr_format=zarr_format) == tuple(fill_value)
 
 
 @pytest.mark.parametrize("fill_value", [{"foo": 10}])
@@ -152,7 +145,7 @@ def test_parse_fill_value_invalid_type(fill_value: Any, dtype_str: str) -> None:
     """
     dtype_instance = get_data_type_from_native_dtype(dtype_str)
     with pytest.raises(TypeError, match=f"Invalid type: {fill_value}"):
-        dtype_instance.from_json_value(fill_value, zarr_format=3)
+        dtype_instance.from_json_scalar(fill_value, zarr_format=3)
 
 
 @pytest.mark.parametrize(
@@ -173,7 +166,7 @@ def test_parse_fill_value_invalid_type_sequence(fill_value: Any, dtype_str: str)
     """
     dtype_instance = get_data_type_from_native_dtype(dtype_str)
     with pytest.raises(TypeError, match=re.escape(f"Invalid type: {fill_value}")):
-        dtype_instance.from_json_value(fill_value, zarr_format=3)
+        dtype_instance.from_json_scalar(fill_value, zarr_format=3)
 
 
 @pytest.mark.parametrize("chunk_grid", ["regular"])
@@ -275,8 +268,8 @@ async def test_datetime_metadata(fill_value: int, precision: str) -> None:
         "data_type": dtype.to_json(zarr_format=3),
         "chunk_key_encoding": {"name": "default", "separator": "."},
         "codecs": (BytesCodec(),),
-        "fill_value": dtype.to_json_value(
-            dtype.to_dtype().type(fill_value, dtype.unit), zarr_format=3
+        "fill_value": dtype.to_json_scalar(
+            dtype.to_native_dtype().type(fill_value, dtype.unit), zarr_format=3
         ),
     }
     metadata = ArrayV3Metadata.from_dict(metadata_dict)
