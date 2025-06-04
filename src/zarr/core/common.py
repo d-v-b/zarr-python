@@ -38,6 +38,8 @@ ChunkCoordsLike = Iterable[int]
 ZarrFormat = Literal[2, 3]
 NodeType = Literal["array", "group"]
 JSON = str | int | float | Mapping[str, "JSON"] | Sequence["JSON"] | None
+# This is a JSON-like type that works with typeddicts
+JSON2 = str | int | float | Mapping[str, object] | Sequence["JSON2"] | None
 MemoryOrder = Literal["C", "F"]
 AccessModeLiteral = Literal["r", "r+", "a", "w", "w-"]
 DimensionNames = Iterable[str | None] | None

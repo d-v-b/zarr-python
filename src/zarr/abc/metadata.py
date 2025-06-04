@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
+from zarr.core.common import JSON2
+
 if TYPE_CHECKING:
     from typing import Self
 
@@ -15,6 +17,27 @@ __all__ = ["Metadata"]
 
 @dataclass(frozen=True)
 class Metadata:
+    def to_json(self) -> JSON2:
+        """
+        Recursively serialize this model to a JSON literal or an object.
+        This method inspects the fields of self and calls `x.to_dict()` for any fields that
+        are instances of `Metadata`. Sequences of `Metadata` are similarly recursed into, and
+        the output of that recursion is collected in a list.
+        """
+        out_dict: dict[str, JSON2] = {}
+        for field in fields(self):
+            key = field.name
+            value = getattr(self, key)
+            if isinstance(value, Metadata):
+                out_dict[field.name] = getattr(self, field.name).to_dict()
+            elif isinstance(value, str):
+                out_dict[key] = value
+            elif isinstance(value, Sequence):
+                out_dict[key] = tuple(v.to_json() if isinstance(v, Metadata) else v for v in value)
+            else:
+                raise TypeError(f"Invalid type encounted: {value!r}")
+        return out_dict
+
     def to_dict(self) -> dict[str, JSON]:
         """
         Recursively serialize this model to a dictionary.
