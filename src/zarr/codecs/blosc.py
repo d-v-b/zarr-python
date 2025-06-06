@@ -1,10 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from enum import Enum
 from functools import cached_property
-from typing import TYPE_CHECKING
+from typing import (
+    TYPE_CHECKING,
+    Final,
+    Literal,
+    TypedDict,
+    cast,
+    overload,
+)
 
 import numcodecs
 from numcodecs.blosc import Blosc
@@ -12,7 +20,14 @@ from packaging.version import Version
 
 from zarr.abc.codec import BytesBytesCodec
 from zarr.core.buffer.cpu import as_numpy_array_wrapper
-from zarr.core.common import JSON, parse_enum, parse_named_configuration
+from zarr.core.common import (
+    JSON,
+    JSON2,
+    NamedConfig,
+    ZarrFormat,
+    parse_enum,
+    parse_named_configuration,
+)
 from zarr.registry import register_codec
 
 if TYPE_CHECKING:
@@ -20,6 +35,76 @@ if TYPE_CHECKING:
 
     from zarr.core.array_spec import ArraySpec
     from zarr.core.buffer import Buffer
+
+_BloscCname = Literal["lz4", "lz4hc", "blosclz", "zstd", "snappy", "zlib"]
+BLOSC_CNAME: Final = ("lz4", "lz4hc", "blosclz", "zstd", "snappy", "zlib")
+
+_BloscShuffle = Literal["noshuffle", "shuffle", "bitshuffle"]
+BLOSC_SHUFFLE: Final = ("noshuffle", "shuffle", "bitshuffle")
+
+
+class BloscMetaV2(TypedDict):
+    id: Literal["blosc"]
+    cname: str
+    clevel: int
+    shuffle: _BloscShuffle | None
+
+
+def parse_bloscmetav2(data: JSON2) -> BloscMetaV2:
+    if not isinstance(data, Mapping):
+        raise TypeError(f"Expected a dict, got {data!r} which has type {type(data)}")
+
+    expect_keys = {"id", "cname", "clevel", "shuffle"}
+
+    if (obs_keys := set(data.keys())) != expect_keys:
+        msg = f"Object {data} has invalid keys. "
+        missing = expect_keys - obs_keys
+        extra = obs_keys - expect_keys
+        if len(missing) > 0:
+            msg += f"These keys were missing: {missing}. "
+        if len(extra) > 0:
+            msg += f"These extra keys were found: {extra}"
+        raise ValueError(msg)
+
+    if _id := data["id"] != "blosc":
+        raise ValueError(f"ID field must be blosc, got {_id}")
+
+    if data["cname"] not in BLOSC_CNAME:
+        raise ValueError(f'value for "cname" is not one of {BLOSC_CNAME}')
+
+    if data["shuffle"] not in BLOSC_SHUFFLE:
+        raise ValueError(f'value for "cname" is not one of {BLOSC_CNAME}')
+
+    if not isinstance(data["clevel"], int):
+        raise ValueError("clevel is not an int.")
+
+    return cast(BloscMetaV2, data)
+
+
+def parse_bloscmetav3(data: JSON2) -> BloscMetaV2:
+    if not isinstance(data, Mapping):
+        raise TypeError(f"Expected a dict, got {data!r} which has type {type(data)}")
+    if _id := data["id"] != "blosc":
+        raise ValueError(f"ID field must be blosc, got {_id}")
+    if "cname" not in data:
+        raise ValueError(f'Missing required key "cname" from {data}')
+    if data["cname"] not in BLOSC_CNAME:
+        raise ValueError(f'value for "cname" is not one of {BLOSC_CNAME}')
+    if "shuffle" not in data:
+        raise ValueError(f'Missing required key "shuffle" from {data}')
+    if data["shuffle"] not in BLOSC_SHUFFLE:
+        raise ValueError(f'value for "cname" is not one of {BLOSC_CNAME}')
+    return cast(BloscMetaV2, data)
+
+
+class BloscConfigV3(TypedDict):
+    cname: _BloscCname
+    clevel: int
+    shuffle: _BloscShuffle | None
+    blocksize: int
+
+
+BloscMetaV3 = NamedConfig[Literal["blosc"], BloscConfigV3]
 
 
 class BloscShuffle(Enum):
@@ -88,11 +173,11 @@ def parse_blocksize(data: JSON) -> int:
 class BloscCodec(BytesBytesCodec):
     is_fixed_size = False
 
-    typesize: int | None
-    cname: BloscCname = BloscCname.zstd
-    clevel: int = 5
-    shuffle: BloscShuffle | None = BloscShuffle.noshuffle
-    blocksize: int = 0
+    typesize: int
+    cname: BloscCname
+    clevel: int
+    shuffle: BloscShuffle | None
+    blocksize: int
 
     def __init__(
         self,
@@ -114,6 +199,36 @@ class BloscCodec(BytesBytesCodec):
         object.__setattr__(self, "clevel", clevel_parsed)
         object.__setattr__(self, "shuffle", shuffle_parsed)
         object.__setattr__(self, "blocksize", blocksize_parsed)
+
+    @overload
+    def to_json(self, *, zarr_format: Literal[2]) -> BloscMetaV2: ...
+
+    @overload
+    def to_json(self, *, zarr_format: Literal[3]) -> BloscMetaV3: ...
+
+    def to_json(self, *, zarr_format: ZarrFormat) -> BloscMetaV2 | BloscMetaV3:
+        if zarr_format == 2:
+            return {
+                "id": "blosc",
+                "cname": self.cname.value,
+                "clevel": self.clevel,
+                "shuffle": self.shuffle.value,
+            }
+        elif zarr_format == 3:
+            return {
+                "name": "blosc",
+                "configuration": {
+                    "cname": self.cname.value,
+                    "clevel": self.clevel,
+                    "shuffle": self.shuffle.value,
+                    "blocksize": self.blocksize,
+                },
+            }
+        else:
+            raise ValueError(f"Unsupported zarr format: {zarr_format}")  # pragma: no cover
+
+    @classmethod
+    def from_json(cls, data: JSON2): ...
 
     @classmethod
     def from_dict(cls, data: dict[str, JSON]) -> Self:

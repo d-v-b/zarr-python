@@ -10,7 +10,9 @@ from itertools import starmap
 from typing import (
     TYPE_CHECKING,
     Any,
+    Generic,
     Literal,
+    TypedDict,
     TypeVar,
     cast,
     overload,
@@ -51,6 +53,14 @@ def product(tup: ChunkCoords) -> int:
 
 T = TypeVar("T", bound=tuple[Any, ...])
 V = TypeVar("V")
+
+TName = TypeVar("TName", bound=str)
+TConfig = TypeVar("TConfig", bound=Mapping[str, object])
+
+
+class NamedConfig(TypedDict, Generic[TName, TConfig]):
+    name: TName
+    configuration: TConfig
 
 
 async def concurrent_map(
