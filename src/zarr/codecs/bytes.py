@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -17,7 +17,6 @@ if TYPE_CHECKING:
     from typing import Self
 
     from zarr.core.array_spec import ArraySpec
-    from zarr.core.dtype.common import Endianness
 
 
 class Endian(Enum):
