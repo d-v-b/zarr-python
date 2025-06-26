@@ -7,7 +7,6 @@ exclude = [
   "/.github",
   "/bench",
   "/docs",
-  "/notebooks"
 ]
 
 [project]
@@ -72,13 +71,15 @@ gpu = [
 # Development extras
 test = [
     "coverage",
-    "pytest",
+    # Pin possibly due to https://github.com/pytest-dev/pytest-cov/issues/693
+    "pytest<8.4",
     "pytest-asyncio",
     "pytest-cov",
     "pytest-accept",
     "rich",
     "mypy",
     "hypothesis",
+    "pytest-xdist",
 ]
 remote_tests = [
     'zarr[remote]',
@@ -111,7 +112,7 @@ docs = [
 
 [project.urls]
 "Bug Tracker" = "https://github.com/zarr-developers/zarr-python/issues"
-Changelog = "https://zarr.readthedocs.io/en/stable/release.html"
+Changelog = "https://zarr.readthedocs.io/en/stable/release-notes.html"
 Discussions = "https://github.com/zarr-developers/zarr-python/discussions"
 Documentation = "https://zarr.readthedocs.io/"
 Homepage = "https://github.com/zarr-developers/zarr-python"
@@ -164,7 +165,7 @@ run = "run-coverage --no-cov"
 run-pytest = "run"
 run-verbose = "run-coverage --verbose"
 run-mypy = "mypy src"
-run-hypothesis = "run-coverage --hypothesis-profile ci --run-slow-hypothesis tests/test_properties.py tests/test_store/test_stateful*"
+run-hypothesis = "run-coverage -nauto --run-slow-hypothesis tests/test_properties.py tests/test_store/test_stateful*"
 list-env = "pip list"
 
 [tool.hatch.envs.doctest]
@@ -193,7 +194,7 @@ run-coverage = "pytest -m gpu --cov-config=pyproject.toml --cov=pkg --cov-report
 run = "run-coverage --no-cov"
 run-verbose = "run-coverage --verbose"
 run-mypy = "mypy src"
-run-hypothesis = "pytest --hypothesis-profile ci tests/test_properties.py tests/test_store/test_stateful*"
+run-hypothesis = "run-coverage --hypothesis-profile ci --run-slow-hypothesis tests/test_properties.py tests/test_store/test_stateful*"
 list-env = "pip list"
 
 [tool.hatch.envs.docs]
@@ -209,7 +210,6 @@ dependencies = [
     'packaging @ git+https://github.com/pypa/packaging',
     'numpy',  # from scientific-python-nightly-wheels
     'numcodecs @ git+https://github.com/zarr-developers/numcodecs',
-    'fsspec @ git+https://github.com/fsspec/filesystem_spec',
     's3fs @ git+https://github.com/fsspec/s3fs',
     'universal_pathlib @ git+https://github.com/fsspec/universal_pathlib',
     'typing_extensions @ git+https://github.com/python/typing_extensions',
@@ -252,6 +252,7 @@ dependencies = [
     'obstore==0.5.*',
     # test deps
     'zarr[test]',
+    'zarr[remote_tests]',
 ]
 
 [tool.hatch.envs.min_deps.scripts]
@@ -280,7 +281,6 @@ extend-exclude = [
     "buck-out",
     "build",
     "dist",
-    "notebooks", # temporary, until we achieve compatibility with ruff ≥ 0.6
     "venv",
     "docs",
     "tests/test_regression/scripts/", # these are scripts that use a different version of python
@@ -382,7 +382,6 @@ module = [
     "tests.test_indexing",
     "tests.test_properties",
     "tests.test_sync",
-    "tests.test_v2",
     "tests.test_regression.scripts.*"
 ]
 ignore_errors = true

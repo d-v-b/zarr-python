@@ -11,7 +11,6 @@ from zarr.abc.codec import ArrayBytesCodec
 from zarr.core.buffer import Buffer, NDArrayLike, NDBuffer
 from zarr.core.common import JSON, parse_enum, parse_named_configuration
 from zarr.core.dtype.common import HasEndianness
-from zarr.core.dtype.npy.common import endianness_to_numpy_str
 from zarr.registry import register_codec
 
 if TYPE_CHECKING:
@@ -75,12 +74,11 @@ class BytesCodec(ArrayBytesCodec):
     ) -> NDBuffer:
         assert isinstance(chunk_bytes, Buffer)
         # TODO: remove endianness enum in favor of literal union
-        endian_str = cast(
-            "Endianness | None", self.endian.value if self.endian is not None else None
-        )
-        new_byte_order = endianness_to_numpy_str(endian_str)
-        dtype = chunk_spec.dtype.to_native_dtype().newbyteorder(new_byte_order)
-
+        endian_str = self.endian.value if self.endian is not None else None
+        if isinstance(chunk_spec.dtype, HasEndianness):
+            dtype = replace(chunk_spec.dtype, endianness=endian_str).to_native_dtype()  # type: ignore[call-arg]
+        else:
+            dtype = chunk_spec.dtype.to_native_dtype()
         as_array_like = chunk_bytes.as_array_like()
         if isinstance(as_array_like, NDArrayLike):
             as_nd_array_like = as_array_like

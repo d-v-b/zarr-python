@@ -25,7 +25,7 @@ from zarr.core.buffer import NDBuffer
 from zarr.core.buffer.core import Buffer
 from zarr.core.codec_pipeline import BatchedCodecPipeline
 from zarr.core.config import BadConfigError, config
-from zarr.core.dtype import Int8, VariableLengthString
+from zarr.core.dtype import Int8, VariableLengthUTF8
 from zarr.core.indexing import SelectorTuple
 from zarr.registry import (
     fully_qualified_name,
@@ -47,7 +47,7 @@ from zarr.testing.buffer import (
 )
 
 if TYPE_CHECKING:
-    from zarr.core.dtype.wrapper import ZDType
+    from zarr.core.dtype.wrapper import TBaseDType, TBaseScalar, ZDType
 
 
 def test_config_defaults_set() -> None:
@@ -101,8 +101,8 @@ def test_config_defaults_set() -> None:
                     "vlen-utf8": "zarr.codecs.vlen_utf8.VLenUTF8Codec",
                     "vlen-bytes": "zarr.codecs.vlen_utf8.VLenBytesCodec",
                 },
-                "buffer": "zarr.core.buffer.cpu.Buffer",
-                "ndbuffer": "zarr.core.buffer.cpu.NDBuffer",
+                "buffer": "zarr.buffer.cpu.Buffer",
+                "ndbuffer": "zarr.buffer.cpu.NDBuffer",
             }
         ]
     )
@@ -224,9 +224,6 @@ def test_config_codec_implementation(store: Store) -> None:
 
 @pytest.mark.parametrize("store", ["local", "memory"], indirect=["store"])
 def test_config_ndbuffer_implementation(store: Store) -> None:
-    # has default value
-    assert fully_qualified_name(get_ndbuffer_class()) == config.defaults[0]["ndbuffer"]
-
     # set custom ndbuffer with TestNDArrayLike implementation
     register_ndbuffer(NDBufferUsingTestNDArrayLike)
     with config.set({"ndbuffer": fully_qualified_name(NDBufferUsingTestNDArrayLike)}):
@@ -244,7 +241,7 @@ def test_config_ndbuffer_implementation(store: Store) -> None:
 
 def test_config_buffer_implementation() -> None:
     # has default value
-    assert fully_qualified_name(get_buffer_class()) == config.defaults[0]["buffer"]
+    assert config.defaults[0]["buffer"] == "zarr.buffer.cpu.Buffer"
 
     arr = zeros(shape=(100,), store=StoreExpectingTestBuffer())
 
@@ -279,6 +276,27 @@ def test_config_buffer_implementation() -> None:
         assert np.array_equal(arr_Crc32c[:], data2d)
 
 
+def test_config_buffer_backwards_compatibility() -> None:
+    # This should warn once zarr.core is private
+    # https://github.com/zarr-developers/zarr-python/issues/2621
+    with zarr.config.set(
+        {"buffer": "zarr.core.buffer.cpu.Buffer", "ndbuffer": "zarr.core.buffer.cpu.NDBuffer"}
+    ):
+        get_buffer_class()
+        get_ndbuffer_class()
+
+
+@pytest.mark.gpu
+def test_config_buffer_backwards_compatibility_gpu() -> None:
+    # This should warn once zarr.core is private
+    # https://github.com/zarr-developers/zarr-python/issues/2621
+    with zarr.config.set(
+        {"buffer": "zarr.core.buffer.gpu.Buffer", "ndbuffer": "zarr.core.buffer.gpu.NDBuffer"}
+    ):
+        get_buffer_class()
+        get_ndbuffer_class()
+
+
 @pytest.mark.filterwarnings("error")
 def test_warning_on_missing_codec_config() -> None:
     class NewCodec(BytesCodec):
@@ -306,13 +324,14 @@ def test_warning_on_missing_codec_config() -> None:
 
 
 @pytest.mark.parametrize("dtype_category", ["variable-length-string", "default"])
+@pytest.mark.filterwarnings("ignore::zarr.core.dtype.common.UnstableSpecificationWarning")
 async def test_default_codecs(dtype_category: str) -> None:
     """
     Test that the default compressors are sensitive to the current setting of the config.
     """
-    zdtype: ZDType[Any, Any]
+    zdtype: ZDType[TBaseDType, TBaseScalar]
     if dtype_category == "variable-length-string":
-        zdtype = VariableLengthString()
+        zdtype = VariableLengthUTF8()  # type: ignore[assignment]
     else:
         zdtype = Int8()
     expected_compressors = (GzipCodec(),)
