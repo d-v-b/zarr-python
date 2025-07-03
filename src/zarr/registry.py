@@ -10,7 +10,7 @@ from zarr.core.dtype import data_type_registry
 
 if TYPE_CHECKING:
     from importlib.metadata import EntryPoint
-    from zarr.codecs.numcodec import Numcodec
+
     from zarr.abc.codec import (
         ArrayArrayCodec,
         ArrayBytesCodec,
@@ -18,6 +18,7 @@ if TYPE_CHECKING:
         Codec,
         CodecPipeline,
     )
+    from zarr.codecs.numcodec import Numcodec
     from zarr.core.buffer import Buffer, NDBuffer
     from zarr.core.common import JSON
 
@@ -97,8 +98,8 @@ def _collect_entrypoints() -> list[Registry[Any]]:
     __ndbuffer_registry.lazy_load_list.extend(entry_points.select(group="zarr.ndbuffer"))
     __ndbuffer_registry.lazy_load_list.extend(entry_points.select(group="zarr", name="ndbuffer"))
 
-    data_type_registry.lazy_load_list.extend(entry_points.select(group="zarr.data_type"))
-    data_type_registry.lazy_load_list.extend(entry_points.select(group="zarr", name="data_type"))
+    data_type_registry._lazy_load_list.extend(entry_points.select(group="zarr.data_type"))
+    data_type_registry._lazy_load_list.extend(entry_points.select(group="zarr", name="data_type"))
 
     __pipeline_registry.lazy_load_list.extend(entry_points.select(group="zarr.codec_pipeline"))
     __pipeline_registry.lazy_load_list.extend(
@@ -121,17 +122,21 @@ def _collect_entrypoints() -> list[Registry[Any]]:
 def _reload_config() -> None:
     config.refresh()
 
+
 def fully_qualified_name(cls: type) -> str:
     module = cls.__module__
     return module + "." + cls.__qualname__
+
 
 def register_filter(key: str, codec_cls: type[ArrayArrayCodec]) -> None:
     if key not in __filter_registries:
         __filter_registries[key] = Registry()
     __filter_registries[key].register(codec_cls)
 
+
 def register_serializer(key: str, codec_cls: type[ArrayBytesCodec]) -> None:
     from zarr.codecs.numcodec import NumcodecsArrayBytesCodec, is_numcodec_cls
+
     if is_numcodec_cls(codec_cls):
         _codec_cls = NumcodecsArrayBytesCodec(_codec=codec_cls)
     else:
@@ -140,8 +145,10 @@ def register_serializer(key: str, codec_cls: type[ArrayBytesCodec]) -> None:
         __serializer_registries[key] = Registry()
     __serializer_registries[key].register(_codec_cls)
 
+
 def register_serializer(key: str, codec_cls: type[ArrayBytesCodec]) -> None:
     from zarr.codecs.numcodec import NumcodecsArrayBytesCodec, is_numcodec_cls
+
     if is_numcodec_cls(codec_cls):
         _codec_cls = NumcodecsArrayBytesCodec(_codec=codec_cls)
     else:
@@ -149,9 +156,11 @@ def register_serializer(key: str, codec_cls: type[ArrayBytesCodec]) -> None:
     if key not in __serializer_registries:
         __serializer_registries[key] = Registry()
     __serializer_registries[key].register(_codec_cls)
+
 
 def register_compressor(key: str, codec_cls: type[BytesBytesCodec | Numcodec]) -> None:
     from zarr.codecs.numcodec import NumcodecsBytesBytesCodec, is_numcodec_cls
+
     if is_numcodec_cls(codec_cls):
         _codec_cls = NumcodecsBytesBytesCodec(_codec=codec_cls)
     else:
@@ -160,8 +169,10 @@ def register_compressor(key: str, codec_cls: type[BytesBytesCodec | Numcodec]) -
         __compressor_registries[key] = Registry()
     __compressor_registries[key].register(_codec_cls)
 
+
 def register_codec(key: str, codec_cls: type[Codec]) -> None:
     from zarr.abc.codec import ArrayArrayCodec, ArrayBytesCodec
+
     if issubclass(codec_cls, ArrayBytesCodec):
         register_serializer(key, codec_cls)
     elif issubclass(codec_cls, ArrayArrayCodec):
@@ -175,6 +186,7 @@ def register_codec(key: str, codec_cls: type[Codec]) -> None:
     __codec_registries[key].register(codec_cls)
     """
 
+
 def register_pipeline(pipe_cls: type[CodecPipeline]) -> None:
     __pipeline_registry.register(pipe_cls)
 
@@ -186,16 +198,22 @@ def register_ndbuffer(cls: type[NDBuffer], qualname: str | None = None) -> None:
 def register_buffer(cls: type[Buffer], qualname: str | None = None) -> None:
     __buffer_registry.register(cls, qualname)
 
+
 def get_filter_class(key: str, reload_config: bool = False) -> type[ArrayArrayCodec]:
     return _get_codec_class(key, __serializer_registries, reload_config=reload_config)
+
 
 def get_serializer_class(key: str, reload_config: bool = False) -> type[ArrayBytesCodec]:
     return _get_codec_class(key, __serializer_registries, reload_config=reload_config)
 
+
 def get_compressor_class(key: str, reload_config: bool = False) -> type[BytesBytesCodec]:
     return _get_codec_class(key, __compressor_registries, reload_config=reload_config)
 
-def _get_codec_class(key: str, registry: dict[str, Registry[Codec]], *, reload_config: bool = False) -> type[Codec]:
+
+def _get_codec_class(
+    key: str, registry: dict[str, Registry[Codec]], *, reload_config: bool = False
+) -> type[Codec]:
     if reload_config:
         _reload_config()
 
@@ -221,6 +239,7 @@ def _get_codec_class(key: str, registry: dict[str, Registry[Codec]], *, reload_c
     if selected_codec_cls:
         return selected_codec_cls
     raise KeyError(key)
+
 
 def get_codec_class(key: str, reload_config: bool = False) -> type[Codec]:
     if reload_config:
@@ -291,6 +310,7 @@ def _parse_array_bytes_codec(data: dict[str, JSON] | Codec | Numcodec) -> ArrayB
     """
     from zarr.abc.codec import ArrayBytesCodec
     from zarr.codecs.numcodec import Numcodec, NumcodecsArrayBytesCodec
+
     if isinstance(data, dict):
         result = get_serializer_class(data["name"]).from_dict(data)
         if not isinstance(result, ArrayBytesCodec):
@@ -313,6 +333,7 @@ def _parse_array_array_codec(data: dict[str, JSON] | Codec | Numcodec) -> ArrayA
     """
     from zarr.abc.codec import ArrayArrayCodec
     from zarr.codecs.numcodec import Numcodec, NumcodecsArrayArrayCodec
+
     if isinstance(data, dict):
         result = get_filter_class(data["name"]).from_dict(data)
         if not isinstance(result, ArrayArrayCodec):

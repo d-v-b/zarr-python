@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable, Literal, Self, TypeGuard, overload
+from typing import TYPE_CHECKING, ClassVar, Literal, Self, TypeGuard, overload
 
 import numpy as np
 from typing_extensions import Protocol, runtime_checkable
@@ -36,7 +36,7 @@ class Numcodec(Protocol):
     A protocol that models the ``numcodecs.abc.Codec`` interface.
     """
 
-    codec_id: str
+    codec_id: ClassVar[str]
 
     def encode(self, buf: BufferOrNDArray) -> BufferOrNDArray: ...
 
@@ -49,6 +49,7 @@ class Numcodec(Protocol):
     @classmethod
     def from_config(cls, config: CodecConfig_V2[str]) -> Self: ...
 
+
 def is_numcodec_cls(obj: object) -> TypeGuard[type[Numcodec]]:
     """
     Check if the given object implements the Numcodec protocol. Because the @runtime_checkable
@@ -56,18 +57,18 @@ def is_numcodec_cls(obj: object) -> TypeGuard[type[Numcodec]]:
     we need to manually check for the presence of the required attributes and methods.
     """
     return (
-        isinstance(obj, type) and
-        hasattr(obj, "codec_id") and
-        isinstance(obj.codec_id, str) and
-        hasattr(obj, "encode") and
-        callable(obj.encode) and
-        hasattr(obj, "decode") and
-        callable(obj.decode) and
-        hasattr(obj, "get_config") and
-        callable(obj.get_config) and
-        hasattr(obj, "from_config") and
-        callable(obj.from_config)
-        )
+        isinstance(obj, type)
+        and hasattr(obj, "codec_id")
+        and isinstance(obj.codec_id, str)
+        and hasattr(obj, "encode")
+        and callable(obj.encode)
+        and hasattr(obj, "decode")
+        and callable(obj.decode)
+        and hasattr(obj, "get_config")
+        and callable(obj.get_config)
+        and hasattr(obj, "from_config")
+        and callable(obj.from_config)
+    )
 
 
 @dataclass(frozen=True, kw_only=True)

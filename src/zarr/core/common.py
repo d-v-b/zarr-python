@@ -47,13 +47,24 @@ DimensionNames = Iterable[str | None] | None
 
 BaseConfig = Mapping[str, object]
 
-TName_co = TypeVar("TName_co", bound=str, covariant=True)
-TConfig_co = TypeVar("TConfig_co", bound=BaseConfig, covariant=True)
+TName = TypeVar("TName", bound=str, covariant=True)
+TConfig = TypeVar("TConfig", bound=BaseConfig, covariant=True)
 
 
-class NamedConfig(TypedDict, Generic[TName_co, TConfig_co]):
-    name: ReadOnly[TName_co]
-    configuration: ReadOnly[TConfig_co]
+class NamedConfig(TypedDict, Generic[TName, TConfig]):
+    """
+    A typed dictionary representing an object with a name and configuration, where the configuration
+    is a mapping of string keys to values, e.g. another typed dictionary or a JSON object.
+
+    This class is generic with two type parameters: the type of the name (``TName``) and the type of
+    the configuration (``TConfig``).
+    """
+
+    name: ReadOnly[TName]
+    """The name of the object."""
+
+    configuration: ReadOnly[TConfig]
+    """The configuration of the object."""
 
 
 def product(tup: ChunkCoords) -> int:
