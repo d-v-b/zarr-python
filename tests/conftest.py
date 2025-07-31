@@ -39,7 +39,7 @@ if TYPE_CHECKING:
     from _pytest.compat import LEGACY_PATH
 
     from zarr.abc.codec import Codec
-    from zarr.core.array import CompressorsLike, FiltersLike, SerializerLike, ShardsLike
+    from zarr.core.array import CompressorLike, FilterLike, SerializerLike, ShardsLike
     from zarr.core.chunk_key_encodings import ChunkKeyEncoding, ChunkKeyEncodingLike
     from zarr.core.common import ChunkCoords, MemoryOrder, ShapeLike, ZarrFormat
     from zarr.core.dtype.wrapper import ZDType
@@ -232,7 +232,7 @@ def create_array_metadata(
     chunks: ChunkCoords | Literal["auto"],
     shards: None,
     filters: FiltersLike,
-    compressors: CompressorsLike,
+    compressors: CompressorLike,
     serializer: SerializerLike,
     fill_value: Any | None,
     order: MemoryOrder | None,
@@ -269,8 +269,8 @@ def create_array_metadata(
     dtype: npt.DTypeLike,
     chunks: ChunkCoords | Literal["auto"] = "auto",
     shards: ShardsLike | None = None,
-    filters: FiltersLike = "auto",
-    compressors: CompressorsLike = "auto",
+    filters: FilterLike | Literal["auto"] = "auto",
+    compressors: CompressorLike | Literal["auto"] = "auto",
     serializer: SerializerLike = "auto",
     fill_value: Any = 0,
     order: MemoryOrder | None = None,
@@ -407,8 +407,8 @@ def meta_from_array(
     *,
     chunks: ChunkCoords | Literal["auto"] = "auto",
     shards: ShardsLike | None = None,
-    filters: FiltersLike = "auto",
-    compressors: CompressorsLike = "auto",
+    filters: FilterLike | Literal["auto"] = "auto",
+    compressors: CompressorLike | Literal["auto"] = "auto",
     serializer: SerializerLike = "auto",
     fill_value: Any = 0,
     order: MemoryOrder | None = None,

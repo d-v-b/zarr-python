@@ -29,8 +29,8 @@ from zarr.codecs import (
 )
 from zarr.core._info import ArrayInfo
 from zarr.core.array import (
-    CompressorsLike,
-    FiltersLike,
+    CompressorLike,
+    FilterLike,
     _parse_chunk_encoding_v2,
     _parse_chunk_encoding_v3,
     chunks_initialized,
@@ -69,6 +69,8 @@ from zarr.storage import LocalStore, MemoryStore, StorePath
 from .test_dtype.conftest import zdtype_examples
 
 if TYPE_CHECKING:
+    from zarr.abc.codec import ArrayArrayCodec, BytesBytesCodec, CodecJSON_V3
+    from zarr.codecs._v2 import Numcodec
     from zarr.core.metadata.v3 import ArrayV3Metadata
 
 
@@ -1146,8 +1148,8 @@ class TestCreateArray:
     @pytest.mark.parametrize(("chunks", "shards"), [((6,), None), ((3,), (6,))])
     async def test_v3_chunk_encoding(
         store: MemoryStore,
-        compressors: CompressorsLike,
-        filters: FiltersLike,
+        compressors: CompressorLike | tuple[CompressorLike, ...] | Literal["auto"] | None,
+        filters: tuple[FilterLike, ...],
         dtype: str,
         chunks: tuple[int, ...],
         shards: tuple[int, ...] | None,
@@ -1295,7 +1297,10 @@ class TestCreateArray:
         "filters", ["auto", None, numcodecs.GZip(level=1), (numcodecs.GZip(level=1),)]
     )
     async def test_v2_chunk_encoding(
-        store: MemoryStore, compressors: CompressorsLike, filters: FiltersLike, dtype: str
+        store: MemoryStore,
+        compressors: CompressorLike | Literal["auto"] | tuple[CompressorLike],
+        filters: FilterLike | tuple[FilterLike] | None | Literal["auto"],
+        dtype: str,
     ) -> None:
         if dtype == "str" and filters != "auto":
             pytest.skip("Only the auto filters are compatible with str dtype in this test.")
@@ -1314,12 +1319,15 @@ class TestCreateArray:
         assert arr.metadata.compressor == compressor_expected
         assert arr.metadata.filters == filters_expected
 
-        # Normalize for property getters
-        compressor_expected = () if compressor_expected is None else (compressor_expected,)
-        filters_expected = () if filters_expected is None else filters_expected
+        if compressor_expected is None:
+            assert arr.compressors == ()
+        else:
+            assert arr.compressors == (compressor_expected,)
 
-        assert arr.compressors == compressor_expected
-        assert arr.filters == filters_expected
+        if filters_expected is None:
+            assert arr.filters == ()
+        else:
+            assert arr.filters == filters_expected
 
     @staticmethod
     @pytest.mark.parametrize("dtype", [UInt8(), Float32(), VariableLengthUTF8()])
@@ -1339,7 +1347,8 @@ class TestCreateArray:
         )
 
         sig = inspect.signature(create_array)
-
+        expected_filters: tuple[Numcodec, ...] | tuple[ArrayArrayCodec, ...]
+        expected_compressors: tuple[Numcodec,] | tuple[BytesBytesCodec, ...] | None
         if zarr_format == 3:
             expected_filters, expected_serializer, expected_compressors = _parse_chunk_encoding_v3(
                 compressors=sig.parameters["compressors"].default,
@@ -1665,7 +1674,7 @@ def test_roundtrip_numcodecs() -> None:
         {"name": "numcodecs.shuffle", "configuration": {"elementsize": 2}},
         {"name": "numcodecs.zlib", "configuration": {"level": 4}},
     ]
-    filters = [
+    filters: list[CodecJSON_V3] = [
         {
             "name": "numcodecs.fixedscaleoffset",
             "configuration": {

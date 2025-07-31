@@ -23,8 +23,7 @@ from zarr.core.array import (
     Array,
     AsyncArray,
     CompressorLike,
-    CompressorsLike,
-    FiltersLike,
+    FilterLike,
     SerializerLike,
     ShardsLike,
     _build_parents,
@@ -1005,10 +1004,10 @@ class AsyncGroup:
         data: np.ndarray[Any, np.dtype[Any]] | None = None,
         chunks: ChunkCoords | Literal["auto"] = "auto",
         shards: ShardsLike | None = None,
-        filters: FiltersLike = "auto",
-        compressors: CompressorsLike = "auto",
-        compressor: CompressorLike = "auto",
-        serializer: SerializerLike = "auto",
+        filters: FilterLike | Iterable[FilterLike] | None | Literal["auto"] = "auto",
+        compressors: CompressorLike | Iterable[CompressorLike] | None | Literal["auto"] = "auto",
+        compressor: CompressorLike | None | Literal["auto"] = "auto",
+        serializer: SerializerLike | Literal["auto"] = "auto",
         fill_value: Any | None = DEFAULT_FILL_VALUE,
         order: MemoryOrder | None = None,
         attributes: dict[str, JSON] | None = None,
@@ -2436,10 +2435,10 @@ class Group(SyncMixin):
         data: np.ndarray[Any, np.dtype[Any]] | None = None,
         chunks: ChunkCoords | Literal["auto"] = "auto",
         shards: ShardsLike | None = None,
-        filters: FiltersLike = "auto",
-        compressors: CompressorsLike = "auto",
-        compressor: CompressorLike = "auto",
-        serializer: SerializerLike = "auto",
+        filters: FilterLike | Iterable[FilterLike] | None | Literal["auto"] = "auto",
+        compressors: CompressorLike | Iterable[CompressorLike] | None | Literal["auto"] = "auto",
+        compressor: CompressorLike | None | Literal["auto"] = "auto",
+        serializer: SerializerLike | Literal["auto"] = "auto",
         fill_value: Any | None = DEFAULT_FILL_VALUE,
         order: MemoryOrder | None = None,
         attributes: dict[str, JSON] | None = None,
@@ -2549,9 +2548,6 @@ class Group(SyncMixin):
         -------
         AsyncArray
         """
-        compressors = _parse_deprecated_compressor(
-            compressor, compressors, zarr_format=self.metadata.zarr_format
-        )
         return Array(
             self._sync(
                 self._async_group.create_array(
@@ -2564,6 +2560,7 @@ class Group(SyncMixin):
                     fill_value=fill_value,
                     attributes=attributes,
                     chunk_key_encoding=chunk_key_encoding,
+                    compressor=compressor,
                     compressors=compressors,
                     serializer=serializer,
                     dimension_names=dimension_names,
@@ -2832,9 +2829,9 @@ class Group(SyncMixin):
         dtype: npt.DTypeLike,
         chunks: ChunkCoords | Literal["auto"] = "auto",
         shards: ChunkCoords | Literal["auto"] | None = None,
-        filters: FiltersLike = "auto",
-        compressors: CompressorsLike = "auto",
-        compressor: CompressorLike = None,
+        filters: Iterable[FilterLike] = "auto",
+        compressors: Iterable[CompressorLike] | None | Literal["auto"] = "auto",
+        compressor: CompressorLike | None = None,
         serializer: SerializerLike = "auto",
         fill_value: Any | None = DEFAULT_FILL_VALUE,
         order: MemoryOrder | None = None,
@@ -2942,7 +2939,6 @@ class Group(SyncMixin):
         -------
         AsyncArray
         """
-        compressors = _parse_deprecated_compressor(compressor, compressors)
         return Array(
             self._sync(
                 self._async_group.create_dataset(

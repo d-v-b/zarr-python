@@ -15,6 +15,7 @@ from zarr.core.array import (
     Array,
     AsyncArray,
     CompressorLike,
+    FilterLike,
     create_array,
     from_array,
     get_array_metadata,
@@ -45,8 +46,6 @@ from zarr.storage._common import make_store_path
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
-
-    import numcodecs.abc
 
     from zarr.abc.codec import Codec
     from zarr.core.buffer import NDArrayLikeOrScalar
@@ -863,7 +862,7 @@ async def create(
     *,  # Note: this is a change from v2
     chunks: ChunkCoords | int | bool | None = None,
     dtype: ZDTypeLike | None = None,
-    compressor: CompressorLike = "auto",
+    compressor: CompressorLike | None | Literal["auto"] = "auto",
     fill_value: Any | None = DEFAULT_FILL_VALUE,
     order: MemoryOrder | None = None,
     store: str | StoreLike | None = None,
@@ -871,7 +870,7 @@ async def create(
     overwrite: bool = False,
     path: PathLike | None = None,
     chunk_store: StoreLike | None = None,
-    filters: Iterable[dict[str, JSON] | numcodecs.abc.Codec] | None = None,
+    filters: Iterable[FilterLike] | None = None,
     cache_metadata: bool | None = None,
     cache_attrs: bool | None = None,
     read_only: bool | None = None,

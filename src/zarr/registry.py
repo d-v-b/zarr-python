@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import warnings
 from collections import defaultdict
+from collections.abc import Mapping
 from importlib.metadata import entry_points as get_entry_points
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
@@ -169,7 +170,7 @@ def get_codec_class(key: str, reload_config: bool = False) -> type[Codec]:
     raise KeyError(key)
 
 
-def _resolve_codec(data: dict[str, JSON]) -> Codec:
+def _resolve_codec(data: Mapping[str, object]) -> Codec:
     """
     Get a codec instance from a dict representation of that codec.
     """
@@ -177,7 +178,7 @@ def _resolve_codec(data: dict[str, JSON]) -> Codec:
     return get_codec_class(data["name"]).from_dict(data)  # type: ignore[arg-type]
 
 
-def _parse_bytes_bytes_codec(data: dict[str, JSON] | Codec) -> BytesBytesCodec:
+def _parse_bytes_bytes_codec(data: Mapping[str, object] | Codec) -> BytesBytesCodec:
     """
     Normalize the input to a ``BytesBytesCodec`` instance.
     If the input is already a ``BytesBytesCodec``, it is returned as is. If the input is a dict, it
@@ -197,7 +198,7 @@ def _parse_bytes_bytes_codec(data: dict[str, JSON] | Codec) -> BytesBytesCodec:
     return result
 
 
-def _parse_array_bytes_codec(data: dict[str, JSON] | Codec) -> ArrayBytesCodec:
+def _parse_array_bytes_codec(data: Mapping[str, object] | Codec) -> ArrayBytesCodec:
     """
     Normalize the input to a ``ArrayBytesCodec`` instance.
     If the input is already a ``ArrayBytesCodec``, it is returned as is. If the input is a dict, it
@@ -205,7 +206,7 @@ def _parse_array_bytes_codec(data: dict[str, JSON] | Codec) -> ArrayBytesCodec:
     """
     from zarr.abc.codec import ArrayBytesCodec
 
-    if isinstance(data, dict):
+    if isinstance(data, Mapping):
         result = _resolve_codec(data)
         if not isinstance(result, ArrayBytesCodec):
             msg = f"Expected a dict representation of a ArrayBytesCodec; got a dict representation of a {type(result)} instead."
@@ -217,7 +218,7 @@ def _parse_array_bytes_codec(data: dict[str, JSON] | Codec) -> ArrayBytesCodec:
     return result
 
 
-def _parse_array_array_codec(data: dict[str, JSON] | Codec) -> ArrayArrayCodec:
+def _parse_array_array_codec(data: Mapping[str, JSON] | Codec) -> ArrayArrayCodec:
     """
     Normalize the input to a ``ArrayArrayCodec`` instance.
     If the input is already a ``ArrayArrayCodec``, it is returned as is. If the input is a dict, it

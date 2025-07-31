@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import warnings
 from asyncio import gather
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from itertools import starmap
 from logging import getLogger
@@ -19,15 +19,13 @@ from typing import (
 )
 from warnings import warn
 
-import numcodecs
-import numcodecs.abc
 import numpy as np
 from typing_extensions import deprecated
 
 import zarr
-from zarr.abc.codec import ArrayArrayCodec, ArrayBytesCodec, BytesBytesCodec, Codec
+from zarr.abc.codec import ArrayArrayCodec, ArrayBytesCodec, BytesBytesCodec, Codec, CodecJSON
 from zarr.abc.store import Store, set_or_delete
-from zarr.codecs._v2 import V2Codec
+from zarr.codecs._v2 import Numcodec, V2Codec, _is_numcodec
 from zarr.codecs.bytes import BytesCodec
 from zarr.codecs.vlen_utf8 import VLenBytesCodec, VLenUTF8Codec
 from zarr.codecs.zstd import ZstdCodec
@@ -110,7 +108,7 @@ from zarr.core.metadata import (
     T_ArrayMetadata,
 )
 from zarr.core.metadata.v2 import (
-    CompressorLikev2,
+    CompressorLike_V2,
     get_object_codec_id,
     parse_compressor,
     parse_filters,
@@ -340,7 +338,7 @@ class AsyncArray(Generic[T_ArrayMetadata]):
         dimension_separator: Literal[".", "/"] | None = None,
         order: MemoryOrder | None = None,
         filters: list[dict[str, JSON]] | None = None,
-        compressor: CompressorLikev2 | Literal["auto"] = "auto",
+        compressor: CompressorLike_V2 | Literal["auto"] = "auto",
         # runtime
         overwrite: bool = False,
         data: npt.ArrayLike | None = None,
@@ -605,8 +603,8 @@ class AsyncArray(Generic[T_ArrayMetadata]):
         chunks: ShapeLike | None = None,
         dimension_separator: Literal[".", "/"] | None = None,
         order: MemoryOrder | None = None,
-        filters: Iterable[dict[str, JSON] | numcodecs.abc.Codec] | None = None,
-        compressor: CompressorLike = "auto",
+        filters: Iterable[FilterLike] | None = None,
+        compressor: CompressorLike | None | Literal["auto"] = "auto",
         # runtime
         overwrite: bool = False,
         data: npt.ArrayLike | None = None,
@@ -691,8 +689,8 @@ class AsyncArray(Generic[T_ArrayMetadata]):
                 fill_value=fill_value,
                 order=order_parsed,
                 config=config_parsed,
-                filters=filters,
-                compressor=compressor,
+                filters=filters,  # type: ignore[arg-type]
+                compressor=compressor,  # type: ignore[arg-type]
                 attributes=attributes,
                 overwrite=overwrite,
             )
@@ -816,8 +814,8 @@ class AsyncArray(Generic[T_ArrayMetadata]):
         order: MemoryOrder,
         dimension_separator: Literal[".", "/"] | None = None,
         fill_value: Any | None = DEFAULT_FILL_VALUE,
-        filters: Iterable[dict[str, JSON] | numcodecs.abc.Codec] | None = None,
-        compressor: CompressorLikev2 = None,
+        filters: Iterable[CompressorLike_V2] | None = None,
+        compressor: CompressorLike_V2 | None = None,
         attributes: dict[str, JSON] | None = None,
     ) -> ArrayV2Metadata:
         if dimension_separator is None:
@@ -854,8 +852,8 @@ class AsyncArray(Generic[T_ArrayMetadata]):
         config: ArrayConfig,
         dimension_separator: Literal[".", "/"] | None = None,
         fill_value: Any | None = DEFAULT_FILL_VALUE,
-        filters: Iterable[dict[str, JSON] | numcodecs.abc.Codec] | None = None,
-        compressor: CompressorLike = "auto",
+        filters: Iterable[CompressorLike_V2] | None = None,
+        compressor: CompressorLike_V2 | None | Literal["auto"] = "auto",
         attributes: dict[str, JSON] | None = None,
         overwrite: bool = False,
     ) -> AsyncArray[ArrayV2Metadata]:
@@ -867,7 +865,7 @@ class AsyncArray(Generic[T_ArrayMetadata]):
         else:
             await ensure_no_existing_node(store_path, zarr_format=2)
 
-        compressor_parsed: CompressorLikev2
+        compressor_parsed: CompressorLike_V2 | None
         if compressor == "auto":
             compressor_parsed = default_compressor_v2(dtype)
         elif isinstance(compressor, BytesBytesCodec):
@@ -1031,7 +1029,7 @@ class AsyncArray(Generic[T_ArrayMetadata]):
         return np.prod(self.metadata.shape).item()
 
     @property
-    def filters(self) -> tuple[numcodecs.abc.Codec, ...] | tuple[ArrayArrayCodec, ...]:
+    def filters(self) -> tuple[Numcodec, ...] | tuple[ArrayArrayCodec, ...]:
         """
         Filters that are applied to each chunk of the array, in order, before serializing that
         chunk to bytes.
@@ -1060,7 +1058,7 @@ class AsyncArray(Generic[T_ArrayMetadata]):
 
     @property
     @deprecated("Use AsyncArray.compressors instead.")
-    def compressor(self) -> numcodecs.abc.Codec | None:
+    def compressor(self) -> Numcodec | None:
         """
         Compressor that is applied to each chunk of the array.
 
@@ -1073,7 +1071,7 @@ class AsyncArray(Generic[T_ArrayMetadata]):
         raise TypeError("`compressor` is not available for Zarr format 3 arrays.")
 
     @property
-    def compressors(self) -> tuple[numcodecs.abc.Codec, ...] | tuple[BytesBytesCodec, ...]:
+    def compressors(self) -> tuple[Numcodec, ...] | tuple[BytesBytesCodec, ...]:
         """
         Compressors that are applied to each chunk of the array. Compressors are applied in order, and after any
         filters are applied (if any are specified) and the data is serialized into bytes.
@@ -2162,7 +2160,7 @@ class Array:
         return self.metadata.fill_value
 
     @property
-    def filters(self) -> tuple[numcodecs.abc.Codec, ...] | tuple[ArrayArrayCodec, ...]:
+    def filters(self) -> tuple[Numcodec, ...] | tuple[ArrayArrayCodec, ...]:
         """
         Filters that are applied to each chunk of the array, in order, before serializing that
         chunk to bytes.
@@ -2178,7 +2176,7 @@ class Array:
 
     @property
     @deprecated("Use Array.compressors instead.")
-    def compressor(self) -> numcodecs.abc.Codec | None:
+    def compressor(self) -> Numcodec | None:
         """
         Compressor that is applied to each chunk of the array.
 
@@ -2189,7 +2187,7 @@ class Array:
         return self._async_array.compressor
 
     @property
-    def compressors(self) -> tuple[numcodecs.abc.Codec, ...] | tuple[BytesBytesCodec, ...]:
+    def compressors(self) -> tuple[Numcodec, ...] | tuple[BytesBytesCodec, ...]:
         """
         Compressors that are applied to each chunk of the array. Compressors are applied in order, and after any
         filters are applied (if any are specified) and the data is serialized into bytes.
@@ -3832,28 +3830,11 @@ def _build_parents(
     return parents
 
 
-FiltersLike: TypeAlias = (
-    Iterable[dict[str, JSON] | ArrayArrayCodec | numcodecs.abc.Codec]
-    | ArrayArrayCodec
-    | Iterable[numcodecs.abc.Codec]
-    | numcodecs.abc.Codec
-    | Literal["auto"]
-    | None
-)
-# Union of acceptable types for users to pass in for both v2 and v3 compressors
-CompressorLike: TypeAlias = (
-    dict[str, JSON] | BytesBytesCodec | numcodecs.abc.Codec | Literal["auto"] | None
-)
+FilterLike: TypeAlias = CodecJSON | ArrayArrayCodec | Numcodec
 
-CompressorsLike: TypeAlias = (
-    Iterable[dict[str, JSON] | BytesBytesCodec | numcodecs.abc.Codec]
-    | dict[str, JSON]
-    | BytesBytesCodec
-    | numcodecs.abc.Codec
-    | Literal["auto"]
-    | None
-)
-SerializerLike: TypeAlias = dict[str, JSON] | ArrayBytesCodec | Literal["auto"]
+CompressorLike: TypeAlias = CodecJSON | BytesBytesCodec | Numcodec
+
+SerializerLike: TypeAlias = CodecJSON | ArrayBytesCodec | Numcodec
 
 
 class ShardsConfigParam(TypedDict):
@@ -3871,10 +3852,13 @@ async def from_array(
     write_data: bool = True,
     name: str | None = None,
     chunks: Literal["auto", "keep"] | ChunkCoords = "keep",
-    shards: ShardsLike | None | Literal["keep"] = "keep",
-    filters: FiltersLike | Literal["keep"] = "keep",
-    compressors: CompressorsLike | Literal["keep"] = "keep",
-    serializer: SerializerLike | Literal["keep"] = "keep",
+    shards: ShardsLike | None | Literal["auto", "keep"] = "keep",
+    filters: FilterLike | Iterable[FilterLike] | None | Literal["auto", "keep"] = "keep",
+    compressors: CompressorLike
+    | Iterable[CompressorLike]
+    | None
+    | Literal["auto", "keep"] = "keep",
+    serializer: SerializerLike | Literal["auto", "keep"] = "keep",
     fill_value: Any | None = DEFAULT_FILL_VALUE,
     order: MemoryOrder | None = None,
     zarr_format: ZarrFormat | None = None,
@@ -4134,9 +4118,9 @@ async def init_array(
     dtype: ZDTypeLike,
     chunks: ChunkCoords | Literal["auto"] = "auto",
     shards: ShardsLike | None = None,
-    filters: FiltersLike = "auto",
-    compressors: CompressorsLike = "auto",
-    serializer: SerializerLike = "auto",
+    filters: FilterLike | Iterable[FilterLike] | None | Literal["auto"] = "auto",
+    compressors: CompressorLike | Iterable[CompressorLike] | None | Literal["auto"] = "auto",
+    serializer: SerializerLike | Literal["auto"] = "auto",
     fill_value: Any | None = DEFAULT_FILL_VALUE,
     order: MemoryOrder | None = None,
     zarr_format: ZarrFormat | None = 3,
@@ -4353,9 +4337,9 @@ async def create_array(
     data: np.ndarray[Any, np.dtype[Any]] | None = None,
     chunks: ChunkCoords | Literal["auto"] = "auto",
     shards: ShardsLike | None = None,
-    filters: FiltersLike = "auto",
-    compressors: CompressorsLike = "auto",
-    serializer: SerializerLike = "auto",
+    filters: FilterLike | Iterable[FilterLike] | None | Literal["auto"] = "auto",
+    compressors: Iterable[CompressorLike] | CompressorLike | None | Literal["auto"] = "auto",
+    serializer: SerializerLike | Literal["auto"] = "auto",
     fill_value: Any | None = DEFAULT_FILL_VALUE,
     order: MemoryOrder | None = None,
     zarr_format: ZarrFormat | None = 3,
@@ -4532,10 +4516,10 @@ async def create_array(
 def _parse_keep_array_attr(
     data: Array | npt.ArrayLike,
     chunks: Literal["auto", "keep"] | ChunkCoords,
-    shards: ShardsLike | None | Literal["keep"],
-    filters: FiltersLike | Literal["keep"],
-    compressors: CompressorsLike | Literal["keep"],
-    serializer: SerializerLike | Literal["keep"],
+    shards: ShardsLike | None | Literal["auto", "keep"],
+    filters: FilterLike | Iterable[FilterLike] | None | Literal["auto", "keep"],
+    compressors: CompressorLike | Iterable[CompressorLike] | None | Literal["auto", "keep"],
+    serializer: SerializerLike | Literal["auto", "keep"],
     fill_value: Any | None,
     order: MemoryOrder | None,
     zarr_format: ZarrFormat | None,
@@ -4544,9 +4528,9 @@ def _parse_keep_array_attr(
 ) -> tuple[
     ChunkCoords | Literal["auto"],
     ShardsLike | None,
-    FiltersLike,
-    CompressorsLike,
-    SerializerLike,
+    FilterLike | Iterable[FilterLike] | None | Literal["auto"],
+    CompressorLike | Iterable[CompressorLike] | None | Literal["auto"],
+    SerializerLike | Literal["auto"],
     Any | None,
     MemoryOrder | None,
     ZarrFormat,
@@ -4710,7 +4694,7 @@ def default_serializer_v3(dtype: ZDType[Any, Any]) -> ArrayBytesCodec:
     return serializer
 
 
-def default_filters_v2(dtype: ZDType[Any, Any]) -> tuple[numcodecs.abc.Codec] | None:
+def default_filters_v2(dtype: ZDType[Any, Any]) -> tuple[Numcodec] | None:
     """
     Given a data type, return the default filters for that data type.
 
@@ -4732,7 +4716,7 @@ def default_filters_v2(dtype: ZDType[Any, Any]) -> tuple[numcodecs.abc.Codec] | 
     return None
 
 
-def default_compressor_v2(dtype: ZDType[Any, Any]) -> numcodecs.abc.Codec:
+def default_compressor_v2(dtype: ZDType[Any, Any]) -> Numcodec:
     """
     Given a data type, return the default compressors for that data type.
 
@@ -4740,20 +4724,20 @@ def default_compressor_v2(dtype: ZDType[Any, Any]) -> numcodecs.abc.Codec:
     """
     from numcodecs import Zstd
 
-    return Zstd(level=0, checksum=False)
+    return Zstd(level=0, checksum=False)  # type: ignore[no-any-return]
 
 
 def _parse_chunk_encoding_v2(
     *,
-    compressor: CompressorsLike,
-    filters: FiltersLike,
+    compressor: CompressorLike | Iterable[CompressorLike] | None | Literal["auto"],
+    filters: FilterLike | Iterable[FilterLike] | None | Literal["auto"],
     dtype: ZDType[TBaseDType, TBaseScalar],
-) -> tuple[tuple[numcodecs.abc.Codec, ...] | None, numcodecs.abc.Codec | None]:
+) -> tuple[tuple[Numcodec, ...] | None, Numcodec | None]:
     """
     Generate chunk encoding classes for Zarr format 2 arrays with optional defaults.
     """
-    _filters: tuple[numcodecs.abc.Codec, ...] | None
-    _compressor: numcodecs.abc.Codec | None
+    _filters: tuple[Numcodec, ...] | None
+    _compressor: Numcodec | None
 
     if compressor is None or compressor == ():
         _compressor = None
@@ -4762,7 +4746,7 @@ def _parse_chunk_encoding_v2(
     elif isinstance(compressor, tuple | list) and len(compressor) == 1:
         _compressor = parse_compressor(compressor[0])
     else:
-        if isinstance(compressor, Iterable) and not isinstance(compressor, dict):
+        if isinstance(compressor, Iterable) and not isinstance(compressor, Mapping):
             msg = f"For Zarr format 2 arrays, the `compressor` must be a single codec. Got an iterable with type {type(compressor)} instead."
             raise TypeError(msg)
         _compressor = parse_compressor(compressor)
@@ -4774,7 +4758,7 @@ def _parse_chunk_encoding_v2(
     else:
         if isinstance(filters, Iterable):
             for idx, f in enumerate(filters):
-                if not isinstance(f, numcodecs.abc.Codec):
+                if not _is_numcodec(f):
                     msg = (
                         "For Zarr format 2 arrays, all elements of `filters` must be numcodecs codecs. "
                         f"Element at index {idx} has type {type(f)}, which is not a numcodecs codec."
@@ -4813,9 +4797,9 @@ def _parse_chunk_encoding_v2(
 
 def _parse_chunk_encoding_v3(
     *,
-    compressors: CompressorsLike,
-    filters: FiltersLike,
-    serializer: SerializerLike,
+    compressors: CompressorLike | Iterable[CompressorLike] | None | Literal["auto"],
+    filters: FilterLike | Iterable[FilterLike] | None | Literal["auto"],
+    serializer: SerializerLike | Literal["auto"],
     dtype: ZDType[TBaseDType, TBaseScalar],
 ) -> tuple[tuple[ArrayArrayCodec, ...], ArrayBytesCodec, tuple[BytesBytesCodec, ...]]:
     """
@@ -4840,7 +4824,11 @@ def _parse_chunk_encoding_v3(
         # TODO: ensure that the serializer is compatible with the ndarray produced by the
         # array-array codecs. For example, if a sequence of array-array codecs produces an
         # array with a single-byte data type, then the serializer should not specify endiannesss.
-        out_array_bytes = _parse_array_bytes_codec(serializer)
+        if isinstance(serializer, str):
+            _serializer = {"name": serializer}
+        else:
+            _serializer = serializer  # type: ignore[assignment]
+        out_array_bytes = _parse_array_bytes_codec(_serializer)
 
     if compressors is None:
         out_bytes_bytes: tuple[BytesBytesCodec, ...] = ()
@@ -4864,8 +4852,10 @@ def _parse_chunk_encoding_v3(
 
 
 def _parse_deprecated_compressor(
-    compressor: CompressorLike | None, compressors: CompressorsLike, zarr_format: int = 3
-) -> CompressorsLike | None:
+    compressor: CompressorLike | None | Literal["auto"],
+    compressors: CompressorLike | Iterable[CompressorLike] | None | Literal["auto"],
+    zarr_format: int = 3,
+) -> CompressorLike | Iterable[CompressorLike] | None | Literal["auto"]:
     if compressor != "auto":
         if compressors != "auto":
             raise ValueError("Cannot specify both `compressor` and `compressors`.")
@@ -4880,8 +4870,6 @@ def _parse_deprecated_compressor(
             compressors = ()
         else:
             compressors = (compressor,)
-    elif zarr_format == 2 and compressor == compressors == "auto":
-        compressors = ({"id": "blosc"},)
     return compressors
 
 

@@ -5,7 +5,7 @@ import pytest
 
 import zarr
 from zarr import Array
-from zarr.abc.codec import Codec
+from zarr.abc.codec import BytesBytesCodec
 from zarr.abc.store import Store
 from zarr.codecs import ZstdCodec
 from zarr.core.dtype import get_data_type_from_native_dtype
@@ -28,7 +28,10 @@ else:
 @pytest.mark.parametrize("as_object_array", [False, True])
 @pytest.mark.parametrize("compressor", [None, ZstdCodec()])
 def test_vlen_string(
-    store: Store, dtype: np.dtype[Any] | None, as_object_array: bool, compressor: Codec | None
+    store: Store,
+    dtype: np.dtype[Any] | None,
+    as_object_array: bool,
+    compressor: BytesBytesCodec | None,
 ) -> None:
     strings = ["hello", "world", "this", "is", "a", "test"]
     data = np.array(strings, dtype=dtype).reshape((2, 3))

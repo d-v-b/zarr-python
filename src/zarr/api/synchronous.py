@@ -6,7 +6,7 @@ from typing_extensions import deprecated
 
 import zarr.api.asynchronous as async_api
 import zarr.core.array
-from zarr.core.array import DEFAULT_FILL_VALUE, Array, AsyncArray, CompressorLike
+from zarr.core.array import DEFAULT_FILL_VALUE, Array, AsyncArray, CompressorLike, FilterLike
 from zarr.core.group import Group
 from zarr.core.sync import sync
 from zarr.core.sync_group import create_hierarchy
@@ -14,15 +14,13 @@ from zarr.core.sync_group import create_hierarchy
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-    import numcodecs.abc
     import numpy as np
     import numpy.typing as npt
 
     from zarr.abc.codec import Codec
     from zarr.api.asynchronous import ArrayLike, PathLike
     from zarr.core.array import (
-        CompressorsLike,
-        FiltersLike,
+        CompressorLike,
         SerializerLike,
         ShardsLike,
     )
@@ -601,7 +599,7 @@ def create(
     *,  # Note: this is a change from v2
     chunks: ChunkCoords | int | bool | None = None,
     dtype: ZDTypeLike | None = None,
-    compressor: CompressorLike = "auto",
+    compressor: CompressorLike | None | Literal["auto"] = "auto",
     fill_value: Any | None = DEFAULT_FILL_VALUE,  # TODO: need type
     order: MemoryOrder | None = None,
     store: str | StoreLike | None = None,
@@ -609,7 +607,7 @@ def create(
     overwrite: bool = False,
     path: PathLike | None = None,
     chunk_store: StoreLike | None = None,
-    filters: Iterable[dict[str, JSON] | numcodecs.abc.Codec] | None = None,
+    filters: Iterable[FilterLike] | None = None,
     cache_metadata: bool | None = None,
     cache_attrs: bool | None = None,
     read_only: bool | None = None,
@@ -756,9 +754,9 @@ def create_array(
     data: np.ndarray[Any, np.dtype[Any]] | None = None,
     chunks: ChunkCoords | Literal["auto"] = "auto",
     shards: ShardsLike | None = None,
-    filters: FiltersLike = "auto",
-    compressors: CompressorsLike = "auto",
-    serializer: SerializerLike = "auto",
+    filters: Iterable[FilterLike] | None | Literal["auto"] = "auto",
+    compressors: CompressorLike | Iterable[CompressorLike] | None | Literal["auto"] = "auto",
+    serializer: SerializerLike | Literal["auto"] = "auto",
     fill_value: Any | None = DEFAULT_FILL_VALUE,
     order: MemoryOrder | None = None,
     zarr_format: ZarrFormat | None = 3,
@@ -922,8 +920,8 @@ def from_array(
     name: str | None = None,
     chunks: Literal["auto", "keep"] | ChunkCoords = "keep",
     shards: ShardsLike | None | Literal["keep"] = "keep",
-    filters: FiltersLike | Literal["keep"] = "keep",
-    compressors: CompressorsLike | Literal["keep"] = "keep",
+    filters: Iterable[FilterLike] | Literal["keep"] = "keep",
+    compressors: Iterable[CompressorLike] | Literal["keep"] = "keep",
     serializer: SerializerLike | Literal["keep"] = "keep",
     fill_value: Any | None = DEFAULT_FILL_VALUE,
     order: MemoryOrder | None = None,
