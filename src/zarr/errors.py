@@ -1,5 +1,3 @@
-from typing import Any
-
 __all__ = [
     "BaseZarrError",
     "ContainsArrayAndGroupError",
@@ -30,6 +28,15 @@ class GroupNotFoundError(BaseZarrError, FileNotFoundError):
         else:
             super().__init__(*args)
 
+
+class ArrayNotFoundError(BaseZarrError):
+    """Raised when an array does not exist at a certain path."""
+
+
+class NodeNotFoundError(BaseZarrError):
+    """Raised when an array or group does not exist at a certain path."""
+
+
 class ContainsGroupError(BaseZarrError):
     """Raised when a group already exists at a certain path."""
 
@@ -53,6 +60,7 @@ class ContainsArrayError(BaseZarrError):
         else:
             super().__init__(*args)
 
+
 class ContainsArrayAndGroupError(BaseZarrError):
     """Raised when both array and group metadata are found at the same path."""
 
@@ -69,6 +77,7 @@ class ContainsArrayAndGroupError(BaseZarrError):
         else:
             super().__init__(*args)
 
+
 class MetadataValidationError(BaseZarrError):
     """Raised when the Zarr metadata is invalid in some way"""
 
@@ -79,6 +88,7 @@ class MetadataValidationError(BaseZarrError):
             super().__init__(args[0])
         else:
             super().__init__(*args)
+
 
 class NodeTypeValidationError(MetadataValidationError):
     """
