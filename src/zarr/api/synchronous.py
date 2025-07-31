@@ -754,7 +754,7 @@ def create_array(
     data: np.ndarray[Any, np.dtype[Any]] | None = None,
     chunks: ChunkCoords | Literal["auto"] = "auto",
     shards: ShardsLike | None = None,
-    filters: Iterable[FilterLike] | None | Literal["auto"] = "auto",
+    filters: FilterLike | Iterable[FilterLike] | None | Literal["auto"] = "auto",
     compressors: CompressorLike | Iterable[CompressorLike] | None | Literal["auto"] = "auto",
     serializer: SerializerLike | Literal["auto"] = "auto",
     fill_value: Any | None = DEFAULT_FILL_VALUE,

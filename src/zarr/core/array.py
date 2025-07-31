@@ -4338,7 +4338,7 @@ async def create_array(
     chunks: ChunkCoords | Literal["auto"] = "auto",
     shards: ShardsLike | None = None,
     filters: FilterLike | Iterable[FilterLike] | None | Literal["auto"] = "auto",
-    compressors: Iterable[CompressorLike] | CompressorLike | None | Literal["auto"] = "auto",
+    compressors: CompressorLike | Iterable[CompressorLike] | None | Literal["auto"] = "auto",
     serializer: SerializerLike | Literal["auto"] = "auto",
     fill_value: Any | None = DEFAULT_FILL_VALUE,
     order: MemoryOrder | None = None,
@@ -4870,6 +4870,9 @@ def _parse_deprecated_compressor(
             compressors = ()
         else:
             compressors = (compressor,)
+    # TODO: remove this, because we should be setting the default deeper in the stack
+    elif zarr_format == 2 and compressor == compressors == "auto":
+        compressors = ({"id": "blosc"},)
     return compressors
 
 

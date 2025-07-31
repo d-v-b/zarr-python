@@ -275,10 +275,10 @@ def parse_filters(data: object) -> tuple[Numcodec, ...] | None:
         for val in data:
             if _is_numcodec(val):
                 out.append(val)
-            if _check_codecjson_v2(val):
+            elif _check_codecjson_v2(val):
                 out.append(get_numcodec(val))
             else:
-                msg = f'Invalid representation of Numcodec. Got {data}, expected a dict with an "id" key or a Numcodec instance.'
+                msg = f'Invalid representation of a Zarr V2 codec. Got {data}, expected a dict with an "id" key or a Numcodec instance.'
                 raise TypeError(msg)
         if len(out) == 0:
             # Per the v2 spec, an empty tuple is not allowed -- use None to express "no filters"
