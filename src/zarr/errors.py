@@ -13,13 +13,8 @@ __all__ = [
 
 class BaseZarrError(ValueError):
     """
-    Base error which all zarr errors are sub-classed from.
+    Base class for Zarr errors.
     """
-
-    _msg = ""
-
-    def __init__(self, *args: Any) -> None:
-        super().__init__(self._msg.format(*args))
 
 
 class GroupNotFoundError(BaseZarrError, FileNotFoundError):
@@ -29,11 +24,22 @@ class GroupNotFoundError(BaseZarrError, FileNotFoundError):
 
     _msg = "No group found in store {!r} at path {!r}"
 
+    def __init__(self, *args: object) -> None:
+        if len(args) == 1:
+            super().__init__(args[0])
+        else:
+            super().__init__(*args)
 
 class ContainsGroupError(BaseZarrError):
     """Raised when a group already exists at a certain path."""
 
     _msg = "A group exists in store {!r} at path {!r}."
+
+    def __init__(self, *args: object) -> None:
+        if len(args) == 1:
+            super().__init__(args[0])
+        else:
+            super().__init__(*args)
 
 
 class ContainsArrayError(BaseZarrError):
@@ -41,6 +47,11 @@ class ContainsArrayError(BaseZarrError):
 
     _msg = "An array exists in store {!r} at path {!r}."
 
+    def __init__(self, *args: object) -> None:
+        if len(args) == 1:
+            super().__init__(args[0])
+        else:
+            super().__init__(*args)
 
 class ContainsArrayAndGroupError(BaseZarrError):
     """Raised when both array and group metadata are found at the same path."""
@@ -52,12 +63,22 @@ class ContainsArrayAndGroupError(BaseZarrError):
         "Remove the .zarray file, or the .zgroup file, or both."
     )
 
+    def __init__(self, *args: object) -> None:
+        if len(args) == 1:
+            super().__init__(args[0])
+        else:
+            super().__init__(*args)
 
 class MetadataValidationError(BaseZarrError):
     """Raised when the Zarr metadata is invalid in some way"""
 
     _msg = "Invalid value for '{}'. Expected '{}'. Got '{}'."
 
+    def __init__(self, *args: object) -> None:
+        if len(args) == 1:
+            super().__init__(args[0])
+        else:
+            super().__init__(*args)
 
 class NodeTypeValidationError(MetadataValidationError):
     """
