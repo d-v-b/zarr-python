@@ -642,6 +642,40 @@ class ShardingCodec(
                 )
             )
 
+    async def encode_partial(
+        self,
+        batch_info: Iterable[tuple[ByteSetter, NDBuffer, SelectorTuple, ArraySpec]],
+    ) -> None:
+        """Optimized partial encoding that detects complete shard writes."""
+        # For single item batches, check if it represents a complete shard
+        batch_list = list(batch_info)
+        if len(batch_list) == 1:
+            byte_setter, shard_array, selection, spec = batch_list[0]
+            chunks_per_shard = self._get_chunks_per_shard(spec)
+
+            # Check if the selection covers the entire shard
+            indexer = list(
+                get_indexer(
+                    selection,
+                    shape=spec.shape,
+                    chunk_grid=RegularChunkGrid(chunk_shape=self.chunk_shape),
+                )
+            )
+            all_chunk_coords = {chunk_coords for chunk_coords, _, _, _ in indexer}
+
+            # If this single call covers all chunks in the shard, use optimized path
+            if self._is_total_shard(all_chunk_coords, chunks_per_shard):
+                encoded_shard = await self._encode_single(shard_array, spec)
+                if encoded_shard is not None:
+                    await byte_setter.set(encoded_shard)
+                else:
+                    await byte_setter.delete()
+                return
+
+        # Fall back to default partial encoding
+        for item in batch_list:
+            await self._encode_partial_single(*item)
+
     def _is_total_shard(
         self, all_chunk_coords: set[tuple[int, ...]], chunks_per_shard: tuple[int, ...]
     ) -> bool:
