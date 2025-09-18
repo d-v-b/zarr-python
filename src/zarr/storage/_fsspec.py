@@ -4,6 +4,7 @@ import json
 import warnings
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 from packaging.version import parse as parse_version
 
@@ -117,6 +118,7 @@ class FsspecStore(Store):
     fs: AsyncFileSystem
     allowed_exceptions: tuple[type[Exception], ...]
     path: str
+    _url: str
 
     def __init__(
         self,
@@ -127,7 +129,12 @@ class FsspecStore(Store):
     ) -> None:
         super().__init__(read_only=read_only)
         self.fs = fs
-        self.path = path
+        # If the input is a URL, ensure that we only keep the path part
+        parsed_path = urlparse(path)
+        self.path = parsed_path.path
+        # Not sure if there's a better way to get the scheme from fsspec.fs.
+        # There's a protocol attribute but it's not type-stable
+        self._url = self.fs.to_dict()["protocol"] + "://" + path
         self.allowed_exceptions = allowed_exceptions
 
         if not self.fs.async_impl:
@@ -256,8 +263,8 @@ class FsspecStore(Store):
     async def clear(self) -> None:
         # docstring inherited
         try:
-            for subpath in await self.fs._find(self.path, withdirs=True):
-                if subpath != self.path:
+            for subpath in await self.fs._find(self._url, withdirs=True):
+                if subpath != self._url:
                     await self.fs._rm(subpath, recursive=True)
         except FileNotFoundError:
             pass
@@ -282,7 +289,7 @@ class FsspecStore(Store):
         # docstring inherited
         if not self._is_open:
             await self._open()
-        path = _dereference_path(self.path, key)
+        path = _dereference_path(self._url, key)
 
         try:
             if byte_range is None:
@@ -329,7 +336,7 @@ class FsspecStore(Store):
             raise TypeError(
                 f"FsspecStore.set(): `value` must be a Buffer instance. Got an instance of {type(value)} instead."
             )
-        path = _dereference_path(self.path, key)
+        path = _dereference_path(self._url, key)
         # write data
         if byte_range:
             raise NotImplementedError
@@ -338,7 +345,7 @@ class FsspecStore(Store):
     async def delete(self, key: str) -> None:
         # docstring inherited
         self._check_writable()
-        path = _dereference_path(self.path, key)
+        path = _dereference_path(self._url, key)
         try:
             await self.fs._rm(path)
         except FileNotFoundError:
@@ -354,14 +361,14 @@ class FsspecStore(Store):
             )
         self._check_writable()
 
-        path_to_delete = _dereference_path(self.path, prefix)
+        path_to_delete = _dereference_path(self._url, prefix)
 
         with suppress(*self.allowed_exceptions):
             await self.fs._rm(path_to_delete, recursive=True)
 
     async def exists(self, key: str) -> bool:
         # docstring inherited
-        path = _dereference_path(self.path, key)
+        path = _dereference_path(self._url, key)
         exists: bool = await self.fs._exists(path)
         return exists
 
@@ -378,7 +385,7 @@ class FsspecStore(Store):
             starts: list[int | None] = []
             stops: list[int | None] = []
             for key, byte_range in key_ranges:
-                paths.append(_dereference_path(self.path, key))
+                paths.append(_dereference_path(self._url, key))
                 if byte_range is None:
                     starts.append(None)
                     stops.append(None)
@@ -407,26 +414,26 @@ class FsspecStore(Store):
 
     async def list(self) -> AsyncIterator[str]:
         # docstring inherited
-        allfiles = await self.fs._find(self.path, detail=False, withdirs=False)
-        for onefile in (a.removeprefix(self.path + "/") for a in allfiles):
+        allfiles = await self.fs._find(self._url, detail=False, withdirs=False)
+        for onefile in (a.removeprefix(self._url + "/") for a in allfiles):
             yield onefile
 
     async def list_dir(self, prefix: str) -> AsyncIterator[str]:
         # docstring inherited
-        prefix = f"{self.path}/{prefix.rstrip('/')}"
+        prefix = f"{self._url}/{prefix.rstrip('/')}"
         try:
             allfiles = await self.fs._ls(prefix, detail=False)
         except FileNotFoundError:
             return
         for onefile in (a.replace(prefix + "/", "") for a in allfiles):
-            yield onefile.removeprefix(self.path).removeprefix("/")
+            yield onefile.removeprefix(self._url).removeprefix("/")
 
     async def list_prefix(self, prefix: str) -> AsyncIterator[str]:
         # docstring inherited
         for onefile in await self.fs._find(
-            f"{self.path}/{prefix}", detail=False, maxdepth=None, withdirs=False
+            f"{self._url}/{prefix}", detail=False, maxdepth=None, withdirs=False
         ):
-            yield onefile.removeprefix(f"{self.path}/")
+            yield onefile.removeprefix(f"{self._url}/")
 
     async def getsize(self, key: str) -> int:
         path = _dereference_path(self.path, key)
