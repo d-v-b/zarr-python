@@ -1,0 +1,18 @@
+[project]
+name = "zarr-zarrs-integration"
+version = "0.1.0"
+description = "Integration tests between zarr-python and Zarrs"
+channels = ["conda-forge"]
+platforms = ["linux-64", "osx-64", "osx-arm64", "win-64"]
+
+[dependencies]
+python = ">=3.11"
+numpy = ">=1.26"
+pytest = ">=7.0"
+pip = "*"
+rust = ">=1.70"
+
+[tasks]
+install-zarrs = "pip install 'zarrs>=0.2.0'"
+setup = { depends-on = ["install-zarrs"] }
+test = { cmd = "pytest test_zarrs_interop.py -v", depends-on = ["install-zarrs"] }
