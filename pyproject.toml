@@ -269,6 +269,18 @@ dependencies = [
 test = "pytest tests/test_docs.py -v"
 list-env = "pip list"
 
+[tool.hatch.envs.zarrs-integration]
+description = "Integration tests with Zarrs (Rust implementation)"
+features = ['test']
+dependencies = [
+    "zarrs>=0.2.0",
+]
+
+[tool.hatch.envs.zarrs-integration.scripts]
+run-pytest = "pytest tests/test_integration/test_zarrs_interop.py -v"
+run-coverage = "pytest tests/test_integration/test_zarrs_interop.py --cov-config=pyproject.toml --cov=src --cov-append --cov-report xml"
+list-env = "pip list"
+
 [tool.ruff]
 line-length = 100
 force-exclude = true
