@@ -293,30 +293,14 @@ class BatchedCodecPipeline(CodecPipeline):
 
     def _merge_chunk_array(
         self,
-        existing_chunk_array: NDBuffer | None,
+        *,
+        chunk_array: NDBuffer,
         value: NDBuffer,
         out_selection: SelectorTuple,
         chunk_spec: ArraySpec,
         chunk_selection: SelectorTuple,
-        is_complete_chunk: bool,
         drop_axes: tuple[int, ...],
-    ) -> NDBuffer:
-        if (
-            is_complete_chunk
-            and value.shape == chunk_spec.shape
-            # Guard that this is not a partial chunk at the end with is_complete_chunk=True
-            and value[out_selection].shape == chunk_spec.shape
-        ):
-            return value
-        if existing_chunk_array is None:
-            chunk_array = chunk_spec.prototype.nd_buffer.create(
-                shape=chunk_spec.shape,
-                dtype=chunk_spec.dtype.to_native_dtype(),
-                order=chunk_spec.order,
-                fill_value=fill_value_or_default(chunk_spec),
-            )
-        else:
-            chunk_array = existing_chunk_array.copy()  # make a writable copy
+    ) -> None:
         if chunk_selection == () or is_scalar(
             value.as_ndarray_like(), chunk_spec.dtype.to_native_dtype()
         ):
@@ -333,7 +317,6 @@ class BatchedCodecPipeline(CodecPipeline):
                 )
                 chunk_value = chunk_value[item]
         chunk_array[chunk_selection] = chunk_value
-        return chunk_array
 
     async def write_batch(
         self,
@@ -388,24 +371,68 @@ class BatchedCodecPipeline(CodecPipeline):
                 ],
             )
 
-            chunk_array_merged = [
-                self._merge_chunk_array(
-                    chunk_array,
-                    value,
-                    out_selection,
-                    chunk_spec,
-                    chunk_selection,
-                    is_complete_chunk,
-                    drop_axes,
-                )
-                for chunk_array, (
-                    _,
-                    chunk_spec,
-                    chunk_selection,
-                    out_selection,
-                    is_complete_chunk,
-                ) in zip(chunk_array_decoded, batch_info, strict=False)
-            ]
+            chunk_array_merged = []
+
+            for chunk_array, (
+                _,
+                chunk_spec,
+                chunk_selection,
+                out_selection,
+                is_complete_chunk,
+            ) in zip(chunk_array_decoded, batch_info, strict=False):
+                if (
+                    is_complete_chunk
+                    and value.shape == chunk_spec.shape
+                    # Guard that this is not a partial chunk at the end with is_complete_chunk=True
+                    and value[out_selection].shape == chunk_spec.shape
+                ):
+                    # Complete chunk write with matching shape, use value directly
+                    chunk_array_merged.append(value)
+                elif chunk_array is None:
+                    # Create new chunk array if none exists
+                    chunk_array = chunk_spec.prototype.nd_buffer.create(
+                        shape=chunk_spec.shape,
+                        dtype=chunk_spec.dtype.to_native_dtype(),
+                        order=chunk_spec.order,
+                        fill_value=fill_value_or_default(chunk_spec),
+                    )
+                    # Merge the value into the newly created chunk
+                    self._merge_chunk_array(
+                        chunk_array=chunk_array,
+                        value=value,
+                        out_selection=out_selection,
+                        chunk_spec=chunk_spec,
+                        chunk_selection=chunk_selection,
+                        drop_axes=drop_axes,
+                    )
+                    chunk_array_merged.append(chunk_array)
+                else:
+                    # Try to merge in-place; if buffer is read-only, copy it first
+                    try:
+                        self._merge_chunk_array(
+                            chunk_array=chunk_array,
+                            value=value,
+                            out_selection=out_selection,
+                            chunk_spec=chunk_spec,
+                            chunk_selection=chunk_selection,
+                            drop_axes=drop_axes,
+                        )
+                        chunk_array_merged.append(chunk_array)
+                    except ValueError as e:
+                        # Buffer is read-only, need to copy
+                        if "read-only" in str(e):
+                            chunk_array = chunk_array.copy()
+                            self._merge_chunk_array(
+                                chunk_array=chunk_array,
+                                value=value,
+                                out_selection=out_selection,
+                                chunk_spec=chunk_spec,
+                                chunk_selection=chunk_selection,
+                                drop_axes=drop_axes,
+                            )
+                            chunk_array_merged.append(chunk_array)
+                        else:
+                            raise
             chunk_array_batch: list[NDBuffer | None] = []
             for chunk_array, (_, chunk_spec, *_) in zip(
                 chunk_array_merged, batch_info, strict=False
