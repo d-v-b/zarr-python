@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import warnings
 from collections import defaultdict
+from dataclasses import field
 from importlib.metadata import entry_points as get_entry_points
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
@@ -13,9 +14,6 @@ if TYPE_CHECKING:
     from importlib.metadata import EntryPoint
 
     from zarr.abc.codec import (
-        ArrayArrayCodec,
-        ArrayBytesCodec,
-        BytesBytesCodec,
         Codec,
         CodecJSON_V2,
         CodecPipeline,
@@ -23,7 +21,6 @@ if TYPE_CHECKING:
     from zarr.abc.numcodec import Numcodec
     from zarr.core.buffer import Buffer, NDBuffer
     from zarr.core.chunk_key_encodings import ChunkKeyEncoding
-    from zarr.core.common import JSON
 
 __all__ = [
     "Registry",
@@ -40,6 +37,23 @@ __all__ = [
 ]
 
 T = TypeVar("T")
+
+
+@dataclass
+class RegistryV2(Generic[T]):
+    contents: dict[str, type[T]] = field(default_factory=dict, init=False)
+
+    def register(self, key: str, cls: type[T]) -> None:
+        self.contents[key] = cls
+
+    def get(self, key: str) -> type[T]:
+        return self.contents[key]
+
+    def unregister(self, key: str) -> None:
+        if key in self.contents:
+            del self.contents[key]
+        else:
+            raise KeyError(key)
 
 
 class Registry(dict[str, type[T]], Generic[T]):
@@ -186,74 +200,6 @@ def get_codec_class(key: str, reload_config: bool = False) -> type[Codec]:
     if selected_codec_cls:
         return selected_codec_cls
     raise KeyError(key)
-
-
-def _resolve_codec(data: dict[str, JSON]) -> Codec:
-    """
-    Get a codec instance from a dict representation of that codec.
-    """
-    # TODO: narrow the type of the input to only those dicts that map on to codec class instances.
-    return get_codec_class(data["name"]).from_dict(data)  # type: ignore[arg-type]
-
-
-def _parse_bytes_bytes_codec(data: dict[str, JSON] | Codec) -> BytesBytesCodec:
-    """
-    Normalize the input to a ``BytesBytesCodec`` instance.
-    If the input is already a ``BytesBytesCodec``, it is returned as is. If the input is a dict, it
-    is converted to a ``BytesBytesCodec`` instance via the ``_resolve_codec`` function.
-    """
-    from zarr.abc.codec import BytesBytesCodec
-
-    if isinstance(data, dict):
-        result = _resolve_codec(data)
-        if not isinstance(result, BytesBytesCodec):
-            msg = f"Expected a dict representation of a BytesBytesCodec; got a dict representation of a {type(result)} instead."
-            raise TypeError(msg)
-    else:
-        if not isinstance(data, BytesBytesCodec):
-            raise TypeError(f"Expected a BytesBytesCodec. Got {type(data)} instead.")
-        result = data
-    return result
-
-
-def _parse_array_bytes_codec(data: dict[str, JSON] | Codec) -> ArrayBytesCodec:
-    """
-    Normalize the input to a ``ArrayBytesCodec`` instance.
-    If the input is already a ``ArrayBytesCodec``, it is returned as is. If the input is a dict, it
-    is converted to a ``ArrayBytesCodec`` instance via the ``_resolve_codec`` function.
-    """
-    from zarr.abc.codec import ArrayBytesCodec
-
-    if isinstance(data, dict):
-        result = _resolve_codec(data)
-        if not isinstance(result, ArrayBytesCodec):
-            msg = f"Expected a dict representation of a ArrayBytesCodec; got a dict representation of a {type(result)} instead."
-            raise TypeError(msg)
-    else:
-        if not isinstance(data, ArrayBytesCodec):
-            raise TypeError(f"Expected a ArrayBytesCodec. Got {type(data)} instead.")
-        result = data
-    return result
-
-
-def _parse_array_array_codec(data: dict[str, JSON] | Codec) -> ArrayArrayCodec:
-    """
-    Normalize the input to a ``ArrayArrayCodec`` instance.
-    If the input is already a ``ArrayArrayCodec``, it is returned as is. If the input is a dict, it
-    is converted to a ``ArrayArrayCodec`` instance via the ``_resolve_codec`` function.
-    """
-    from zarr.abc.codec import ArrayArrayCodec
-
-    if isinstance(data, dict):
-        result = _resolve_codec(data)
-        if not isinstance(result, ArrayArrayCodec):
-            msg = f"Expected a dict representation of a ArrayArrayCodec; got a dict representation of a {type(result)} instead."
-            raise TypeError(msg)
-    else:
-        if not isinstance(data, ArrayArrayCodec):
-            raise TypeError(f"Expected a ArrayArrayCodec. Got {type(data)} instead.")
-        result = data
-    return result
 
 
 def get_pipeline_class(reload_config: bool = False) -> type[CodecPipeline]:
