@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, MutableMapping
-from dataclasses import dataclass, field, replace
+from collections.abc import Awaitable, Callable, Iterable
+from dataclasses import dataclass, replace
 from enum import Enum
 from functools import lru_cache
 from operator import itemgetter
@@ -54,15 +54,13 @@ from zarr.core.metadata.v3 import parse_codecs
 from zarr.registry import get_ndbuffer_class, get_pipeline_class
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterator
+    from collections.abc import Iterator
     from typing import Self
 
     from zarr.core.common import JSON
     from zarr.core.dtype.wrapper import TBaseDType, TBaseScalar, ZDType
 
 MAX_UINT_64 = 2**64 - 1
-ShardMapping = Mapping[tuple[int, ...], Buffer]
-ShardMutableMapping = MutableMapping[tuple[int, ...], Buffer]
 
 
 class ShardingCodecIndexLocation(Enum):
@@ -80,7 +78,9 @@ def parse_index_location(data: object) -> ShardingCodecIndexLocation:
 
 @dataclass(frozen=True)
 class _ShardingByteGetter(ByteGetter):
-    shard_dict: ShardMapping
+    """Adapts a shard to the ByteGetter protocol for a specific chunk."""
+
+    shard: Shard | ShardBuilder
     chunk_coords: tuple[int, ...]
 
     async def get(
@@ -90,22 +90,35 @@ class _ShardingByteGetter(ByteGetter):
         assert prototype == default_buffer_prototype(), (
             f"prototype is not supported within shards currently. diff: {prototype} != {default_buffer_prototype()}"
         )
-        return self.shard_dict.get(self.chunk_coords)
+        if isinstance(self.shard, Shard):
+            return self.shard.get_chunk_bytes(self.chunk_coords)
+        else:
+            # ShardBuilder - used for nested sharding during construction
+            return self.shard.get(self.chunk_coords)
 
 
 @dataclass(frozen=True)
 class _ShardingByteSetter(_ShardingByteGetter, ByteSetter):
-    shard_dict: ShardMutableMapping
+    """Adapts a shard builder to the ByteSetter protocol for a specific chunk."""
+
+    shard: ShardBuilder
 
     async def set(self, value: Buffer, byte_range: ByteRequest | None = None) -> None:
         assert byte_range is None, "byte_range is not supported within shards"
-        self.shard_dict[self.chunk_coords] = value
+        self.shard.append_chunk(self.chunk_coords, value)
 
     async def delete(self) -> None:
-        del self.shard_dict[self.chunk_coords]
+        # Delete means "don't include this chunk in the final shard"
+        # Mark as tombstone so it won't be copied from old shard during merge
+        self.shard._tombstones.add(self.chunk_coords)
+        # Also remove from new chunks if it was previously added
+        if self.chunk_coords in self.shard._chunks:
+            del self.shard._chunks[self.chunk_coords]
 
     async def set_if_not_exists(self, default: Buffer) -> None:
-        self.shard_dict.setdefault(self.chunk_coords, default)
+        # Only set if chunk doesn't exist
+        if self.shard.get_chunk(self.chunk_coords) is None:
+            self.shard.append_chunk(self.chunk_coords, default)
 
 
 class _ShardIndex(NamedTuple):
@@ -176,159 +189,310 @@ class _ShardIndex(NamedTuple):
         return cls(offsets_and_lengths)
 
 
-class _ShardReader(ShardMapping):
-    buf: Buffer
-    index: _ShardIndex
-
-    @classmethod
-    async def from_bytes(
-        cls, buf: Buffer, codec: ShardingCodec, chunks_per_shard: tuple[int, ...]
-    ) -> _ShardReader:
-        shard_index_size = codec._shard_index_size(chunks_per_shard)
-        obj = cls()
-        obj.buf = buf
-        if codec.index_location == ShardingCodecIndexLocation.start:
-            shard_index_bytes = obj.buf[:shard_index_size]
-        else:
-            shard_index_bytes = obj.buf[-shard_index_size:]
-
-        obj.index = await codec._decode_shard_index(shard_index_bytes, chunks_per_shard)
-        return obj
-
-    @classmethod
-    def create_empty(
-        cls, chunks_per_shard: tuple[int, ...], buffer_prototype: BufferPrototype | None = None
-    ) -> _ShardReader:
-        if buffer_prototype is None:
-            buffer_prototype = default_buffer_prototype()
-        index = _ShardIndex.create_empty(chunks_per_shard)
-        obj = cls()
-        obj.buf = buffer_prototype.buffer.create_zero_length()
-        obj.index = index
-        return obj
-
-    def __getitem__(self, chunk_coords: tuple[int, ...]) -> Buffer:
-        chunk_byte_slice = self.index.get_chunk_slice(chunk_coords)
-        if chunk_byte_slice:
-            return self.buf[chunk_byte_slice[0] : chunk_byte_slice[1]]
-        raise KeyError
-
-    def __len__(self) -> int:
-        return int(self.index.offsets_and_lengths.size / 2)
-
-    def __iter__(self) -> Iterator[tuple[int, ...]]:
-        return c_order_iter(self.index.offsets_and_lengths.shape[:-1])
-
-    def is_empty(self) -> bool:
-        return self.index.is_all_empty()
-
-
-class _ShardBuilder(_ShardReader, ShardMutableMapping):
-    buffers: list[Buffer]
-    index: _ShardIndex
-    buf: Buffer
-
-    @classmethod
-    def merge_with_morton_order(
-        cls,
-        chunks_per_shard: tuple[int, ...],
-        tombstones: set[tuple[int, ...]],
-        *shard_dicts: ShardMapping,
-    ) -> _ShardBuilder:
-        obj = cls.create_empty(chunks_per_shard)
-        for chunk_coords in morton_order_iter(chunks_per_shard):
-            if chunk_coords in tombstones:
-                continue
-            for shard_dict in shard_dicts:
-                maybe_value = shard_dict.get(chunk_coords, None)
-                if maybe_value is not None:
-                    obj[chunk_coords] = maybe_value
-                    break
-        return obj
-
-    @classmethod
-    def create_empty(
-        cls, chunks_per_shard: tuple[int, ...], buffer_prototype: BufferPrototype | None = None
-    ) -> _ShardBuilder:
-        if buffer_prototype is None:
-            buffer_prototype = default_buffer_prototype()
-        obj = cls()
-        obj.buf = buffer_prototype.buffer.create_zero_length()
-        obj.buffers = []
-        obj.index = _ShardIndex.create_empty(chunks_per_shard)
-        return obj
-
-    def __setitem__(self, chunk_coords: tuple[int, ...], value: Buffer) -> None:
-        chunk_start = sum(len(buf) for buf in self.buffers)
-        chunk_length = len(value)
-        self.buffers.append(value)
-        self.index.set_chunk_slice(chunk_coords, slice(chunk_start, chunk_start + chunk_length))
-
-    def __delitem__(self, chunk_coords: tuple[int, ...]) -> None:
-        raise NotImplementedError
-
-    async def finalize(
-        self,
-        index_location: ShardingCodecIndexLocation,
-        index_encoder: Callable[[_ShardIndex], Awaitable[Buffer]],
-    ) -> Buffer:
-        index_bytes = await index_encoder(self.index)
-        if index_location == ShardingCodecIndexLocation.start:
-            empty_chunks_mask = self.index.offsets_and_lengths[..., 0] == MAX_UINT_64
-            self.index.offsets_and_lengths[~empty_chunks_mask, 0] += len(index_bytes)
-            index_bytes = await index_encoder(self.index)  # encode again with corrected offsets
-            self.buffers.insert(0, index_bytes)
-        else:
-            self.buffers.append(index_bytes)
-        self.buf = self.buf.combine(self.buffers)
-        return self.buf
+# ============================================================================
+# New Core Abstractions: Shard as Immutable Value Object
+# ============================================================================
 
 
 @dataclass(frozen=True)
-class _MergingShardBuilder(ShardMutableMapping):
-    old_dict: _ShardReader
-    new_dict: _ShardBuilder
-    tombstones: set[tuple[int, ...]] = field(default_factory=set)
+class ChunkLocation:
+    """Location of a chunk in a linear buffer."""
 
-    def __getitem__(self, chunk_coords: tuple[int, ...]) -> Buffer:
-        chunk_bytes_maybe = self.new_dict.get(chunk_coords)
-        if chunk_bytes_maybe is not None:
-            return chunk_bytes_maybe
-        return self.old_dict[chunk_coords]
+    offset: int
+    length: int
 
-    def __setitem__(self, chunk_coords: tuple[int, ...], value: Buffer) -> None:
-        self.new_dict[chunk_coords] = value
 
-    def __delitem__(self, chunk_coords: tuple[int, ...]) -> None:
-        self.tombstones.add(chunk_coords)
+@dataclass(frozen=True)
+class Shard:
+    """
+    Immutable shard: represents a sparse N-D chunk grid backed by a linear buffer.
 
-    def __len__(self) -> int:
-        return self.old_dict.__len__()
+    A shard is fundamentally:
+    - An index mapping chunk coordinates to byte ranges
+    - A buffer containing the actual chunk data
+    - Metadata describing the logical structure
 
-    def __iter__(self) -> Iterator[tuple[int, ...]]:
-        return self.old_dict.__iter__()
+    This is a value object - all operations are reads or transformations that
+    return new Shards.
+    """
+
+    # Index: chunk coordinates → byte range
+    index: _ShardIndex
+
+    # Physical storage: linear byte buffer (already includes index if serialized)
+    buffer: Buffer
+
+    # Logical structure metadata
+    chunks_per_shard: tuple[int, ...]
+    chunk_shape: tuple[int, ...]
+    dtype: Any  # np.dtype
+    fill_value: Any
+
+    @classmethod
+    async def from_buffer(
+        cls,
+        buffer: Buffer,
+        chunks_per_shard: tuple[int, ...],
+        chunk_shape: tuple[int, ...],
+        dtype: Any,
+        fill_value: Any,
+        index_location: ShardingCodecIndexLocation,
+        index_decoder: Callable[[Buffer], Awaitable[_ShardIndex]],
+    ) -> Shard:
+        """
+        Parse a shard from a serialized buffer.
+
+        The buffer contains both the index and chunk data, in the order
+        specified by index_location.
+        """
+        # Decode index from buffer
+        index = await index_decoder(buffer)
+
+        return cls(
+            index=index,
+            buffer=buffer,
+            chunks_per_shard=chunks_per_shard,
+            chunk_shape=chunk_shape,
+            dtype=dtype,
+            fill_value=fill_value,
+        )
+
+    @classmethod
+    def empty(
+        cls,
+        chunks_per_shard: tuple[int, ...],
+        chunk_shape: tuple[int, ...],
+        dtype: Any,
+        fill_value: Any,
+        buffer_prototype: BufferPrototype | None = None,
+    ) -> Shard:
+        """Create an empty shard with no chunks."""
+        if buffer_prototype is None:
+            buffer_prototype = default_buffer_prototype()
+
+        return cls(
+            index=_ShardIndex.create_empty(chunks_per_shard),
+            buffer=buffer_prototype.buffer.create_zero_length(),
+            chunks_per_shard=chunks_per_shard,
+            chunk_shape=chunk_shape,
+            dtype=dtype,
+            fill_value=fill_value,
+        )
+
+    def get_chunk_location(self, coords: tuple[int, ...]) -> ChunkLocation | None:
+        """Get the byte range for a chunk, or None if not present."""
+        byte_range = self.index.get_chunk_slice(coords)
+        if byte_range is None:
+            return None
+        return ChunkLocation(offset=byte_range[0], length=byte_range[1] - byte_range[0])
+
+    def get_chunk_bytes(self, coords: tuple[int, ...]) -> Buffer | None:
+        """Get raw encoded bytes for a chunk, or None if not present."""
+        location = self.get_chunk_location(coords)
+        if location is None:
+            return None
+        return self.buffer[location.offset : location.offset + location.length]
 
     def is_empty(self) -> bool:
-        full_chunk_coords_map = self.old_dict.index.get_full_chunk_map()
-        full_chunk_coords_map = np.logical_or(
-            full_chunk_coords_map, self.new_dict.index.get_full_chunk_map()
-        )
-        for tombstone in self.tombstones:
-            full_chunk_coords_map[tombstone] = False
-        return bool(np.array_equiv(full_chunk_coords_map, False))
+        """Check if shard has no chunks."""
+        return self.index.is_all_empty()
+
+    def present_chunks(self) -> Iterator[tuple[int, ...]]:
+        """Iterate over coordinates of all present chunks."""
+        full_map = self.index.get_full_chunk_map()
+        for coords in c_order_iter(self.chunks_per_shard):
+            if full_map[coords]:
+                yield coords
+
+
+class ShardBuilder:
+    """
+    Mutable builder for constructing immutable Shards.
+
+    Accumulates encoded chunks and metadata, then serializes them into
+    a single buffer with an index.
+
+    Usage:
+        builder = ShardBuilder(...)
+        builder.append_chunk((0, 0), encoded_bytes)
+        builder.append_chunk((0, 1), encoded_bytes)
+        shard = await builder.finalize(index_location, index_encoder)
+    """
+
+    def __init__(
+        self,
+        chunks_per_shard: tuple[int, ...],
+        chunk_shape: tuple[int, ...],
+        dtype: Any,
+        fill_value: Any,
+    ):
+        self.chunks_per_shard = chunks_per_shard
+        self.chunk_shape = chunk_shape
+        self.dtype = dtype
+        self.fill_value = fill_value
+
+        # Accumulate chunks: coords → encoded bytes
+        self._chunks: dict[tuple[int, ...], Buffer] = {}
+
+        # Track explicitly deleted chunks (for merging with old shards)
+        self._tombstones: set[tuple[int, ...]] = set()
+
+    def append_chunk(self, coords: tuple[int, ...], encoded: Buffer) -> None:
+        """Add an encoded chunk. Overwrites if coords already exist."""
+        self._chunks[coords] = encoded
+
+    def get_chunk(self, coords: tuple[int, ...]) -> Buffer | None:
+        """Get a chunk that was added (for builder queries)."""
+        return self._chunks.get(coords)
+
+    def get(self, coords: tuple[int, ...], default: Buffer | None = None) -> Buffer | None:
+        """Get chunk with optional default (for compatibility)."""
+        return self._chunks.get(coords, default)
 
     async def finalize(
         self,
         index_location: ShardingCodecIndexLocation,
         index_encoder: Callable[[_ShardIndex], Awaitable[Buffer]],
-    ) -> Buffer:
-        shard_builder = _ShardBuilder.merge_with_morton_order(
-            self.new_dict.index.chunks_per_shard,
-            self.tombstones,
-            self.new_dict,
-            self.old_dict,
+    ) -> Shard:
+        """
+        Build the immutable Shard.
+
+        This performs serialization:
+        1. Orders chunks (Morton order for spatial locality)
+        2. Builds index mapping coords → byte ranges
+        3. Concatenates all chunks into single buffer
+        4. Encodes and prepends/appends index
+        5. Returns immutable Shard
+        """
+        if not self._chunks:
+            # Empty shard
+            return Shard.empty(
+                self.chunks_per_shard,
+                self.chunk_shape,
+                self.dtype,
+                self.fill_value,
+            )
+
+        # Order chunks in Morton order for better spatial locality
+        ordered_coords = sorted(self._chunks.keys(), key=lambda c: morton_encode(c))
+
+        # Build index and accumulate buffers
+        index = _ShardIndex.create_empty(self.chunks_per_shard)
+        chunk_buffers = []
+        current_offset = 0
+
+        for coords in ordered_coords:
+            chunk_buffer = self._chunks[coords]
+            length = len(chunk_buffer)
+
+            # Record in index
+            index.set_chunk_slice(coords, slice(current_offset, current_offset + length))
+
+            chunk_buffers.append(chunk_buffer)
+            current_offset += length
+
+        # Encode index
+        index_bytes = await index_encoder(index)
+
+        # Combine based on index location
+        if index_location == ShardingCodecIndexLocation.start:
+            # Adjust all offsets to account for index at start
+            empty_chunks_mask = index.offsets_and_lengths[..., 0] == MAX_UINT_64
+            index.offsets_and_lengths[~empty_chunks_mask, 0] += len(index_bytes)
+            # Re-encode with adjusted offsets
+            index_bytes = await index_encoder(index)
+            all_buffers = [index_bytes] + chunk_buffers
+        else:
+            all_buffers = chunk_buffers + [index_bytes]
+
+        # Concatenate into single buffer
+        if len(all_buffers) == 1:
+            combined_buffer = all_buffers[0]
+        else:
+            combined_buffer = all_buffers[0].combine(all_buffers[1:])
+
+        return Shard(
+            index=index,
+            buffer=combined_buffer,
+            chunks_per_shard=self.chunks_per_shard,
+            chunk_shape=self.chunk_shape,
+            dtype=self.dtype,
+            fill_value=self.fill_value,
         )
-        return await shard_builder.finalize(index_location, index_encoder)
+
+
+async def merge_shards(
+    old_shard: Shard | None,
+    new_chunks: dict[tuple[int, ...], Buffer],
+    tombstones: set[tuple[int, ...]],
+    index_location: ShardingCodecIndexLocation,
+    index_encoder: Callable[[_ShardIndex], Awaitable[Buffer]],
+) -> Shard:
+    """
+    Create a new shard by merging an old shard with updates.
+
+    This is a pure function implementing the reconciliation operation:
+        new_shard = old_shard - tombstones + new_chunks
+
+    Args:
+        old_shard: Existing shard to merge from (None = empty)
+        new_chunks: New/updated chunks to add (coords → encoded bytes)
+        tombstones: Chunk coordinates to delete
+        index_location: Where to place index in serialized buffer
+        index_encoder: Function to encode the index
+
+    Returns:
+        New immutable Shard with merged data
+    """
+    # Use old shard's metadata, or infer from new chunks if no old shard
+    if old_shard is not None:
+        chunks_per_shard = old_shard.chunks_per_shard
+        chunk_shape = old_shard.chunk_shape
+        dtype = old_shard.dtype
+        fill_value = old_shard.fill_value
+    else:
+        # No old shard - must have new chunks to infer metadata
+        # (In practice, caller should provide metadata)
+        raise ValueError("Cannot merge with no old shard and no metadata")
+
+    # Create builder
+    builder = ShardBuilder(chunks_per_shard, chunk_shape, dtype, fill_value)
+
+    # Iterate in Morton order for spatial locality
+    for coords in morton_order_iter(chunks_per_shard):
+        # Skip tombstones
+        if coords in tombstones:
+            continue
+
+        # Prefer new chunks over old
+        if coords in new_chunks:
+            builder.append_chunk(coords, new_chunks[coords])
+        elif old_shard is not None:
+            # Copy from old shard
+            chunk_bytes = old_shard.get_chunk_bytes(coords)
+            if chunk_bytes is not None:
+                builder.append_chunk(coords, chunk_bytes)
+
+    return await builder.finalize(index_location, index_encoder)
+
+
+def morton_encode(coords: tuple[int, ...]) -> int:
+    """
+    Encode multi-dimensional coordinates as a Morton (Z-order) number.
+
+    This interleaves the bits of the coordinates to produce a single integer
+    that preserves spatial locality.
+    """
+    # Simple implementation - could be optimized
+    result = 0
+    max_bits = max((c.bit_length() for c in coords), default=0)
+
+    for bit in range(max_bits):
+        for dim, coord in enumerate(coords):
+            if coord & (1 << bit):
+                result |= 1 << (bit * len(coords) + dim)
+
+    return result
 
 
 @dataclass(frozen=True)
@@ -460,9 +624,27 @@ class ShardingCodec(
             dtype=shard_spec.dtype.to_native_dtype(),
             order=shard_spec.order,
         )
-        shard_dict = await _ShardReader.from_bytes(shard_bytes, self, chunks_per_shard)
 
-        if shard_dict.index.is_all_empty():
+        # Parse shard from buffer
+        async def decode_index(buffer: Buffer) -> _ShardIndex:
+            shard_index_size = self._shard_index_size(chunks_per_shard)
+            if self.index_location == ShardingCodecIndexLocation.start:
+                index_bytes = buffer[:shard_index_size]
+            else:
+                index_bytes = buffer[-shard_index_size:]
+            return await self._decode_shard_index(index_bytes, chunks_per_shard)
+
+        shard = await Shard.from_buffer(
+            buffer=shard_bytes,
+            chunks_per_shard=chunks_per_shard,
+            chunk_shape=chunk_shape,
+            dtype=shard_spec.dtype.to_native_dtype(),
+            fill_value=shard_spec.fill_value,
+            index_location=self.index_location,
+            index_decoder=decode_index,
+        )
+
+        if shard.is_empty():
             out.fill(shard_spec.fill_value)
             return out
 
@@ -470,7 +652,7 @@ class ShardingCodec(
         await self.codec_pipeline.read(
             [
                 (
-                    _ShardingByteGetter(shard_dict, chunk_coords),
+                    _ShardingByteGetter(shard, chunk_coords),
                     chunk_spec,
                     chunk_selection,
                     out_selection,
@@ -511,13 +693,15 @@ class ShardingCodec(
         all_chunk_coords = {chunk_coords for chunk_coords, *_ in indexed_chunks}
 
         # reading bytes of all requested chunks
-        shard_dict: ShardMapping = {}
+        shard_dict: Shard | dict[tuple[int, ...], Buffer]
         if self._is_total_shard(all_chunk_coords, chunks_per_shard):
             # read entire shard
             shard_dict_maybe = await self._load_full_shard_maybe(
                 byte_getter=byte_getter,
                 prototype=chunk_spec.prototype,
                 chunks_per_shard=chunks_per_shard,
+                dtype=shard_spec.dtype.to_native_dtype(),
+                fill_value=shard_spec.fill_value,
             )
             if shard_dict_maybe is None:
                 return None
@@ -576,7 +760,12 @@ class ShardingCodec(
             )
         )
 
-        shard_builder = _ShardBuilder.create_empty(chunks_per_shard)
+        shard_builder = ShardBuilder(
+            chunks_per_shard=chunks_per_shard,
+            chunk_shape=chunk_shape,
+            dtype=shard_spec.dtype.to_native_dtype(),
+            fill_value=shard_spec.fill_value,
+        )
 
         await self.codec_pipeline.write(
             [
@@ -592,7 +781,8 @@ class ShardingCodec(
             shard_array,
         )
 
-        return await shard_builder.finalize(self.index_location, self._encode_shard_index)
+        shard = await shard_builder.finalize(self.index_location, self._encode_shard_index)
+        return shard.buffer
 
     async def _encode_partial_single(
         self,
@@ -606,14 +796,21 @@ class ShardingCodec(
         chunks_per_shard = self._get_chunks_per_shard(shard_spec)
         chunk_spec = self._get_chunk_spec(shard_spec)
 
-        shard_dict = _MergingShardBuilder(
-            await self._load_full_shard_maybe(
-                byte_getter=byte_setter,
-                prototype=chunk_spec.prototype,
-                chunks_per_shard=chunks_per_shard,
-            )
-            or _ShardReader.create_empty(chunks_per_shard),
-            _ShardBuilder.create_empty(chunks_per_shard),
+        # Load existing shard if it exists
+        old_shard = await self._load_full_shard_maybe(
+            byte_getter=byte_setter,
+            prototype=chunk_spec.prototype,
+            chunks_per_shard=chunks_per_shard,
+            dtype=shard_spec.dtype.to_native_dtype(),
+            fill_value=shard_spec.fill_value,
+        )
+
+        # Collect new chunks
+        new_chunk_builder = ShardBuilder(
+            chunks_per_shard=chunks_per_shard,
+            chunk_shape=chunk_shape,
+            dtype=shard_spec.dtype.to_native_dtype(),
+            fill_value=shard_spec.fill_value,
         )
 
         indexer = list(
@@ -625,7 +822,7 @@ class ShardingCodec(
         await self.codec_pipeline.write(
             [
                 (
-                    _ShardingByteSetter(shard_dict, chunk_coords),
+                    _ShardingByteSetter(new_chunk_builder, chunk_coords),
                     chunk_spec,
                     chunk_selection,
                     out_selection,
@@ -636,15 +833,24 @@ class ShardingCodec(
             shard_array,
         )
 
-        if shard_dict.is_empty():
+        # Merge old and new using merge_shards()
+        if old_shard is None and not new_chunk_builder._chunks:
+            # Nothing to write - delete the shard
             await byte_setter.delete()
-        else:
-            await byte_setter.set(
-                await shard_dict.finalize(
-                    self.index_location,
-                    self._encode_shard_index,
-                )
+        elif old_shard is not None:
+            # Merge old and new
+            merged_shard = await merge_shards(
+                old_shard=old_shard,
+                new_chunks=new_chunk_builder._chunks,
+                tombstones=new_chunk_builder._tombstones,
+                index_location=self.index_location,
+                index_encoder=self._encode_shard_index,
             )
+            await byte_setter.set(merged_shard.buffer)
+        else:
+            # No old shard, just new chunks - finalize the builder directly
+            shard = await new_chunk_builder.finalize(self.index_location, self._encode_shard_index)
+            await byte_setter.set(shard.buffer)
 
     def _is_total_shard(
         self, all_chunk_coords: set[tuple[int, ...]], chunks_per_shard: tuple[int, ...]
@@ -751,14 +957,35 @@ class ShardingCodec(
         ) or _ShardIndex.create_empty(chunks_per_shard)
 
     async def _load_full_shard_maybe(
-        self, byte_getter: ByteGetter, prototype: BufferPrototype, chunks_per_shard: tuple[int, ...]
-    ) -> _ShardReader | None:
+        self,
+        byte_getter: ByteGetter,
+        prototype: BufferPrototype,
+        chunks_per_shard: tuple[int, ...],
+        dtype: Any,
+        fill_value: Any,
+    ) -> Shard | None:
         shard_bytes = await byte_getter.get(prototype=prototype)
 
-        return (
-            await _ShardReader.from_bytes(shard_bytes, self, chunks_per_shard)
-            if shard_bytes
-            else None
+        if not shard_bytes:
+            return None
+
+        # Decode the index from the buffer
+        async def decode_index(buffer: Buffer) -> _ShardIndex:
+            shard_index_size = self._shard_index_size(chunks_per_shard)
+            if self.index_location == ShardingCodecIndexLocation.start:
+                index_bytes = buffer[:shard_index_size]
+            else:
+                index_bytes = buffer[-shard_index_size:]
+            return await self._decode_shard_index(index_bytes, chunks_per_shard)
+
+        return await Shard.from_buffer(
+            buffer=shard_bytes,
+            chunks_per_shard=chunks_per_shard,
+            chunk_shape=self.chunk_shape,
+            dtype=dtype,
+            fill_value=fill_value,
+            index_location=self.index_location,
+            index_decoder=decode_index,
         )
 
     def compute_encoded_size(self, input_byte_length: int, shard_spec: ArraySpec) -> int:
