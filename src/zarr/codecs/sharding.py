@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, MutableMapping
+from collections.abc import AsyncIterator, Iterable, Mapping, MutableMapping
 from dataclasses import dataclass, replace
 from enum import Enum
 from functools import lru_cache
@@ -21,7 +21,9 @@ from zarr.abc.store import (
     ByteGetter,
     ByteRequest,
     ByteSetter,
+    OffsetByteRequest,
     RangeByteRequest,
+    Store,
     SuffixByteRequest,
 )
 from zarr.codecs.bytes import BytesCodec
@@ -52,7 +54,8 @@ from zarr.core.indexing import (
 )
 from zarr.core.metadata.v3 import parse_codecs
 from zarr.registry import get_ndbuffer_class, get_pipeline_class
-from zarr.storage._utils import _normalize_byte_range_index
+from zarr.storage._common import StorePath
+from zarr.storage._memory import MemoryStore
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -62,8 +65,11 @@ if TYPE_CHECKING:
     from zarr.core.dtype.wrapper import TBaseDType, TBaseScalar, ZDType
 
 MAX_UINT_64 = 2**64 - 1
-ShardMapping = Mapping[tuple[int, ...], Buffer | None]
-ShardMutableMapping = MutableMapping[tuple[int, ...], Buffer | None]
+
+
+def _chunk_coords_to_key(chunk_coords: tuple[int, ...]) -> str:
+    """Convert chunk coordinates to a string key for use with MemoryStore."""
+    return "/".join(map(str, chunk_coords))
 
 
 class ShardingCodecIndexLocation(Enum):
@@ -77,41 +83,6 @@ class ShardingCodecIndexLocation(Enum):
 
 def parse_index_location(data: object) -> ShardingCodecIndexLocation:
     return parse_enum(data, ShardingCodecIndexLocation)
-
-
-@dataclass(frozen=True)
-class _ShardingByteGetter(ByteGetter):
-    shard_dict: ShardMapping
-    chunk_coords: tuple[int, ...]
-
-    async def get(
-        self, prototype: BufferPrototype, byte_range: ByteRequest | None = None
-    ) -> Buffer | None:
-        assert prototype == default_buffer_prototype(), (
-            f"prototype is not supported within shards currently. diff: {prototype} != {default_buffer_prototype()}"
-        )
-        value = self.shard_dict.get(self.chunk_coords)
-        if value is None:
-            return None
-        if byte_range is None:
-            return value
-        start, stop = _normalize_byte_range_index(value, byte_range)
-        return value[start:stop]
-
-
-@dataclass(frozen=True)
-class _ShardingByteSetter(_ShardingByteGetter, ByteSetter):
-    shard_dict: ShardMutableMapping
-
-    async def set(self, value: Buffer, byte_range: ByteRequest | None = None) -> None:
-        assert byte_range is None, "byte_range is not supported within shards"
-        self.shard_dict[self.chunk_coords] = value
-
-    async def delete(self) -> None:
-        del self.shard_dict[self.chunk_coords]
-
-    async def set_if_not_exists(self, default: Buffer) -> None:
-        self.shard_dict.setdefault(self.chunk_coords, default)
 
 
 class _ShardIndex(NamedTuple):
@@ -182,7 +153,7 @@ class _ShardIndex(NamedTuple):
         return cls(offsets_and_lengths)
 
 
-class _ShardReader(ShardMapping):
+class _ShardReader(Mapping[tuple[int, ...], Buffer]):
     buf: Buffer
     index: _ShardIndex
 
@@ -224,6 +195,98 @@ class _ShardReader(ShardMapping):
 
     def __iter__(self) -> Iterator[tuple[int, ...]]:
         return c_order_iter(self.index.offsets_and_lengths.shape[:-1])
+
+
+def _key_to_chunk_coords(key: str) -> tuple[int, ...]:
+    """Convert a string key like '0/1/2' to chunk coordinates (0, 1, 2)."""
+    return tuple(int(x) for x in key.split("/"))
+
+
+class _ShardReaderStore(Store):
+    """
+    A read-only Store that wraps a _ShardReader.
+
+    This provides lazy access to chunks within a shard via the Store interface,
+    avoiding the need to materialize all chunks into a MemoryStore upfront.
+    """
+
+    _shard_reader: _ShardReader
+
+    def __init__(self, shard_reader: _ShardReader) -> None:
+        super().__init__(read_only=True)
+        self._shard_reader = shard_reader
+        self._is_open = True
+
+    @property
+    def supports_writes(self) -> bool:
+        return False
+
+    @property
+    def supports_deletes(self) -> bool:
+        return False
+
+    @property
+    def supports_listing(self) -> bool:
+        return True
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, _ShardReaderStore) and self._shard_reader is other._shard_reader
+
+    async def get(
+        self,
+        key: str,
+        prototype: BufferPrototype,
+        byte_range: ByteRequest | None = None,
+    ) -> Buffer | None:
+        chunk_coords = _key_to_chunk_coords(key)
+        chunk_byte_slice = self._shard_reader.index.get_chunk_slice(chunk_coords)
+        if chunk_byte_slice is None:
+            return None
+
+        chunk_bytes = self._shard_reader.buf[chunk_byte_slice[0] : chunk_byte_slice[1]]
+
+        # Handle byte range requests
+        if byte_range is not None:
+            if isinstance(byte_range, RangeByteRequest):
+                chunk_bytes = chunk_bytes[byte_range.start : byte_range.end]
+            elif isinstance(byte_range, OffsetByteRequest):
+                chunk_bytes = chunk_bytes[byte_range.offset :]
+            elif isinstance(byte_range, SuffixByteRequest):
+                chunk_bytes = chunk_bytes[-byte_range.suffix :]
+
+        return prototype.buffer.from_buffer(chunk_bytes)
+
+    async def get_partial_values(
+        self,
+        prototype: BufferPrototype,
+        key_ranges: Iterable[tuple[str, ByteRequest | None]],
+    ) -> list[Buffer | None]:
+        return [await self.get(key, prototype, byte_range) for key, byte_range in key_ranges]
+
+    async def exists(self, key: str) -> bool:
+        chunk_coords = _key_to_chunk_coords(key)
+        return self._shard_reader.index.get_chunk_slice(chunk_coords) is not None
+
+    async def set(self, key: str, value: Buffer) -> None:
+        raise NotImplementedError("_ShardReaderStore is read-only")
+
+    async def delete(self, key: str) -> None:
+        raise NotImplementedError("_ShardReaderStore is read-only")
+
+    async def list(self) -> AsyncIterator[str]:
+        for chunk_coords in self._shard_reader:
+            if self._shard_reader.index.get_chunk_slice(chunk_coords) is not None:
+                yield _chunk_coords_to_key(chunk_coords)
+
+    async def list_prefix(self, prefix: str) -> AsyncIterator[str]:
+        async for key in self.list():
+            if key.startswith(prefix):
+                yield key
+
+    async def list_dir(self, prefix: str) -> AsyncIterator[str]:
+        # Simple implementation - just yield keys that match the prefix
+        async for key in self.list_prefix(prefix):
+            yield key
 
 
 @dataclass(frozen=True)
@@ -355,17 +418,20 @@ class ShardingCodec(
             dtype=shard_spec.dtype.to_native_dtype(),
             order=shard_spec.order,
         )
-        shard_dict = await _ShardReader.from_bytes(shard_bytes, self, chunks_per_shard)
+        shard_reader = await _ShardReader.from_bytes(shard_bytes, self, chunks_per_shard)
 
-        if shard_dict.index.is_all_empty():
+        if shard_reader.index.is_all_empty():
             out.fill(shard_spec.fill_value)
             return out
+
+        # Wrap the shard reader in a store for lazy access
+        shard_store = _ShardReaderStore(shard_reader)
 
         # decoding chunks and writing them into the output buffer
         await self.codec_pipeline.read(
             [
                 (
-                    _ShardingByteGetter(shard_dict, chunk_coords),
+                    StorePath(shard_store, _chunk_coords_to_key(chunk_coords)),
                     chunk_spec,
                     chunk_selection,
                     out_selection,
@@ -406,23 +472,23 @@ class ShardingCodec(
         all_chunk_coords = {chunk_coords for chunk_coords, *_ in indexed_chunks}
 
         # reading bytes of all requested chunks
-        shard_dict: ShardMapping = {}
+        shard_store: Store
         if self._is_total_shard(all_chunk_coords, chunks_per_shard):
-            # read entire shard
-            shard_dict_maybe = await self._load_full_shard_maybe(
+            # read entire shard - use lazy _ShardReaderStore
+            shard_reader_maybe = await self._load_full_shard_maybe(
                 byte_getter=byte_getter,
                 prototype=chunk_spec.prototype,
                 chunks_per_shard=chunks_per_shard,
             )
-            if shard_dict_maybe is None:
+            if shard_reader_maybe is None:
                 return None
-            shard_dict = shard_dict_maybe
+            shard_store = _ShardReaderStore(shard_reader_maybe)
         else:
-            # read some chunks within the shard
+            # read some chunks within the shard - materialize into MemoryStore
             shard_index = await self._load_shard_index_maybe(byte_getter, chunks_per_shard)
             if shard_index is None:
                 return None
-            shard_dict = {}
+            store_dict: MutableMapping[str, Buffer] = {}
             for chunk_coords in all_chunk_coords:
                 chunk_byte_slice = shard_index.get_chunk_slice(chunk_coords)
                 if chunk_byte_slice:
@@ -431,13 +497,14 @@ class ShardingCodec(
                         byte_range=RangeByteRequest(chunk_byte_slice[0], chunk_byte_slice[1]),
                     )
                     if chunk_bytes:
-                        shard_dict[chunk_coords] = chunk_bytes
+                        store_dict[_chunk_coords_to_key(chunk_coords)] = chunk_bytes
+            shard_store = MemoryStore(store_dict)
 
         # decoding chunks and writing them into the output buffer
         await self.codec_pipeline.read(
             [
                 (
-                    _ShardingByteGetter(shard_dict, chunk_coords),
+                    StorePath(shard_store, _chunk_coords_to_key(chunk_coords)),
                     chunk_spec,
                     chunk_selection,
                     out_selection,
@@ -471,12 +538,12 @@ class ShardingCodec(
             )
         )
 
-        shard_builder = dict.fromkeys(morton_order_iter(chunks_per_shard))
+        shard_store = MemoryStore({})
 
         await self.codec_pipeline.write(
             [
                 (
-                    _ShardingByteSetter(shard_builder, chunk_coords),
+                    StorePath(shard_store, _chunk_coords_to_key(chunk_coords)),
                     chunk_spec,
                     chunk_selection,
                     out_selection,
@@ -488,7 +555,7 @@ class ShardingCodec(
         )
 
         return await self._encode_shard_dict(
-            shard_builder,
+            shard_store,
             chunks_per_shard=chunks_per_shard,
             buffer_prototype=default_buffer_prototype(),
         )
@@ -511,7 +578,14 @@ class ShardingCodec(
             chunks_per_shard=chunks_per_shard,
         )
         shard_reader = shard_reader or _ShardReader.create_empty(chunks_per_shard)
-        shard_dict = {k: shard_reader.get(k) for k in morton_order_iter(chunks_per_shard)}
+
+        # Build a MemoryStore from existing shard data
+        store_dict: MutableMapping[str, Buffer] = {}
+        for chunk_coords in morton_order_iter(chunks_per_shard):
+            chunk_bytes = shard_reader.get(chunk_coords)
+            if chunk_bytes is not None:
+                store_dict[_chunk_coords_to_key(chunk_coords)] = chunk_bytes
+        shard_store = MemoryStore(store_dict)
 
         indexer = list(
             get_indexer(
@@ -522,7 +596,7 @@ class ShardingCodec(
         await self.codec_pipeline.write(
             [
                 (
-                    _ShardingByteSetter(shard_dict, chunk_coords),
+                    StorePath(shard_store, _chunk_coords_to_key(chunk_coords)),
                     chunk_spec,
                     chunk_selection,
                     out_selection,
@@ -533,7 +607,7 @@ class ShardingCodec(
             shard_array,
         )
         buf = await self._encode_shard_dict(
-            shard_dict,
+            shard_store,
             chunks_per_shard=chunks_per_shard,
             buffer_prototype=default_buffer_prototype(),
         )
@@ -545,7 +619,7 @@ class ShardingCodec(
 
     async def _encode_shard_dict(
         self,
-        map: ShardMapping,
+        shard_store: MemoryStore,
         chunks_per_shard: tuple[int, ...],
         buffer_prototype: BufferPrototype,
     ) -> Buffer | None:
@@ -556,7 +630,8 @@ class ShardingCodec(
         template = buffer_prototype.buffer.create_zero_length()
         chunk_start = 0
         for chunk_coords in morton_order_iter(chunks_per_shard):
-            value = map.get(chunk_coords)
+            key = _chunk_coords_to_key(chunk_coords)
+            value = await shard_store.get(key, prototype=buffer_prototype)
             if value is None:
                 continue
 
