@@ -12,7 +12,7 @@ from zarr.abc.store import Store
 from zarr.storage._wrapper import WrapperStore
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Generator, Iterable
+    from collections.abc import AsyncIterator, Generator, Iterable
 
     from zarr.abc.store import ByteRequest
     from zarr.core.buffer import Buffer, BufferPrototype
@@ -97,6 +97,17 @@ class LoggingStore(WrapperStore[T_Store]):
             end_time = time.time()
             self.logger.info("Finished %s [%.2f s]", op, end_time - start_time)
 
+    def with_path(self, path: str) -> LoggingStore[T_Store]:
+        # docstring inherited
+        new_store: LoggingStore[T_Store] = LoggingStore(
+            self._store.with_path(path),
+            log_level=self.log_level,
+            log_handler=self.log_handler,
+        )
+        # Share the same counter so that operations on derived stores are counted together
+        new_store.counter = self.counter
+        return new_store
+
     @classmethod
     async def open(cls: type[Self], store_cls: type[T_Store], *args: Any, **kwargs: Any) -> Self:
         log_level = kwargs.pop("log_level", "DEBUG")
@@ -162,7 +173,7 @@ class LoggingStore(WrapperStore[T_Store]):
         with self.log(other):
             return type(self) is type(other) and self._store.__eq__(other._store)  # type: ignore[attr-defined]
 
-    async def get(
+    async def _get(
         self,
         key: str,
         prototype: BufferPrototype,
@@ -170,9 +181,9 @@ class LoggingStore(WrapperStore[T_Store]):
     ) -> Buffer | None:
         # docstring inherited
         with self.log(key):
-            return await self._store.get(key=key, prototype=prototype, byte_range=byte_range)
+            return await self._store._get(key=key, prototype=prototype, byte_range=byte_range)
 
-    async def get_partial_values(
+    async def _get_partial_values(
         self,
         prototype: BufferPrototype,
         key_ranges: Iterable[tuple[str, ByteRequest | None]],
@@ -180,50 +191,47 @@ class LoggingStore(WrapperStore[T_Store]):
         # docstring inherited
         keys = ",".join([k[0] for k in key_ranges])
         with self.log(keys):
-            return await self._store.get_partial_values(prototype=prototype, key_ranges=key_ranges)
+            return await self._store._get_partial_values(prototype=prototype, key_ranges=key_ranges)
 
-    async def exists(self, key: str) -> bool:
+    async def _exists(self, key: str) -> bool:
         # docstring inherited
         with self.log(key):
-            return await self._store.exists(key)
+            return await self._store._exists(key)
 
-    async def set(self, key: str, value: Buffer) -> None:
+    async def _set(self, key: str, value: Buffer) -> None:
         # docstring inherited
         with self.log(key):
-            return await self._store.set(key=key, value=value)
+            return await self._store._set(key=key, value=value)
 
-    async def set_if_not_exists(self, key: str, value: Buffer) -> None:
+    async def _set_if_not_exists(self, key: str, value: Buffer) -> None:
         # docstring inherited
         with self.log(key):
-            return await self._store.set_if_not_exists(key=key, value=value)
+            return await self._store._set_if_not_exists(key=key, value=value)
 
-    async def delete(self, key: str) -> None:
+    async def _delete(self, key: str) -> None:
         # docstring inherited
         with self.log(key):
-            return await self._store.delete(key=key)
+            return await self._store._delete(key=key)
 
-    async def list(self) -> AsyncGenerator[str, None]:
+    def _list(self) -> AsyncIterator[str]:
         # docstring inherited
         with self.log():
-            async for key in self._store.list():
-                yield key
+            return self._store._list()
 
-    async def list_prefix(self, prefix: str) -> AsyncGenerator[str, None]:
+    def _list_prefix(self, prefix: str) -> AsyncIterator[str]:
         # docstring inherited
         with self.log(prefix):
-            async for key in self._store.list_prefix(prefix=prefix):
-                yield key
+            return self._store._list_prefix(prefix=prefix)
 
-    async def list_dir(self, prefix: str) -> AsyncGenerator[str, None]:
+    def _list_dir(self, prefix: str) -> AsyncIterator[str]:
         # docstring inherited
         with self.log(prefix):
-            async for key in self._store.list_dir(prefix=prefix):
-                yield key
+            return self._store._list_dir(prefix=prefix)
 
-    async def delete_dir(self, prefix: str) -> None:
+    async def _delete_dir(self, prefix: str) -> None:
         # docstring inherited
         with self.log(prefix):
-            await self._store.delete_dir(prefix=prefix)
+            await self._store._delete_dir(prefix=prefix)
 
     async def getsize(self, key: str) -> int:
         with self.log(key):

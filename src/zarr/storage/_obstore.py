@@ -66,10 +66,10 @@ class ObjectStore(Store, Generic[T_Store]):
 
         return self.store == value.store  # type: ignore[no-any-return]
 
-    def __init__(self, store: T_Store, *, read_only: bool = False) -> None:
+    def __init__(self, store: T_Store, *, read_only: bool = False, path: str = "") -> None:
         if not store.__class__.__module__.startswith("obstore"):
             raise TypeError(f"expected ObjectStore class, got {store!r}")
-        super().__init__(read_only=read_only)
+        super().__init__(read_only=read_only, path=path)
         self.store = store
 
     def with_read_only(self, read_only: bool = False) -> Self:
@@ -77,6 +77,15 @@ class ObjectStore(Store, Generic[T_Store]):
         return type(self)(
             store=self.store,
             read_only=read_only,
+            path=self.path,
+        )
+
+    def with_path(self, path: str) -> Self:
+        # docstring inherited
+        return type(self)(
+            store=self.store,
+            read_only=self.read_only,
+            path=path,
         )
 
     def __str__(self) -> str:
@@ -94,7 +103,7 @@ class ObjectStore(Store, Generic[T_Store]):
         state["store"] = pickle.loads(state["store"])
         self.__dict__.update(state)
 
-    async def get(
+    async def _get(
         self, key: str, prototype: BufferPrototype, byte_range: ByteRequest | None = None
     ) -> Buffer | None:
         # docstring inherited
@@ -139,7 +148,7 @@ class ObjectStore(Store, Generic[T_Store]):
         except _ALLOWED_EXCEPTIONS:
             return None
 
-    async def get_partial_values(
+    async def _get_partial_values(
         self,
         prototype: BufferPrototype,
         key_ranges: Iterable[tuple[str, ByteRequest | None]],
@@ -147,7 +156,7 @@ class ObjectStore(Store, Generic[T_Store]):
         # docstring inherited
         return await _get_partial_values(self.store, prototype=prototype, key_ranges=key_ranges)
 
-    async def exists(self, key: str) -> bool:
+    async def _exists(self, key: str) -> bool:
         # docstring inherited
         import obstore as obs
 
@@ -163,7 +172,7 @@ class ObjectStore(Store, Generic[T_Store]):
         # docstring inherited
         return True
 
-    async def set(self, key: str, value: Buffer) -> None:
+    async def _set(self, key: str, value: Buffer) -> None:
         # docstring inherited
         import obstore as obs
 
@@ -172,7 +181,7 @@ class ObjectStore(Store, Generic[T_Store]):
         buf = value.as_buffer_like()
         await obs.put_async(self.store, key, buf)
 
-    async def set_if_not_exists(self, key: str, value: Buffer) -> None:
+    async def _set_if_not_exists(self, key: str, value: Buffer) -> None:
         # docstring inherited
         import obstore as obs
 
@@ -186,7 +195,7 @@ class ObjectStore(Store, Generic[T_Store]):
         # docstring inherited
         return True
 
-    async def delete(self, key: str) -> None:
+    async def _delete(self, key: str) -> None:
         # docstring inherited
         import obstore as obs
 
@@ -199,7 +208,7 @@ class ObjectStore(Store, Generic[T_Store]):
         with contextlib.suppress(FileNotFoundError):
             await obs.delete_async(self.store, key)
 
-    async def delete_dir(self, prefix: str) -> None:
+    async def _delete_dir(self, prefix: str) -> None:
         # docstring inherited
         import obstore as obs
 
@@ -209,14 +218,14 @@ class ObjectStore(Store, Generic[T_Store]):
 
         metas = await obs.list(self.store, prefix).collect_async()
         keys = [(m["path"],) for m in metas]
-        await concurrent_map(keys, self.delete, limit=config.get("async.concurrency"))
+        await concurrent_map(keys, self._delete, limit=config.get("async.concurrency"))
 
     @property
     def supports_listing(self) -> bool:
         # docstring inherited
         return True
 
-    async def _list(self, prefix: str | None = None) -> AsyncGenerator[ObjectMeta, None]:
+    async def _list_objects(self, prefix: str | None = None) -> AsyncGenerator[ObjectMeta, None]:
         import obstore as obs
 
         objects: ListStream[Sequence[ObjectMeta]] = obs.list(self.store, prefix=prefix)
@@ -224,15 +233,15 @@ class ObjectStore(Store, Generic[T_Store]):
             for item in batch:
                 yield item
 
-    def list(self) -> AsyncGenerator[str, None]:
+    def _list(self) -> AsyncGenerator[str, None]:
         # docstring inherited
-        return (obj["path"] async for obj in self._list())
+        return (obj["path"] async for obj in self._list_objects())
 
-    def list_prefix(self, prefix: str) -> AsyncGenerator[str, None]:
+    def _list_prefix(self, prefix: str) -> AsyncGenerator[str, None]:
         # docstring inherited
-        return (obj["path"] async for obj in self._list(prefix))
+        return (obj["path"] async for obj in self._list_objects(prefix))
 
-    def list_dir(self, prefix: str) -> AsyncGenerator[str, None]:
+    def _list_dir(self, prefix: str) -> AsyncGenerator[str, None]:
         # docstring inherited
         import obstore as obs
 
@@ -248,7 +257,7 @@ class ObjectStore(Store, Generic[T_Store]):
 
     async def getsize_prefix(self, prefix: str) -> int:
         # docstring inherited
-        sizes = [obj["size"] async for obj in self._list(prefix=prefix)]
+        sizes = [obj["size"] async for obj in self._list_objects(prefix=prefix)]
         return sum(sizes)
 
 

@@ -46,7 +46,6 @@ from zarr.errors import (
     ZarrRuntimeWarning,
     ZarrUserWarning,
 )
-from zarr.storage import StorePath
 from zarr.storage._common import make_store_path
 
 if TYPE_CHECKING:
@@ -223,14 +222,14 @@ async def consolidate_metadata(
     """
     store_path = await make_store_path(store, path=path)
 
-    if not store_path.store.supports_consolidated_metadata:
-        store_name = type(store_path.store).__name__
+    if not store_path.supports_consolidated_metadata:
+        store_name = type(store_path).__name__
         raise TypeError(
             f"The Zarr Store in use ({store_name}) doesn't support consolidated metadata",
         )
 
     group = await AsyncGroup.open(store_path, zarr_format=zarr_format, use_consolidated=False)
-    group.store_path.store._check_writable()
+    group.store_path._check_writable()
 
     members_metadata = {
         k: v.metadata
@@ -369,7 +368,7 @@ async def open(
     """
     zarr_format = _handle_zarr_version_or_format(zarr_version=zarr_version, zarr_format=zarr_format)
     if mode is None:
-        if isinstance(store, (Store, StorePath)) and store.read_only:
+        if isinstance(store, Store) and store.read_only:
             mode = "r"
         else:
             mode = "a"
@@ -1290,7 +1289,7 @@ async def open_array(
                 overwrite=overwrite,
                 **kwargs,
             )
-        msg = f"No array found in store {store_path.store} at path {store_path.path}"
+        msg = f"No array found in store {store_path} at path {store_path.path}"
         raise ArrayNotFoundError(msg) from err
 
 

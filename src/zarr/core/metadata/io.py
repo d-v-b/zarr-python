@@ -3,10 +3,10 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
-from zarr.abc.store import set_or_delete
+from zarr.abc.store import Store, set_or_delete
 from zarr.core.buffer.core import default_buffer_prototype
 from zarr.errors import ContainsArrayError
-from zarr.storage._common import StorePath, ensure_no_existing_node
+from zarr.storage._common import ensure_no_existing_node
 
 if TYPE_CHECKING:
     from zarr.core.common import ZarrFormat
@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from zarr.core.metadata import ArrayMetadata
 
 
-def _build_parents(store_path: StorePath, zarr_format: ZarrFormat) -> dict[str, GroupMetadata]:
+def _build_parents(store_path: Store, zarr_format: ZarrFormat) -> dict[str, GroupMetadata]:
     from zarr.core.group import GroupMetadata
 
     path = store_path.path
@@ -34,13 +34,13 @@ def _build_parents(store_path: StorePath, zarr_format: ZarrFormat) -> dict[str, 
 
 
 async def save_metadata(
-    store_path: StorePath, metadata: ArrayMetadata | GroupMetadata, ensure_parents: bool = False
+    store_path: Store, metadata: ArrayMetadata | GroupMetadata, ensure_parents: bool = False
 ) -> None:
     """Asynchronously save the array or group metadata.
 
     Parameters
     ----------
-    store_path : StorePath
+    store_path : Store
         Location to save metadata.
     metadata : ArrayMetadata | GroupMetadata
         Metadata to save.
@@ -60,7 +60,7 @@ async def save_metadata(
         ensure_array_awaitables = []
 
         for parent_path, parent_metadata in parents.items():
-            parent_store_path = StorePath(store_path.store, parent_path)
+            parent_store_path = store_path.with_path(parent_path)
 
             # Error if an array already exists at any parent location. Only groups can have child nodes.
             ensure_array_awaitables.append(
@@ -70,7 +70,7 @@ async def save_metadata(
             )
             set_awaitables.extend(
                 [
-                    (parent_store_path / key).set_if_not_exists(value)
+                    (parent_store_path / key).set_if_not_existsb(value)
                     for key, value in parent_metadata.to_buffer_dict(
                         default_buffer_prototype()
                     ).items()

@@ -73,7 +73,7 @@ from zarr.errors import (
     ContainsGroupError,
     ZarrUserWarning,
 )
-from zarr.storage import LocalStore, MemoryStore, StorePath
+from zarr.storage import LocalStore, MemoryStore
 from zarr.storage._logging import LoggingStore
 from zarr.types import AnyArray, AnyAsyncArray
 
@@ -96,8 +96,7 @@ def test_array_creation_existing_node(
     """
     Check that an existing array or group is handled as expected during array creation.
     """
-    spath = StorePath(store)
-    group = Group.from_store(spath, zarr_format=zarr_format)
+    group = Group.from_store(store, zarr_format=zarr_format)
     expected_exception: type[ContainsArrayError | ContainsGroupError]
     if extant_node == "array":
         expected_exception = ContainsArrayError
@@ -115,7 +114,7 @@ def test_array_creation_existing_node(
         if not store.supports_deletes:
             pytest.skip("store does not support deletes")
         arr_new = zarr.create_array(
-            spath / "extant",
+            store / "extant",
             shape=new_shape,
             dtype=new_dtype,
             overwrite=overwrite,
@@ -126,7 +125,7 @@ def test_array_creation_existing_node(
     else:
         with pytest.raises(expected_exception):
             arr_new = zarr.create_array(
-                spath / "extant",
+                store / "extant",
                 shape=new_shape,
                 dtype=new_dtype,
                 overwrite=overwrite,
@@ -353,14 +352,14 @@ def test_storage_transformers(store: MemoryStore, zarr_format: ZarrFormat | str)
     if zarr_format == 3:
         match = "Arrays with storage transformers are not supported in zarr-python at this time."
         with pytest.raises(ValueError, match=match):
-            Array.from_dict(StorePath(store), data=metadata_dict)
+            Array.from_dict(store, data=metadata_dict)
     elif zarr_format == 2:
         # no warning
-        Array.from_dict(StorePath(store), data=metadata_dict)
+        Array.from_dict(store, data=metadata_dict)
     else:
         match = f"Invalid zarr_format: {zarr_format}. Expected 2 or 3"
         with pytest.raises(ValueError, match=match):
-            Array.from_dict(StorePath(store), data=metadata_dict)
+            Array.from_dict(store, data=metadata_dict)
 
 
 @pytest.mark.parametrize("test_cls", [AnyArray, AnyAsyncArray])
@@ -416,7 +415,7 @@ async def test_nchunks_initialized(
 
     # delete chunks
     for idx, key in enumerate(arr._iter_shard_keys()):
-        sync(arr.store_path.store.delete(key))
+        sync(arr.store_path.delete(key))
         if test_cls == Array:
             observed = arr._nshards_initialized
             assert observed == arr.nchunks_initialized // chunks_per_shard
@@ -1038,7 +1037,7 @@ def test_auto_partition_auto_shards_with_auto_chunks_should_be_close_to_1MiB() -
 
 
 def test_chunks_and_shards() -> None:
-    store = StorePath(MemoryStore())
+    store = MemoryStore()
     shape = (100, 100)
     chunks = (5, 5)
     shards = (10, 10)
@@ -1078,17 +1077,16 @@ def test_default_fill_value(dtype: str, fill_value_expected: object, store: Stor
 class TestCreateArray:
     @staticmethod
     def test_chunks_and_shards(store: Store) -> None:
-        spath = StorePath(store)
         shape = (100, 100)
         chunks = (5, 5)
         shards = (10, 10)
 
-        arr_v3 = zarr.create_array(store=spath / "v3", shape=shape, chunks=chunks, dtype="i4")
+        arr_v3 = zarr.create_array(store=store / "v3", shape=shape, chunks=chunks, dtype="i4")
         assert arr_v3.chunks == chunks
         assert arr_v3.shards is None
 
         arr_v3_sharding = zarr.create_array(
-            store=spath / "v3_sharding",
+            store=store / "v3_sharding",
             shape=shape,
             chunks=chunks,
             shards=shards,
@@ -1098,7 +1096,7 @@ class TestCreateArray:
         assert arr_v3_sharding.shards == shards
 
         arr_v2 = zarr.create_array(
-            store=spath / "v2", shape=shape, chunks=chunks, zarr_format=2, dtype="i4"
+            store=store / "v2", shape=shape, chunks=chunks, zarr_format=2, dtype="i4"
         )
         assert arr_v2.chunks == chunks
         assert arr_v2.shards is None
@@ -2193,4 +2191,4 @@ def test_create_array_with_data_num_gets(
     zarr.create_array(store, data=data, chunks=chunk_shape, shards=shard_shape, fill_value=-1)  # type: ignore[arg-type]
     # one get for the metadata and one per shard.
     # Note: we don't actually need one get per shard, but this is the current behavior
-    assert store.counter["get"] == 1 + num_shards
+    assert store.counter["_get"] == 1 + num_shards

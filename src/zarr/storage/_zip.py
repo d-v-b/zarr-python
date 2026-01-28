@@ -6,7 +6,7 @@ import threading
 import time
 import zipfile
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Self
 
 from zarr.abc.store import (
     ByteRequest,
@@ -29,8 +29,8 @@ class ZipStore(Store):
 
     Parameters
     ----------
-    path : str
-        Location of file.
+    zip_path : str or Path
+        Location of the ZIP file.
     mode : str, optional
         One of 'r' to read an existing file, 'w' to truncate and write a new
         file, 'a' to append to an existing file, or 'x' to exclusively create
@@ -49,7 +49,7 @@ class ZipStore(Store):
     supports_writes
     supports_deletes
     supports_listing
-    path
+    zip_path
     compression
     allowZip64
     """
@@ -58,7 +58,7 @@ class ZipStore(Store):
     supports_deletes: bool = False
     supports_listing: bool = True
 
-    path: Path
+    zip_path: Path
     compression: int
     allowZip64: bool
 
@@ -67,26 +67,33 @@ class ZipStore(Store):
 
     def __init__(
         self,
-        path: Path | str,
+        zip_path: Path | str,
         *,
         mode: ZipStoreAccessModeLiteral = "r",
         read_only: bool | None = None,
         compression: int = zipfile.ZIP_STORED,
         allowZip64: bool = True,
+        path: str = "",
     ) -> None:
         if read_only is None:
             read_only = mode == "r"
 
-        super().__init__(read_only=read_only)
+        super().__init__(read_only=read_only, path=path)
 
-        if isinstance(path, str):
-            path = Path(path)
-        assert isinstance(path, Path)
-        self.path = path  # root?
+        if isinstance(zip_path, str):
+            zip_path = Path(zip_path)
+        assert isinstance(zip_path, Path)
+        self.zip_path = zip_path
 
         self._zmode = mode
         self.compression = compression
         self.allowZip64 = allowZip64
+
+    def with_path(self, path: str) -> Self:
+        raise NotImplementedError(
+            "ZipStore does not support with_path. "
+            "Use StorePath(store, path) instead for path-scoped access."
+        )
 
     def _sync_open(self) -> None:
         if self._is_open:
@@ -95,7 +102,7 @@ class ZipStore(Store):
         self._lock = threading.RLock()
 
         self._zf = zipfile.ZipFile(
-            self.path,
+            self.zip_path,
             mode=self._zmode,
             compression=self.compression,
             allowZip64=self.allowZip64,
@@ -129,29 +136,29 @@ class ZipStore(Store):
         with self._lock:
             self._check_writable()
             self._zf.close()
-            os.remove(self.path)
+            os.remove(self.zip_path)
             self._zf = zipfile.ZipFile(
-                self.path, mode="w", compression=self.compression, allowZip64=self.allowZip64
+                self.zip_path, mode="w", compression=self.compression, allowZip64=self.allowZip64
             )
 
     def __str__(self) -> str:
-        return f"zip://{self.path}"
+        return f"zip://{self.zip_path}"
 
     def __repr__(self) -> str:
         return f"ZipStore('{self}')"
 
     def __eq__(self, other: object) -> bool:
-        return isinstance(other, type(self)) and self.path == other.path
+        return isinstance(other, type(self)) and self.zip_path == other.zip_path
 
-    def _get(
+    def _read_item(
         self,
         key: str,
         prototype: BufferPrototype,
         byte_range: ByteRequest | None = None,
     ) -> Buffer | None:
+        """Synchronous helper to read from the zip file (must be called under lock)."""
         if not self._is_open:
             self._sync_open()
-        # docstring inherited
         try:
             with self._zf.open(key) as f:  # will raise KeyError
                 if byte_range is None:
@@ -170,7 +177,7 @@ class ZipStore(Store):
         except KeyError:
             return None
 
-    async def get(
+    async def _get(
         self,
         key: str,
         prototype: BufferPrototype,
@@ -180,9 +187,9 @@ class ZipStore(Store):
         assert isinstance(key, str)
 
         with self._lock:
-            return self._get(key, prototype=prototype, byte_range=byte_range)
+            return self._read_item(key, prototype=prototype, byte_range=byte_range)
 
-    async def get_partial_values(
+    async def _get_partial_values(
         self,
         prototype: BufferPrototype,
         key_ranges: Iterable[tuple[str, ByteRequest | None]],
@@ -191,10 +198,11 @@ class ZipStore(Store):
         out = []
         with self._lock:
             for key, byte_range in key_ranges:
-                out.append(self._get(key, prototype=prototype, byte_range=byte_range))
+                out.append(self._read_item(key, prototype=prototype, byte_range=byte_range))
         return out
 
-    def _set(self, key: str, value: Buffer) -> None:
+    def _write_item(self, key: str, value: Buffer) -> None:
+        """Synchronous helper to write to the zip file (must be called under lock)."""
         if not self._is_open:
             self._sync_open()
         # generally, this should be called inside a lock
@@ -207,7 +215,7 @@ class ZipStore(Store):
             keyinfo.external_attr = 0o644 << 16  # ?rw-r--r--
         self._zf.writestr(keyinfo, value.to_bytes())
 
-    async def set(self, key: str, value: Buffer) -> None:
+    async def _set(self, key: str, value: Buffer) -> None:
         # docstring inherited
         self._check_writable()
         if not self._is_open:
@@ -218,32 +226,32 @@ class ZipStore(Store):
                 f"ZipStore.set(): `value` must be a Buffer instance. Got an instance of {type(value)} instead."
             )
         with self._lock:
-            self._set(key, value)
+            self._write_item(key, value)
 
-    async def set_if_not_exists(self, key: str, value: Buffer) -> None:
+    async def _set_if_not_exists(self, key: str, value: Buffer) -> None:
         self._check_writable()
         with self._lock:
             members = self._zf.namelist()
             if key not in members:
-                self._set(key, value)
+                self._write_item(key, value)
 
-    async def delete_dir(self, prefix: str) -> None:
+    async def _delete_dir(self, prefix: str) -> None:
         # only raise NotImplementedError if any keys are found
         self._check_writable()
         if prefix != "" and not prefix.endswith("/"):
             prefix += "/"
-        async for _ in self.list_prefix(prefix):
+        async for _ in self._list_prefix(prefix):
             raise NotImplementedError
 
-    async def delete(self, key: str) -> None:
+    async def _delete(self, key: str) -> None:
         # docstring inherited
         # we choose to only raise NotImplementedError here if the key exists
         # this allows the array/group APIs to avoid the overhead of existence checks
         self._check_writable()
-        if await self.exists(key):
+        if await self._exists(key):
             raise NotImplementedError
 
-    async def exists(self, key: str) -> bool:
+    async def _exists(self, key: str) -> bool:
         # docstring inherited
         with self._lock:
             try:
@@ -253,19 +261,19 @@ class ZipStore(Store):
             else:
                 return True
 
-    async def list(self) -> AsyncIterator[str]:
+    async def _list(self) -> AsyncIterator[str]:
         # docstring inherited
         with self._lock:
             for key in self._zf.namelist():
                 yield key
 
-    async def list_prefix(self, prefix: str) -> AsyncIterator[str]:
+    async def _list_prefix(self, prefix: str) -> AsyncIterator[str]:
         # docstring inherited
-        async for key in self.list():
+        async for key in self._list():
             if key.startswith(prefix):
                 yield key
 
-    async def list_dir(self, prefix: str) -> AsyncIterator[str]:
+    async def _list_dir(self, prefix: str) -> AsyncIterator[str]:
         # docstring inherited
         prefix = prefix.rstrip("/")
 
@@ -285,14 +293,14 @@ class ZipStore(Store):
                         seen.add(k)
                         yield k
 
-    async def move(self, path: Path | str) -> None:
+    async def move(self, new_zip_path: Path | str) -> None:
         """
         Move the store to another path.
         """
-        if isinstance(path, str):
-            path = Path(path)
+        if isinstance(new_zip_path, str):
+            new_zip_path = Path(new_zip_path)
         self.close()
-        os.makedirs(path.parent, exist_ok=True)
-        shutil.move(self.path, path)
-        self.path = path
+        os.makedirs(new_zip_path.parent, exist_ok=True)
+        shutil.move(self.zip_path, new_zip_path)
+        self.zip_path = new_zip_path
         await self._open()

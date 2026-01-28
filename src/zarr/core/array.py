@@ -25,6 +25,7 @@ from typing_extensions import deprecated
 import zarr
 from zarr.abc.codec import ArrayArrayCodec, ArrayBytesCodec, BytesBytesCodec, Codec
 from zarr.abc.numcodec import Numcodec, _is_numcodec
+from zarr.abc.store import Store
 from zarr.codecs._v2 import V2Codec
 from zarr.codecs.bytes import BytesCodec
 from zarr.codecs.vlen_utf8 import VLenBytesCodec, VLenUTF8Codec
@@ -130,8 +131,7 @@ from zarr.registry import (
     _parse_bytes_bytes_codec,
     get_pipeline_class,
 )
-from zarr.storage._common import StorePath, ensure_no_existing_node, make_store_path
-from zarr.storage._utils import _relativize_path
+from zarr.storage._common import ensure_no_existing_node, make_store_path
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
@@ -140,7 +140,6 @@ if TYPE_CHECKING:
     import numpy.typing as npt
 
     from zarr.abc.codec import CodecPipeline
-    from zarr.abc.store import Store
     from zarr.codecs.sharding import ShardingCodecIndexLocation
     from zarr.core.dtype.wrapper import TBaseDType, TBaseScalar
     from zarr.storage import StoreLike
@@ -215,32 +214,32 @@ def create_codec_pipeline(metadata: ArrayMetadata, *, store: Store | None = None
 
 
 async def get_array_metadata(
-    store_path: StorePath, zarr_format: ZarrFormat | None = 3
+    store_path: Store, zarr_format: ZarrFormat | None = 3
 ) -> dict[str, JSON]:
     if zarr_format == 2:
         zarray_bytes, zattrs_bytes = await gather(
-            (store_path / ZARRAY_JSON).get(prototype=cpu_buffer_prototype),
-            (store_path / ZATTRS_JSON).get(prototype=cpu_buffer_prototype),
+            (store_path / ZARRAY_JSON).getb(prototype=cpu_buffer_prototype),
+            (store_path / ZATTRS_JSON).getb(prototype=cpu_buffer_prototype),
         )
         if zarray_bytes is None:
             msg = (
                 "A Zarr V2 array metadata document was not found in store "
-                f"{store_path.store!r} at path {store_path.path!r}."
+                f"{store_path!r} at path {store_path.path!r}."
             )
             raise ArrayNotFoundError(msg)
     elif zarr_format == 3:
-        zarr_json_bytes = await (store_path / ZARR_JSON).get(prototype=cpu_buffer_prototype)
+        zarr_json_bytes = await (store_path / ZARR_JSON).getb(prototype=cpu_buffer_prototype)
         if zarr_json_bytes is None:
             msg = (
                 "A Zarr V3 array metadata document was not found in store "
-                f"{store_path.store!r} at path {store_path.path!r}."
+                f"{store_path!r} at path {store_path.path!r}."
             )
             raise ArrayNotFoundError(msg)
     elif zarr_format is None:
         zarr_json_bytes, zarray_bytes, zattrs_bytes = await gather(
-            (store_path / ZARR_JSON).get(prototype=cpu_buffer_prototype),
-            (store_path / ZARRAY_JSON).get(prototype=cpu_buffer_prototype),
-            (store_path / ZATTRS_JSON).get(prototype=cpu_buffer_prototype),
+            (store_path / ZARR_JSON).getb(prototype=cpu_buffer_prototype),
+            (store_path / ZARRAY_JSON).getb(prototype=cpu_buffer_prototype),
+            (store_path / ZATTRS_JSON).getb(prototype=cpu_buffer_prototype),
         )
         if zarr_json_bytes is not None and zarray_bytes is not None:
             # warn and favor v3
@@ -249,7 +248,7 @@ async def get_array_metadata(
         if zarr_json_bytes is None and zarray_bytes is None:
             msg = (
                 f"Neither Zarr V3 nor Zarr V2 array metadata documents "
-                f"were found in store {store_path.store!r} at path {store_path.path!r}."
+                f"were found in store {store_path!r} at path {store_path.path!r}."
             )
             raise ArrayNotFoundError(msg)
         # set zarr_format based on which keys were found
@@ -287,7 +286,7 @@ class AsyncArray(Generic[T_ArrayMetadata]):
     ----------
     metadata : ArrayMetadata
         The metadata of the array.
-    store_path : StorePath
+    store_path : Store
         The path to the Zarr store.
     config : ArrayConfigLike, optional
         The runtime configuration of the array, by default None.
@@ -296,7 +295,7 @@ class AsyncArray(Generic[T_ArrayMetadata]):
     ----------
     metadata : ArrayMetadata
         The metadata of the array.
-    store_path : StorePath
+    store_path : Store
         The path to the Zarr store.
     codec_pipeline : CodecPipeline
         The codec pipeline used for encoding and decoding chunks.
@@ -305,7 +304,7 @@ class AsyncArray(Generic[T_ArrayMetadata]):
     """
 
     metadata: T_ArrayMetadata
-    store_path: StorePath
+    store_path: Store
     codec_pipeline: CodecPipeline = field(init=False)
     _config: ArrayConfig
 
@@ -313,7 +312,7 @@ class AsyncArray(Generic[T_ArrayMetadata]):
     def __init__(
         self: AsyncArrayV2,
         metadata: ArrayV2Metadata | ArrayV2MetadataDict,
-        store_path: StorePath,
+        store_path: Store,
         config: ArrayConfigLike | None = None,
     ) -> None: ...
 
@@ -321,14 +320,14 @@ class AsyncArray(Generic[T_ArrayMetadata]):
     def __init__(
         self: AsyncArrayV3,
         metadata: ArrayV3Metadata | ArrayMetadataJSON_V3,
-        store_path: StorePath,
+        store_path: Store,
         config: ArrayConfigLike | None = None,
     ) -> None: ...
 
     def __init__(
         self,
         metadata: ArrayMetadata | ArrayMetadataDict,
-        store_path: StorePath,
+        store_path: Store,
         config: ArrayConfigLike | None = None,
     ) -> None:
         metadata_parsed = parse_array_metadata(metadata)
@@ -340,7 +339,7 @@ class AsyncArray(Generic[T_ArrayMetadata]):
         object.__setattr__(
             self,
             "codec_pipeline",
-            create_codec_pipeline(metadata=metadata_parsed, store=store_path.store),
+            create_codec_pipeline(metadata=metadata_parsed, store=store_path),
         )
 
     # this overload defines the function signature when zarr_format is 2
@@ -789,7 +788,7 @@ class AsyncArray(Generic[T_ArrayMetadata]):
     @classmethod
     async def _create_v3(
         cls,
-        store_path: StorePath,
+        store_path: Store,
         *,
         shape: ShapeLike,
         dtype: ZDType[TBaseDType, TBaseScalar],
@@ -808,8 +807,8 @@ class AsyncArray(Generic[T_ArrayMetadata]):
         overwrite: bool = False,
     ) -> AsyncArrayV3:
         if overwrite:
-            if store_path.store.supports_deletes:
-                await store_path.delete_dir()
+            if store_path.supports_deletes:
+                await store_path.delete_dir("")
             else:
                 await ensure_no_existing_node(store_path, zarr_format=3)
         else:
@@ -874,7 +873,7 @@ class AsyncArray(Generic[T_ArrayMetadata]):
     @classmethod
     async def _create_v2(
         cls,
-        store_path: StorePath,
+        store_path: Store,
         *,
         shape: tuple[int, ...],
         dtype: ZDType[TBaseDType, TBaseScalar],
@@ -889,8 +888,8 @@ class AsyncArray(Generic[T_ArrayMetadata]):
         overwrite: bool = False,
     ) -> AsyncArrayV2:
         if overwrite:
-            if store_path.store.supports_deletes:
-                await store_path.delete_dir()
+            if store_path.supports_deletes:
+                await store_path.delete_dir("")
             else:
                 await ensure_no_existing_node(store_path, zarr_format=2)
         else:
@@ -929,7 +928,7 @@ class AsyncArray(Generic[T_ArrayMetadata]):
     @classmethod
     def from_dict(
         cls,
-        store_path: StorePath,
+        store_path: Store,
         data: dict[str, JSON],
     ) -> AnyAsyncArray:
         """
@@ -937,7 +936,7 @@ class AsyncArray(Generic[T_ArrayMetadata]):
 
         Parameters
         ----------
-        store_path : StorePath
+        store_path : Store
             The path within the store where the array should be created.
 
         data : dict
@@ -1010,7 +1009,7 @@ class AsyncArray(Generic[T_ArrayMetadata]):
 
     @property
     def store(self) -> Store:
-        return self.store_path.store
+        return self.store_path
 
     @property
     def ndim(self) -> int:
@@ -1384,7 +1383,7 @@ class AsyncArray(Generic[T_ArrayMetadata]):
         return len(await _shards_initialized(self))
 
     async def nbytes_stored(self) -> int:
-        return await self.store_path.store.getsize_prefix(self.store_path.path)
+        return await self.store_path.getsize_prefix(self.store_path.path)
 
     def _iter_chunk_coords(
         self, *, origin: Sequence[int] | None = None, selection_shape: Sequence[int] | None = None
@@ -1859,7 +1858,7 @@ class AsyncArray(Generic[T_ArrayMetadata]):
             new_chunk_coords = set(self.metadata.chunk_grid.all_chunk_coords(new_shape))
 
             async def _delete_key(key: str) -> None:
-                await (self.store_path / key).delete()
+                await (self.store_path / key).deleteb()
 
             await concurrent_map(
                 [
@@ -2019,7 +2018,7 @@ class AsyncArray(Generic[T_ArrayMetadata]):
         """
         return self._info(
             await self._nshards_initialized(),
-            await self.store_path.store.getsize_prefix(self.store_path.path),
+            await self.store_path.getsize_prefix(self.store_path.path),
         )
 
     def _info(
@@ -2037,7 +2036,7 @@ class AsyncArray(Generic[T_ArrayMetadata]):
             _compressors=self.compressors,
             _filters=self.filters,
             _serializer=self.serializer,
-            _store_type=type(self.store_path.store).__name__,
+            _store_type=type(self.store_path).__name__,
             _count_bytes=self.nbytes,
             _count_bytes_stored=count_bytes_stored,
             _count_chunks_initialized=count_chunks_initialized,
@@ -2268,7 +2267,7 @@ class Array(Generic[T_ArrayMetadata]):
     @classmethod
     def from_dict(
         cls,
-        store_path: StorePath,
+        store_path: Store,
         data: dict[str, JSON],
     ) -> Self:
         """
@@ -2276,7 +2275,7 @@ class Array(Generic[T_ArrayMetadata]):
 
         Parameters
         ----------
-        store_path : StorePath
+        store_path : Store
             The path within the store where the array should be created.
 
         data : dict
@@ -2436,7 +2435,7 @@ class Array(Generic[T_ArrayMetadata]):
         return self.async_array.metadata
 
     @property
-    def store_path(self) -> StorePath:
+    def store_path(self) -> Store:
         return self.async_array.store_path
 
     @property
@@ -4263,15 +4262,8 @@ async def _shards_initialized(
     [nchunks_initialized][zarr.Array.nchunks_initialized]
 
     """
-    store_contents = [
-        x async for x in array.store_path.store.list_prefix(prefix=array.store_path.path)
-    ]
-    store_contents_relative = [
-        _relativize_path(path=key, prefix=array.store_path.path) for key in store_contents
-    ]
-    return tuple(
-        chunk_key for chunk_key in array._iter_shard_keys() if chunk_key in store_contents_relative
-    )
+    store_contents = [x async for x in array.store_path.list_prefix(prefix="")]
+    return tuple(chunk_key for chunk_key in array._iter_shard_keys() if chunk_key in store_contents)
 
 
 FiltersLike: TypeAlias = (
@@ -4576,7 +4568,7 @@ async def from_array(
 
 async def init_array(
     *,
-    store_path: StorePath,
+    store_path: Store,
     shape: ShapeLike,
     dtype: ZDTypeLike,
     chunks: tuple[int, ...] | Literal["auto"] = "auto",
@@ -4597,8 +4589,8 @@ async def init_array(
 
     Parameters
     ----------
-    store_path : StorePath
-        StorePath instance. The path attribute is the name of the array to initialize.
+    store_path : Store
+        Store instance. The path attribute is the name of the array to initialize.
     shape : tuple[int, ...]
         Shape of the array.
     dtype : ZDTypeLike
@@ -4688,8 +4680,8 @@ async def init_array(
     )
 
     if overwrite:
-        if store_path.store.supports_deletes:
-            await store_path.delete_dir()
+        if store_path.supports_deletes:
+            await store_path.delete_dir("")
         else:
             await ensure_no_existing_node(store_path, zarr_format=zarr_format)
     else:

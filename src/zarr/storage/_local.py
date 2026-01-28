@@ -110,8 +110,8 @@ class LocalStore(Store):
 
     root: Path
 
-    def __init__(self, root: Path | str, *, read_only: bool = False) -> None:
-        super().__init__(read_only=read_only)
+    def __init__(self, root: Path | str, *, read_only: bool = False, path: str = "") -> None:
+        super().__init__(read_only=read_only, path=path)
         if isinstance(root, str):
             root = Path(root)
         if not isinstance(root, Path):
@@ -125,6 +125,15 @@ class LocalStore(Store):
         return type(self)(
             root=self.root,
             read_only=read_only,
+            path=self.path,
+        )
+
+    def with_path(self, path: str) -> Self:
+        # docstring inherited
+        return type(self)(
+            root=self.root,
+            read_only=self.read_only,
+            path=path,
         )
 
     @classmethod
@@ -187,7 +196,7 @@ class LocalStore(Store):
     def __eq__(self, other: object) -> bool:
         return isinstance(other, type(self)) and self.root == other.root
 
-    async def get(
+    async def _get(
         self,
         key: str,
         prototype: BufferPrototype | None = None,
@@ -206,7 +215,7 @@ class LocalStore(Store):
         except (FileNotFoundError, IsADirectoryError, NotADirectoryError):
             return None
 
-    async def get_partial_values(
+    async def _get_partial_values(
         self,
         prototype: BufferPrototype,
         key_ranges: Iterable[tuple[str, ByteRequest | None]],
@@ -219,18 +228,18 @@ class LocalStore(Store):
             args.append((_get, path, prototype, byte_range))
         return await concurrent_map(args, asyncio.to_thread, limit=None)  # TODO: fix limit
 
-    async def set(self, key: str, value: Buffer) -> None:
+    async def _set(self, key: str, value: Buffer) -> None:
         # docstring inherited
-        return await self._set(key, value)
+        return await self._write(key, value)
 
-    async def set_if_not_exists(self, key: str, value: Buffer) -> None:
+    async def _set_if_not_exists(self, key: str, value: Buffer) -> None:
         # docstring inherited
         try:
-            return await self._set(key, value, exclusive=True)
+            return await self._write(key, value, exclusive=True)
         except FileExistsError:
             pass
 
-    async def _set(self, key: str, value: Buffer, exclusive: bool = False) -> None:
+    async def _write(self, key: str, value: Buffer, exclusive: bool = False) -> None:
         if not self._is_open:
             await self._open()
         self._check_writable()
@@ -242,7 +251,7 @@ class LocalStore(Store):
         path = self.root / key
         await asyncio.to_thread(_put, path, value, exclusive=exclusive)
 
-    async def delete(self, key: str) -> None:
+    async def _delete(self, key: str) -> None:
         """
         Remove a key from the store.
 
@@ -263,7 +272,7 @@ class LocalStore(Store):
         else:
             await asyncio.to_thread(path.unlink, True)  # Q: we may want to raise if path is missing
 
-    async def delete_dir(self, prefix: str) -> None:
+    async def _delete_dir(self, prefix: str) -> None:
         # docstring inherited
         self._check_writable()
         path = self.root / prefix
@@ -276,19 +285,19 @@ class LocalStore(Store):
             # This path is tested by test_group:test_create_creates_parents for one
             pass
 
-    async def exists(self, key: str) -> bool:
+    async def _exists(self, key: str) -> bool:
         # docstring inherited
         path = self.root / key
         return await asyncio.to_thread(path.is_file)
 
-    async def list(self) -> AsyncIterator[str]:
+    async def _list(self) -> AsyncIterator[str]:
         # docstring inherited
         to_strip = self.root.as_posix() + "/"
         for p in list(self.root.rglob("*")):
             if p.is_file():
                 yield p.as_posix().replace(to_strip, "")
 
-    async def list_prefix(self, prefix: str) -> AsyncIterator[str]:
+    async def _list_prefix(self, prefix: str) -> AsyncIterator[str]:
         # docstring inherited
         to_strip = self.root.as_posix() + "/"
         prefix = prefix.rstrip("/")
@@ -296,7 +305,7 @@ class LocalStore(Store):
             if p.is_file():
                 yield p.as_posix().replace(to_strip, "")
 
-    async def list_dir(self, prefix: str) -> AsyncIterator[str]:
+    async def _list_dir(self, prefix: str) -> AsyncIterator[str]:
         # docstring inherited
         base = self.root / prefix
         try:

@@ -13,10 +13,10 @@ from zarr.abc.store import (
     RangeByteRequest,
     Store,
     SuffixByteRequest,
+    _dereference_path,
 )
 from zarr.core.buffer import Buffer
 from zarr.errors import ZarrUserWarning
-from zarr.storage._common import _dereference_path
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable
@@ -77,8 +77,8 @@ class FsspecStore(Store):
         The Async FSSpec filesystem to use with this store.
     read_only : bool
         Whether the store is read-only
-    path : str
-        The root path of the store. This should be a relative path and must not include the
+    fs_root : str
+        The root path on the filesystem. This should be a relative path and must not include the
         filesystem scheme.
     allowed_exceptions : tuple[type[Exception], ...]
         When fetching data, these cases will be deemed to correspond to missing keys.
@@ -116,7 +116,7 @@ class FsspecStore(Store):
 
     fs: AsyncFileSystem
     allowed_exceptions: tuple[type[Exception], ...]
-    path: str
+    _fs_root: str
 
     def __init__(
         self,
@@ -127,7 +127,7 @@ class FsspecStore(Store):
     ) -> None:
         super().__init__(read_only=read_only)
         self.fs = fs
-        self.path = path
+        self._fs_root = path
         self.allowed_exceptions = allowed_exceptions
 
         if not self.fs.async_impl:
@@ -246,34 +246,47 @@ class FsspecStore(Store):
 
     def with_read_only(self, read_only: bool = False) -> FsspecStore:
         # docstring inherited
-        return type(self)(
+        store = type(self)(
             fs=self.fs,
-            path=self.path,
+            path=self._fs_root,
             allowed_exceptions=self.allowed_exceptions,
             read_only=read_only,
         )
+        store._path = self._path
+        return store
+
+    def with_path(self, path: str) -> FsspecStore:
+        # docstring inherited
+        store = type(self)(
+            fs=self.fs,
+            path=self._fs_root,
+            allowed_exceptions=self.allowed_exceptions,
+            read_only=self.read_only,
+        )
+        store._path = path
+        return store
 
     async def clear(self) -> None:
         # docstring inherited
         try:
-            for subpath in await self.fs._find(self.path, withdirs=True):
-                if subpath != self.path:
+            for subpath in await self.fs._find(self._fs_root, withdirs=True):
+                if subpath != self._fs_root:
                     await self.fs._rm(subpath, recursive=True)
         except FileNotFoundError:
             pass
 
     def __repr__(self) -> str:
-        return f"<FsspecStore({type(self.fs).__name__}, {self.path})>"
+        return f"<FsspecStore({type(self.fs).__name__}, {self._fs_root})>"
 
     def __eq__(self, other: object) -> bool:
         return (
             isinstance(other, type(self))
-            and self.path == other.path
+            and self._fs_root == other._fs_root
             and self.read_only == other.read_only
             and self.fs == other.fs
         )
 
-    async def get(
+    async def _get(
         self,
         key: str,
         prototype: BufferPrototype,
@@ -282,7 +295,7 @@ class FsspecStore(Store):
         # docstring inherited
         if not self._is_open:
             await self._open()
-        path = _dereference_path(self.path, key)
+        path = _dereference_path(self._fs_root, key)
 
         try:
             if byte_range is None:
@@ -315,7 +328,7 @@ class FsspecStore(Store):
         else:
             return value
 
-    async def set(
+    async def _set(
         self,
         key: str,
         value: Buffer,
@@ -329,16 +342,16 @@ class FsspecStore(Store):
             raise TypeError(
                 f"FsspecStore.set(): `value` must be a Buffer instance. Got an instance of {type(value)} instead."
             )
-        path = _dereference_path(self.path, key)
+        path = _dereference_path(self._fs_root, key)
         # write data
         if byte_range:
             raise NotImplementedError
         await self.fs._pipe_file(path, value.to_bytes())
 
-    async def delete(self, key: str) -> None:
+    async def _delete(self, key: str) -> None:
         # docstring inherited
         self._check_writable()
-        path = _dereference_path(self.path, key)
+        path = _dereference_path(self._fs_root, key)
         try:
             await self.fs._rm(path)
         except FileNotFoundError:
@@ -346,7 +359,7 @@ class FsspecStore(Store):
         except self.allowed_exceptions:
             pass
 
-    async def delete_dir(self, prefix: str) -> None:
+    async def _delete_dir(self, prefix: str) -> None:
         # docstring inherited
         if not self.supports_deletes:
             raise NotImplementedError(
@@ -354,18 +367,18 @@ class FsspecStore(Store):
             )
         self._check_writable()
 
-        path_to_delete = _dereference_path(self.path, prefix)
+        path_to_delete = _dereference_path(self._fs_root, prefix)
 
         with suppress(*self.allowed_exceptions):
             await self.fs._rm(path_to_delete, recursive=True)
 
-    async def exists(self, key: str) -> bool:
+    async def _exists(self, key: str) -> bool:
         # docstring inherited
-        path = _dereference_path(self.path, key)
+        path = _dereference_path(self._fs_root, key)
         exists: bool = await self.fs._exists(path)
         return exists
 
-    async def get_partial_values(
+    async def _get_partial_values(
         self,
         prototype: BufferPrototype,
         key_ranges: Iterable[tuple[str, ByteRequest | None]],
@@ -378,7 +391,7 @@ class FsspecStore(Store):
             starts: list[int | None] = []
             stops: list[int | None] = []
             for key, byte_range in key_ranges:
-                paths.append(_dereference_path(self.path, key))
+                paths.append(_dereference_path(self._fs_root, key))
                 if byte_range is None:
                     starts.append(None)
                     stops.append(None)
@@ -405,31 +418,31 @@ class FsspecStore(Store):
 
         return [None if isinstance(r, Exception) else prototype.buffer.from_bytes(r) for r in res]
 
-    async def list(self) -> AsyncIterator[str]:
+    async def _list(self) -> AsyncIterator[str]:
         # docstring inherited
-        allfiles = await self.fs._find(self.path, detail=False, withdirs=False)
-        for onefile in (a.removeprefix(self.path + "/") for a in allfiles):
+        allfiles = await self.fs._find(self._fs_root, detail=False, withdirs=False)
+        for onefile in (a.removeprefix(self._fs_root + "/") for a in allfiles):
             yield onefile
 
-    async def list_dir(self, prefix: str) -> AsyncIterator[str]:
+    async def _list_dir(self, prefix: str) -> AsyncIterator[str]:
         # docstring inherited
-        prefix = f"{self.path}/{prefix.rstrip('/')}"
+        prefix = f"{self._fs_root}/{prefix.rstrip('/')}"
         try:
             allfiles = await self.fs._ls(prefix, detail=False)
         except FileNotFoundError:
             return
         for onefile in (a.replace(prefix + "/", "") for a in allfiles):
-            yield onefile.removeprefix(self.path).removeprefix("/")
+            yield onefile.removeprefix(self._fs_root).removeprefix("/")
 
-    async def list_prefix(self, prefix: str) -> AsyncIterator[str]:
+    async def _list_prefix(self, prefix: str) -> AsyncIterator[str]:
         # docstring inherited
         for onefile in await self.fs._find(
-            f"{self.path}/{prefix}", detail=False, maxdepth=None, withdirs=False
+            f"{self._fs_root}/{prefix}", detail=False, maxdepth=None, withdirs=False
         ):
-            yield onefile.removeprefix(f"{self.path}/")
+            yield onefile.removeprefix(f"{self._fs_root}/")
 
     async def getsize(self, key: str) -> int:
-        path = _dereference_path(self.path, key)
+        path = _dereference_path(self._fs_root, key)
         info = await self.fs._info(path)
 
         size = info.get("size")

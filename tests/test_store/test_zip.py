@@ -39,15 +39,15 @@ class TestZipStore(StoreTests[ZipStore, cpu.Buffer]):
         os.close(fd)
         os.unlink(temp_path)
 
-        return {"path": temp_path, "mode": "w", "read_only": False}
+        return {"zip_path": temp_path, "mode": "w", "read_only": False}
 
     async def get(self, store: ZipStore, key: str) -> Buffer:
-        buf = store._get(key, prototype=default_buffer_prototype())
+        buf = await store._get(key, prototype=default_buffer_prototype())
         assert buf is not None
         return buf
 
     async def set(self, store: ZipStore, key: str, value: Buffer) -> None:
-        return store._set(key, value)
+        return await store._set(key, value)
 
     def test_store_read_only(self, store: ZipStore) -> None:
         assert not store.read_only
@@ -67,7 +67,7 @@ class TestZipStore(StoreTests[ZipStore, cpu.Buffer]):
             await store.set("foo", cpu.Buffer.from_bytes(b"bar"))
 
     def test_store_repr(self, store: ZipStore) -> None:
-        assert str(store) == f"zip://{store.path}"
+        assert str(store) == f"zip://{store.zip_path}"
 
     def test_store_supports_writes(self, store: ZipStore) -> None:
         assert store.supports_writes
@@ -112,7 +112,7 @@ class TestZipStore(StoreTests[ZipStore, cpu.Buffer]):
     ) -> None:
         if read_only:
             # create an empty zipfile
-            with zipfile.ZipFile(store_kwargs["path"], mode="w"):
+            with zipfile.ZipFile(store_kwargs["zip_path"], mode="w"):
                 pass
 
         await super().test_store_open_read_only(store_kwargs, read_only)
@@ -143,12 +143,12 @@ class TestZipStore(StoreTests[ZipStore, cpu.Buffer]):
         origin = tmp_path / "origin.zip"
         destination = tmp_path / "some_folder" / "destination.zip"
 
-        store = await ZipStore.open(path=origin, mode="a")
+        store = await ZipStore.open(zip_path=origin, mode="a")
         array = create_array(store, data=np.arange(10))
 
         await store.move(str(destination))
 
-        assert store.path == destination
+        assert store.zip_path == destination
         assert destination.exists()
         assert not origin.exists()
         assert np.array_equal(array[...], np.arange(10))

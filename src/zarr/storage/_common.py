@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Self, TypeAlias
 
-from zarr.abc.store import ByteRequest, Store
+from zarr.abc.store import ByteRequest, Store, _dereference_path
 from zarr.core.buffer import Buffer, default_buffer_prototype
 from zarr.core.common import (
     ANY_ACCESS_MODE,
@@ -28,18 +28,6 @@ else:
 
 if TYPE_CHECKING:
     from zarr.core.buffer import BufferPrototype
-
-
-def _dereference_path(root: str, path: str) -> str:
-    if not isinstance(root, str):
-        msg = f"{root=} is not a string ({type(root)=})"  # type: ignore[unreachable]
-        raise TypeError(msg)
-    if not isinstance(path, str):
-        msg = f"{path=} is not a string ({type(path)=})"  # type: ignore[unreachable]
-        raise TypeError(msg)
-    root = root.rstrip("/")
-    path = f"{root}/{path}" if root else path
-    return path.rstrip("/")
 
 
 class StorePath:
@@ -260,6 +248,7 @@ class StorePath:
 
 
 StoreLike: TypeAlias = Store | StorePath | FSMap | Path | str | dict[str, Buffer]
+# TODO: Remove StorePath from StoreLike once StorePath is fully removed
 
 
 async def make_store(
@@ -363,33 +352,31 @@ async def make_store_path(
     path: str | None = "",
     mode: AccessModeLiteral | None = None,
     storage_options: dict[str, Any] | None = None,
-) -> StorePath:
+) -> Store:
     """
-    Convert a `StoreLike` object into a StorePath object.
+    Convert a `StoreLike` object into a Store object with an optional path.
 
-    This function takes a `StoreLike` object and returns a `StorePath` object. See `make_store` for details
+    This function takes a `StoreLike` object and returns a `Store` object. See `make_store` for details
     of which `Store` is used for each type of `store_like` object.
 
     Parameters
     ----------
     store_like : StoreLike or None, default=None
-        The `StoreLike` object to convert to a `StorePath` object. See the
+        The `StoreLike` object to convert to a `Store` object. See the
         [storage documentation in the user guide][user-guide-store-like]
         for a description of all valid StoreLike values.
     path : str | None, optional
-        The path to use when creating the `StorePath` object.  If None, the
-        default path is the empty string.
+        The path within the store. If None, the default path is the empty string.
     mode : StoreAccessMode | None, optional
-        The mode to use when creating the `StorePath` object.  If None, the
-        default mode is 'r'.
+        The mode to use when opening the store. If None, the default mode is 'r'.
     storage_options : dict[str, Any] | None, optional
         The storage options to use when creating the `RemoteStore` object.  If
         None, the default storage options are used.
 
     Returns
     -------
-    StorePath
-        The converted StorePath object.
+    Store
+        The converted Store object, with path set.
 
     Raises
     ------
@@ -405,13 +392,30 @@ async def make_store_path(
     path_normalized = normalize_path(path)
 
     if isinstance(store_like, StorePath):
-        # Already a StorePath
+        # Legacy StorePath — extract store and combine paths
         if storage_options:
             raise TypeError(
                 "'storage_options' was provided but unused. "
                 "'storage_options' is only used when the store is passed as an FSSpec URI string.",
             )
-        return store_like / path_normalized
+        store = store_like.store
+        if store_like.path:
+            result_store = store / store_like.path
+        else:
+            result_store = store
+        if path_normalized:
+            return result_store / path_normalized
+        return result_store
+
+    elif isinstance(store_like, Store):
+        # Already a Store — apply path
+        if storage_options:
+            raise TypeError(
+                "'storage_options' was provided but unused. "
+                "'storage_options' is only used when the store is passed as an FSSpec URI string.",
+            )
+        result_store = store_like / path_normalized if path_normalized else store_like
+        return await _open_store_with_mode(result_store, mode=mode)
 
     elif _has_fsspec and isinstance(store_like, FSMap) and path:
         raise ValueError(
@@ -420,7 +424,70 @@ async def make_store_path(
 
     else:
         store = await make_store(store_like, mode=mode, storage_options=storage_options)
-        return await StorePath.open(store, path=path_normalized, mode=mode)
+        result_store = store / path_normalized if path_normalized else store
+        return await _open_store_with_mode(result_store, mode=mode)
+
+
+async def _open_store_with_mode(store: Store, mode: AccessModeLiteral | None = None) -> Store:
+    """Open a store and apply mode-specific operations.
+
+    This is the equivalent of the old StorePath.open() logic, applied to a Store object.
+
+    Parameters
+    ----------
+    store : Store
+        The store to open with a mode.
+    mode : AccessModeLiteral | None
+        The access mode.
+
+    Returns
+    -------
+    Store
+        The opened store.
+    """
+    from zarr.core.common import ANY_ACCESS_MODE
+
+    # fastpath if mode is None
+    if mode is None:
+        await store._ensure_open()
+        return store
+
+    if mode not in ANY_ACCESS_MODE:
+        raise ValueError(f"Invalid mode: {mode}, expected one of {ANY_ACCESS_MODE}")
+
+    if store.read_only:
+        # Don't allow write operations on a read-only store
+        if mode != "r":
+            raise ValueError(
+                f"Store is read-only but mode is {mode!r}. Create a writable store or use 'r' mode."
+            )
+        await store._ensure_open()
+    elif mode == "r":
+        # Create read-only copy for read mode on writable store
+        try:
+            store = store.with_read_only(True)
+        except NotImplementedError as e:
+            raise ValueError(
+                "Store is not read-only but mode is 'r'. Unable to create a read-only copy of the store. "
+                "Please use a read-only store or a storage class that implements .with_read_only()."
+            ) from e
+        await store._ensure_open()
+    else:
+        # writable store and writable mode
+        await store._ensure_open()
+
+    # Handle mode-specific operations
+    match mode:
+        case "w-":
+            if not await store.is_empty(store.path):
+                raise FileExistsError(
+                    f"Cannot create '{store.path}' with mode 'w-' because it already contains data. "
+                    f"Use mode 'w' to overwrite or 'a' to append."
+                )
+        case "w":
+            await store.delete_dir(store.path)
+
+    return store
 
 
 def _is_fsspec_uri(uri: str) -> bool:
@@ -443,7 +510,7 @@ def _is_fsspec_uri(uri: str) -> bool:
 
 
 async def ensure_no_existing_node(
-    store_path: StorePath,
+    store_path: Store,
     zarr_format: ZarrFormat,
     node_type: Literal["array", "group"] | None = None,
 ) -> None:
@@ -453,7 +520,7 @@ async def ensure_no_existing_node(
 
     Parameters
     ----------
-    store_path : StorePath
+    store_path : Store
         The storage location to check.
     zarr_format : ZarrFormat
         The Zarr format to check.
@@ -472,12 +539,12 @@ async def ensure_no_existing_node(
     match extant_node:
         case "array":
             if node_type != "group":
-                msg = f"An array exists in store {store_path.store!r} at path {store_path.path!r}."
+                msg = f"An array exists in store {store_path!r} at path {store_path.path!r}."
                 raise ContainsArrayError(msg)
 
         case "group":
             if node_type != "array":
-                msg = f"A group exists in store {store_path.store!r} at path {store_path.path!r}."
+                msg = f"A group exists in store {store_path!r} at path {store_path.path!r}."
                 raise ContainsGroupError(msg)
 
         case "nothing":
@@ -488,7 +555,7 @@ async def ensure_no_existing_node(
             raise ValueError(msg)
 
 
-async def _contains_node_v3(store_path: StorePath) -> Literal["array", "group", "nothing"]:
+async def _contains_node_v3(store_path: Store) -> Literal["array", "group", "nothing"]:
     """
     Check if a store_path contains nothing, an array, or a group. This function
     returns the string "array", "group", or "nothing" to denote containing an array, a group, or
@@ -496,7 +563,7 @@ async def _contains_node_v3(store_path: StorePath) -> Literal["array", "group", 
 
     Parameters
     ----------
-    store_path : StorePath
+    store_path : Store
         The location in storage to check.
 
     Returns
@@ -505,7 +572,7 @@ async def _contains_node_v3(store_path: StorePath) -> Literal["array", "group", 
         A string representing the zarr node found at store_path.
     """
     result: Literal["array", "group", "nothing"] = "nothing"
-    extant_meta_bytes = await (store_path / ZARR_JSON).get()
+    extant_meta_bytes = await (store_path / ZARR_JSON).getb()
     # if no metadata document could be loaded, then we just return "nothing"
     if extant_meta_bytes is not None:
         try:
@@ -521,7 +588,7 @@ async def _contains_node_v3(store_path: StorePath) -> Literal["array", "group", 
     return result
 
 
-async def _contains_node_v2(store_path: StorePath) -> Literal["array", "group", "nothing"]:
+async def _contains_node_v2(store_path: Store) -> Literal["array", "group", "nothing"]:
     """
     Check if a store_path contains nothing, an array, a group, or both. If both an array and a
     group are detected, a `ContainsArrayAndGroup` exception is raised. Otherwise, this function
@@ -530,7 +597,7 @@ async def _contains_node_v2(store_path: StorePath) -> Literal["array", "group", 
 
     Parameters
     ----------
-    store_path : StorePath
+    store_path : Store
         The location in storage to check.
 
     Returns
@@ -544,7 +611,7 @@ async def _contains_node_v2(store_path: StorePath) -> Literal["array", "group", 
     if _array and _group:
         msg = (
             "Array and group metadata documents (.zarray and .zgroup) were both found in store "
-            f"{store_path.store!r} at path {store_path.path!r}. "
+            f"{store_path!r} at path {store_path.path!r}. "
             "Only one of these files may be present in a given directory / prefix. "
             "Remove the .zarray file, or the .zgroup file, or both."
         )
@@ -557,25 +624,25 @@ async def _contains_node_v2(store_path: StorePath) -> Literal["array", "group", 
         return "nothing"
 
 
-async def contains_array(store_path: StorePath, zarr_format: ZarrFormat) -> bool:
+async def contains_array(store_path: Store, zarr_format: ZarrFormat) -> bool:
     """
-    Check if an array exists at a given StorePath.
+    Check if an array exists at a given store path.
 
     Parameters
     ----------
-    store_path : StorePath
-        The StorePath to check for an existing group.
+    store_path : Store
+        The store to check for an existing array.
     zarr_format :
         The zarr format to check for.
 
     Returns
     -------
     bool
-        True if the StorePath contains a group, False otherwise.
+        True if the store path contains an array, False otherwise.
 
     """
     if zarr_format == 3:
-        extant_meta_bytes = await (store_path / ZARR_JSON).get()
+        extant_meta_bytes = await (store_path / ZARR_JSON).getb()
         if extant_meta_bytes is None:
             return False
         else:
@@ -587,32 +654,30 @@ async def contains_array(store_path: StorePath, zarr_format: ZarrFormat) -> bool
             except (ValueError, KeyError):
                 return False
     elif zarr_format == 2:
-        return await (store_path / ZARRAY_JSON).exists()
+        return await (store_path / ZARRAY_JSON).existsb()
     msg = f"Invalid zarr_format provided. Got {zarr_format}, expected 2 or 3"
     raise ValueError(msg)
 
 
-async def contains_group(store_path: StorePath, zarr_format: ZarrFormat) -> bool:
+async def contains_group(store_path: Store, zarr_format: ZarrFormat) -> bool:
     """
-    Check if a group exists at a given StorePath.
+    Check if a group exists at a given store path.
 
     Parameters
     ----------
-
-    store_path : StorePath
-        The StorePath to check for an existing group.
+    store_path : Store
+        The store to check for an existing group.
     zarr_format :
         The zarr format to check for.
 
     Returns
     -------
-
     bool
-        True if the StorePath contains a group, False otherwise
+        True if the store path contains a group, False otherwise
 
     """
     if zarr_format == 3:
-        extant_meta_bytes = await (store_path / ZARR_JSON).get()
+        extant_meta_bytes = await (store_path / ZARR_JSON).getb()
         if extant_meta_bytes is None:
             return False
         else:
@@ -625,6 +690,6 @@ async def contains_group(store_path: StorePath, zarr_format: ZarrFormat) -> bool
             else:
                 return result
     elif zarr_format == 2:
-        return await (store_path / ZGROUP_JSON).exists()
+        return await (store_path / ZGROUP_JSON).existsb()
     msg = f"Invalid zarr_format provided. Got {zarr_format}, expected 2 or 3"  # type: ignore[unreachable]
     raise ValueError(msg)

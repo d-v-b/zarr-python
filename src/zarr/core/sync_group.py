@@ -142,16 +142,14 @@ def create_rooted_hierarchy(
     return _parse_async_node(async_node)
 
 
-def get_node(store: Store, path: str, zarr_format: ZarrFormat) -> AnyArray | Group:
+def get_node(store: Store, zarr_format: ZarrFormat) -> AnyArray | Group:
     """
-    Get an Array or Group from a path in a Store.
+    Get an Array or Group from a store with path already set.
 
     Parameters
     ----------
     store : Store
-        The store-like object to read from.
-    path : str
-        The path to the node to read.
+        The store with path set to the node location.
     zarr_format : {2, 3}
         The zarr format of the node to read.
 
@@ -160,4 +158,4 @@ def get_node(store: Store, path: str, zarr_format: ZarrFormat) -> AnyArray | Gro
     Array | Group
     """
 
-    return _parse_async_node(sync(get_node_async(store=store, path=path, zarr_format=zarr_format)))
+    return _parse_async_node(sync(get_node_async(store=store, zarr_format=zarr_format)))

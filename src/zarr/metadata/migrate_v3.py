@@ -30,7 +30,7 @@ from zarr.core.metadata.v2 import ArrayV2Metadata
 from zarr.core.metadata.v3 import ArrayV3Metadata
 from zarr.core.sync import sync
 from zarr.registry import get_codec_class
-from zarr.storage import StorePath
+from zarr.storage._common import _open_store_with_mode
 from zarr.types import AnyArray
 
 _logger = logging.getLogger(__name__)
@@ -62,14 +62,14 @@ def migrate_v2_to_v3(
 
     if output_store is not None:
         # w- access to not allow overwrite of existing data
-        output_path = sync(StorePath.open(output_store, path="", mode="w-"))
+        output_path = sync(_open_store_with_mode(output_store, mode="w-"))
     else:
         output_path = zarr_v2.store_path
 
     migrate_to_v3(zarr_v2, output_path, dry_run=dry_run)
 
 
-def migrate_to_v3(zarr_v2: AnyArray | Group, output_path: StorePath, dry_run: bool = False) -> None:
+def migrate_to_v3(zarr_v2: AnyArray | Group, output_path: Store, dry_run: bool = False) -> None:
     """Migrate all v2 metadata in a Zarr array/group to v3.
 
     Note - if a group is provided, then all arrays / groups within this group will also be converted.
@@ -80,8 +80,8 @@ def migrate_to_v3(zarr_v2: AnyArray | Group, output_path: StorePath, dry_run: bo
     ----------
     zarr_v2 : Array | Group
         An array or group with zarr_format = 2
-    output_path : StorePath
-        The store path to write generated v3 metadata to.
+    output_path : Store
+        The store to write generated v3 metadata to.
     dry_run : bool, optional
         Enable a 'dry run' - files that would be created are logged, but no files are created or changed.
     """
@@ -120,7 +120,7 @@ async def remove_metadata(
 
     if not store.supports_deletes:
         raise ValueError("Store must support deletes to remove metadata")
-    store_path = await StorePath.open(store, path="", mode="r+")
+    store_path = await _open_store_with_mode(store, mode="r+")
 
     metadata_files_all = {
         2: [ZARRAY_JSON, ZATTRS_JSON, ZGROUP_JSON, ZMETADATA_V2_JSON],
@@ -144,7 +144,7 @@ async def remove_metadata(
         ):
             _logger.info("Deleting metadata at %s", store_path / file_path)
             if not dry_run:
-                awaitables.append((store_path / file_path).delete())
+                awaitables.append((store_path / file_path).deleteb())
         else:
             raise ValueError(
                 f"Cannot remove v{zarr_format} metadata at {store_path / file_path} - no v{alternative_metadata} "
@@ -154,7 +154,7 @@ async def remove_metadata(
     await asyncio.gather(*awaitables)
 
 
-def _convert_group(zarr_v2: Group, output_path: StorePath, dry_run: bool) -> None:
+def _convert_group(zarr_v2: Group, output_path: Store, dry_run: bool) -> None:
     if zarr_v2.metadata.consolidated_metadata is not None:
         raise NotImplementedError("Migration of consolidated metadata isn't supported.")
 
@@ -169,16 +169,16 @@ def _convert_group(zarr_v2: Group, output_path: StorePath, dry_run: bool) -> Non
     sync(_save_v3_metadata(group_metadata_v3, output_path, dry_run=dry_run))
 
 
-def _convert_array(zarr_v2: AnyArray, output_path: StorePath, dry_run: bool) -> None:
+def _convert_array(zarr_v2: AnyArray, output_path: Store, dry_run: bool) -> None:
     array_metadata_v3 = _convert_array_metadata(cast(ArrayV2Metadata, zarr_v2.metadata))
     sync(_save_v3_metadata(array_metadata_v3, output_path, dry_run=dry_run))
 
 
-async def _metadata_exists(zarr_format: ZarrFormat, store_path: StorePath) -> bool:
+async def _metadata_exists(zarr_format: ZarrFormat, store_path: Store) -> bool:
     metadata_files_required = {2: [ZARRAY_JSON, ZGROUP_JSON], 3: [ZARR_JSON]}
 
     for metadata_file in metadata_files_required[zarr_format]:
-        if await (store_path / metadata_file).exists():
+        if await (store_path / metadata_file).existsb():
             return True
 
     return False
@@ -282,14 +282,14 @@ def _find_numcodecs_zarr3(numcodecs_codec: numcodecs.abc.Codec) -> Codec:
 
 
 async def _save_v3_metadata(
-    metadata_v3: ArrayV3Metadata | GroupMetadata, output_path: StorePath, dry_run: bool = False
+    metadata_v3: ArrayV3Metadata | GroupMetadata, output_path: Store, dry_run: bool = False
 ) -> None:
     zarr_json_path = output_path / ZARR_JSON
-    if await zarr_json_path.exists():
+    if await zarr_json_path.existsb():
         raise ValueError(f"{ZARR_JSON} already exists at {zarr_json_path}")
 
     _logger.info("Saving metadata to %s", zarr_json_path)
     to_save = metadata_v3.to_buffer_dict(default_buffer_prototype())
 
     if not dry_run:
-        await zarr_json_path.set_if_not_exists(to_save[ZARR_JSON])
+        await zarr_json_path.set_if_not_existsb(to_save[ZARR_JSON])

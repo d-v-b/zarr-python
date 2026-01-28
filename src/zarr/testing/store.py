@@ -583,11 +583,19 @@ class LatencyStore(WrapperStore[Store]):
         self.set_latency = float(set_latency)
         self._store = cls
 
-    async def set(self, key: str, value: Buffer) -> None:
+    def with_path(self, path: str) -> LatencyStore:
+        # docstring inherited
+        return LatencyStore(
+            self._store.with_path(path),
+            get_latency=self.get_latency,
+            set_latency=self.set_latency,
+        )
+
+    async def _set(self, key: str, value: Buffer) -> None:
         """
         Add latency to the ``set`` method.
 
-        Calls ``asyncio.sleep(self.set_latency)`` before invoking the wrapped ``set`` method.
+        Calls ``asyncio.sleep(self.set_latency)`` before invoking the wrapped ``_set`` method.
 
         Parameters
         ----------
@@ -601,15 +609,15 @@ class LatencyStore(WrapperStore[Store]):
         None
         """
         await asyncio.sleep(self.set_latency)
-        await self._store.set(key, value)
+        await self._store._set(key, value)
 
-    async def get(
+    async def _get(
         self, key: str, prototype: BufferPrototype, byte_range: ByteRequest | None = None
     ) -> Buffer | None:
         """
         Add latency to the ``get`` method.
 
-        Calls ``asyncio.sleep(self.get_latency)`` before invoking the wrapped ``get`` method.
+        Calls ``asyncio.sleep(self.get_latency)`` before invoking the wrapped ``_get`` method.
 
         Parameters
         ----------
@@ -625,4 +633,4 @@ class LatencyStore(WrapperStore[Store]):
         buffer : Buffer or None
         """
         await asyncio.sleep(self.get_latency)
-        return await self._store.get(key, prototype=prototype, byte_range=byte_range)
+        return await self._store._get(key, prototype=prototype, byte_range=byte_range)

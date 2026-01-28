@@ -8,7 +8,6 @@ import zarr.codecs
 import zarr.storage
 from zarr.core.array import AsyncArray, init_array
 from zarr.storage import LocalStore, ZipStore
-from zarr.storage._common import StorePath
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -437,7 +436,7 @@ async def test_open_with_mode_a(tmp_path: Path) -> None:
     # Open without shape argument should default to group
     g = zarr.open(store=tmp_path, mode="a")
     assert isinstance(g, Group)
-    await g.store_path.delete()
+    await g.store_path.deleteb()
 
     # 'a' means read/write (create if doesn't exist)
     arr = zarr.open(store=tmp_path, mode="a", shape=(3, 3))
@@ -526,7 +525,7 @@ async def test_init_order_warns() -> None:
         RuntimeWarning, match="The `order` keyword argument has no effect for Zarr format 3 arrays"
     ):
         await init_array(
-            store_path=StorePath(store=MemoryStore()),
+            store_path=MemoryStore(),
             shape=(1,),
             dtype="uint8",
             zarr_format=3,

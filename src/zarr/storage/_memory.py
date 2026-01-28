@@ -47,8 +47,9 @@ class MemoryStore(Store):
         store_dict: MutableMapping[str, Buffer] | None = None,
         *,
         read_only: bool = False,
+        path: str = "",
     ) -> None:
-        super().__init__(read_only=read_only)
+        super().__init__(read_only=read_only, path=path)
         if store_dict is None:
             store_dict = {}
         self._store_dict = store_dict
@@ -58,6 +59,15 @@ class MemoryStore(Store):
         return type(self)(
             store_dict=self._store_dict,
             read_only=read_only,
+            path=self.path,
+        )
+
+    def with_path(self, path: str) -> MemoryStore:
+        # docstring inherited
+        return type(self)(
+            store_dict=self._store_dict,
+            read_only=self.read_only,
+            path=path,
         )
 
     async def clear(self) -> None:
@@ -77,7 +87,7 @@ class MemoryStore(Store):
             and self.read_only == other.read_only
         )
 
-    async def get(
+    async def _get(
         self,
         key: str,
         prototype: BufferPrototype | None = None,
@@ -96,7 +106,7 @@ class MemoryStore(Store):
         except KeyError:
             return None
 
-    async def get_partial_values(
+    async def _get_partial_values(
         self,
         prototype: BufferPrototype,
         key_ranges: Iterable[tuple[str, ByteRequest | None]],
@@ -104,16 +114,18 @@ class MemoryStore(Store):
         # docstring inherited
 
         # All the key-ranges arguments goes with the same prototype
-        async def _get(key: str, byte_range: ByteRequest | None) -> Buffer | None:
-            return await self.get(key, prototype=prototype, byte_range=byte_range)
+        async def _get_one(key: str, byte_range: ByteRequest | None) -> Buffer | None:
+            return await self._get(key, prototype=prototype, byte_range=byte_range)
 
-        return await concurrent_map(key_ranges, _get, limit=None)
+        return await concurrent_map(key_ranges, _get_one, limit=None)
 
-    async def exists(self, key: str) -> bool:
+    async def _exists(self, key: str) -> bool:
         # docstring inherited
         return key in self._store_dict
 
-    async def set(self, key: str, value: Buffer, byte_range: tuple[int, int] | None = None) -> None:
+    async def _set(
+        self, key: str, value: Buffer, byte_range: tuple[int, int] | None = None
+    ) -> None:
         # docstring inherited
         self._check_writable()
         await self._ensure_open()
@@ -130,13 +142,13 @@ class MemoryStore(Store):
         else:
             self._store_dict[key] = value
 
-    async def set_if_not_exists(self, key: str, value: Buffer) -> None:
+    async def _set_if_not_exists(self, key: str, value: Buffer) -> None:
         # docstring inherited
         self._check_writable()
         await self._ensure_open()
         self._store_dict.setdefault(key, value)
 
-    async def delete(self, key: str) -> None:
+    async def _delete(self, key: str) -> None:
         # docstring inherited
         self._check_writable()
         try:
@@ -144,19 +156,19 @@ class MemoryStore(Store):
         except KeyError:
             logger.debug("Key %s does not exist.", key)
 
-    async def list(self) -> AsyncIterator[str]:
+    async def _list(self) -> AsyncIterator[str]:
         # docstring inherited
         for key in self._store_dict:
             yield key
 
-    async def list_prefix(self, prefix: str) -> AsyncIterator[str]:
+    async def _list_prefix(self, prefix: str) -> AsyncIterator[str]:
         # docstring inherited
         # note: we materialize all dict keys into a list here so we can mutate the dict in-place (e.g. in delete_prefix)
         for key in list(self._store_dict):
             if key.startswith(prefix):
                 yield key
 
-    async def list_dir(self, prefix: str) -> AsyncIterator[str]:
+    async def _list_dir(self, prefix: str) -> AsyncIterator[str]:
         # docstring inherited
         prefix = prefix.rstrip("/")
 
@@ -434,8 +446,9 @@ class GpuMemoryStore(MemoryStore):
         store_dict: MutableMapping[str, gpu.Buffer] | None = None,
         *,
         read_only: bool = False,
+        path: str = "",
     ) -> None:
-        super().__init__(store_dict=store_dict, read_only=read_only)  # type: ignore[arg-type]
+        super().__init__(store_dict=store_dict, read_only=read_only, path=path)  # type: ignore[arg-type]
 
     def __str__(self) -> str:
         return f"gpumemory://{id(self._store_dict)}"
@@ -464,7 +477,9 @@ class GpuMemoryStore(MemoryStore):
         gpu_store_dict = {k: gpu.Buffer.from_buffer(v) for k, v in store_dict.items()}
         return cls(gpu_store_dict)
 
-    async def set(self, key: str, value: Buffer, byte_range: tuple[int, int] | None = None) -> None:
+    async def _set(
+        self, key: str, value: Buffer, byte_range: tuple[int, int] | None = None
+    ) -> None:
         # docstring inherited
         self._check_writable()
         assert isinstance(key, str)
@@ -474,4 +489,4 @@ class GpuMemoryStore(MemoryStore):
             )
         # Convert to gpu.Buffer
         gpu_value = value if isinstance(value, gpu.Buffer) else gpu.Buffer.from_buffer(value)
-        await super().set(key, gpu_value, byte_range=byte_range)
+        await super()._set(key, gpu_value, byte_range=byte_range)

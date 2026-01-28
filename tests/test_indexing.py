@@ -12,6 +12,7 @@ from numpy.testing import assert_array_equal
 
 import zarr
 from zarr import Array
+from zarr.abc.store import Store
 from zarr.core.buffer import default_buffer_prototype
 from zarr.core.indexing import (
     BasicSelection,
@@ -29,7 +30,7 @@ from zarr.core.indexing import (
     replace_ellipsis,
 )
 from zarr.registry import get_ndbuffer_class
-from zarr.storage import MemoryStore, StorePath
+from zarr.storage import MemoryStore
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -39,12 +40,12 @@ if TYPE_CHECKING:
 
 
 @pytest.fixture
-async def store() -> AsyncGenerator[StorePath]:
-    return StorePath(await MemoryStore.open())
+async def store() -> AsyncGenerator[Store]:
+    return await MemoryStore.open()
 
 
 def zarr_array_from_numpy_array(
-    store: StorePath,
+    store: Store,
     a: npt.NDArray[Any],
     chunk_shape: tuple[int, ...] | None = None,
 ) -> zarr.Array:
@@ -62,13 +63,16 @@ def zarr_array_from_numpy_array(
 class CountingDict(MemoryStore):
     counter: Counter[tuple[str, str]]
 
-    @classmethod
-    async def open(cls) -> CountingDict:
-        store = await super().open()
-        store.counter = Counter()
-        return store
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.counter = Counter()
 
-    async def get(
+    def with_path(self, path: str) -> CountingDict:
+        new = CountingDict(store_dict=self._store_dict, read_only=self.read_only, path=path)
+        new.counter = self.counter
+        return new
+
+    async def _get(
         self,
         key: str,
         prototype: BufferPrototype,
@@ -76,12 +80,14 @@ class CountingDict(MemoryStore):
     ) -> Buffer | None:
         key_suffix = "/".join(key.split("/")[1:])
         self.counter["__getitem__", key_suffix] += 1
-        return await super().get(key, prototype, byte_range)
+        return await super()._get(key, prototype, byte_range)
 
-    async def set(self, key: str, value: Buffer, byte_range: tuple[int, int] | None = None) -> None:
+    async def _set(
+        self, key: str, value: Buffer, byte_range: tuple[int, int] | None = None
+    ) -> None:
         key_suffix = "/".join(key.split("/")[1:])
         self.counter["__setitem__", key_suffix] += 1
-        return await super().set(key, value, byte_range)
+        return await super()._set(key, value, byte_range)
 
 
 def test_normalize_integer_selection() -> None:
@@ -143,7 +149,7 @@ def test_replace_ellipsis() -> None:
     ],
 )
 @pytest.mark.parametrize("use_out", [True, False])
-def test_get_basic_selection_0d(store: StorePath, use_out: bool, value: Any, dtype: Any) -> None:
+def test_get_basic_selection_0d(store: Store, use_out: bool, value: Any, dtype: Any) -> None:
     # setup
     arr_np = np.array(value, dtype=dtype)
     arr_z = zarr_array_from_numpy_array(store, arr_np)
@@ -276,7 +282,7 @@ def _test_get_basic_selection(
 
 
 # noinspection PyStatementEffect
-def test_get_basic_selection_1d(store: StorePath) -> None:
+def test_get_basic_selection_1d(store: Store) -> None:
     # setup
     a = np.arange(1050, dtype=int)
     z = zarr_array_from_numpy_array(store, a, chunk_shape=(100,))
@@ -346,7 +352,7 @@ basic_selections_2d_bad = [
 
 
 # noinspection PyStatementEffect
-def test_get_basic_selection_2d(store: StorePath) -> None:
+def test_get_basic_selection_2d(store: Store) -> None:
     # setup
     a = np.arange(10000, dtype=int).reshape(1000, 10)
     z = zarr_array_from_numpy_array(store, a, chunk_shape=(300, 3))
@@ -367,7 +373,7 @@ def test_get_basic_selection_2d(store: StorePath) -> None:
     np.testing.assert_array_equal(z[fancy_selection], [0, 11])
 
 
-def test_fancy_indexing_fallback_on_get_setitem(store: StorePath) -> None:
+def test_fancy_indexing_fallback_on_get_setitem(store: Store) -> None:
     z = zarr_array_from_numpy_array(store, np.zeros((20, 20)))
     z[[1, 2, 3], [1, 2, 3]] = 1
     np.testing.assert_array_equal(
@@ -408,7 +414,7 @@ def test_fancy_indexing_fallback_on_get_setitem(store: StorePath) -> None:
     ],
 )
 def test_orthogonal_indexing_fallback_on_getitem_2d(
-    store: StorePath, index: Selection, expected_result: npt.ArrayLike
+    store: Store, index: Selection, expected_result: npt.ArrayLike
 ) -> None:
     """
     Tests the orthogonal indexing fallback on __getitem__ for a 2D matrix.
@@ -455,7 +461,7 @@ Index = list[int] | tuple[slice | int | list[int], ...]
     ],
 )
 def test_orthogonal_indexing_fallback_on_getitem_3d(
-    store: StorePath, index: Selection, expected_result: npt.ArrayLike
+    store: Store, index: Selection, expected_result: npt.ArrayLike
 ) -> None:
     """
     Tests the orthogonal indexing fallback on __getitem__ for a 3D matrix.
@@ -495,7 +501,7 @@ def test_orthogonal_indexing_fallback_on_getitem_3d(
     ],
 )
 def test_orthogonal_indexing_fallback_on_setitem_2d(
-    store: StorePath, index: Selection, expected_result: npt.ArrayLike
+    store: Store, index: Selection, expected_result: npt.ArrayLike
 ) -> None:
     """
     Tests the orthogonal indexing fallback on __setitem__ for a 3D matrix.
@@ -512,7 +518,7 @@ def test_orthogonal_indexing_fallback_on_setitem_2d(
     np.testing.assert_array_equal(z[:], a, err_msg="Indexing disagrees with numpy")
 
 
-def test_fancy_indexing_doesnt_mix_with_implicit_slicing(store: StorePath) -> None:
+def test_fancy_indexing_doesnt_mix_with_implicit_slicing(store: Store) -> None:
     z2 = zarr_array_from_numpy_array(store, np.zeros((5, 5, 5)))
     with pytest.raises(IndexError):
         z2[[1, 2, 3], [1, 2, 3]] = 2
@@ -534,7 +540,7 @@ def test_fancy_indexing_doesnt_mix_with_implicit_slicing(store: StorePath) -> No
     ],
 )
 def test_set_basic_selection_0d(
-    store: StorePath, value: Any, dtype: str | list[tuple[str, str]]
+    store: Store, value: Any, dtype: str | list[tuple[str, str]]
 ) -> None:
     arr_np = np.array(value, dtype=dtype)
     arr_np_zeros = np.zeros_like(arr_np, dtype=dtype)
@@ -577,7 +583,7 @@ def _test_get_orthogonal_selection(
 
 
 # noinspection PyStatementEffect
-def test_get_orthogonal_selection_1d_bool(store: StorePath) -> None:
+def test_get_orthogonal_selection_1d_bool(store: Store) -> None:
     # setup
     a = np.arange(1050, dtype=int)
     z = zarr_array_from_numpy_array(store, a, chunk_shape=(100,))
@@ -599,7 +605,7 @@ def test_get_orthogonal_selection_1d_bool(store: StorePath) -> None:
 
 
 # noinspection PyStatementEffect
-def test_get_orthogonal_selection_1d_int(store: StorePath) -> None:
+def test_get_orthogonal_selection_1d_int(store: Store) -> None:
     # setup
     a = np.arange(550, dtype=int)
     z = zarr_array_from_numpy_array(store, a, chunk_shape=(100,))
@@ -653,7 +659,7 @@ def _test_get_orthogonal_selection_2d(
 
 
 # noinspection PyStatementEffect
-def test_get_orthogonal_selection_2d(store: StorePath) -> None:
+def test_get_orthogonal_selection_2d(store: Store) -> None:
     # setup
     a = np.arange(5400, dtype=int).reshape(600, 9)
     z = zarr_array_from_numpy_array(store, a, chunk_shape=(300, 3))
@@ -732,7 +738,7 @@ def _test_get_orthogonal_selection_3d(
         _test_get_orthogonal_selection(a, z, selection)
 
 
-def test_get_orthogonal_selection_3d(store: StorePath) -> None:
+def test_get_orthogonal_selection_3d(store: Store) -> None:
     # setup
     a = np.arange(32400, dtype=int).reshape(120, 30, 9)
     z = zarr_array_from_numpy_array(store, a, chunk_shape=(60, 20, 3))
@@ -756,7 +762,7 @@ def test_get_orthogonal_selection_3d(store: StorePath) -> None:
         _test_get_orthogonal_selection_3d(a, z, ix0, ix1, ix2)
 
 
-def test_orthogonal_indexing_edge_cases(store: StorePath) -> None:
+def test_orthogonal_indexing_edge_cases(store: Store) -> None:
     a = np.arange(6).reshape(1, 2, 3)
     z = zarr_array_from_numpy_array(store, a, chunk_shape=(1, 2, 3))
 
@@ -789,7 +795,7 @@ def _test_set_orthogonal_selection(
         assert_array_equal(a, z[:])
 
 
-def test_set_orthogonal_selection_1d(store: StorePath) -> None:
+def test_set_orthogonal_selection_1d(store: Store) -> None:
     # setup
     v = np.arange(550, dtype=int)
     a = np.empty(v.shape, dtype=int)
@@ -812,7 +818,7 @@ def test_set_orthogonal_selection_1d(store: StorePath) -> None:
         _test_set_orthogonal_selection(v, a, z, selection)
 
 
-def test_set_item_1d_last_two_chunks(store: StorePath):
+def test_set_item_1d_last_two_chunks(store: Store):
     # regression test for GH2849
     g = zarr.open_group(store=store, zarr_format=3, mode="w")
     a = g.create_array("bar", shape=(10,), chunks=(3,), dtype=int)
@@ -851,7 +857,7 @@ def _test_set_orthogonal_selection_2d(
         _test_set_orthogonal_selection(v, a, z, selection)
 
 
-def test_set_orthogonal_selection_2d(store: StorePath) -> None:
+def test_set_orthogonal_selection_2d(store: Store) -> None:
     # setup
     v = np.arange(5400, dtype=int).reshape(600, 9)
     a = np.empty_like(v)
@@ -909,7 +915,7 @@ def _test_set_orthogonal_selection_3d(
         _test_set_orthogonal_selection(v, a, z, selection)
 
 
-def test_set_orthogonal_selection_3d(store: StorePath) -> None:
+def test_set_orthogonal_selection_3d(store: Store) -> None:
     # setup
     v = np.arange(32400, dtype=int).reshape(120, 30, 9)
     a = np.empty_like(v)
@@ -934,7 +940,7 @@ def test_set_orthogonal_selection_3d(store: StorePath) -> None:
         _test_set_orthogonal_selection_3d(v, a, z, ix0, ix1, ix2)
 
 
-def test_orthogonal_indexing_fallback_on_get_setitem(store: StorePath) -> None:
+def test_orthogonal_indexing_fallback_on_get_setitem(store: Store) -> None:
     z = zarr_array_from_numpy_array(store, np.zeros((20, 20)))
     z[[1, 2, 3], [1, 2, 3]] = 1
     np.testing.assert_array_equal(
@@ -981,7 +987,7 @@ coordinate_selections_1d_bad = [
 
 
 # noinspection PyStatementEffect
-def test_get_coordinate_selection_1d(store: StorePath) -> None:
+def test_get_coordinate_selection_1d(store: Store) -> None:
     # setup
     a = np.arange(1050, dtype=int)
     z = zarr_array_from_numpy_array(store, a, chunk_shape=(100,))
@@ -1023,7 +1029,7 @@ def test_get_coordinate_selection_1d(store: StorePath) -> None:
             z.vindex[selection]  # type: ignore[index]
 
 
-def test_get_coordinate_selection_2d(store: StorePath) -> None:
+def test_get_coordinate_selection_2d(store: Store) -> None:
     # setup
     a = np.arange(10000, dtype=int).reshape(1000, 10)
     z = zarr_array_from_numpy_array(store, a, chunk_shape=(300, 3))
@@ -1096,7 +1102,7 @@ def _test_set_coordinate_selection(
         assert_array_equal(a, z[:])
 
 
-def test_set_coordinate_selection_1d(store: StorePath) -> None:
+def test_set_coordinate_selection_1d(store: Store) -> None:
     # setup
     v = np.arange(550, dtype=int)
     a = np.empty(v.shape, dtype=v.dtype)
@@ -1120,7 +1126,7 @@ def test_set_coordinate_selection_1d(store: StorePath) -> None:
             z.vindex[selection] = 42  # type:ignore[index]
 
 
-def test_set_coordinate_selection_2d(store: StorePath) -> None:
+def test_set_coordinate_selection_2d(store: Store) -> None:
     # setup
     v = np.arange(5400, dtype=int).reshape(600, 9)
     a = np.empty_like(v)
@@ -1208,7 +1214,7 @@ block_selections_1d_bad = [
 ]
 
 
-def test_get_block_selection_1d(store: StorePath) -> None:
+def test_get_block_selection_1d(store: Store) -> None:
     # setup
     a = np.arange(1050, dtype=int)
     z = zarr_array_from_numpy_array(store, a, chunk_shape=(100,))
@@ -1261,7 +1267,7 @@ block_selections_2d_array_projection: list[tuple[slice, slice]] = [
 ]
 
 
-def test_get_block_selection_2d(store: StorePath) -> None:
+def test_get_block_selection_2d(store: Store) -> None:
     # setup
     a = np.arange(10000, dtype=int).reshape(1000, 10)
     z = zarr_array_from_numpy_array(store, a, chunk_shape=(300, 3))
@@ -1303,7 +1309,7 @@ def _test_set_block_selection(
         assert_array_equal(a, z[:])
 
 
-def test_set_block_selection_1d(store: StorePath) -> None:
+def test_set_block_selection_1d(store: Store) -> None:
     # setup
     v = np.arange(1050, dtype=int)
     a = np.empty(v.shape, dtype=v.dtype)
@@ -1321,7 +1327,7 @@ def test_set_block_selection_1d(store: StorePath) -> None:
             z.blocks[selection_bad] = 42  # type:ignore[index]
 
 
-def test_set_block_selection_2d(store: StorePath) -> None:
+def test_set_block_selection_2d(store: Store) -> None:
     # setup
     v = np.arange(10000, dtype=int).reshape(1000, 10)
     a = np.empty(v.shape, dtype=v.dtype)
@@ -1369,7 +1375,7 @@ mask_selections_1d_bad = [
 
 
 # noinspection PyStatementEffect
-def test_get_mask_selection_1d(store: StorePath) -> None:
+def test_get_mask_selection_1d(store: Store) -> None:
     # setup
     a = np.arange(1050, dtype=int)
     z = zarr_array_from_numpy_array(store, a, chunk_shape=(100,))
@@ -1394,7 +1400,7 @@ def test_get_mask_selection_1d(store: StorePath) -> None:
 
 
 # noinspection PyStatementEffect
-def test_get_mask_selection_2d(store: StorePath) -> None:
+def test_get_mask_selection_2d(store: Store) -> None:
     # setup
     a = np.arange(10000, dtype=int).reshape(1000, 10)
     z = zarr_array_from_numpy_array(store, a, chunk_shape=(300, 3))
@@ -1430,7 +1436,7 @@ def _test_set_mask_selection(
     assert_array_equal(a, z[:])
 
 
-def test_set_mask_selection_1d(store: StorePath) -> None:
+def test_set_mask_selection_1d(store: Store) -> None:
     # setup
     v = np.arange(1050, dtype=int)
     a = np.empty_like(v)
@@ -1449,7 +1455,7 @@ def test_set_mask_selection_1d(store: StorePath) -> None:
             z.vindex[selection] = 42  # type: ignore[index]
 
 
-def test_set_mask_selection_2d(store: StorePath) -> None:
+def test_set_mask_selection_2d(store: Store) -> None:
     # setup
     v = np.arange(10000, dtype=int).reshape(1000, 10)
     a = np.empty_like(v)
@@ -1462,7 +1468,7 @@ def test_set_mask_selection_2d(store: StorePath) -> None:
         _test_set_mask_selection(v, a, z, ix)
 
 
-def test_get_selection_out(store: StorePath) -> None:
+def test_get_selection_out(store: Store) -> None:
     # basic selections
     a = np.arange(1050)
     z = zarr_array_from_numpy_array(store, a, chunk_shape=(100,))
@@ -1532,7 +1538,7 @@ def test_get_selection_out(store: StorePath) -> None:
 
 
 @pytest.mark.xfail(reason="fields are not supported in v3")
-def test_get_selections_with_fields(store: StorePath) -> None:
+def test_get_selections_with_fields(store: Store) -> None:
     a = np.array(
         [("aaa", 1, 4.2), ("bbb", 2, 8.4), ("ccc", 3, 12.6)],
         dtype=[("foo", "S3"), ("bar", "i4"), ("baz", "f8")],
@@ -1640,7 +1646,7 @@ def test_get_selections_with_fields(store: StorePath) -> None:
 
 
 @pytest.mark.xfail(reason="fields are not supported in v3")
-def test_set_selections_with_fields(store: StorePath) -> None:
+def test_set_selections_with_fields(store: Store) -> None:
     v = np.array(
         [("aaa", 1, 4.2), ("bbb", 2, 8.4), ("ccc", 3, 12.6)],
         dtype=[("foo", "S3"), ("bar", "i4"), ("baz", "f8")],
@@ -1732,7 +1738,7 @@ def test_slice_selection_uints() -> None:
     assert arr[tuple(slice_sel)].shape == (1, 6)
 
 
-def test_numpy_int_indexing(store: StorePath) -> None:
+def test_numpy_int_indexing(store: Store) -> None:
     a = np.arange(1050)
     z = zarr_array_from_numpy_array(store, a, chunk_shape=(100,))
     assert a[42] == z[42]
@@ -1774,8 +1780,8 @@ async def test_accessed_chunks(
     # optype = "__getitem__" or "__setitem__", tuple length must match number of dims
 
     # Use a counting dict as the backing store so we can track the items access
-    store = await CountingDict.open()
-    z = zarr_array_from_numpy_array(StorePath(store), np.zeros(shape), chunk_shape=chunks)
+    store = CountingDict()
+    z = zarr_array_from_numpy_array(store, np.zeros(shape), chunk_shape=chunks)
 
     for ii, (optype, slices) in enumerate(ops):
         # Resolve the slices into the accessed chunks for each dimension
@@ -1836,7 +1842,7 @@ async def test_accessed_chunks(
         [[100, 200, 300], [4, 5, 6]],
     ],
 )
-def test_indexing_equals_numpy(store: StorePath, selection: Selection) -> None:
+def test_indexing_equals_numpy(store: Store, selection: Selection) -> None:
     a = np.arange(10000, dtype=int).reshape(1000, 10)
     z = zarr_array_from_numpy_array(store, a, chunk_shape=(300, 3))
     # note: in python 3.10 a[*selection] is not valid unpacking syntax
@@ -1855,7 +1861,7 @@ def test_indexing_equals_numpy(store: StorePath, selection: Selection) -> None:
     ],
 )
 def test_orthogonal_bool_indexing_like_numpy_ix(
-    store: StorePath, selection: list[npt.ArrayLike]
+    store: Store, selection: list[npt.ArrayLike]
 ) -> None:
     a = np.arange(10000, dtype=int).reshape(1000, 10)
     z = zarr_array_from_numpy_array(store, a, chunk_shape=(300, 3))
@@ -1915,7 +1921,7 @@ def test_iter_grid_invalid() -> None:
         list(_iter_grid((5,), origin=(0,), selection_shape=(10,)))
 
 
-def test_indexing_with_zarr_array(store: StorePath) -> None:
+def test_indexing_with_zarr_array(store: Store) -> None:
     # regression test for https://github.com/zarr-developers/zarr-python/issues/2133
     a = np.arange(10)
     za = zarr.array(a, chunks=2, store=store, path="a")
@@ -1934,7 +1940,7 @@ def test_indexing_with_zarr_array(store: StorePath) -> None:
 
 @pytest.mark.parametrize("store", ["local", "memory"], indirect=["store"])
 @pytest.mark.parametrize("shape", [(0, 2, 3), (0), (3, 0)])
-def test_zero_sized_chunks(store: StorePath, shape: list[int]) -> None:
+def test_zero_sized_chunks(store: Store, shape: list[int]) -> None:
     z = zarr.create_array(store=store, shape=shape, chunks=shape, zarr_format=3, dtype="f8")
     z[...] = 42
     assert_array_equal(z[...], np.zeros(shape, dtype="f8"))

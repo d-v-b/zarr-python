@@ -73,8 +73,8 @@ class TestLoggingStore(StoreTests[LoggingStore[LocalStore], cpu.Buffer]):
         assert res is None
         captured = capsys.readouterr()
         assert len(captured) == 2
-        assert "Calling LocalStore.set" in captured.out
-        assert "Finished LocalStore.set" in captured.out
+        assert "Calling LocalStore._set" in captured.out
+        assert "Finished LocalStore._set" in captured.out
         # Restore handlers
         for h in handlers:
             logging.getLogger().addHandler(h)
@@ -95,20 +95,24 @@ async def test_logging_store(store: Store, caplog: pytest.LogCaptureFixture) -> 
     caplog.clear()
     res = await wrapped.set("foo/bar/c/0", buffer.from_bytes(b"\x01\x02\x03\x04"))  # type: ignore[func-returns-value]
     assert res is None
-    assert len(caplog.record_tuples) == 2
+    # The public set() calls _ensure_open() then _set(), each of which is logged (start+finish)
+    assert len(caplog.record_tuples) == 4
     for tup in caplog.record_tuples:
         assert str(store) in tup[0]
-    assert f"Calling {type(store).__name__}.set" in caplog.record_tuples[0][2]
-    assert f"Finished {type(store).__name__}.set" in caplog.record_tuples[1][2]
+    assert f"Calling {type(store).__name__}._ensure_open" in caplog.record_tuples[0][2]
+    assert f"Finished {type(store).__name__}._ensure_open" in caplog.record_tuples[1][2]
+    assert f"Calling {type(store).__name__}._set" in caplog.record_tuples[2][2]
+    assert f"Finished {type(store).__name__}._set" in caplog.record_tuples[3][2]
 
     caplog.clear()
     keys = [k async for k in wrapped.list()]
     assert keys == ["foo/bar/c/0"]
+    # list() is synchronous (returns AsyncIterator) so no _ensure_open call
     assert len(caplog.record_tuples) == 2
     for tup in caplog.record_tuples:
         assert str(store) in tup[0]
-    assert f"Calling {type(store).__name__}.list" in caplog.record_tuples[0][2]
-    assert f"Finished {type(store).__name__}.list" in caplog.record_tuples[1][2]
+    assert f"Calling {type(store).__name__}._list" in caplog.record_tuples[0][2]
+    assert f"Finished {type(store).__name__}._list" in caplog.record_tuples[1][2]
 
 
 @pytest.mark.parametrize("store", ["local", "memory", "zip"], indirect=["store"])
@@ -118,13 +122,13 @@ async def test_logging_store_counter(store: Store) -> None:
     arr = zarr.create(shape=(10,), store=wrapped, overwrite=True)
     arr[:] = 1
 
-    assert wrapped.counter["set"] == 2
-    assert wrapped.counter["list"] == 0
-    assert wrapped.counter["list_dir"] == 0
-    assert wrapped.counter["list_prefix"] == 0
+    assert wrapped.counter["_set"] == 2
+    assert wrapped.counter["_list"] == 0
+    assert wrapped.counter["_list_dir"] == 0
+    assert wrapped.counter["_list_prefix"] == 0
     if store.supports_deletes:
-        assert wrapped.counter["get"] == 0  # 1 if overwrite=False
-        assert wrapped.counter["delete_dir"] == 1
+        assert wrapped.counter["_get"] == 0  # 1 if overwrite=False
+        assert wrapped.counter["_delete_dir"] == 1
     else:
-        assert wrapped.counter["get"] == 1
-        assert wrapped.counter["delete_dir"] == 0
+        assert wrapped.counter["_get"] == 1
+        assert wrapped.counter["_delete_dir"] == 0

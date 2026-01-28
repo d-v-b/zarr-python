@@ -269,7 +269,7 @@ class BatchedCodecPipeline(CodecPipeline):
         else:
             chunk_bytes_batch = await concurrent_map(
                 [(byte_getter, array_spec.prototype) for byte_getter, array_spec, *_ in batch_info],
-                lambda byte_getter, prototype: byte_getter.get(prototype),
+                lambda byte_getter, prototype: byte_getter.getb(prototype),
                 config.get("async.concurrency"),
             )
             chunk_array_batch = await self.decode_batch(
@@ -365,7 +365,7 @@ class BatchedCodecPipeline(CodecPipeline):
             ) -> Buffer | None:
                 if byte_setter is None:
                     return None
-                return await byte_setter.get(prototype=prototype)
+                return await byte_setter.getb(prototype=prototype)
 
             chunk_bytes_batch: Iterable[Buffer | None]
             chunk_bytes_batch = await concurrent_map(
@@ -431,9 +431,9 @@ class BatchedCodecPipeline(CodecPipeline):
 
             async def _write_key(byte_setter: ByteSetter, chunk_bytes: Buffer | None) -> None:
                 if chunk_bytes is None:
-                    await byte_setter.delete()
+                    await byte_setter.deleteb()
                 else:
-                    await byte_setter.set(chunk_bytes)
+                    await byte_setter.setb(chunk_bytes)
 
             await concurrent_map(
                 [

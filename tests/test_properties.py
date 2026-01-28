@@ -87,17 +87,18 @@ def test_array_roundtrip(data: st.DataObject) -> None:
 @given(array=arrays())
 def test_array_creates_implicit_groups(array):
     path = array.path
+    root_store = array.store.with_path("")
     ancestry = path.split("/")[:-1]
     for i in range(len(ancestry)):
         parent = "/".join(ancestry[: i + 1])
         if array.metadata.zarr_format == 2:
             assert (
-                sync(array.store.get(f"{parent}/.zgroup", prototype=default_buffer_prototype()))
+                sync(root_store.get(f"{parent}/.zgroup", prototype=default_buffer_prototype()))
                 is not None
             )
         elif array.metadata.zarr_format == 3:
             assert (
-                sync(array.store.get(f"{parent}/zarr.json", prototype=default_buffer_prototype()))
+                sync(root_store.get(f"{parent}/zarr.json", prototype=default_buffer_prototype()))
                 is not None
             )
 

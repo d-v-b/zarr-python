@@ -13,6 +13,8 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
     from typing import Self
 
+    from zarr.abc.store import ByteRequest
+
 
 __all__ = [
     "NDBufferUsingTestNDArrayLike",
@@ -67,20 +69,20 @@ class StoreExpectingTestBuffer(MemoryStore):
     We assume that keys containing "json" is metadata
     """
 
-    async def set(self, key: str, value: Buffer, byte_range: tuple[int, int] | None = None) -> None:
+    async def _set(self, key: str, value: Buffer) -> None:
         if "json" not in key:
             assert isinstance(value, TestBuffer)
-        await super().set(key, value, byte_range)
+        await super()._set(key, value)
 
-    async def get(
+    async def _get(
         self,
         key: str,
         prototype: BufferPrototype,
-        byte_range: tuple[int, int | None] | None = None,
+        byte_range: ByteRequest | None = None,
     ) -> Buffer | None:
         if "json" not in key:
             assert prototype.buffer is TestBuffer
-        ret = await super().get(key=key, prototype=prototype, byte_range=byte_range)
+        ret = await super()._get(key=key, prototype=prototype, byte_range=byte_range)
         if ret is not None:
             assert isinstance(ret, prototype.buffer)
         return ret

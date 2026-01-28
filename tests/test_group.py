@@ -47,7 +47,7 @@ from zarr.errors import (
     ZarrDeprecationWarning,
     ZarrUserWarning,
 )
-from zarr.storage import LocalStore, MemoryStore, StorePath, ZipStore
+from zarr.storage import LocalStore, MemoryStore, ZipStore
 from zarr.storage._common import make_store_path
 from zarr.storage._utils import _join_paths, normalize_path
 from zarr.testing.store import LatencyStore
@@ -149,7 +149,7 @@ def test_group_name_properties(
     """
     Test that the path, name, and basename attributes of a group and its subgroups are consistent
     """
-    root = Group.from_store(store=StorePath(store=store, path=root_name), zarr_format=zarr_format)
+    root = Group.from_store(store=store.with_path(root_name), zarr_format=zarr_format)
     assert root.path == normalize_path(root_name)
     assert root.name == "/" + root.path
     assert root.basename == root.path
@@ -254,11 +254,10 @@ def test_group(store: Store, zarr_format: ZarrFormat) -> None:
     """
     Test basic Group routines.
     """
-    store_path = StorePath(store)
-    agroup = AsyncGroup(metadata=GroupMetadata(zarr_format=zarr_format), store_path=store_path)
+    agroup = AsyncGroup(metadata=GroupMetadata(zarr_format=zarr_format), store_path=store)
     group = Group(agroup)
     assert agroup.metadata is group.metadata
-    assert agroup.store_path == group.store_path == store_path
+    assert agroup.store_path == group.store_path == store
 
     # create two groups
     foo = group.create_group("foo")
@@ -314,7 +313,6 @@ def test_group_open(store: Store, zarr_format: ZarrFormat, overwrite: bool) -> N
     """
     Test the `Group.open` method.
     """
-    spath = StorePath(store)
     # attempt to open a group that does not exist
     with pytest.raises(FileNotFoundError):
         Group.open(store)
@@ -326,7 +324,7 @@ def test_group_open(store: Store, zarr_format: ZarrFormat, overwrite: bool) -> N
     )
     assert group_created.attrs == attrs
     assert group_created.metadata.zarr_format == zarr_format
-    assert group_created.store_path == spath
+    assert group_created.store_path == store
 
     # attempt to create a new group in place, to test overwrite
     new_attrs = {"path": "bar"}
@@ -343,7 +341,7 @@ def test_group_open(store: Store, zarr_format: ZarrFormat, overwrite: bool) -> N
         )
         assert group_created_again.attrs == new_attrs
         assert group_created_again.metadata.zarr_format == zarr_format
-        assert group_created_again.store_path == spath
+        assert group_created_again.store_path == store
 
 
 @pytest.mark.parametrize("consolidated", [True, False])
@@ -849,62 +847,62 @@ def test_group_array_creation(
     assert isinstance(empty_array, Array)
     assert empty_array.fill_value == 0
     assert empty_array.shape == shape
-    assert empty_array.store_path.store == store
+    assert empty_array.store_path.with_path("") == store
     assert empty_array.store_path.path == "empty"
 
     empty_like_array = group.empty_like(name="empty_like", data=empty_array)
     assert isinstance(empty_like_array, Array)
     assert empty_like_array.fill_value == 0
     assert empty_like_array.shape == shape
-    assert empty_like_array.store_path.store == store
+    assert empty_like_array.store_path.with_path("") == store
 
     empty_array_bool = group.empty(name="empty_bool", shape=shape, dtype=np.dtype("bool"))
     assert isinstance(empty_array_bool, Array)
     assert not empty_array_bool.fill_value
     assert empty_array_bool.shape == shape
-    assert empty_array_bool.store_path.store == store
+    assert empty_array_bool.store_path.with_path("") == store
 
     empty_like_array_bool = group.empty_like(name="empty_like_bool", data=empty_array_bool)
     assert isinstance(empty_like_array_bool, Array)
     assert not empty_like_array_bool.fill_value
     assert empty_like_array_bool.shape == shape
-    assert empty_like_array_bool.store_path.store == store
+    assert empty_like_array_bool.store_path.with_path("") == store
 
     zeros_array = group.zeros(name="zeros", shape=shape)
     assert isinstance(zeros_array, Array)
     assert zeros_array.fill_value == 0
     assert zeros_array.shape == shape
-    assert zeros_array.store_path.store == store
+    assert zeros_array.store_path.with_path("") == store
 
     zeros_like_array = group.zeros_like(name="zeros_like", data=zeros_array)
     assert isinstance(zeros_like_array, Array)
     assert zeros_like_array.fill_value == 0
     assert zeros_like_array.shape == shape
-    assert zeros_like_array.store_path.store == store
+    assert zeros_like_array.store_path.with_path("") == store
 
     ones_array = group.ones(name="ones", shape=shape)
     assert isinstance(ones_array, Array)
     assert ones_array.fill_value == 1
     assert ones_array.shape == shape
-    assert ones_array.store_path.store == store
+    assert ones_array.store_path.with_path("") == store
 
     ones_like_array = group.ones_like(name="ones_like", data=ones_array)
     assert isinstance(ones_like_array, Array)
     assert ones_like_array.fill_value == 1
     assert ones_like_array.shape == shape
-    assert ones_like_array.store_path.store == store
+    assert ones_like_array.store_path.with_path("") == store
 
     full_array = group.full(name="full", shape=shape, fill_value=42)
     assert isinstance(full_array, Array)
     assert full_array.fill_value == 42
     assert full_array.shape == shape
-    assert full_array.store_path.store == store
+    assert full_array.store_path.with_path("") == store
 
     full_like_array = group.full_like(name="full_like", data=full_array, fill_value=43)
     assert isinstance(full_like_array, Array)
     assert full_like_array.fill_value == 43
     assert full_like_array.shape == shape
-    assert full_like_array.store_path.store == store
+    assert full_like_array.store_path.with_path("") == store
 
 
 @pytest.mark.parametrize("store", ["local", "memory", "zip"], indirect=["store"])
@@ -920,8 +918,7 @@ def test_group_creation_existing_node(
     """
     Check that an existing array or group is handled as expected during group creation.
     """
-    spath = StorePath(store)
-    group = Group.from_store(spath, zarr_format=zarr_format)
+    group = Group.from_store(store, zarr_format=zarr_format)
     expected_exception: type[ContainsArrayError | ContainsGroupError]
     attributes: dict[str, JSON] = {"old": True}
 
@@ -940,7 +937,7 @@ def test_group_creation_existing_node(
         if not store.supports_deletes:
             pytest.skip("store does not support deletes but overwrite is True")
         node_new = Group.from_store(
-            spath / "extant",
+            store / "extant",
             attributes=new_attributes,
             zarr_format=zarr_format,
             overwrite=overwrite,
@@ -949,7 +946,7 @@ def test_group_creation_existing_node(
     else:
         with pytest.raises(expected_exception):
             node_new = Group.from_store(
-                spath / "extant",
+                store / "extant",
                 attributes=new_attributes,
                 zarr_format=zarr_format,
                 overwrite=overwrite,
@@ -964,7 +961,6 @@ async def test_asyncgroup_create(
     """
     Test that `AsyncGroup.from_store` works as expected.
     """
-    spath = StorePath(store=store)
     attributes = {"foo": 100}
     agroup = await AsyncGroup.from_store(
         store,
@@ -979,7 +975,7 @@ async def test_asyncgroup_create(
     if not overwrite:
         with pytest.raises(ContainsGroupError):
             agroup = await AsyncGroup.from_store(
-                spath,
+                store,
                 attributes=attributes,
                 overwrite=overwrite,
                 zarr_format=zarr_format,
@@ -987,11 +983,11 @@ async def test_asyncgroup_create(
         # create an array at our target path
         collision_name = "foo"
         _ = await zarr.api.asynchronous.create_array(
-            spath / collision_name, shape=(10,), dtype="uint8", zarr_format=zarr_format
+            store / collision_name, shape=(10,), dtype="uint8", zarr_format=zarr_format
         )
         with pytest.raises(ContainsArrayError):
             _ = await AsyncGroup.from_store(
-                StorePath(store=store) / collision_name,
+                store / collision_name,
                 attributes=attributes,
                 overwrite=overwrite,
                 zarr_format=zarr_format,
@@ -1058,8 +1054,7 @@ def test_asyncgroup_from_dict(store: Store, data: dict[str, Any]) -> None:
     Test that we can create an AsyncGroup from a dict
     """
     path = "test"
-    store_path = StorePath(store=store, path=path)
-    group = AsyncGroup.from_dict(store_path, data=data)
+    group = AsyncGroup.from_dict(store.with_path(path), data=data)
 
     assert group.metadata.zarr_format == data["zarr_format"]
     assert group.metadata.attributes == data["attributes"]
@@ -1105,10 +1100,10 @@ async def test_asyncgroup_delitem(store: Store, zarr_format: ZarrFormat) -> None
 
     #  todo: clean up the code duplication here
     if zarr_format == 2:
-        assert not await agroup.store_path.store.exists(array_name + "/" + ".zarray")
-        assert not await agroup.store_path.store.exists(array_name + "/" + ".zattrs")
+        assert not await agroup.store_path.exists(array_name + "/" + ".zarray")
+        assert not await agroup.store_path.exists(array_name + "/" + ".zattrs")
     elif zarr_format == 3:
-        assert not await agroup.store_path.store.exists(array_name + "/" + "zarr.json")
+        assert not await agroup.store_path.exists(array_name + "/" + "zarr.json")
     else:
         raise AssertionError
 
@@ -1116,10 +1111,10 @@ async def test_asyncgroup_delitem(store: Store, zarr_format: ZarrFormat) -> None
     _ = await agroup.create_group(sub_group_path, attributes={"foo": 100})
     await agroup.delitem(sub_group_path)
     if zarr_format == 2:
-        assert not await agroup.store_path.store.exists(array_name + "/" + ".zgroup")
-        assert not await agroup.store_path.store.exists(array_name + "/" + ".zattrs")
+        assert not await agroup.store_path.exists(array_name + "/" + ".zgroup")
+        assert not await agroup.store_path.exists(array_name + "/" + ".zattrs")
     elif zarr_format == 3:
-        assert not await agroup.store_path.store.exists(array_name + "/" + "zarr.json")
+        assert not await agroup.store_path.exists(array_name + "/" + "zarr.json")
     else:
         raise AssertionError
 
@@ -1139,7 +1134,7 @@ async def test_asyncgroup_create_group(
     assert subgroup.name == "/" + subgroup.path
     assert subgroup.attrs == attributes
     assert subgroup.store_path.path == subgroup.path
-    assert subgroup.store_path.store == store
+    assert subgroup.store_path.with_path("") == store
     assert subgroup.metadata.zarr_format == zarr_format
 
 
@@ -1173,7 +1168,7 @@ async def test_asyncgroup_create_array(
     assert isinstance(subnode, AsyncArray)
     assert subnode.attrs == attributes
     assert subnode.store_path.path == sub_node_path
-    assert subnode.store_path.store == store
+    assert subnode.store_path.with_path("") == store
     assert subnode.shape == shape
     assert subnode.dtype == dtype
     # todo: fix the type annotation of array.metadata.chunk_grid so that we get some autocomplete
@@ -1470,14 +1465,14 @@ async def test_open_mutable_mapping():
     group = await zarr.api.asynchronous.open_group(
         store={},
     )
-    assert isinstance(group.store_path.store, MemoryStore)
+    assert isinstance(group.store_path, MemoryStore)
 
 
 def test_open_mutable_mapping_sync():
     group = zarr.open_group(
         store={},
     )
-    assert isinstance(group.store_path.store, MemoryStore)
+    assert isinstance(group.store_path, MemoryStore)
 
 
 async def test_open_ambiguous_node():
@@ -1842,11 +1837,11 @@ async def test_create_hierarchy(
     else:
         raise ValueError(f"Invalid impl: {impl}")
     if not overwrite:
-        extra_group = sync_group.get_node(store=store, path="group/extra", zarr_format=zarr_format)
+        extra_group = sync_group.get_node(store=store / "group/extra", zarr_format=zarr_format)
         assert extra_group.metadata.attributes == {"path": "group/extra"}
     else:
         with pytest.raises(FileNotFoundError):
-            await get_node(store=store, path="group/extra", zarr_format=zarr_format)
+            await get_node(store=store / "group/extra", zarr_format=zarr_format)
     assert expected_meta == {k: v.metadata for k, v in created.items()}
 
 
@@ -1903,7 +1898,7 @@ async def test_create_hierarchy_existing_nodes(
 
     # ensure that the extant metadata was not overwritten
     assert (
-        await get_node(store=store, path=extant_node_path, zarr_format=zarr_format)
+        await get_node(store=store / extant_node_path, zarr_format=zarr_format)
     ).metadata.attributes == {"extant": True}
 
 
@@ -1961,7 +1956,7 @@ async def test_group_create_hierarchy(
             assert all_members[k].metadata == v == extant_created[k].metadata
     # ensure that we left the root group as-is
     assert (
-        sync_group.get_node(store=store, path=group_path, zarr_format=zarr_format).attrs.asdict()
+        sync_group.get_node(store=store / group_path, zarr_format=zarr_format).attrs.asdict()
         == root_attrs
     )
 
