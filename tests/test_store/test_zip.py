@@ -139,6 +139,27 @@ class TestZipStore(StoreTests[ZipStore, cpu.Buffer]):
         assert isinstance(group := zipped["foo"], Group)
         assert list(group.keys()) == list(group.keys())
 
+    async def test_store_usable_without_open(self, store_kwargs: dict[str, Any]) -> None:
+        """ZipStore should be fully usable immediately after construction, without calling open()."""
+        store = ZipStore(**store_kwargs)
+        buf = cpu.Buffer.from_bytes(b"bar")
+
+        await store.set("foo", buf)
+        await store.set_if_not_exists("baz", buf)
+        assert await store.exists("foo")
+        result = await store.get("foo", default_buffer_prototype())
+        assert result is not None
+        assert result.to_bytes() == b"bar"
+
+        keys = [k async for k in store.list()]
+        assert "foo" in keys
+
+        dir_keys = [k async for k in store.list_dir("")]
+        assert "foo" in dir_keys
+
+        await store.clear()
+        store.close()
+
     async def test_move(self, tmp_path: Path) -> None:
         origin = tmp_path / "origin.zip"
         destination = tmp_path / "some_folder" / "destination.zip"

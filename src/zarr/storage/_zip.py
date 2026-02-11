@@ -88,12 +88,7 @@ class ZipStore(Store):
         self.compression = compression
         self.allowZip64 = allowZip64
 
-    def _sync_open(self) -> None:
-        if self._is_open:
-            raise ValueError("store is already open")
-
         self._lock = threading.RLock()
-
         self._zf = zipfile.ZipFile(
             self.path,
             mode=self._zmode,
@@ -101,10 +96,10 @@ class ZipStore(Store):
             allowZip64=self.allowZip64,
         )
 
-        self._is_open = True
-
     async def _open(self) -> None:
-        self._sync_open()
+        if self._is_open:
+            raise ValueError("store is already open")
+        self._is_open = True
 
     def __getstate__(self) -> dict[str, Any]:
         # We need a copy to not modify the state of the original store
@@ -115,8 +110,13 @@ class ZipStore(Store):
 
     def __setstate__(self, state: dict[str, Any]) -> None:
         self.__dict__ = state
-        self._is_open = False
-        self._sync_open()
+        self._lock = threading.RLock()
+        self._zf = zipfile.ZipFile(
+            self.path,
+            mode=self._zmode,
+            compression=self.compression,
+            allowZip64=self.allowZip64,
+        )
 
     def close(self) -> None:
         # docstring inherited
@@ -149,8 +149,6 @@ class ZipStore(Store):
         prototype: BufferPrototype,
         byte_range: ByteRequest | None = None,
     ) -> Buffer | None:
-        if not self._is_open:
-            self._sync_open()
         # docstring inherited
         try:
             with self._zf.open(key) as f:  # will raise KeyError
@@ -195,8 +193,6 @@ class ZipStore(Store):
         return out
 
     def _set(self, key: str, value: Buffer) -> None:
-        if not self._is_open:
-            self._sync_open()
         # generally, this should be called inside a lock
         keyinfo = zipfile.ZipInfo(filename=key, date_time=time.localtime(time.time())[:6])
         keyinfo.compress_type = self.compression
@@ -210,8 +206,6 @@ class ZipStore(Store):
     async def set(self, key: str, value: Buffer) -> None:
         # docstring inherited
         self._check_writable()
-        if not self._is_open:
-            self._sync_open()
         assert isinstance(key, str)
         if not isinstance(value, Buffer):
             raise TypeError(
@@ -295,4 +289,10 @@ class ZipStore(Store):
         os.makedirs(path.parent, exist_ok=True)
         shutil.move(self.path, path)
         self.path = path
-        await self._open()
+        self._zf = zipfile.ZipFile(
+            self.path,
+            mode=self._zmode,
+            compression=self.compression,
+            allowZip64=self.allowZip64,
+        )
+        self._is_open = True
