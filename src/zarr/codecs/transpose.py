@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, cast
 
 import numpy as np
@@ -33,11 +33,14 @@ class TransposeCodec(ArrayArrayCodec):
     is_fixed_size = True
 
     order: tuple[int, ...]
+    _inverse_order: tuple[int, ...] = field(init=False, repr=False, compare=False)
 
     def __init__(self, *, order: Iterable[int]) -> None:
         order_parsed = parse_transpose_order(order)
 
         object.__setattr__(self, "order", order_parsed)
+        # Cache the inverse order to avoid np.argsort on every decode.
+        object.__setattr__(self, "_inverse_order", tuple(int(i) for i in np.argsort(order_parsed)))
 
     @classmethod
     def from_dict(cls, data: dict[str, JSON]) -> Self:
@@ -96,8 +99,7 @@ class TransposeCodec(ArrayArrayCodec):
         )
 
     def _decode_sync(self, chunk_array: NDBuffer, chunk_spec: ArraySpec) -> NDBuffer:
-        inverse_order = np.argsort(self.order)
-        return chunk_array.transpose(inverse_order)
+        return chunk_array.transpose(self._inverse_order)
 
     def _encode_sync(self, chunk_array: NDBuffer, _chunk_spec: ArraySpec) -> NDBuffer | None:
         return chunk_array.transpose(self.order)

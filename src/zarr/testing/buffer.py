@@ -67,10 +67,10 @@ class StoreExpectingTestBuffer(MemoryStore):
     We assume that keys containing "json" is metadata
     """
 
-    async def set(self, key: str, value: Buffer, byte_range: tuple[int, int] | None = None) -> None:
+    async def set(self, key: str, value: Buffer) -> None:
         if "json" not in key:
             assert isinstance(value, TestBuffer)
-        await super().set(key, value, byte_range)
+        await super().set(key, value)
 
     def set_sync(self, key: str, value: Buffer) -> None:
         if "json" not in key:

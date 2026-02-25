@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from itertools import pairwise
@@ -24,7 +25,7 @@ from zarr.errors import ZarrUserWarning
 from zarr.registry import register_pipeline
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator
+    from collections.abc import Callable, Iterable, Iterator
     from typing import Self
 
     from zarr.abc.store import ByteGetter, ByteSetter
@@ -91,7 +92,14 @@ def _choose_workers(n_chunks: int, chunk_nbytes: int, codecs: Iterable[Codec]) -
     - ``enabled``: if False, always returns 0.
     - ``min``: floor for the number of workers.
     - ``max``: ceiling for the number of workers (default: ``os.cpu_count()``).
+
+    Returns 0 if already running on a pool worker thread (prevents deadlock).
     """
+    # Prevent nested pool usage: if we're already on a pool worker, don't
+    # submit more work to the same pool (classic nested-pool deadlock).
+    if getattr(_thread_local, "in_pool_worker", False):
+        return 0
+
     enabled, min_workers, max_workers = _get_codec_worker_config()
     if not enabled:
         return 0
@@ -121,92 +129,54 @@ def _get_pool() -> ThreadPoolExecutor:
 
 _pool: ThreadPoolExecutor | None = None
 
+# Thread-local flag to prevent nested thread pool deadlock.
+# When a pool worker is running codec compute, inner pipelines (e.g. sharding)
+# must not submit work to the same pool.
+_thread_local = threading.local()
+
+
+def _mark_pool_worker(fn: Callable[..., T]) -> Callable[..., T]:
+    """Wrap *fn* so that ``_thread_local.in_pool_worker`` is ``True`` while it runs.
+
+    Used around functions dispatched to the thread pool so that nested
+    ``_choose_workers`` calls (e.g. from sharding) return 0 instead of
+    deadlocking by submitting more work to the same pool.
+    """
+
+    def wrapper(*args: Any, **kwargs: Any) -> T:
+        _thread_local.in_pool_worker = True
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            _thread_local.in_pool_worker = False
+
+    return wrapper
+
+
 # Sentinel to distinguish "delete this key" from None.
 _DELETED = object()
 
 
 @dataclass(frozen=True)
-class BatchedCodecPipeline(CodecPipeline):
-    """Codec pipeline that automatically selects the optimal execution strategy.
+class CodecChain:
+    """Lightweight codec chain: array-array -> array-bytes -> bytes-bytes.
 
-    When all codecs support synchronous operations and the store supports
-    sync IO, this pipeline runs the entire read/write path on the calling
-    thread with zero async overhead, using a thread pool for parallel codec
-    compute on multi-chunk operations.
-
-    When the store requires async IO (e.g. cloud stores), this pipeline uses
-    the async path with concurrent IO overlap via ``concurrent_map``.
-
-    This automatic dispatch eliminates the need for users to choose between
-    pipeline implementations — the right strategy is selected based on codec
-    and store capabilities.
+    Pure compute only — no IO methods, no threading, no batching.
+    The pipeline accesses IO methods (prepare_read, prepare_write)
+    via ``codec_chain.array_bytes_codec`` directly.
     """
 
     array_array_codecs: tuple[ArrayArrayCodec, ...]
     array_bytes_codec: ArrayBytesCodec
     bytes_bytes_codecs: tuple[BytesBytesCodec, ...]
-    batch_size: int | None = None
 
     _all_sync: bool = field(default=False, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if self.batch_size is not None:
-            warn(
-                "The 'batch_size' parameter is deprecated and has no effect. "
-                "Batch size is now determined automatically.",
-                FutureWarning,
-                stacklevel=2,
-            )
-        # Compute once; frozen dataclass requires object.__setattr__.
         object.__setattr__(
             self,
             "_all_sync",
             all(isinstance(c, SupportsSyncCodec) for c in self),
-        )
-
-    def evolve_from_array_spec(self, array_spec: ArraySpec) -> Self:
-        return type(self).from_codecs(c.evolve_from_array_spec(array_spec=array_spec) for c in self)
-
-    @classmethod
-    def from_codecs(cls, codecs: Iterable[Codec]) -> Self:
-        array_array_codecs, array_bytes_codec, bytes_bytes_codecs = codecs_from_list(list(codecs))
-
-        return cls(
-            array_array_codecs=array_array_codecs,
-            array_bytes_codec=array_bytes_codec,
-            bytes_bytes_codecs=bytes_bytes_codecs,
-        )
-
-    @property
-    def supports_partial_decode(self) -> bool:
-        """Determines whether the codec pipeline supports partial decoding.
-
-        Currently, only codec pipelines with a single ArrayBytesCodec that supports
-        partial decoding can support partial decoding. This limitation is due to the fact
-        that ArrayArrayCodecs can change the slice selection leading to non-contiguous
-        slices and BytesBytesCodecs can change the chunk bytes in a way that slice
-        selections cannot be attributed to byte ranges anymore which renders partial
-        decoding infeasible.
-
-        This limitation may softened in the future."""
-        return (len(self.array_array_codecs) + len(self.bytes_bytes_codecs)) == 0 and isinstance(
-            self.array_bytes_codec, ArrayBytesCodecPartialDecodeMixin
-        )
-
-    @property
-    def supports_partial_encode(self) -> bool:
-        """Determines whether the codec pipeline supports partial encoding.
-
-        Currently, only codec pipelines with a single ArrayBytesCodec that supports
-        partial encoding can support partial encoding. This limitation is due to the fact
-        that ArrayArrayCodecs can change the slice selection leading to non-contiguous
-        slices and BytesBytesCodecs can change the chunk bytes in a way that slice
-        selections cannot be attributed to byte ranges anymore which renders partial
-        encoding infeasible.
-
-        This limitation may softened in the future."""
-        return (len(self.array_array_codecs) + len(self.bytes_bytes_codecs)) == 0 and isinstance(
-            self.array_bytes_codec, ArrayBytesCodecPartialEncodeMixin
         )
 
     def __iter__(self) -> Iterator[Codec]:
@@ -214,27 +184,12 @@ class BatchedCodecPipeline(CodecPipeline):
         yield self.array_bytes_codec
         yield from self.bytes_bytes_codecs
 
-    def validate(
-        self,
-        *,
-        shape: tuple[int, ...],
-        dtype: ZDType[TBaseDType, TBaseScalar],
-        chunk_grid: ChunkGrid,
-    ) -> None:
-        for codec in self:
-            codec.validate(shape=shape, dtype=dtype, chunk_grid=chunk_grid)
+    @classmethod
+    def from_codecs(cls, codecs: Iterable[Codec]) -> CodecChain:
+        aa, ab, bb = codecs_from_list(list(codecs))
+        return cls(array_array_codecs=aa, array_bytes_codec=ab, bytes_bytes_codecs=bb)
 
-    def compute_encoded_size(self, byte_length: int, array_spec: ArraySpec) -> int:
-        for codec in self:
-            byte_length = codec.compute_encoded_size(byte_length, array_spec)
-            array_spec = codec.resolve_metadata(array_spec)
-        return byte_length
-
-    # -------------------------------------------------------------------
-    # Per-chunk sync codec chain
-    # -------------------------------------------------------------------
-
-    def _resolve_metadata_chain(
+    def resolve_metadata_chain(
         self, chunk_spec: ArraySpec
     ) -> tuple[
         list[tuple[ArrayArrayCodec, ArraySpec]],
@@ -258,24 +213,28 @@ class BatchedCodecPipeline(CodecPipeline):
 
         return (aa_codecs_with_spec, ab_codec_with_spec, bb_codecs_with_spec)
 
-    def _decode_one(
+    def decode_chunk(
         self,
         chunk_bytes: Buffer | None,
         chunk_spec: ArraySpec,
-        aa_chain: list[tuple[ArrayArrayCodec, ArraySpec]],
-        ab_pair: tuple[ArrayBytesCodec, ArraySpec],
-        bb_chain: list[tuple[BytesBytesCodec, ArraySpec]],
+        aa_chain: list[tuple[ArrayArrayCodec, ArraySpec]] | None = None,
+        ab_pair: tuple[ArrayBytesCodec, ArraySpec] | None = None,
+        bb_chain: list[tuple[BytesBytesCodec, ArraySpec]] | None = None,
     ) -> NDBuffer | None:
         """Decode a single chunk through the full codec chain, synchronously.
 
-        Only called when ``_all_sync`` is True, so every codec implements
-        ``SupportsSyncCodec``.
+        Pure compute — no IO. Only callable when all codecs support sync.
+
+        The optional ``aa_chain``, ``ab_pair``, ``bb_chain`` parameters allow
+        pre-resolved metadata to be reused across many chunks with the same spec.
+        If not provided, ``resolve_metadata_chain`` is called internally.
         """
         if chunk_bytes is None:
             return None
 
-        # Use Any to avoid verbose casts on every codec call — we know
-        # all codecs satisfy SupportsSyncCodec because _all_sync is True.
+        if aa_chain is None or ab_pair is None or bb_chain is None:
+            aa_chain, ab_pair, bb_chain = self.resolve_metadata_chain(chunk_spec)
+
         bb_out: Any = chunk_bytes
         for bb_codec, spec in reversed(bb_chain):
             bb_out = cast("SupportsSyncCodec", bb_codec)._decode_sync(bb_out, spec)
@@ -288,15 +247,14 @@ class BatchedCodecPipeline(CodecPipeline):
 
         return ab_out  # type: ignore[no-any-return]
 
-    def _encode_one(
+    def encode_chunk(
         self,
         chunk_array: NDBuffer | None,
         chunk_spec: ArraySpec,
     ) -> Buffer | None:
         """Encode a single chunk through the full codec chain, synchronously.
 
-        Only called when ``_all_sync`` is True, so every codec implements
-        ``SupportsSyncCodec``.
+        Pure compute — no IO. Only callable when all codecs support sync.
         """
         if chunk_array is None:
             return None
@@ -322,6 +280,223 @@ class BatchedCodecPipeline(CodecPipeline):
             spec = bb_codec.resolve_metadata(spec)
 
         return bb_out  # type: ignore[no-any-return]
+
+    def compute_encoded_size(self, byte_length: int, array_spec: ArraySpec) -> int:
+        for codec in self:
+            byte_length = codec.compute_encoded_size(byte_length, array_spec)
+            array_spec = codec.resolve_metadata(array_spec)
+        return byte_length
+
+    def resolve_metadata(self, chunk_spec: ArraySpec) -> ArraySpec:
+        for codec in self:
+            chunk_spec = codec.resolve_metadata(chunk_spec)
+        return chunk_spec
+
+
+# ---------------------------------------------------------------------------
+# Module-level helpers used by both BatchedCodecPipeline and ArrayBytesCodec
+# ---------------------------------------------------------------------------
+
+
+def _merge_chunk_array(
+    existing_chunk_array: NDBuffer | None,
+    value: NDBuffer,
+    out_selection: SelectorTuple,
+    chunk_spec: ArraySpec,
+    chunk_selection: SelectorTuple,
+    is_complete_chunk: bool,
+    drop_axes: tuple[int, ...],
+) -> NDBuffer:
+    """Merge new data into an existing (or freshly-created) chunk array."""
+    if (
+        is_complete_chunk
+        and value.shape == chunk_spec.shape
+        # Guard that this is not a partial chunk at the end with is_complete_chunk=True
+        and value[out_selection].shape == chunk_spec.shape
+    ):
+        return value
+    if existing_chunk_array is None:
+        chunk_array = chunk_spec.prototype.nd_buffer.create(
+            shape=chunk_spec.shape,
+            dtype=chunk_spec.dtype.to_native_dtype(),
+            order=chunk_spec.order,
+            fill_value=fill_value_or_default(chunk_spec),
+        )
+    else:
+        chunk_array = existing_chunk_array.copy()  # make a writable copy
+    if chunk_selection == () or is_scalar(
+        value.as_ndarray_like(), chunk_spec.dtype.to_native_dtype()
+    ):
+        chunk_value = value
+    else:
+        chunk_value = value[out_selection]
+        # handle missing singleton dimensions
+        if drop_axes != ():
+            item = tuple(
+                None  # equivalent to np.newaxis
+                if idx in drop_axes
+                else slice(None)
+                for idx in range(chunk_spec.ndim)
+            )
+            chunk_value = chunk_value[item]
+    chunk_array[chunk_selection] = chunk_value
+    return chunk_array
+
+
+def _write_chunk_compute_default(
+    existing_bytes: Buffer | None,
+    chunk_spec: ArraySpec,
+    chunk_selection: SelectorTuple,
+    out_selection: SelectorTuple,
+    is_complete_chunk: bool,
+    value: NDBuffer,
+    drop_axes: tuple[int, ...],
+    codec_chain: CodecChain,
+    aa_chain: list[tuple[ArrayArrayCodec, ArraySpec]] | None = None,
+    ab_pair: tuple[ArrayBytesCodec, ArraySpec] | None = None,
+    bb_chain: list[tuple[BytesBytesCodec, ArraySpec]] | None = None,
+) -> Buffer | None | object:
+    """Per-chunk compute for write: decode existing -> merge -> encode.
+
+    Returns the encoded chunk bytes, or ``_DELETED`` if the chunk should be
+    removed from the store.
+    """
+    existing_array: NDBuffer | None = None
+    if existing_bytes is not None:
+        if aa_chain is None or ab_pair is None or bb_chain is None:
+            aa_chain, ab_pair, bb_chain = codec_chain.resolve_metadata_chain(chunk_spec)
+        existing_array = codec_chain.decode_chunk(
+            existing_bytes, chunk_spec, aa_chain, ab_pair, bb_chain
+        )
+
+    chunk_array: NDBuffer | None = _merge_chunk_array(
+        existing_array,
+        value,
+        out_selection,
+        chunk_spec,
+        chunk_selection,
+        is_complete_chunk,
+        drop_axes,
+    )
+
+    if (
+        chunk_array is not None
+        and not chunk_spec.config.write_empty_chunks
+        and chunk_array.all_equal(fill_value_or_default(chunk_spec))
+    ):
+        chunk_array = None
+
+    if chunk_array is None:
+        return _DELETED
+    chunk_bytes = codec_chain.encode_chunk(chunk_array, chunk_spec)
+    if chunk_bytes is None:
+        return _DELETED
+    return chunk_bytes
+
+
+@dataclass(frozen=True)
+class BatchedCodecPipeline(CodecPipeline):
+    """Codec pipeline that automatically selects the optimal execution strategy.
+
+    When all codecs support synchronous operations and the store supports
+    sync IO, this pipeline runs the entire read/write path on the calling
+    thread with zero async overhead, using a thread pool for parallel codec
+    compute on multi-chunk operations.
+
+    When the store requires async IO (e.g. cloud stores), this pipeline uses
+    the async path with concurrent IO overlap via ``concurrent_map``.
+
+    This automatic dispatch eliminates the need for users to choose between
+    pipeline implementations — the right strategy is selected based on codec
+    and store capabilities.
+    """
+
+    codec_chain: CodecChain
+    batch_size: int | None = None
+
+    def __init__(
+        self,
+        *,
+        codec_chain: CodecChain | None = None,
+        array_array_codecs: tuple[ArrayArrayCodec, ...] | None = None,
+        array_bytes_codec: ArrayBytesCodec | None = None,
+        bytes_bytes_codecs: tuple[BytesBytesCodec, ...] | None = None,
+        batch_size: int | None = None,
+    ) -> None:
+        if batch_size is not None:
+            warn(
+                "The 'batch_size' parameter is deprecated and has no effect. "
+                "Batch size is now determined automatically.",
+                FutureWarning,
+                stacklevel=2,
+            )
+        object.__setattr__(self, "batch_size", batch_size)
+
+        if codec_chain is not None:
+            object.__setattr__(self, "codec_chain", codec_chain)
+        elif array_bytes_codec is not None:
+            object.__setattr__(
+                self,
+                "codec_chain",
+                CodecChain(
+                    array_array_codecs=array_array_codecs or (),
+                    array_bytes_codec=array_bytes_codec,
+                    bytes_bytes_codecs=bytes_bytes_codecs or (),
+                ),
+            )
+        else:
+            raise ValueError("Either codec_chain or array_bytes_codec must be provided.")
+
+    @property
+    def array_array_codecs(self) -> tuple[ArrayArrayCodec, ...]:
+        return self.codec_chain.array_array_codecs
+
+    @property
+    def array_bytes_codec(self) -> ArrayBytesCodec:
+        return self.codec_chain.array_bytes_codec
+
+    @property
+    def bytes_bytes_codecs(self) -> tuple[BytesBytesCodec, ...]:
+        return self.codec_chain.bytes_bytes_codecs
+
+    @property
+    def _all_sync(self) -> bool:
+        return self.codec_chain._all_sync
+
+    def evolve_from_array_spec(self, array_spec: ArraySpec) -> Self:
+        return type(self).from_codecs(c.evolve_from_array_spec(array_spec=array_spec) for c in self)
+
+    @classmethod
+    def from_codecs(cls, codecs: Iterable[Codec]) -> Self:
+        return cls(codec_chain=CodecChain.from_codecs(codecs))
+
+    @property
+    def supports_partial_decode(self) -> bool:
+        return (len(self.array_array_codecs) + len(self.bytes_bytes_codecs)) == 0 and isinstance(
+            self.array_bytes_codec, ArrayBytesCodecPartialDecodeMixin
+        )
+
+    @property
+    def supports_partial_encode(self) -> bool:
+        return (len(self.array_array_codecs) + len(self.bytes_bytes_codecs)) == 0 and isinstance(
+            self.array_bytes_codec, ArrayBytesCodecPartialEncodeMixin
+        )
+
+    def __iter__(self) -> Iterator[Codec]:
+        yield from self.codec_chain
+
+    def validate(
+        self,
+        *,
+        shape: tuple[int, ...],
+        dtype: ZDType[TBaseDType, TBaseScalar],
+        chunk_grid: ChunkGrid,
+    ) -> None:
+        for codec in self:
+            codec.validate(shape=shape, dtype=dtype, chunk_grid=chunk_grid)
+
+    def compute_encoded_size(self, byte_length: int, array_spec: ArraySpec) -> int:
+        return self.codec_chain.compute_encoded_size(byte_length, array_spec)
 
     # -------------------------------------------------------------------
     # Batched async decode/encode (layer-by-layer across all chunks)
@@ -381,14 +556,6 @@ class BatchedCodecPipeline(CodecPipeline):
 
         return chunk_array_batch
 
-    async def decode_partial_batch(
-        self,
-        batch_info: Iterable[tuple[ByteGetter, SelectorTuple, ArraySpec]],
-    ) -> Iterable[NDBuffer | None]:
-        assert self.supports_partial_decode
-        assert isinstance(self.array_bytes_codec, ArrayBytesCodecPartialDecodeMixin)
-        return await self.array_bytes_codec.decode_partial(batch_info)
-
     async def encode_batch(
         self,
         chunk_arrays_and_specs: Iterable[tuple[NDBuffer | None, ArraySpec]],
@@ -416,14 +583,6 @@ class BatchedCodecPipeline(CodecPipeline):
 
         return chunk_bytes_batch
 
-    async def encode_partial_batch(
-        self,
-        batch_info: Iterable[tuple[ByteSetter, NDBuffer, SelectorTuple, ArraySpec]],
-    ) -> None:
-        assert self.supports_partial_encode
-        assert isinstance(self.array_bytes_codec, ArrayBytesCodecPartialEncodeMixin)
-        await self.array_bytes_codec.encode_partial(batch_info)
-
     # -------------------------------------------------------------------
     # Top-level decode / encode
     # -------------------------------------------------------------------
@@ -439,9 +598,9 @@ class BatchedCodecPipeline(CodecPipeline):
         if self._all_sync:
             # All codecs support sync -- run the full chain inline (no threading).
             _, first_spec = items[0]
-            aa_chain, ab_pair, bb_chain = self._resolve_metadata_chain(first_spec)
+            aa_chain, ab_pair, bb_chain = self.codec_chain.resolve_metadata_chain(first_spec)
             return [
-                self._decode_one(chunk_bytes, chunk_spec, aa_chain, ab_pair, bb_chain)
+                self.codec_chain.decode_chunk(chunk_bytes, chunk_spec, aa_chain, ab_pair, bb_chain)
                 for chunk_bytes, chunk_spec in items
             ]
 
@@ -458,7 +617,10 @@ class BatchedCodecPipeline(CodecPipeline):
 
         if self._all_sync:
             # All codecs support sync -- run the full chain inline (no threading).
-            return [self._encode_one(chunk_array, chunk_spec) for chunk_array, chunk_spec in items]
+            return [
+                self.codec_chain.encode_chunk(chunk_array, chunk_spec)
+                for chunk_array, chunk_spec in items
+            ]
 
         # Async fallback: layer-by-layer across all chunks.
         return list(await self.encode_batch(items))
@@ -475,28 +637,11 @@ class BatchedCodecPipeline(CodecPipeline):
     ) -> None:
         batch_info = list(batch_info)
 
-        if self.supports_partial_decode:
-            chunk_array_batch = await self.decode_partial_batch(
-                [
-                    (byte_getter, chunk_selection, chunk_spec)
-                    for byte_getter, chunk_spec, chunk_selection, *_ in batch_info
-                ]
-            )
-            for chunk_array, (_, chunk_spec, _, out_selection, _) in zip(
-                chunk_array_batch, batch_info, strict=False
-            ):
-                if chunk_array is not None:
-                    out[out_selection] = chunk_array
-                else:
-                    out[out_selection] = fill_value_or_default(chunk_spec)
-            return
-
         if self._all_sync:
-            # Streaming per-chunk pipeline: each chunk flows through
-            # fetch → decode → scatter as a single task. Running N tasks
-            # concurrently overlaps IO with codec compute.
             _, first_spec, *_ = batch_info[0]
-            aa_chain, ab_pair, bb_chain = self._resolve_metadata_chain(first_spec)
+            aa_chain, ab_pair, bb_chain = self.codec_chain.resolve_metadata_chain(first_spec)
+            ab_codec = self.array_bytes_codec
+            codec_chain = self.codec_chain
 
             async def _read_chunk(
                 byte_getter: ByteGetter,
@@ -504,18 +649,19 @@ class BatchedCodecPipeline(CodecPipeline):
                 chunk_selection: SelectorTuple,
                 out_selection: SelectorTuple,
             ) -> None:
-                # 1) Fetch
-                chunk_bytes = await byte_getter.get(prototype=chunk_spec.prototype)
-
-                # 2) Decode (full chain, sync)
-                chunk_array = self._decode_one(chunk_bytes, chunk_spec, aa_chain, ab_pair, bb_chain)
-
-                # 3) Scatter
-                if chunk_array is not None:
-                    tmp = chunk_array[chunk_selection]
+                result = await ab_codec.prepare_read(
+                    byte_getter,
+                    chunk_spec,
+                    chunk_selection,
+                    codec_chain,
+                    aa_chain,
+                    ab_pair,
+                    bb_chain,
+                )
+                if result is not None:
                     if drop_axes != ():
-                        tmp = tmp.squeeze(axis=drop_axes)
-                    out[out_selection] = tmp
+                        result = result.squeeze(axis=drop_axes)
+                    out[out_selection] = result
                 else:
                     out[out_selection] = fill_value_or_default(chunk_spec)
 
@@ -574,8 +720,8 @@ class BatchedCodecPipeline(CodecPipeline):
     ) -> None:
         await self.read_batch(batch_info, out, drop_axes)
 
+    @staticmethod
     def _merge_chunk_array(
-        self,
         existing_chunk_array: NDBuffer | None,
         value: NDBuffer,
         out_selection: SelectorTuple,
@@ -584,39 +730,15 @@ class BatchedCodecPipeline(CodecPipeline):
         is_complete_chunk: bool,
         drop_axes: tuple[int, ...],
     ) -> NDBuffer:
-        if (
-            is_complete_chunk
-            and value.shape == chunk_spec.shape
-            # Guard that this is not a partial chunk at the end with is_complete_chunk=True
-            and value[out_selection].shape == chunk_spec.shape
-        ):
-            return value
-        if existing_chunk_array is None:
-            chunk_array = chunk_spec.prototype.nd_buffer.create(
-                shape=chunk_spec.shape,
-                dtype=chunk_spec.dtype.to_native_dtype(),
-                order=chunk_spec.order,
-                fill_value=fill_value_or_default(chunk_spec),
-            )
-        else:
-            chunk_array = existing_chunk_array.copy()  # make a writable copy
-        if chunk_selection == () or is_scalar(
-            value.as_ndarray_like(), chunk_spec.dtype.to_native_dtype()
-        ):
-            chunk_value = value
-        else:
-            chunk_value = value[out_selection]
-            # handle missing singleton dimensions
-            if drop_axes != ():
-                item = tuple(
-                    None  # equivalent to np.newaxis
-                    if idx in drop_axes
-                    else slice(None)
-                    for idx in range(chunk_spec.ndim)
-                )
-                chunk_value = chunk_value[item]
-        chunk_array[chunk_selection] = chunk_value
-        return chunk_array
+        return _merge_chunk_array(
+            existing_chunk_array,
+            value,
+            out_selection,
+            chunk_spec,
+            chunk_selection,
+            is_complete_chunk,
+            drop_axes,
+        )
 
     async def write_batch(
         self,
@@ -626,56 +748,76 @@ class BatchedCodecPipeline(CodecPipeline):
     ) -> None:
         batch_info = list(batch_info)
 
-        if self.supports_partial_encode:
-            # Pass scalar values as is
-            if len(value.shape) == 0:
-                await self.encode_partial_batch(
-                    [
-                        (byte_setter, value, chunk_selection, chunk_spec)
-                        for byte_setter, chunk_spec, chunk_selection, out_selection, _ in batch_info
-                    ],
-                )
-            else:
-                await self.encode_partial_batch(
-                    [
-                        (byte_setter, value[out_selection], chunk_selection, chunk_spec)
-                        for byte_setter, chunk_spec, chunk_selection, out_selection, _ in batch_info
-                    ],
-                )
-            return
-
         if self._all_sync:
-            # Streaming per-chunk pipeline: each chunk flows through
-            # read_existing → decode → merge → encode → write as a single
-            # task. Running N tasks concurrently overlaps IO with compute.
+            ab_codec = self.array_bytes_codec
+            codec_chain = self.codec_chain
+
             async def _write_chunk(
                 byte_setter: ByteSetter,
                 chunk_spec: ArraySpec,
                 chunk_selection: SelectorTuple,
                 out_selection: SelectorTuple,
-                is_complete_chunk: bool,
+                _is_complete_chunk: bool,
             ) -> None:
-                # 1) Read existing chunk (for partial writes)
-                existing_bytes: Buffer | None = None
-                if not is_complete_chunk:
-                    existing_bytes = await byte_setter.get(prototype=chunk_spec.prototype)
-
-                # 2) Compute: decode existing, merge, encode
-                chunk_bytes = self._write_chunk_compute(
-                    existing_bytes,
+                prepared = await ab_codec.prepare_write(
+                    byte_setter,
                     chunk_spec,
                     chunk_selection,
                     out_selection,
-                    is_complete_chunk,
-                    value,
-                    drop_axes,
+                    codec_chain,
                 )
 
-                # 3) Write result
-                if chunk_bytes is _DELETED:
-                    await byte_setter.delete()
+                if prepared.is_complete_shard:
+                    if prepared.value_selection is not None and not is_scalar(
+                        value.as_ndarray_like(),
+                        prepared.inner_chunk_spec.dtype.to_native_dtype(),
+                    ):
+                        prepared.shard_data = value[prepared.value_selection]
+                    else:
+                        prepared.shard_data = value
+                    await ab_codec.finalize_write(prepared, chunk_spec, byte_setter)
+                    return
+
+                inner_chain = prepared.inner_codec_chain
+                inner_spec = prepared.inner_chunk_spec
+                inner_aa, inner_ab, inner_bb = inner_chain.resolve_metadata_chain(inner_spec)
+
+                if prepared.value_selection is not None and not is_scalar(
+                    value.as_ndarray_like(), inner_spec.dtype.to_native_dtype()
+                ):
+                    write_value = value[prepared.value_selection]
                 else:
-                    await byte_setter.set(chunk_bytes)  # type: ignore[arg-type]
+                    write_value = value
+
+                for coords, chunk_sel, out_sel, _is_complete in prepared.indexer:
+                    existing_bytes_inner = prepared.chunk_dict.get(coords)
+                    if existing_bytes_inner is not None:
+                        existing_array = inner_chain.decode_chunk(
+                            existing_bytes_inner,
+                            inner_spec,
+                            inner_aa,
+                            inner_ab,
+                            inner_bb,
+                        )
+                    else:
+                        existing_array = None
+                    merged = _merge_chunk_array(
+                        existing_array,
+                        write_value,
+                        out_sel,
+                        inner_spec,
+                        chunk_sel,
+                        _is_complete,
+                        drop_axes,
+                    )
+                    if not inner_spec.config.write_empty_chunks and merged.all_equal(
+                        fill_value_or_default(inner_spec)
+                    ):
+                        prepared.chunk_dict[coords] = None
+                    else:
+                        prepared.chunk_dict[coords] = inner_chain.encode_chunk(merged, inner_spec)
+
+                await ab_codec.finalize_write(prepared, chunk_spec, byte_setter)
 
             await concurrent_map(
                 [
@@ -821,35 +963,21 @@ class BatchedCodecPipeline(CodecPipeline):
         if not batch_info_list:
             return
 
-        if self.supports_partial_decode:
-            ab_codec: Any = self.array_bytes_codec
-            for byte_getter, chunk_spec, chunk_selection, out_selection, _ in batch_info_list:
-                chunk_array: NDBuffer | None = ab_codec._decode_partial_sync(
-                    byte_getter, chunk_selection, chunk_spec
-                )
-                if chunk_array is not None:
-                    out[out_selection] = chunk_array
-                else:
-                    out[out_selection] = fill_value_or_default(chunk_spec)
-            return
-
         _, first_spec, *_ = batch_info_list[0]
-        aa_chain, ab_pair, bb_chain = self._resolve_metadata_chain(first_spec)
+        aa_chain, ab_pair, bb_chain = self.codec_chain.resolve_metadata_chain(first_spec)
 
-        # Phase 1: IO — fetch all chunk bytes sequentially.
-        chunk_bytes_list: list[Buffer | None] = [
-            byte_getter.get_sync(prototype=chunk_spec.prototype)
-            for byte_getter, chunk_spec, *_ in batch_info_list
-        ]
-
-        # Phase 2: Decode — run the codec chain for each chunk.
         chunk_nbytes = product(first_spec.shape) * getattr(first_spec.dtype, "item_size", 1)
         n_workers = _choose_workers(len(batch_info_list), chunk_nbytes, self)
         if n_workers > 0:
+            # Threaded: fetch all, decode in parallel, scatter.
+            chunk_bytes_list: list[Buffer | None] = [
+                byte_getter.get_sync(prototype=chunk_spec.prototype)
+                for byte_getter, chunk_spec, *_ in batch_info_list
+            ]
             pool = _get_pool()
             chunk_arrays: list[NDBuffer | None] = list(
                 pool.map(
-                    self._decode_one,
+                    _mark_pool_worker(self.codec_chain.decode_chunk),
                     chunk_bytes_list,
                     [chunk_spec for _, chunk_spec, *_ in batch_info_list],
                     [aa_chain] * len(batch_info_list),
@@ -857,16 +985,27 @@ class BatchedCodecPipeline(CodecPipeline):
                     [bb_chain] * len(batch_info_list),
                 )
             )
+            self._scatter(chunk_arrays, batch_info_list, out, drop_axes)
         else:
-            chunk_arrays = [
-                self._decode_one(chunk_bytes, chunk_spec, aa_chain, ab_pair, bb_chain)
-                for chunk_bytes, (_, chunk_spec, *_) in zip(
-                    chunk_bytes_list, batch_info_list, strict=False
+            # Non-threaded: prepare_read_sync handles IO + decode.
+            # ShardingCodec overrides for optimized partial IO (byte-range reads).
+            ab_codec = self.array_bytes_codec
+            for byte_getter, chunk_spec, chunk_selection, out_selection, _ in batch_info_list:
+                result = ab_codec.prepare_read_sync(
+                    byte_getter,
+                    chunk_spec,
+                    chunk_selection,
+                    self.codec_chain,
+                    aa_chain,
+                    ab_pair,
+                    bb_chain,
                 )
-            ]
-
-        # Phase 3: Scatter decoded chunk data into the output buffer.
-        self._scatter(chunk_arrays, batch_info_list, out, drop_axes)
+                if result is not None:
+                    if drop_axes != ():
+                        result = result.squeeze(axis=drop_axes)
+                    out[out_selection] = result
+                else:
+                    out[out_selection] = fill_value_or_default(chunk_spec)
 
     def _write_chunk_compute(
         self,
@@ -877,38 +1016,24 @@ class BatchedCodecPipeline(CodecPipeline):
         is_complete_chunk: bool,
         value: NDBuffer,
         drop_axes: tuple[int, ...],
+        aa_chain: list[tuple[ArrayArrayCodec, ArraySpec]] | None = None,
+        ab_pair: tuple[ArrayBytesCodec, ArraySpec] | None = None,
+        bb_chain: list[tuple[BytesBytesCodec, ArraySpec]] | None = None,
     ) -> Buffer | None | object:
         """Per-chunk compute for write: decode existing -> merge -> encode."""
-        existing_array: NDBuffer | None = None
-        if existing_bytes is not None:
-            aa_chain, ab_pair, bb_chain = self._resolve_metadata_chain(chunk_spec)
-            existing_array = self._decode_one(
-                existing_bytes, chunk_spec, aa_chain, ab_pair, bb_chain
-            )
-
-        chunk_array: NDBuffer | None = self._merge_chunk_array(
-            existing_array,
-            value,
-            out_selection,
+        return _write_chunk_compute_default(
+            existing_bytes,
             chunk_spec,
             chunk_selection,
+            out_selection,
             is_complete_chunk,
+            value,
             drop_axes,
+            self.codec_chain,
+            aa_chain,
+            ab_pair,
+            bb_chain,
         )
-
-        if (
-            chunk_array is not None
-            and not chunk_spec.config.write_empty_chunks
-            and chunk_array.all_equal(fill_value_or_default(chunk_spec))
-        ):
-            chunk_array = None
-
-        if chunk_array is None:
-            return _DELETED
-        chunk_bytes = self._encode_one(chunk_array, chunk_spec)
-        if chunk_bytes is None:
-            return _DELETED
-        return chunk_bytes
 
     def write_sync(
         self,
@@ -920,68 +1045,113 @@ class BatchedCodecPipeline(CodecPipeline):
         if not batch_info_list:
             return
 
-        if self.supports_partial_encode:
-            ab_codec: Any = self.array_bytes_codec
-            if len(value.shape) == 0:
-                for byte_setter, chunk_spec, chunk_selection, _, _ in batch_info_list:
-                    ab_codec._encode_partial_sync(byte_setter, value, chunk_selection, chunk_spec)
-            else:
-                for byte_setter, chunk_spec, chunk_selection, out_selection, _ in batch_info_list:
-                    ab_codec._encode_partial_sync(
-                        byte_setter, value[out_selection], chunk_selection, chunk_spec
-                    )
-            return
-
-        # Phase 1: IO — read existing chunk bytes for partial writes.
-        existing_bytes_list: list[Buffer | None] = [
-            byte_setter.get_sync(prototype=chunk_spec.prototype) if not is_complete_chunk else None
-            for byte_setter, chunk_spec, _, _, is_complete_chunk in batch_info_list
-        ]
-
-        # Phase 2: Compute — decode existing, merge new data, encode.
         _, first_spec, *_ = batch_info_list[0]
+        aa_chain, ab_pair, bb_chain = self.codec_chain.resolve_metadata_chain(first_spec)
         chunk_nbytes = product(first_spec.shape) * getattr(first_spec.dtype, "item_size", 1)
         n_workers = _choose_workers(len(batch_info_list), chunk_nbytes, self)
         if n_workers > 0:
+            # Threaded: fetch all, compute in parallel, write all.
+            existing_bytes_list: list[Buffer | None] = [
+                byte_setter.get_sync(prototype=chunk_spec.prototype)
+                if not is_complete_chunk
+                else None
+                for byte_setter, chunk_spec, _, _, is_complete_chunk in batch_info_list
+            ]
             pool = _get_pool()
+            n = len(batch_info_list)
             encoded_list: list[Buffer | None | object] = list(
                 pool.map(
-                    self._write_chunk_compute,
+                    _mark_pool_worker(self._write_chunk_compute),
                     existing_bytes_list,
                     [chunk_spec for _, chunk_spec, *_ in batch_info_list],
                     [chunk_selection for _, _, chunk_selection, _, _ in batch_info_list],
                     [out_selection for _, _, _, out_selection, _ in batch_info_list],
                     [is_complete for _, _, _, _, is_complete in batch_info_list],
-                    [value] * len(batch_info_list),
-                    [drop_axes] * len(batch_info_list),
+                    [value] * n,
+                    [drop_axes] * n,
+                    [aa_chain] * n,
+                    [ab_pair] * n,
+                    [bb_chain] * n,
                 )
             )
+            for encoded, (byte_setter, *_) in zip(encoded_list, batch_info_list, strict=False):
+                if encoded is _DELETED:
+                    byte_setter.delete_sync()
+                else:
+                    byte_setter.set_sync(encoded)
         else:
-            encoded_list = [
-                self._write_chunk_compute(
-                    existing_bytes,
+            # Non-threaded: prepare_write_sync handles IO + deserialize.
+            # Pipeline does decode/merge/encode loop, then serialize + write.
+            ab_codec = self.array_bytes_codec
+            for (
+                byte_setter,
+                chunk_spec,
+                chunk_selection,
+                out_selection,
+                _,
+            ) in batch_info_list:
+                prepared = ab_codec.prepare_write_sync(
+                    byte_setter,
                     chunk_spec,
                     chunk_selection,
                     out_selection,
-                    is_complete_chunk,
-                    value,
-                    drop_axes,
+                    self.codec_chain,
                 )
-                for existing_bytes, (
-                    _,
-                    chunk_spec,
-                    chunk_selection,
-                    out_selection,
-                    is_complete_chunk,
-                ) in zip(existing_bytes_list, batch_info_list, strict=False)
-            ]
 
-        # Phase 3: IO — write encoded chunks to store.
-        for encoded, (byte_setter, *_) in zip(encoded_list, batch_info_list, strict=False):
-            if encoded is _DELETED:
-                byte_setter.delete_sync()
-            else:
-                byte_setter.set_sync(encoded)
+                if prepared.is_complete_shard:
+                    # Complete shard: pass the shard value to finalize_write
+                    # which encodes and writes in one shot, bypassing the
+                    # per-inner-chunk loop.
+                    if prepared.value_selection is not None and not is_scalar(
+                        value.as_ndarray_like(),
+                        prepared.inner_chunk_spec.dtype.to_native_dtype(),
+                    ):
+                        prepared.shard_data = value[prepared.value_selection]
+                    else:
+                        prepared.shard_data = value
+                    ab_codec.finalize_write_sync(prepared, chunk_spec, byte_setter)
+                    continue
+
+                inner_chain = prepared.inner_codec_chain
+                inner_spec = prepared.inner_chunk_spec
+                inner_aa, inner_ab, inner_bb = inner_chain.resolve_metadata_chain(inner_spec)
+
+                if prepared.value_selection is not None and not is_scalar(
+                    value.as_ndarray_like(), inner_spec.dtype.to_native_dtype()
+                ):
+                    write_value = value[prepared.value_selection]
+                else:
+                    write_value = value
+
+                for coords, chunk_sel, out_sel, _is_complete in prepared.indexer:
+                    existing_bytes_inner = prepared.chunk_dict.get(coords)
+                    if existing_bytes_inner is not None:
+                        existing_array = inner_chain.decode_chunk(
+                            existing_bytes_inner,
+                            inner_spec,
+                            inner_aa,
+                            inner_ab,
+                            inner_bb,
+                        )
+                    else:
+                        existing_array = None
+                    merged = _merge_chunk_array(
+                        existing_array,
+                        write_value,
+                        out_sel,
+                        inner_spec,
+                        chunk_sel,
+                        _is_complete,
+                        drop_axes,
+                    )
+                    if not inner_spec.config.write_empty_chunks and merged.all_equal(
+                        fill_value_or_default(inner_spec)
+                    ):
+                        prepared.chunk_dict[coords] = None
+                    else:
+                        prepared.chunk_dict[coords] = inner_chain.encode_chunk(merged, inner_spec)
+
+                ab_codec.finalize_write_sync(prepared, chunk_spec, byte_setter)
 
 
 def codecs_from_list(

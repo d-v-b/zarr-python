@@ -20,8 +20,6 @@ __all__ = [
     "ByteGetter",
     "ByteSetter",
     "Store",
-    "SyncByteGetter",
-    "SyncByteSetter",
     "set_or_delete",
 ]
 
@@ -473,6 +471,21 @@ class Store(ABC):
         """
         ...
 
+    async def set_range(self, key: str, value: Buffer, start: int) -> None:
+        """Write ``value`` into an existing key beginning at byte offset ``start``.
+
+        The key must already exist and ``start + len(value)`` must not exceed
+        the current size of the stored value.
+
+        Parameters
+        ----------
+        key : str
+        value : Buffer
+        start : int
+            Byte offset at which to begin writing.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not support set_range")
+
     async def set_if_not_exists(self, key: str, value: Buffer) -> None:
         """
         Store a key to ``value`` if the key is not already present.
@@ -702,27 +715,11 @@ class ByteSetter(Protocol):
 
     async def set(self, value: Buffer) -> None: ...
 
+    async def set_range(self, value: Buffer, start: int) -> None: ...
+
     async def delete(self) -> None: ...
 
     async def set_if_not_exists(self, default: Buffer) -> None: ...
-
-
-@runtime_checkable
-class SyncByteGetter(Protocol):
-    """Protocol for stores that support synchronous byte reads."""
-
-    def get_sync(
-        self, prototype: BufferPrototype, byte_range: ByteRequest | None = None
-    ) -> Buffer | None: ...
-
-
-@runtime_checkable
-class SyncByteSetter(SyncByteGetter, Protocol):
-    """Protocol for stores that support synchronous byte reads, writes, and deletes."""
-
-    def set_sync(self, value: Buffer) -> None: ...
-
-    def delete_sync(self) -> None: ...
 
 
 async def set_or_delete(byte_setter: ByteSetter, value: Buffer | None) -> None:

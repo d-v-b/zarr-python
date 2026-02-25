@@ -38,7 +38,7 @@ def parse_checksum(data: JSON) -> bool:
 class ZstdCodec(BytesBytesCodec):
     """zstd codec"""
 
-    is_fixed_size = True
+    is_fixed_size = False
 
     level: int = 0
     checksum: bool = False

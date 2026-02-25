@@ -85,6 +85,13 @@ def _put(path: Path, value: Buffer, exclusive: bool = False) -> int:
         return f.write(view)
 
 
+def _put_range(path: Path, value: Buffer, start: int) -> None:
+    view = value.as_buffer_like()
+    with path.open("r+b") as f:
+        f.seek(start)
+        f.write(view)
+
+
 class LocalStore(Store):
     """
     Store for the local file system.
@@ -241,6 +248,11 @@ class LocalStore(Store):
         # asyncio.to_thread().
         _put(path, value)
 
+    def set_range_sync(self, key: str, value: Buffer, start: int) -> None:
+        self._check_writable()
+        path = self.root / key
+        _put_range(path, value, start)
+
     def delete_sync(self, key: str) -> None:
         self._check_writable()
         path = self.root / key
@@ -285,6 +297,14 @@ class LocalStore(Store):
     async def set(self, key: str, value: Buffer) -> None:
         # docstring inherited
         return await self._set(key, value)
+
+    async def set_range(self, key: str, value: Buffer, start: int) -> None:
+        # docstring inherited
+        if not self._is_open:
+            await self._open()
+        self._check_writable()
+        path = self.root / key
+        await asyncio.to_thread(_put_range, path, value, start)
 
     async def set_if_not_exists(self, key: str, value: Buffer) -> None:
         # docstring inherited

@@ -25,7 +25,6 @@ from typing_extensions import deprecated
 import zarr
 from zarr.abc.codec import ArrayArrayCodec, ArrayBytesCodec, BytesBytesCodec, Codec
 from zarr.abc.numcodec import Numcodec, _is_numcodec
-from zarr.abc.store import SyncByteGetter
 from zarr.codecs._v2 import V2Codec
 from zarr.codecs.bytes import BytesCodec
 from zarr.codecs.vlen_utf8 import VLenBytesCodec, VLenUTF8Codec
@@ -1983,9 +1982,9 @@ class Array(Generic[T_ArrayMetadata]):
            implement ``SupportsSyncCodec``). This is True for
            BatchedCodecPipeline when all codecs support sync.
 
-        2. The store supports synchronous operations (implements
-           ``SyncByteGetter``). MemoryStore and LocalStore provide this;
-           remote stores do not.
+        2. The store supports synchronous operations (has a ``get_sync``
+           method). MemoryStore and LocalStore provide this; remote
+           stores do not.
 
         When both hold, the selection methods below call
         _get_selection_sync / _set_selection_sync directly, running the
@@ -1995,7 +1994,7 @@ class Array(Generic[T_ArrayMetadata]):
         """
         pipeline = self.async_array.codec_pipeline
         store = self.async_array.store_path.store
-        return getattr(pipeline, "supports_sync_io", False) and isinstance(store, SyncByteGetter)
+        return getattr(pipeline, "supports_sync_io", False) and hasattr(store, "get_sync")
 
     @classmethod
     @deprecated("Use zarr.create_array instead.", category=ZarrDeprecationWarning)

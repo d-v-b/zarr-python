@@ -237,10 +237,10 @@ class StorePath:
     # self.path to the key and delegate to the underlying Store's sync
     # methods.
     #
-    # Note: These methods satisfy the SyncByteGetter / SyncByteSetter
-    # protocols (from zarr.abc.store) only when the underlying Store
-    # also has get_sync / set_sync / delete_sync.  Callers check the
-    # store before invoking these.
+    # Note: These methods are only available when the underlying Store
+    # also has get_sync / set_sync / delete_sync (e.g. MemoryStore,
+    # LocalStore).  Callers check ``hasattr(store, 'get_sync')``
+    # before invoking these.
     # -------------------------------------------------------------------
 
     def get_sync(
@@ -256,6 +256,14 @@ class StorePath:
     def set_sync(self, value: Buffer) -> None:
         """Synchronous write — delegates to ``self.store.set_sync(self.path, value)``."""
         self.store.set_sync(self.path, value)  # type: ignore[attr-defined]
+
+    async def set_range(self, value: Buffer, start: int) -> None:
+        """Write ``value`` at byte offset ``start`` within the existing key."""
+        await self.store.set_range(self.path, value, start)
+
+    def set_range_sync(self, value: Buffer, start: int) -> None:
+        """Synchronous byte-range write."""
+        self.store.set_range_sync(self.path, value, start)  # type: ignore[attr-defined]
 
     def delete_sync(self) -> None:
         """Synchronous delete — delegates to ``self.store.delete_sync(self.path)``."""

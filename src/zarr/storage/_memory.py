@@ -167,7 +167,7 @@ class MemoryStore(Store):
         # docstring inherited
         return key in self._store_dict
 
-    async def set(self, key: str, value: Buffer, byte_range: tuple[int, int] | None = None) -> None:
+    async def set(self, key: str, value: Buffer) -> None:
         # docstring inherited
         self._check_writable()
         await self._ensure_open()
@@ -176,13 +176,28 @@ class MemoryStore(Store):
             raise TypeError(
                 f"MemoryStore.set(): `value` must be a Buffer instance. Got an instance of {type(value)} instead."
             )
+        self._store_dict[key] = value
 
-        if byte_range is not None:
-            buf = self._store_dict[key]
-            buf[byte_range[0] : byte_range[1]] = value
-            self._store_dict[key] = buf
-        else:
-            self._store_dict[key] = value
+    def _set_range_impl(self, key: str, value: Buffer, start: int) -> None:
+        buf = self._store_dict[key]
+        target = buf.as_numpy_array()
+        if not target.flags.writeable:
+            target = target.copy()
+            self._store_dict[key] = buf.__class__(target)
+        target[start : start + len(value)] = value.as_numpy_array()
+
+    async def set_range(self, key: str, value: Buffer, start: int) -> None:
+        # docstring inherited
+        self._check_writable()
+        await self._ensure_open()
+        self._set_range_impl(key, value, start)
+
+    def set_range_sync(self, key: str, value: Buffer, start: int) -> None:
+        """Synchronous byte-range write."""
+        self._check_writable()
+        if not self._is_open:
+            self._is_open = True
+        self._set_range_impl(key, value, start)
 
     async def set_if_not_exists(self, key: str, value: Buffer) -> None:
         # docstring inherited
@@ -518,7 +533,7 @@ class GpuMemoryStore(MemoryStore):
         gpu_store_dict = {k: gpu.Buffer.from_buffer(v) for k, v in store_dict.items()}
         return cls(gpu_store_dict)
 
-    async def set(self, key: str, value: Buffer, byte_range: tuple[int, int] | None = None) -> None:
+    async def set(self, key: str, value: Buffer) -> None:
         # docstring inherited
         self._check_writable()
         assert isinstance(key, str)
@@ -528,4 +543,4 @@ class GpuMemoryStore(MemoryStore):
             )
         # Convert to gpu.Buffer
         gpu_value = value if isinstance(value, gpu.Buffer) else gpu.Buffer.from_buffer(value)
-        await super().set(key, gpu_value, byte_range=byte_range)
+        await super().set(key, gpu_value)
