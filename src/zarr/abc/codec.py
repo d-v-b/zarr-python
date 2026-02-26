@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from abc import abstractmethod
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Generic, Protocol, TypeGuard, TypeVar, runtime_checkable
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeGuard, TypeVar, runtime_checkable
 
 from typing_extensions import ReadOnly, TypedDict
 
@@ -19,7 +20,7 @@ if TYPE_CHECKING:
     from zarr.core.array_spec import ArraySpec
     from zarr.core.chunk_grids import ChunkGrid
     from zarr.core.dtype.wrapper import TBaseDType, TBaseScalar, ZDType
-    from zarr.core.indexing import SelectorTuple
+    from zarr.core.indexing import ChunkProjection, SelectorTuple
     from zarr.core.metadata import ArrayMetadata
 
 __all__ = [
@@ -32,6 +33,7 @@ __all__ = [
     "CodecInput",
     "CodecOutput",
     "CodecPipeline",
+    "PreparedWrite",
     "SupportsSyncCodec",
 ]
 
@@ -204,8 +206,185 @@ class ArrayArrayCodec(BaseCodec[NDBuffer, NDBuffer]):
     """Base class for array-to-array codecs."""
 
 
+@dataclass
+class PreparedWrite:
+    """Result of ``prepare_write``: existing encoded chunk bytes + selection info."""
+
+    chunk_dict: dict[tuple[int, ...], Buffer | None]
+    inner_codec_chain: Any  # CodecChain — typed as Any to avoid circular import
+    inner_chunk_spec: ArraySpec
+    indexer: list[ChunkProjection]
+    value_selection: SelectorTuple | None = None
+    write_full_shard: bool = True
+    is_complete_shard: bool = False
+    shard_data: NDBuffer | None = field(default=None)
+
+
 class ArrayBytesCodec(BaseCodec[NDBuffer, Buffer]):
     """Base class for array-to-bytes codecs."""
+
+    @property
+    def inner_codec_chain(self) -> Any:
+        """The codec chain for decoding inner chunks after deserialization.
+
+        Returns ``None`` by default — the pipeline should use its own codec chain.
+        ``ShardingCodec`` overrides to return its inner codec chain.
+        """
+        return None
+
+    def deserialize(
+        self, raw: Buffer | None, chunk_spec: ArraySpec
+    ) -> dict[tuple[int, ...], Buffer | None]:
+        """Unpack stored bytes into per-inner-chunk buffers.
+
+        Default: single chunk keyed at ``(0,)``.
+        ``ShardingCodec`` overrides to decode the shard index and slice the
+        blob into per-chunk buffers.
+        """
+        return {(0,): raw}
+
+    def serialize(
+        self,
+        chunk_dict: dict[tuple[int, ...], Buffer | None],
+        chunk_spec: ArraySpec,
+    ) -> Buffer | None:
+        """Pack per-inner-chunk buffers into a storage blob.
+
+        Default: return the single chunk's bytes (or ``None`` if absent).
+        ``ShardingCodec`` overrides to concatenate chunks and build an index.
+        Returns ``None`` when all chunks are empty (caller should delete the key).
+        """
+        return chunk_dict.get((0,))
+
+    # ------------------------------------------------------------------
+    # prepare / finalize — sync
+    # ------------------------------------------------------------------
+
+    def prepare_read_sync(
+        self,
+        byte_getter: Any,
+        chunk_spec: ArraySpec,
+        chunk_selection: SelectorTuple,
+        codec_chain: Any,
+        aa_chain: Any,
+        ab_pair: Any,
+        bb_chain: Any,
+    ) -> NDBuffer | None:
+        """Sync IO + full decode for the selected region."""
+        raw = byte_getter.get_sync(prototype=chunk_spec.prototype)
+        chunk_array: NDBuffer | None = codec_chain.decode_chunk(
+            raw, chunk_spec, aa_chain, ab_pair, bb_chain
+        )
+        if chunk_array is not None:
+            return chunk_array[chunk_selection]
+        return None
+
+    def prepare_write_sync(
+        self,
+        byte_setter: Any,
+        chunk_spec: ArraySpec,
+        chunk_selection: SelectorTuple,
+        out_selection: SelectorTuple,
+        replace: bool,
+        codec_chain: Any,
+    ) -> PreparedWrite:
+        """Sync IO + deserialize. Returns a :class:`PreparedWrite`."""
+        existing: Buffer | None = None
+        if not replace:
+            existing = byte_setter.get_sync(prototype=chunk_spec.prototype)
+        chunk_dict = self.deserialize(existing, chunk_spec)
+        inner_chain = self.inner_codec_chain or codec_chain
+        return PreparedWrite(
+            chunk_dict=chunk_dict,
+            inner_codec_chain=inner_chain,
+            inner_chunk_spec=chunk_spec,
+            indexer=[
+                (  # type: ignore[list-item]
+                    (0,),
+                    chunk_selection,
+                    out_selection,
+                    replace,
+                )
+            ],
+        )
+
+    def finalize_write_sync(
+        self,
+        prepared: PreparedWrite,
+        chunk_spec: ArraySpec,
+        byte_setter: Any,
+    ) -> None:
+        """Serialize the prepared *chunk_dict* and write to store."""
+        blob = self.serialize(prepared.chunk_dict, chunk_spec)
+        if blob is None:
+            byte_setter.delete_sync()
+        else:
+            byte_setter.set_sync(blob)
+
+    # ------------------------------------------------------------------
+    # prepare / finalize — async
+    # ------------------------------------------------------------------
+
+    async def prepare_read(
+        self,
+        byte_getter: Any,
+        chunk_spec: ArraySpec,
+        chunk_selection: SelectorTuple,
+        codec_chain: Any,
+        aa_chain: Any,
+        ab_pair: Any,
+        bb_chain: Any,
+    ) -> NDBuffer | None:
+        """Async IO + full decode for the selected region."""
+        raw = await byte_getter.get(prototype=chunk_spec.prototype)
+        chunk_array: NDBuffer | None = codec_chain.decode_chunk(
+            raw, chunk_spec, aa_chain, ab_pair, bb_chain
+        )
+        if chunk_array is not None:
+            return chunk_array[chunk_selection]
+        return None
+
+    async def prepare_write(
+        self,
+        byte_setter: Any,
+        chunk_spec: ArraySpec,
+        chunk_selection: SelectorTuple,
+        out_selection: SelectorTuple,
+        replace: bool,
+        codec_chain: Any,
+    ) -> PreparedWrite:
+        """Async IO + deserialize. Returns a :class:`PreparedWrite`."""
+        existing: Buffer | None = None
+        if not replace:
+            existing = await byte_setter.get(prototype=chunk_spec.prototype)
+        chunk_dict = self.deserialize(existing, chunk_spec)
+        inner_chain = self.inner_codec_chain or codec_chain
+        return PreparedWrite(
+            chunk_dict=chunk_dict,
+            inner_codec_chain=inner_chain,
+            inner_chunk_spec=chunk_spec,
+            indexer=[
+                (  # type: ignore[list-item]
+                    (0,),
+                    chunk_selection,
+                    out_selection,
+                    replace,
+                )
+            ],
+        )
+
+    async def finalize_write(
+        self,
+        prepared: PreparedWrite,
+        chunk_spec: ArraySpec,
+        byte_setter: Any,
+    ) -> None:
+        """Async version of :meth:`finalize_write_sync`."""
+        blob = self.serialize(prepared.chunk_dict, chunk_spec)
+        if blob is None:
+            await byte_setter.delete()
+        else:
+            await byte_setter.set(blob)
 
 
 class BytesBytesCodec(BaseCodec[Buffer, Buffer]):
