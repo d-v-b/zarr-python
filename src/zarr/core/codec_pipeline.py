@@ -75,35 +75,37 @@ class CodecChain:
 
     Constructed from an iterable of codecs and a chunk ArraySpec.
     Resolves each codec against the spec so that encode/decode can
-    run without re-resolving.  Pure compute only -- no IO, no threading,
-    no batching.
+    run without re-resolving.
     """
 
     codecs: tuple[Codec, ...]
     chunk_spec: ArraySpec
 
-    _aa_codecs: tuple[tuple[ArrayArrayCodec, ArraySpec], ...] = field(
-        init=False, repr=False, compare=False
-    )
+    _aa_codecs: tuple[ArrayArrayCodec, ...] = field(init=False, repr=False, compare=False)
+    _aa_specs: tuple[ArraySpec, ...] = field(init=False, repr=False, compare=False)
     _ab_codec: ArrayBytesCodec = field(init=False, repr=False, compare=False)
     _ab_spec: ArraySpec = field(init=False, repr=False, compare=False)
     _bb_codecs: tuple[BytesBytesCodec, ...] = field(init=False, repr=False, compare=False)
+    _bb_spec: ArraySpec = field(init=False, repr=False, compare=False)
     _all_sync: bool = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         aa, ab, bb = codecs_from_list(list(self.codecs))
 
-        aa_pairs: list[tuple[ArrayArrayCodec, ArraySpec]] = []
+        aa_specs: list[ArraySpec] = []
         spec = self.chunk_spec
         for aa_codec in aa:
-            aa_pairs.append((aa_codec, spec))
+            aa_specs.append(spec)
             spec = aa_codec.resolve_metadata(spec)
 
-        object.__setattr__(self, "_aa_codecs", tuple(aa_pairs))
+        object.__setattr__(self, "_aa_codecs", aa)
+        object.__setattr__(self, "_aa_specs", tuple(aa_specs))
         object.__setattr__(self, "_ab_codec", ab)
         object.__setattr__(self, "_ab_spec", spec)
 
+        spec = ab.resolve_metadata(spec)
         object.__setattr__(self, "_bb_codecs", bb)
+        object.__setattr__(self, "_bb_spec", spec)
 
         object.__setattr__(
             self,
@@ -125,11 +127,11 @@ class CodecChain:
         """
         bb_out: Any = chunk_bytes
         for bb_codec in reversed(self._bb_codecs):
-            bb_out = cast("SupportsSyncCodec", bb_codec)._decode_sync(bb_out, self.chunk_spec)
+            bb_out = cast("SupportsSyncCodec", bb_codec)._decode_sync(bb_out, self._bb_spec)
 
         ab_out: Any = cast("SupportsSyncCodec", self._ab_codec)._decode_sync(bb_out, self._ab_spec)
 
-        for aa_codec, spec in reversed(self._aa_codecs):
+        for aa_codec, spec in zip(reversed(self._aa_codecs), reversed(self._aa_specs), strict=True):
             ab_out = cast("SupportsSyncCodec", aa_codec)._decode_sync(ab_out, spec)
 
         return ab_out  # type: ignore[no-any-return]
@@ -144,7 +146,7 @@ class CodecChain:
         """
         aa_out: Any = chunk_array
 
-        for aa_codec, spec in self._aa_codecs:
+        for aa_codec, spec in zip(self._aa_codecs, self._aa_specs, strict=True):
             if aa_out is None:
                 return None
             aa_out = cast("SupportsSyncCodec", aa_codec)._encode_sync(aa_out, spec)
@@ -156,7 +158,7 @@ class CodecChain:
         for bb_codec in self._bb_codecs:
             if bb_out is None:
                 return None
-            bb_out = cast("SupportsSyncCodec", bb_codec)._encode_sync(bb_out, self.chunk_spec)
+            bb_out = cast("SupportsSyncCodec", bb_codec)._encode_sync(bb_out, self._bb_spec)
 
         return bb_out  # type: ignore[no-any-return]
 
