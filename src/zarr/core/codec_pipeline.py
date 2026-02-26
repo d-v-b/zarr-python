@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import islice, pairwise
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 from warnings import warn
 
 from zarr.abc.codec import (
@@ -13,6 +13,7 @@ from zarr.abc.codec import (
     BytesBytesCodec,
     Codec,
     CodecPipeline,
+    SupportsSyncCodec,
 )
 from zarr.core.common import concurrent_map
 from zarr.core.config import config
@@ -66,6 +67,134 @@ def fill_value_or_default(chunk_spec: ArraySpec) -> Any:
         return chunk_spec.dtype.default_scalar()
     else:
         return fill_value
+
+
+@dataclass(frozen=True)
+class CodecChain:
+    """Lightweight codec chain: array-array -> array-bytes -> bytes-bytes.
+
+    Pure compute only -- no IO methods, no threading, no batching.
+    """
+
+    array_array_codecs: tuple[ArrayArrayCodec, ...]
+    array_bytes_codec: ArrayBytesCodec
+    bytes_bytes_codecs: tuple[BytesBytesCodec, ...]
+
+    _all_sync: bool = field(default=False, init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "_all_sync",
+            all(isinstance(c, SupportsSyncCodec) for c in self),
+        )
+
+    def __iter__(self) -> Iterator[Codec]:
+        yield from self.array_array_codecs
+        yield self.array_bytes_codec
+        yield from self.bytes_bytes_codecs
+
+    @classmethod
+    def from_codecs(cls, codecs: Iterable[Codec]) -> CodecChain:
+        aa, ab, bb = codecs_from_list(list(codecs))
+        return cls(array_array_codecs=aa, array_bytes_codec=ab, bytes_bytes_codecs=bb)
+
+    def resolve_metadata_chain(
+        self, chunk_spec: ArraySpec
+    ) -> tuple[
+        list[tuple[ArrayArrayCodec, ArraySpec]],
+        tuple[ArrayBytesCodec, ArraySpec],
+        list[tuple[BytesBytesCodec, ArraySpec]],
+    ]:
+        """Resolve metadata through the codec chain for a single chunk_spec."""
+        aa_codecs_with_spec: list[tuple[ArrayArrayCodec, ArraySpec]] = []
+        spec = chunk_spec
+        for aa_codec in self.array_array_codecs:
+            aa_codecs_with_spec.append((aa_codec, spec))
+            spec = aa_codec.resolve_metadata(spec)
+
+        ab_codec_with_spec = (self.array_bytes_codec, spec)
+        spec = self.array_bytes_codec.resolve_metadata(spec)
+
+        bb_codecs_with_spec: list[tuple[BytesBytesCodec, ArraySpec]] = []
+        for bb_codec in self.bytes_bytes_codecs:
+            bb_codecs_with_spec.append((bb_codec, spec))
+            spec = bb_codec.resolve_metadata(spec)
+
+        return (aa_codecs_with_spec, ab_codec_with_spec, bb_codecs_with_spec)
+
+    def decode_chunk(
+        self,
+        chunk_bytes: Buffer,
+        chunk_spec: ArraySpec,
+        aa_chain: Iterable[tuple[ArrayArrayCodec, ArraySpec]] | None = None,
+        ab_pair: tuple[ArrayBytesCodec, ArraySpec] | None = None,
+        bb_chain: Iterable[tuple[BytesBytesCodec, ArraySpec]] | None = None,
+    ) -> NDBuffer:
+        """Decode a single chunk through the full codec chain, synchronously.
+
+        Pure compute -- no IO. Only callable when all codecs support sync.
+
+        The optional ``aa_chain``, ``ab_pair``, ``bb_chain`` parameters allow
+        pre-resolved metadata to be reused across many chunks with the same spec.
+        If not provided, ``resolve_metadata_chain`` is called internally.
+        """
+        if aa_chain is None or ab_pair is None or bb_chain is None:
+            aa_chain, ab_pair, bb_chain = self.resolve_metadata_chain(chunk_spec)
+
+        bb_out: Any = chunk_bytes
+        for bb_codec, spec in reversed(list(bb_chain)):
+            bb_out = cast("SupportsSyncCodec", bb_codec)._decode_sync(bb_out, spec)
+
+        ab_codec, ab_spec = ab_pair
+        ab_out: Any = cast("SupportsSyncCodec", ab_codec)._decode_sync(bb_out, ab_spec)
+
+        for aa_codec, spec in reversed(list(aa_chain)):
+            ab_out = cast("SupportsSyncCodec", aa_codec)._decode_sync(ab_out, spec)
+
+        return ab_out  # type: ignore[no-any-return]
+
+    def encode_chunk(
+        self,
+        chunk_array: NDBuffer,
+        chunk_spec: ArraySpec,
+    ) -> Buffer | None:
+        """Encode a single chunk through the full codec chain, synchronously.
+
+        Pure compute -- no IO. Only callable when all codecs support sync.
+        """
+        spec = chunk_spec
+        aa_out: Any = chunk_array
+
+        for aa_codec in self.array_array_codecs:
+            if aa_out is None:
+                return None
+            aa_out = cast("SupportsSyncCodec", aa_codec)._encode_sync(aa_out, spec)
+            spec = aa_codec.resolve_metadata(spec)
+
+        if aa_out is None:
+            return None
+        bb_out: Any = cast("SupportsSyncCodec", self.array_bytes_codec)._encode_sync(aa_out, spec)
+        spec = self.array_bytes_codec.resolve_metadata(spec)
+
+        for bb_codec in self.bytes_bytes_codecs:
+            if bb_out is None:
+                return None
+            bb_out = cast("SupportsSyncCodec", bb_codec)._encode_sync(bb_out, spec)
+            spec = bb_codec.resolve_metadata(spec)
+
+        return bb_out  # type: ignore[no-any-return]
+
+    def compute_encoded_size(self, byte_length: int, array_spec: ArraySpec) -> int:
+        for codec in self:
+            byte_length = codec.compute_encoded_size(byte_length, array_spec)
+            array_spec = codec.resolve_metadata(array_spec)
+        return byte_length
+
+    def resolve_metadata(self, chunk_spec: ArraySpec) -> ArraySpec:
+        for codec in self:
+            chunk_spec = codec.resolve_metadata(chunk_spec)
+        return chunk_spec
 
 
 @dataclass(frozen=True)
