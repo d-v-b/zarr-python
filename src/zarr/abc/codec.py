@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from zarr.abc.store import ByteGetter, ByteSetter, Store
     from zarr.core.array_spec import ArraySpec
     from zarr.core.chunk_grids import ChunkGrid
+    from zarr.core.codec_pipeline import ChunkRequest
     from zarr.core.dtype.wrapper import TBaseDType, TBaseScalar, ZDType
     from zarr.core.indexing import ChunkProjection, SelectorTuple
     from zarr.core.metadata import ArrayMetadata
@@ -751,7 +752,7 @@ class CodecPipeline:
     @abstractmethod
     async def read(
         self,
-        batch_info: Iterable[tuple[ByteGetter, ArraySpec, SelectorTuple, SelectorTuple, bool]],
+        batch_info: Iterable[ChunkRequest],
         out: NDBuffer,
         drop_axes: tuple[int, ...] = (),
     ) -> None:
@@ -760,12 +761,10 @@ class CodecPipeline:
 
         Parameters
         ----------
-        batch_info : Iterable[tuple[ByteGetter, ArraySpec, SelectorTuple, SelectorTuple]]
-            Ordered set of information about the chunks.
-            The first slice selection determines which parts of the chunk will be fetched.
-            The second slice selection determines where in the output array the chunk data will be written.
-            The ByteGetter is used to fetch the necessary bytes.
-            The chunk spec contains information about the construction of an array from the bytes.
+        batch_info : Iterable[ChunkRequest]
+            Ordered set of chunk requests. Each ``ChunkRequest`` carries the
+            store path (``byte_setter``), the ``ArraySpec`` for that chunk,
+            chunk and output selections, and whether the chunk is complete.
 
             If the Store returns ``None`` for a chunk, then the chunk was not
             written and the implementation must set the values of that chunk (or
@@ -778,7 +777,7 @@ class CodecPipeline:
     @abstractmethod
     async def write(
         self,
-        batch_info: Iterable[tuple[ByteSetter, ArraySpec, SelectorTuple, SelectorTuple, bool]],
+        batch_info: Iterable[ChunkRequest],
         value: NDBuffer,
         drop_axes: tuple[int, ...] = (),
     ) -> None:
@@ -788,12 +787,10 @@ class CodecPipeline:
 
         Parameters
         ----------
-        batch_info : Iterable[tuple[ByteSetter, ArraySpec, SelectorTuple, SelectorTuple]]
-            Ordered set of information about the chunks.
-            The first slice selection determines which parts of the chunk will be encoded.
-            The second slice selection determines where in the value array the chunk data is located.
-            The ByteSetter is used to fetch and write the necessary bytes.
-            The chunk spec contains information about the chunk.
+        batch_info : Iterable[ChunkRequest]
+            Ordered set of chunk requests. Each ``ChunkRequest`` carries the
+            store path (``byte_setter``), the ``ArraySpec`` for that chunk,
+            chunk and output selections, and whether the chunk is complete.
         value : NDBuffer
         """
         ...

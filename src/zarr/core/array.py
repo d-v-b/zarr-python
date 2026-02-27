@@ -48,6 +48,7 @@ from zarr.core.chunk_key_encodings import (
     V2ChunkKeyEncoding,
     parse_chunk_key_encoding,
 )
+from zarr.core.codec_pipeline import ChunkRequest
 from zarr.core.common import (
     JSON,
     ZARR_JSON,
@@ -5602,12 +5603,12 @@ async def _get_selection(
         # reading chunks and decoding them
         await codec_pipeline.read(
             [
-                (
-                    store_path / metadata.encode_chunk_key(chunk_coords),
-                    metadata.get_chunk_spec(chunk_coords, _config, prototype=prototype),
-                    chunk_selection,
-                    out_selection,
-                    is_complete_chunk,
+                ChunkRequest(
+                    byte_setter=store_path / metadata.encode_chunk_key(chunk_coords),
+                    chunk_spec=metadata.get_chunk_spec(chunk_coords, _config, prototype=prototype),
+                    chunk_selection=chunk_selection,
+                    out_selection=out_selection,
+                    is_complete_chunk=is_complete_chunk,
                 )
                 for chunk_coords, chunk_selection, out_selection, is_complete_chunk in indexer
             ],
@@ -5912,12 +5913,12 @@ async def _set_selection(
     # merging with existing data and encoding chunks
     await codec_pipeline.write(
         [
-            (
-                store_path / metadata.encode_chunk_key(chunk_coords),
-                metadata.get_chunk_spec(chunk_coords, _config, prototype),
-                chunk_selection,
-                out_selection,
-                is_complete_chunk,
+            ChunkRequest(
+                byte_setter=store_path / metadata.encode_chunk_key(chunk_coords),
+                chunk_spec=metadata.get_chunk_spec(chunk_coords, _config, prototype),
+                chunk_selection=chunk_selection,
+                out_selection=out_selection,
+                is_complete_chunk=is_complete_chunk,
             )
             for chunk_coords, chunk_selection, out_selection, is_complete_chunk in indexer
         ],

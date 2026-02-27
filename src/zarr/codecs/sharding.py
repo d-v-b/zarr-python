@@ -393,7 +393,7 @@ class ShardingCodec(
 
         transform = self._get_chunk_transform(chunk_spec)
         fill_value = fill_value_or_default(chunk_spec)
-        for chunk_coords, chunk_selection, out_selection, _ in indexer:
+        for chunk_coords, chunk_selection, out_selection, _is_complete in indexer:
             chunk_bytes = shard_dict.get(chunk_coords)
             if chunk_bytes is not None:
                 chunk_array = await transform.decode_chunk_async(chunk_bytes)
@@ -461,7 +461,7 @@ class ShardingCodec(
         # decode chunks and write them into the output buffer
         transform = self._get_chunk_transform(chunk_spec)
         fill_value = fill_value_or_default(chunk_spec)
-        for chunk_coords, chunk_selection, out_selection, _ in indexed_chunks:
+        for chunk_coords, chunk_selection, out_selection, _is_complete in indexed_chunks:
             chunk_bytes = shard_dict.get(chunk_coords)
             if chunk_bytes is not None:
                 chunk_array = await transform.decode_chunk_async(chunk_bytes)
@@ -541,14 +541,14 @@ class ShardingCodec(
         fill_value = fill_value_or_default(chunk_spec)
 
         is_scalar = len(shard_array.shape) == 0
-        for chunk_coords, chunk_selection, out_selection, is_complete_chunk in indexer:
+        for chunk_coords, chunk_selection, out_selection, is_complete in indexer:
             value = shard_array if is_scalar else shard_array[out_selection]
-            if is_complete_chunk and not is_scalar and value.shape == chunk_spec.shape:
+            if is_complete and not is_scalar and value.shape == chunk_spec.shape:
                 # Complete overwrite with matching shape — use value directly
                 chunk_data = value
             else:
                 # Read-modify-write: decode existing or create new, merge data
-                if is_complete_chunk:
+                if is_complete:
                     existing_bytes = None
                 else:
                     existing_bytes = shard_dict.get(chunk_coords)
