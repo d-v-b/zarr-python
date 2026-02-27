@@ -69,49 +69,55 @@ def fill_value_or_default(chunk_spec: ArraySpec) -> Any:
         return fill_value
 
 
-@dataclass(frozen=True, slots=True)
-class CodecChain:
-    """Codec chain with pre-resolved metadata specs.
+@dataclass(slots=True, kw_only=True)
+class ChunkTransform:
+    """A stored chunk, modeled as a layered array.
 
-    Constructed from an iterable of codecs and a chunk ArraySpec.
-    Resolves each codec against the spec so that encode/decode can
-    run without re-resolving.
+    Each layer corresponds to one ArrayArrayCodec and the ArraySpec
+    at its input boundary.  ``layers[0]`` is the outermost (user-visible)
+    transform; after the last layer comes the ArrayBytesCodec.
+
+    The chunk's ``shape`` and ``dtype`` reflect the representation
+    **after** all ArrayArrayCodec layers have been applied — i.e. the
+    spec that feeds the ArrayBytesCodec.
     """
 
     codecs: tuple[Codec, ...]
-    chunk_spec: ArraySpec
+    array_spec: ArraySpec
 
-    _aa_codecs: tuple[ArrayArrayCodec, ...] = field(init=False, repr=False, compare=False)
-    _aa_specs: tuple[ArraySpec, ...] = field(init=False, repr=False, compare=False)
+    # Each element is (ArrayArrayCodec, input_spec_for_that_codec).
+    layers: tuple[tuple[ArrayArrayCodec, ArraySpec], ...] = field(
+        init=False, repr=False, compare=False
+    )
     _ab_codec: ArrayBytesCodec = field(init=False, repr=False, compare=False)
     _ab_spec: ArraySpec = field(init=False, repr=False, compare=False)
     _bb_codecs: tuple[BytesBytesCodec, ...] = field(init=False, repr=False, compare=False)
-    _bb_spec: ArraySpec = field(init=False, repr=False, compare=False)
     _all_sync: bool = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         aa, ab, bb = codecs_from_list(list(self.codecs))
 
-        aa_specs: list[ArraySpec] = []
-        spec = self.chunk_spec
+        layers: tuple[tuple[ArrayArrayCodec, ArraySpec], ...] = ()
+        spec = self.array_spec
         for aa_codec in aa:
-            aa_specs.append(spec)
+            layers = (*layers, (aa_codec, spec))
             spec = aa_codec.resolve_metadata(spec)
 
-        object.__setattr__(self, "_aa_codecs", aa)
-        object.__setattr__(self, "_aa_specs", tuple(aa_specs))
-        object.__setattr__(self, "_ab_codec", ab)
-        object.__setattr__(self, "_ab_spec", spec)
+        self.layers = layers
+        self._ab_codec = ab
+        self._ab_spec = spec
+        self._bb_codecs = bb
+        self._all_sync = all(isinstance(c, SupportsSyncCodec) for c in self.codecs)
 
-        spec = ab.resolve_metadata(spec)
-        object.__setattr__(self, "_bb_codecs", bb)
-        object.__setattr__(self, "_bb_spec", spec)
+    @property
+    def shape(self) -> tuple[int, ...]:
+        """Shape after all ArrayArrayCodec layers (input to the ArrayBytesCodec)."""
+        return self._ab_spec.shape
 
-        object.__setattr__(
-            self,
-            "_all_sync",
-            all(isinstance(c, SupportsSyncCodec) for c in self.codecs),
-        )
+    @property
+    def dtype(self) -> ZDType[TBaseDType, TBaseScalar]:
+        """Dtype after all ArrayArrayCodec layers (input to the ArrayBytesCodec)."""
+        return self._ab_spec.dtype
 
     @property
     def all_sync(self) -> bool:
@@ -127,11 +133,11 @@ class CodecChain:
         """
         bb_out: Any = chunk_bytes
         for bb_codec in reversed(self._bb_codecs):
-            bb_out = cast("SupportsSyncCodec", bb_codec)._decode_sync(bb_out, self._bb_spec)
+            bb_out = cast("SupportsSyncCodec", bb_codec)._decode_sync(bb_out, self._ab_spec)
 
         ab_out: Any = cast("SupportsSyncCodec", self._ab_codec)._decode_sync(bb_out, self._ab_spec)
 
-        for aa_codec, spec in zip(reversed(self._aa_codecs), reversed(self._aa_specs), strict=True):
+        for aa_codec, spec in reversed(self.layers):
             ab_out = cast("SupportsSyncCodec", aa_codec)._decode_sync(ab_out, spec)
 
         return ab_out  # type: ignore[no-any-return]
@@ -146,7 +152,7 @@ class CodecChain:
         """
         aa_out: Any = chunk_array
 
-        for aa_codec, spec in zip(self._aa_codecs, self._aa_specs, strict=True):
+        for aa_codec, spec in self.layers:
             if aa_out is None:
                 return None
             aa_out = cast("SupportsSyncCodec", aa_codec)._encode_sync(aa_out, spec)
@@ -158,7 +164,7 @@ class CodecChain:
         for bb_codec in self._bb_codecs:
             if bb_out is None:
                 return None
-            bb_out = cast("SupportsSyncCodec", bb_codec)._encode_sync(bb_out, self._bb_spec)
+            bb_out = cast("SupportsSyncCodec", bb_codec)._encode_sync(bb_out, self._ab_spec)
 
         return bb_out  # type: ignore[no-any-return]
 
@@ -369,7 +375,7 @@ class BatchedCodecPipeline(CodecPipeline):
                     out[out_selection] = fill_value_or_default(chunk_spec)
         else:
             chunk_bytes_batch = await concurrent_map(
-                [(byte_getter, array_spec.prototype) for byte_getter, array_spec, *_ in batch_info],
+                [(byte_getter, chunk_spec.prototype) for byte_getter, chunk_spec, *_ in batch_info],
                 lambda byte_getter, prototype: byte_getter.get(prototype),
                 config.get("async.concurrency"),
             )
