@@ -34,6 +34,7 @@ __all__ = [
     "CodecOutput",
     "CodecPipeline",
     "PreparedWrite",
+    "SupportsChunkCodec",
     "SupportsSyncCodec",
 ]
 
@@ -77,6 +78,17 @@ class SupportsSyncCodec(Protocol):
     def _encode_sync(
         self, chunk_data: NDBuffer | Buffer, chunk_spec: ArraySpec
     ) -> NDBuffer | Buffer | None: ...
+
+
+class SupportsChunkCodec(Protocol):
+    """Protocol for objects that can decode/encode whole chunks synchronously.
+
+    [`CodecChain`][zarr.core.codec_pipeline.CodecChain] satisfies this protocol.
+    """
+
+    def decode_chunk(self, chunk_bytes: Buffer) -> NDBuffer: ...
+
+    def encode_chunk(self, chunk_array: NDBuffer) -> Buffer | None: ...
 
 
 class BaseCodec(Metadata, Generic[CodecInput, CodecOutput]):
@@ -208,10 +220,37 @@ class ArrayArrayCodec(BaseCodec[NDBuffer, NDBuffer]):
 
 @dataclass
 class PreparedWrite:
-    """Result of ``prepare_write``: existing encoded chunk bytes + selection info."""
+    """Result of the prepare phase of a write operation.
+
+    Carries deserialized chunk data and selection metadata between
+    [`prepare_write`][zarr.abc.codec.ArrayBytesCodec.prepare_write] (or
+    [`prepare_write_sync`][zarr.abc.codec.ArrayBytesCodec.prepare_write_sync])
+    and [`finalize_write`][zarr.abc.codec.ArrayBytesCodec.finalize_write] (or
+    [`finalize_write_sync`][zarr.abc.codec.ArrayBytesCodec.finalize_write_sync]).
+
+    Attributes
+    ----------
+    chunk_dict : dict[tuple[int, ...], Buffer | None]
+        Per-inner-chunk buffers keyed by chunk coordinates.
+    inner_codec_chain : SupportsChunkCodec
+        The [`SupportsChunkCodec`][zarr.abc.codec.SupportsChunkCodec] for
+        decoding/encoding inner chunks.
+    inner_chunk_spec : ArraySpec
+        The [`ArraySpec`][zarr.core.array_spec.ArraySpec] for inner chunks.
+    indexer : list[ChunkProjection]
+        Mapping from inner-chunk coordinates to value/output selections.
+    value_selection : SelectorTuple | None
+        Outer ``out_selection`` for sharding. Unused by the base implementation.
+    write_full_shard : bool
+        Whether the full shard blob will be written. Unused by the base implementation.
+    is_complete_shard : bool
+        Fast-path flag for complete shard writes. Unused by the base implementation.
+    shard_data : NDBuffer | None
+        Full shard value for complete writes. Unused by the base implementation.
+    """
 
     chunk_dict: dict[tuple[int, ...], Buffer | None]
-    inner_codec_chain: Any  # CodecChain — typed as Any to avoid circular import
+    inner_codec_chain: SupportsChunkCodec
     inner_chunk_spec: ArraySpec
     indexer: list[ChunkProjection]
     value_selection: SelectorTuple | None = None
@@ -224,11 +263,18 @@ class ArrayBytesCodec(BaseCodec[NDBuffer, Buffer]):
     """Base class for array-to-bytes codecs."""
 
     @property
-    def inner_codec_chain(self) -> Any:
+    def inner_codec_chain(self) -> SupportsChunkCodec | None:
         """The codec chain for decoding inner chunks after deserialization.
 
-        Returns ``None`` by default — the pipeline should use its own codec chain.
-        ``ShardingCodec`` overrides to return its inner codec chain.
+        Returns ``None`` by default, meaning the pipeline should use its own
+        codec chain. ``ShardingCodec`` overrides this to return its inner
+        codec chain.
+
+        Returns
+        -------
+        SupportsChunkCodec or None
+            A [`SupportsChunkCodec`][zarr.abc.codec.SupportsChunkCodec] instance,
+            or ``None``.
         """
         return None
 
@@ -237,9 +283,22 @@ class ArrayBytesCodec(BaseCodec[NDBuffer, Buffer]):
     ) -> dict[tuple[int, ...], Buffer | None]:
         """Unpack stored bytes into per-inner-chunk buffers.
 
-        Default: single chunk keyed at ``(0,)``.
-        ``ShardingCodec`` overrides to decode the shard index and slice the
-        blob into per-chunk buffers.
+        The default implementation returns a single-entry dict keyed at
+        ``(0,)``. ``ShardingCodec`` overrides this to decode the shard index
+        and split the blob into per-chunk buffers.
+
+        Parameters
+        ----------
+        raw : Buffer or None
+            The raw bytes read from the store, or ``None`` if the key was
+            absent.
+        chunk_spec : ArraySpec
+            The [`ArraySpec`][zarr.core.array_spec.ArraySpec] for the chunk.
+
+        Returns
+        -------
+        dict[tuple[int, ...], Buffer | None]
+            Mapping from inner-chunk coordinates to their encoded bytes.
         """
         return {(0,): raw}
 
@@ -250,9 +309,22 @@ class ArrayBytesCodec(BaseCodec[NDBuffer, Buffer]):
     ) -> Buffer | None:
         """Pack per-inner-chunk buffers into a storage blob.
 
-        Default: return the single chunk's bytes (or ``None`` if absent).
-        ``ShardingCodec`` overrides to concatenate chunks and build an index.
-        Returns ``None`` when all chunks are empty (caller should delete the key).
+        The default implementation returns the single entry at ``(0,)``.
+        ``ShardingCodec`` overrides this to concatenate chunks and build a
+        shard index.
+
+        Parameters
+        ----------
+        chunk_dict : dict[tuple[int, ...], Buffer | None]
+            Mapping from inner-chunk coordinates to their encoded bytes.
+        chunk_spec : ArraySpec
+            The [`ArraySpec`][zarr.core.array_spec.ArraySpec] for the chunk.
+
+        Returns
+        -------
+        Buffer or None
+            The serialized blob, or ``None`` when all chunks are empty
+            (the caller should delete the key).
         """
         return chunk_dict.get((0,))
 
@@ -265,19 +337,35 @@ class ArrayBytesCodec(BaseCodec[NDBuffer, Buffer]):
         byte_getter: Any,
         chunk_spec: ArraySpec,
         chunk_selection: SelectorTuple,
-        codec_chain: Any,
-        aa_chain: Any,
-        ab_pair: Any,
-        bb_chain: Any,
+        codec_chain: SupportsChunkCodec,
     ) -> NDBuffer | None:
-        """Sync IO + full decode for the selected region."""
+        """Read a chunk from the store synchronously, decode it, and
+        return the selected region.
+
+        Parameters
+        ----------
+        byte_getter : Any
+            An object supporting ``get_sync`` (e.g.
+            [`StorePath`][zarr.storage._common.StorePath]).
+        chunk_spec : ArraySpec
+            The [`ArraySpec`][zarr.core.array_spec.ArraySpec] for the chunk.
+        chunk_selection : SelectorTuple
+            Selection within the decoded chunk array.
+        codec_chain : SupportsChunkCodec
+            The [`SupportsChunkCodec`][zarr.abc.codec.SupportsChunkCodec] used to
+            decode the chunk.
+
+        Returns
+        -------
+        NDBuffer or None
+            The decoded chunk data at *chunk_selection*, or ``None`` if the
+            chunk does not exist in the store.
+        """
         raw = byte_getter.get_sync(prototype=chunk_spec.prototype)
-        chunk_array: NDBuffer | None = codec_chain.decode_chunk(
-            raw, chunk_spec, aa_chain, ab_pair, bb_chain
-        )
-        if chunk_array is not None:
-            return chunk_array[chunk_selection]
-        return None
+        if raw is None:
+            return None
+        chunk_array = codec_chain.decode_chunk(raw)
+        return chunk_array[chunk_selection]
 
     def prepare_write_sync(
         self,
@@ -286,9 +374,39 @@ class ArrayBytesCodec(BaseCodec[NDBuffer, Buffer]):
         chunk_selection: SelectorTuple,
         out_selection: SelectorTuple,
         replace: bool,
-        codec_chain: Any,
+        codec_chain: SupportsChunkCodec,
     ) -> PreparedWrite:
-        """Sync IO + deserialize. Returns a :class:`PreparedWrite`."""
+        """Prepare a synchronous write by optionally reading existing data.
+
+        When *replace* is ``False``, the existing chunk bytes are fetched
+        from the store so they can be merged with the new data. When
+        *replace* is ``True``, the fetch is skipped.
+
+        Parameters
+        ----------
+        byte_setter : Any
+            An object supporting ``get_sync`` and ``set_sync`` (e.g.
+            [`StorePath`][zarr.storage._common.StorePath]).
+        chunk_spec : ArraySpec
+            The [`ArraySpec`][zarr.core.array_spec.ArraySpec] for the chunk.
+        chunk_selection : SelectorTuple
+            Selection within the chunk being written.
+        out_selection : SelectorTuple
+            Corresponding selection within the source value array.
+        replace : bool
+            If ``True``, the write replaces all data in the chunk and no
+            read-modify-write is needed. If ``False``, existing data is
+            fetched first.
+        codec_chain : SupportsChunkCodec
+            The [`SupportsChunkCodec`][zarr.abc.codec.SupportsChunkCodec] used to
+            decode/encode the chunk.
+
+        Returns
+        -------
+        PreparedWrite
+            A [`PreparedWrite`][zarr.abc.codec.PreparedWrite] carrying the
+            deserialized chunk data and selection metadata.
+        """
         existing: Buffer | None = None
         if not replace:
             existing = byte_setter.get_sync(prototype=chunk_spec.prototype)
@@ -314,7 +432,22 @@ class ArrayBytesCodec(BaseCodec[NDBuffer, Buffer]):
         chunk_spec: ArraySpec,
         byte_setter: Any,
     ) -> None:
-        """Serialize the prepared *chunk_dict* and write to store."""
+        """Serialize the prepared chunk data and write it to the store.
+
+        If serialization produces ``None`` (all chunks empty), the key is
+        deleted instead.
+
+        Parameters
+        ----------
+        prepared : PreparedWrite
+            The [`PreparedWrite`][zarr.abc.codec.PreparedWrite] returned by
+            [`prepare_write_sync`][zarr.abc.codec.ArrayBytesCodec.prepare_write_sync].
+        chunk_spec : ArraySpec
+            The [`ArraySpec`][zarr.core.array_spec.ArraySpec] for the chunk.
+        byte_setter : Any
+            An object supporting ``set_sync`` and ``delete_sync`` (e.g.
+            [`StorePath`][zarr.storage._common.StorePath]).
+        """
         blob = self.serialize(prepared.chunk_dict, chunk_spec)
         if blob is None:
             byte_setter.delete_sync()
@@ -330,19 +463,35 @@ class ArrayBytesCodec(BaseCodec[NDBuffer, Buffer]):
         byte_getter: Any,
         chunk_spec: ArraySpec,
         chunk_selection: SelectorTuple,
-        codec_chain: Any,
-        aa_chain: Any,
-        ab_pair: Any,
-        bb_chain: Any,
+        codec_chain: SupportsChunkCodec,
     ) -> NDBuffer | None:
-        """Async IO + full decode for the selected region."""
+        """Async variant of
+        [`prepare_read_sync`][zarr.abc.codec.ArrayBytesCodec.prepare_read_sync].
+
+        Parameters
+        ----------
+        byte_getter : Any
+            An object supporting ``get`` (e.g.
+            [`StorePath`][zarr.storage._common.StorePath]).
+        chunk_spec : ArraySpec
+            The [`ArraySpec`][zarr.core.array_spec.ArraySpec] for the chunk.
+        chunk_selection : SelectorTuple
+            Selection within the decoded chunk array.
+        codec_chain : SupportsChunkCodec
+            The [`SupportsChunkCodec`][zarr.abc.codec.SupportsChunkCodec] used to
+            decode the chunk.
+
+        Returns
+        -------
+        NDBuffer or None
+            The decoded chunk data at *chunk_selection*, or ``None`` if the
+            chunk does not exist in the store.
+        """
         raw = await byte_getter.get(prototype=chunk_spec.prototype)
-        chunk_array: NDBuffer | None = codec_chain.decode_chunk(
-            raw, chunk_spec, aa_chain, ab_pair, bb_chain
-        )
-        if chunk_array is not None:
-            return chunk_array[chunk_selection]
-        return None
+        if raw is None:
+            return None
+        chunk_array = codec_chain.decode_chunk(raw)
+        return chunk_array[chunk_selection]
 
     async def prepare_write(
         self,
@@ -351,9 +500,36 @@ class ArrayBytesCodec(BaseCodec[NDBuffer, Buffer]):
         chunk_selection: SelectorTuple,
         out_selection: SelectorTuple,
         replace: bool,
-        codec_chain: Any,
+        codec_chain: SupportsChunkCodec,
     ) -> PreparedWrite:
-        """Async IO + deserialize. Returns a :class:`PreparedWrite`."""
+        """Async variant of
+        [`prepare_write_sync`][zarr.abc.codec.ArrayBytesCodec.prepare_write_sync].
+
+        Parameters
+        ----------
+        byte_setter : Any
+            An object supporting ``get`` and ``set`` (e.g.
+            [`StorePath`][zarr.storage._common.StorePath]).
+        chunk_spec : ArraySpec
+            The [`ArraySpec`][zarr.core.array_spec.ArraySpec] for the chunk.
+        chunk_selection : SelectorTuple
+            Selection within the chunk being written.
+        out_selection : SelectorTuple
+            Corresponding selection within the source value array.
+        replace : bool
+            If ``True``, the write replaces all data in the chunk and no
+            read-modify-write is needed. If ``False``, existing data is
+            fetched first.
+        codec_chain : SupportsChunkCodec
+            The [`SupportsChunkCodec`][zarr.abc.codec.SupportsChunkCodec] used to
+            decode/encode the chunk.
+
+        Returns
+        -------
+        PreparedWrite
+            A [`PreparedWrite`][zarr.abc.codec.PreparedWrite] carrying the
+            deserialized chunk data and selection metadata.
+        """
         existing: Buffer | None = None
         if not replace:
             existing = await byte_setter.get(prototype=chunk_spec.prototype)
@@ -379,7 +555,20 @@ class ArrayBytesCodec(BaseCodec[NDBuffer, Buffer]):
         chunk_spec: ArraySpec,
         byte_setter: Any,
     ) -> None:
-        """Async version of :meth:`finalize_write_sync`."""
+        """Async variant of
+        [`finalize_write_sync`][zarr.abc.codec.ArrayBytesCodec.finalize_write_sync].
+
+        Parameters
+        ----------
+        prepared : PreparedWrite
+            The [`PreparedWrite`][zarr.abc.codec.PreparedWrite] returned by
+            [`prepare_write`][zarr.abc.codec.ArrayBytesCodec.prepare_write].
+        chunk_spec : ArraySpec
+            The [`ArraySpec`][zarr.core.array_spec.ArraySpec] for the chunk.
+        byte_setter : Any
+            An object supporting ``set`` and ``delete`` (e.g.
+            [`StorePath`][zarr.storage._common.StorePath]).
+        """
         blob = self.serialize(prepared.chunk_dict, chunk_spec)
         if blob is None:
             await byte_setter.delete()
