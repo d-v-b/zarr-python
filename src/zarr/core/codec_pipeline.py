@@ -168,6 +168,51 @@ class ChunkTransform:
 
         return bb_out  # type: ignore[no-any-return]
 
+    async def decode_chunk_async(
+        self,
+        chunk_bytes: Buffer,
+    ) -> NDBuffer:
+        """Decode a single chunk through the full codec chain, asynchronously.
+
+        Needed when the codec chain contains async-only codecs (e.g. nested sharding).
+        """
+        bb_out: Any = chunk_bytes
+        for bb_codec in reversed(self._bb_codecs):
+            bb_out = await bb_codec._decode_single(bb_out, self._ab_spec)
+
+        ab_out: Any = await self._ab_codec._decode_single(bb_out, self._ab_spec)
+
+        for aa_codec, spec in reversed(self.layers):
+            ab_out = await aa_codec._decode_single(ab_out, spec)
+
+        return ab_out  # type: ignore[no-any-return]
+
+    async def encode_chunk_async(
+        self,
+        chunk_array: NDBuffer,
+    ) -> Buffer | None:
+        """Encode a single chunk through the full codec chain, asynchronously.
+
+        Needed when the codec chain contains async-only codecs (e.g. nested sharding).
+        """
+        aa_out: Any = chunk_array
+
+        for aa_codec, spec in self.layers:
+            if aa_out is None:
+                return None
+            aa_out = await aa_codec._encode_single(aa_out, spec)
+
+        if aa_out is None:
+            return None
+        bb_out: Any = await self._ab_codec._encode_single(aa_out, self._ab_spec)
+
+        for bb_codec in self._bb_codecs:
+            if bb_out is None:
+                return None
+            bb_out = await bb_codec._encode_single(bb_out, self._ab_spec)
+
+        return bb_out  # type: ignore[no-any-return]
+
     def compute_encoded_size(self, byte_length: int, array_spec: ArraySpec) -> int:
         for codec in self.codecs:
             byte_length = codec.compute_encoded_size(byte_length, array_spec)
