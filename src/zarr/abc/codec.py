@@ -83,12 +83,16 @@ class SupportsSyncCodec(Protocol):
 class SupportsChunkCodec(Protocol):
     """Protocol for objects that can decode/encode whole chunks synchronously.
 
-    [`CodecChain`][zarr.core.codec_pipeline.CodecChain] satisfies this protocol.
+    [`Chunk`][zarr.core.codec_pipeline.Chunk] satisfies this protocol.
+    The chunk spec is baked into the object at construction time.
     """
 
-    def decode_chunk(self, chunk_bytes: Buffer) -> NDBuffer: ...
+    def decode_chunk(
+        self,
+        chunk_bytes: Buffer | None,
+    ) -> NDBuffer | None: ...
 
-    def encode_chunk(self, chunk_array: NDBuffer) -> Buffer | None: ...
+    def encode_chunk(self, chunk_array: NDBuffer | None) -> Buffer | None: ...
 
 
 class BaseCodec(Metadata, Generic[CodecInput, CodecOutput]):
@@ -244,7 +248,7 @@ class ArrayBytesCodec(BaseCodec[NDBuffer, Buffer]):
     """Base class for array-to-bytes codecs."""
 
     @property
-    def inner_codec_chain(self) -> SupportsChunkCodec | None:
+    def inner_chunk(self) -> SupportsChunkCodec | None:
         """The codec chain for decoding inner chunks after deserialization.
 
         Returns ``None`` by default, meaning the pipeline should use its own
@@ -318,7 +322,7 @@ class ArrayBytesCodec(BaseCodec[NDBuffer, Buffer]):
         byte_getter: Any,
         chunk_spec: ArraySpec,
         chunk_selection: SelectorTuple,
-        codec_chain: SupportsChunkCodec,
+        chunk: SupportsChunkCodec,
     ) -> NDBuffer | None:
         """Read a chunk from the store synchronously, decode it, and
         return the selected region.
@@ -332,7 +336,7 @@ class ArrayBytesCodec(BaseCodec[NDBuffer, Buffer]):
             The [`ArraySpec`][zarr.core.array_spec.ArraySpec] for the chunk.
         chunk_selection : SelectorTuple
             Selection within the decoded chunk array.
-        codec_chain : SupportsChunkCodec
+        chunk : SupportsChunkCodec
             The [`SupportsChunkCodec`][zarr.abc.codec.SupportsChunkCodec] used to
             decode the chunk.
 
@@ -345,7 +349,9 @@ class ArrayBytesCodec(BaseCodec[NDBuffer, Buffer]):
         raw = byte_getter.get_sync(prototype=chunk_spec.prototype)
         if raw is None:
             return None
-        chunk_array = codec_chain.decode_chunk(raw)
+        chunk_array = chunk.decode_chunk(raw)
+        if chunk_array is None:
+            return None
         return chunk_array[chunk_selection]
 
     def prepare_write_sync(
@@ -437,7 +443,7 @@ class ArrayBytesCodec(BaseCodec[NDBuffer, Buffer]):
         byte_getter: Any,
         chunk_spec: ArraySpec,
         chunk_selection: SelectorTuple,
-        codec_chain: SupportsChunkCodec,
+        chunk: SupportsChunkCodec,
     ) -> NDBuffer | None:
         """Async variant of
         [`prepare_read_sync`][zarr.abc.codec.ArrayBytesCodec.prepare_read_sync].
@@ -451,7 +457,7 @@ class ArrayBytesCodec(BaseCodec[NDBuffer, Buffer]):
             The [`ArraySpec`][zarr.core.array_spec.ArraySpec] for the chunk.
         chunk_selection : SelectorTuple
             Selection within the decoded chunk array.
-        codec_chain : SupportsChunkCodec
+        chunk : SupportsChunkCodec
             The [`SupportsChunkCodec`][zarr.abc.codec.SupportsChunkCodec] used to
             decode the chunk.
 
@@ -464,7 +470,9 @@ class ArrayBytesCodec(BaseCodec[NDBuffer, Buffer]):
         raw = await byte_getter.get(prototype=chunk_spec.prototype)
         if raw is None:
             return None
-        chunk_array = codec_chain.decode_chunk(raw)
+        chunk_array = chunk.decode_chunk(raw)
+        if chunk_array is None:
+            return None
         return chunk_array[chunk_selection]
 
     async def prepare_write(
