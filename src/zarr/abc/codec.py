@@ -245,22 +245,6 @@ class PreparedWrite:
 class ArrayBytesCodec(BaseCodec[NDBuffer, Buffer]):
     """Base class for array-to-bytes codecs."""
 
-    @property
-    def inner_codec_chain(self) -> SupportsChunkCodec | None:
-        """The codec chain for decoding inner chunks after deserialization.
-
-        Returns ``None`` by default, meaning the pipeline should use its own
-        codec chain. ``ShardingCodec`` overrides this to return its inner
-        codec chain.
-
-        Returns
-        -------
-        SupportsChunkCodec or None
-            A [`SupportsChunkCodec`][zarr.abc.codec.SupportsChunkCodec] instance,
-            or ``None``.
-        """
-        return None
-
     def deserialize(
         self, raw: Buffer | None, chunk_spec: ArraySpec
     ) -> dict[tuple[int, ...], Buffer | None]:
