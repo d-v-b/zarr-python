@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import abstractmethod
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeGuard, TypeVar, runtime_checkable
 
 from typing_extensions import ReadOnly, TypedDict
@@ -232,31 +232,12 @@ class PreparedWrite:
     ----------
     chunk_dict : dict[tuple[int, ...], Buffer | None]
         Per-inner-chunk buffers keyed by chunk coordinates.
-    inner_codec_chain : SupportsChunkCodec
-        The [`SupportsChunkCodec`][zarr.abc.codec.SupportsChunkCodec] for
-        decoding/encoding inner chunks.
-    inner_chunk_spec : ArraySpec
-        The [`ArraySpec`][zarr.core.array_spec.ArraySpec] for inner chunks.
     indexer : list[ChunkProjection]
         Mapping from inner-chunk coordinates to value/output selections.
-    value_selection : SelectorTuple | None
-        Outer ``out_selection`` for sharding. Unused by the base implementation.
-    write_full_shard : bool
-        Whether the full shard blob will be written. Unused by the base implementation.
-    is_complete_shard : bool
-        Fast-path flag for complete shard writes. Unused by the base implementation.
-    shard_data : NDBuffer | None
-        Full shard value for complete writes. Unused by the base implementation.
     """
 
     chunk_dict: dict[tuple[int, ...], Buffer | None]
-    inner_codec_chain: SupportsChunkCodec
-    inner_chunk_spec: ArraySpec
     indexer: list[ChunkProjection]
-    value_selection: SelectorTuple | None = None
-    write_full_shard: bool = True
-    is_complete_shard: bool = False
-    shard_data: NDBuffer | None = field(default=None)
 
 
 class ArrayBytesCodec(BaseCodec[NDBuffer, Buffer]):
@@ -374,7 +355,6 @@ class ArrayBytesCodec(BaseCodec[NDBuffer, Buffer]):
         chunk_selection: SelectorTuple,
         out_selection: SelectorTuple,
         replace: bool,
-        codec_chain: SupportsChunkCodec,
     ) -> PreparedWrite:
         """Prepare a synchronous write by optionally reading existing data.
 
@@ -397,9 +377,6 @@ class ArrayBytesCodec(BaseCodec[NDBuffer, Buffer]):
             If ``True``, the write replaces all data in the chunk and no
             read-modify-write is needed. If ``False``, existing data is
             fetched first.
-        codec_chain : SupportsChunkCodec
-            The [`SupportsChunkCodec`][zarr.abc.codec.SupportsChunkCodec] used to
-            decode/encode the chunk.
 
         Returns
         -------
@@ -411,11 +388,8 @@ class ArrayBytesCodec(BaseCodec[NDBuffer, Buffer]):
         if not replace:
             existing = byte_setter.get_sync(prototype=chunk_spec.prototype)
         chunk_dict = self.deserialize(existing, chunk_spec)
-        inner_chain = self.inner_codec_chain or codec_chain
         return PreparedWrite(
             chunk_dict=chunk_dict,
-            inner_codec_chain=inner_chain,
-            inner_chunk_spec=chunk_spec,
             indexer=[
                 (  # type: ignore[list-item]
                     (0,),
@@ -500,7 +474,6 @@ class ArrayBytesCodec(BaseCodec[NDBuffer, Buffer]):
         chunk_selection: SelectorTuple,
         out_selection: SelectorTuple,
         replace: bool,
-        codec_chain: SupportsChunkCodec,
     ) -> PreparedWrite:
         """Async variant of
         [`prepare_write_sync`][zarr.abc.codec.ArrayBytesCodec.prepare_write_sync].
@@ -520,9 +493,6 @@ class ArrayBytesCodec(BaseCodec[NDBuffer, Buffer]):
             If ``True``, the write replaces all data in the chunk and no
             read-modify-write is needed. If ``False``, existing data is
             fetched first.
-        codec_chain : SupportsChunkCodec
-            The [`SupportsChunkCodec`][zarr.abc.codec.SupportsChunkCodec] used to
-            decode/encode the chunk.
 
         Returns
         -------
@@ -534,11 +504,8 @@ class ArrayBytesCodec(BaseCodec[NDBuffer, Buffer]):
         if not replace:
             existing = await byte_setter.get(prototype=chunk_spec.prototype)
         chunk_dict = self.deserialize(existing, chunk_spec)
-        inner_chain = self.inner_codec_chain or codec_chain
         return PreparedWrite(
             chunk_dict=chunk_dict,
-            inner_codec_chain=inner_chain,
-            inner_chunk_spec=chunk_spec,
             indexer=[
                 (  # type: ignore[list-item]
                     (0,),
