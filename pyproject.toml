@@ -70,6 +70,11 @@ gpu = [
     "cupy-cuda12x",
 ]
 cli = ["typer"]
+server = [
+    "starlette",
+    "httpx",
+    "uvicorn",
+]
 # Testing extras
 test = [
     "coverage>=7.10",
