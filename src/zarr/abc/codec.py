@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from zarr.abc.store import ByteGetter, ByteSetter, Store
     from zarr.core.array_spec import ArraySpec
     from zarr.core.chunk_grids import ChunkGrid
-    from zarr.core.codec_pipeline import ChunkRequest
+    from zarr.core.codec_pipeline import ChunkTransform, ReadChunkRequest, WriteChunkRequest
     from zarr.core.dtype.wrapper import TBaseDType, TBaseScalar, ZDType
     from zarr.core.indexing import ChunkProjection, SelectorTuple
     from zarr.core.metadata import ArrayMetadata
@@ -712,6 +712,20 @@ class CodecPipeline:
         ...
 
     @abstractmethod
+    def get_chunk_transform(self, array_spec: ArraySpec) -> ChunkTransform:
+        """Creates a ChunkTransform for the given array spec.
+
+        Parameters
+        ----------
+        array_spec : ArraySpec
+
+        Returns
+        -------
+        ChunkTransform
+        """
+        ...
+
+    @abstractmethod
     async def decode(
         self,
         chunk_bytes_and_specs: Iterable[tuple[Buffer | None, ArraySpec]],
@@ -752,7 +766,7 @@ class CodecPipeline:
     @abstractmethod
     async def read(
         self,
-        batch_info: Iterable[ChunkRequest],
+        batch_info: Iterable[ReadChunkRequest],
         out: NDBuffer,
         drop_axes: tuple[int, ...] = (),
     ) -> None:
@@ -761,10 +775,10 @@ class CodecPipeline:
 
         Parameters
         ----------
-        batch_info : Iterable[ChunkRequest]
-            Ordered set of chunk requests. Each ``ChunkRequest`` carries the
-            store path (``byte_setter``), the ``ArraySpec`` for that chunk,
-            chunk and output selections, and whether the chunk is complete.
+        batch_info : Iterable[ReadChunkRequest]
+            Ordered set of read requests. Each carries a ``byte_getter``,
+            a ``ChunkTransform`` (codec chain + spec), and chunk/output
+            selections.
 
             If the Store returns ``None`` for a chunk, then the chunk was not
             written and the implementation must set the values of that chunk (or
@@ -777,7 +791,7 @@ class CodecPipeline:
     @abstractmethod
     async def write(
         self,
-        batch_info: Iterable[ChunkRequest],
+        batch_info: Iterable[WriteChunkRequest],
         value: NDBuffer,
         drop_axes: tuple[int, ...] = (),
     ) -> None:
@@ -787,13 +801,36 @@ class CodecPipeline:
 
         Parameters
         ----------
-        batch_info : Iterable[ChunkRequest]
-            Ordered set of chunk requests. Each ``ChunkRequest`` carries the
-            store path (``byte_setter``), the ``ArraySpec`` for that chunk,
-            chunk and output selections, and whether the chunk is complete.
+        batch_info : Iterable[WriteChunkRequest]
+            Ordered set of write requests. Each carries a ``byte_setter``,
+            a ``ChunkTransform`` (codec chain + spec), chunk/output
+            selections, and whether the chunk is complete.
         value : NDBuffer
         """
         ...
+
+    @property
+    def supports_sync_io(self) -> bool:
+        """Whether this pipeline can run read/write entirely on the calling thread."""
+        return False
+
+    def read_sync(
+        self,
+        batch_info: Iterable[ReadChunkRequest],
+        out: NDBuffer,
+        drop_axes: tuple[int, ...] = (),
+    ) -> None:
+        """Synchronous read: fetch bytes from store, decode, scatter into *out*."""
+        raise NotImplementedError
+
+    def write_sync(
+        self,
+        batch_info: Iterable[WriteChunkRequest],
+        value: NDBuffer,
+        drop_axes: tuple[int, ...] = (),
+    ) -> None:
+        """Synchronous write: gather from *value*, encode, persist to store."""
+        raise NotImplementedError
 
 
 async def _batching_helper(
