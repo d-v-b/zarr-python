@@ -10,7 +10,8 @@ The example shows how to:
   existing v2 store
 - Translate v2 metadata (`.zarray` + `.zattrs`) to v3 `zarr.json` using
   the same `_convert_array_metadata` helper that powers `zarr migrate v3`
-- Map v3 default chunk keys (`c/0/0`) to their v2 equivalents (`0.0`)
+- Pass chunk keys through unchanged (the converted metadata preserves
+  `V2ChunkKeyEncoding`, so keys like `0.0` work in both formats)
 - Serve the translated store over HTTP so that any v3-compatible client
   can read v2 data without knowing the original format
 

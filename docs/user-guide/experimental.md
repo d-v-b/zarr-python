@@ -273,3 +273,136 @@ print(f"Cache contains {info['cached_keys']} keys with {info['current_size']} by
 This example shows how the CacheStore can significantly reduce access times for repeated
 data reads, particularly important when working with remote data sources. The dual-store
 architecture allows for flexible cache persistence and management.
+
+## HTTP Server
+
+Zarr Python provides an experimental HTTP server that exposes a Zarr `Store`, `Array`,
+or `Group` over HTTP as an [ASGI](https://asgi.readthedocs.io/) application.
+This makes it possible to serve zarr data to any HTTP-capable client (including
+another Zarr Python process backed by an `HTTPStore`).
+
+The server is built on [Starlette](https://www.starlette.io/) and can be run with
+any ASGI server such as [Uvicorn](https://www.uvicorn.org/).
+
+Install the server dependencies with:
+
+```bash
+pip install zarr[server]
+```
+
+### Serving a Store
+
+[`zarr.experimental.serve.serve_store`][] creates an ASGI app that exposes every key
+in a store:
+
+```python
+import zarr
+from zarr.experimental.serve import serve_store
+
+store = zarr.storage.MemoryStore()
+zarr.create_array(store, shape=(100, 100), chunks=(10, 10), dtype="float64")
+
+app = serve_store(store)
+
+# Run with Uvicorn:
+# uvicorn my_module:app --host 0.0.0.0 --port 8000
+```
+
+### Serving a Node
+
+[`zarr.experimental.serve.serve_node`][] creates an ASGI app that only serves keys
+belonging to a specific `Array` or `Group`.  Requests for keys outside the node
+receive a 404, even if those keys exist in the underlying store:
+
+```python
+import zarr
+from zarr.experimental.serve import serve_node
+
+store = zarr.storage.MemoryStore()
+root = zarr.open_group(store)
+root.create_array("a", shape=(10,), dtype="int32")
+root.create_array("b", shape=(20,), dtype="float64")
+
+# Only serve the array at "a" — requests for "b" will return 404.
+arr = root["a"]
+app = serve_node(arr)
+```
+
+### CORS Support
+
+Both `serve_store` and `serve_node` accept a [`CorsOptions`][zarr.experimental.serve.CorsOptions]
+parameter to enable [CORS](https://developer.mozilla.org/en-US/docs/Web/HTTP/CORS)
+middleware for browser-based clients:
+
+```python
+from zarr.experimental.serve import CorsOptions, serve_store
+
+app = serve_store(
+    store,
+    cors_options=CorsOptions(
+        allow_origins=["*"],
+        allow_methods=["GET"],
+    ),
+)
+```
+
+### HTTP Range Requests
+
+The server supports the standard `Range` header for partial reads.  The three
+forms defined by [RFC 7233](https://httpwg.org/specs/rfc7233.html) are supported:
+
+| Header               | Meaning                        |
+| -------------------- | ------------------------------ |
+| `bytes=0-99`         | First 100 bytes                |
+| `bytes=100-`         | Everything from byte 100       |
+| `bytes=-50`          | Last 50 bytes                  |
+
+A successful range request returns HTTP 206 (Partial Content).
+
+### Write Support
+
+By default only `GET` requests are accepted.  To enable writes, pass
+`methods={"GET", "PUT"}`:
+
+```python
+app = serve_store(store, methods={"GET", "PUT"})
+```
+
+A `PUT` request stores the request body at the given path and returns 204 (No Content).
+
+### Running the Server in a Background Thread
+
+Because `serve_store` and `serve_node` return a standard ASGI app, you can run the
+server in a daemon thread and interact with it from the same process. This is
+useful for notebooks, scripts, and interactive exploration:
+
+```python
+import threading
+
+import numpy as np
+import uvicorn
+
+import zarr
+from zarr.experimental.serve import serve_node
+from zarr.storage import MemoryStore
+
+# Create an array with some data.
+store = MemoryStore()
+arr = zarr.create_array(store, shape=(100,), chunks=(10,), dtype="float64")
+arr[:] = np.arange(100, dtype="float64")
+
+# Build the ASGI app and launch Uvicorn in a daemon thread.
+app = serve_node(arr)
+config = uvicorn.Config(app, host="127.0.0.1", port=8000)
+server = uvicorn.Server(config)
+thread = threading.Thread(target=server.run, daemon=True)
+thread.start()
+
+# Now open the served array from another zarr client.
+remote = zarr.open_array("http://127.0.0.1:8000", mode="r")
+np.testing.assert_array_equal(remote[:], arr[:])
+
+# Shut down when finished.
+server.should_exit = True
+thread.join()
+```
