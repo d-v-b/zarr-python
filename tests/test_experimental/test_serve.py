@@ -11,6 +11,7 @@ from zarr.core.sync import sync
 
 if TYPE_CHECKING:
     from zarr.abc.store import Store
+    from zarr.core.common import ZarrFormat
 
 pytest.importorskip("starlette")
 pytest.importorskip("httpx")
@@ -495,3 +496,85 @@ class TestCorsMiddleware:
         response = client.get("/key", headers={"Origin": "https://example.com"})
         assert response.status_code == 200
         assert "access-control-allow-origin" not in response.headers
+
+
+def _metadata_key(zarr_format: ZarrFormat) -> str:
+    """Return the metadata key for the given zarr format."""
+    return "zarr.json" if zarr_format == 3 else ".zarray"
+
+
+def _chunk_key(zarr_format: ZarrFormat, coords: str) -> str:
+    """Return a chunk key for the given format.
+
+    *coords* is a dot-separated string like ``"0.0"``.  For v3 this becomes
+    ``"c/0/0"``; for v2 it is returned unchanged.
+    """
+    if zarr_format == 3:
+        return "c/" + coords.replace(".", "/")
+    return coords
+
+
+@pytest.mark.parametrize("store", ["memory"], indirect=True)
+class TestServeNodeV2AndV3:
+    """Test serve_node with both v2 and v3 arrays side by side."""
+
+    def test_metadata_accessible(self, store: Store, zarr_format: ZarrFormat) -> None:
+        """The format-appropriate metadata key should be served with 200."""
+        arr = zarr.create_array(store, shape=(4,), chunks=(2,), dtype="f8", zarr_format=zarr_format)
+        app = serve_node(arr)
+        client = TestClient(app)
+
+        response = client.get(f"/{_metadata_key(zarr_format)}")
+        assert response.status_code == 200
+
+    def test_chunk_accessible(self, store: Store, zarr_format: ZarrFormat) -> None:
+        """An in-bounds chunk key should be served with 200 for both formats."""
+        arr = zarr.create_array(store, shape=(4,), chunks=(2,), dtype="f8", zarr_format=zarr_format)
+        arr[:] = np.ones(4)
+
+        app = serve_node(arr)
+        client = TestClient(app)
+
+        response = client.get(f"/{_chunk_key(zarr_format, '0')}")
+        assert response.status_code == 200
+
+    def test_out_of_bounds_chunk_returns_404(self, store: Store, zarr_format: ZarrFormat) -> None:
+        """An out-of-bounds chunk key should return 404 for both formats."""
+        arr = zarr.create_array(store, shape=(4,), chunks=(2,), dtype="f8", zarr_format=zarr_format)
+        arr[:] = np.ones(4)
+
+        app = serve_node(arr)
+        client = TestClient(app)
+
+        response = client.get(f"/{_chunk_key(zarr_format, '99')}")
+        assert response.status_code == 404
+
+    def test_non_zarr_key_returns_404(self, store: Store, zarr_format: ZarrFormat) -> None:
+        """A non-zarr key should return 404 regardless of format."""
+        arr = zarr.create_array(store, shape=(4,), chunks=(2,), dtype="f8", zarr_format=zarr_format)
+        non_zarr_buf = cpu.buffer_prototype.buffer.from_bytes(b"secret")
+        sync(store.set("secret.txt", non_zarr_buf))
+
+        app = serve_node(arr)
+        client = TestClient(app)
+
+        response = client.get("/secret.txt")
+        assert response.status_code == 404
+
+    def test_data_roundtrip(self, store: Store, zarr_format: ZarrFormat) -> None:
+        """Data written to an array should be readable via serve_store for
+        both formats."""
+        arr = zarr.create_array(store, shape=(4,), chunks=(2,), dtype="f8", zarr_format=zarr_format)
+        arr[:] = np.arange(4, dtype="f8")
+
+        app = serve_store(store)
+        client = TestClient(app)
+
+        # Metadata should be accessible.
+        response = client.get(f"/{_metadata_key(zarr_format)}")
+        assert response.status_code == 200
+
+        # First chunk should be accessible.
+        response = client.get(f"/{_chunk_key(zarr_format, '0')}")
+        assert response.status_code == 200
+        assert len(response.content) > 0

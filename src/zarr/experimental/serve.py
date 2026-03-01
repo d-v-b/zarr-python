@@ -7,12 +7,15 @@ from zarr.core.buffer import cpu
 from zarr.core.keys import is_valid_node_key
 
 if TYPE_CHECKING:
+    from starlette.applications import Starlette
     from starlette.requests import Request
     from starlette.responses import Response
 
     from zarr.abc.store import ByteRequest, Store
     from zarr.core.array import Array
     from zarr.core.group import Group
+
+__all__ = ["CorsOptions", "HTTPMethod", "serve_node", "serve_store"]
 
 
 class CorsOptions(TypedDict):
@@ -111,7 +114,7 @@ def _make_starlette_app(
     *,
     methods: set[HTTPMethod] | None = None,
     cors_options: CorsOptions | None = None,
-) -> Any:
+) -> Starlette:
     """Create a Starlette app with the request handler."""
     try:
         from starlette.applications import Starlette
@@ -144,7 +147,7 @@ def serve_store(
     *,
     methods: set[HTTPMethod] | None = None,
     cors_options: CorsOptions | None = None,
-) -> Any:
+) -> Starlette:
     """Create a Starlette ASGI app that serves every key in a zarr ``Store``.
 
     Parameters
@@ -173,7 +176,7 @@ def serve_node(
     *,
     methods: set[HTTPMethod] | None = None,
     cors_options: CorsOptions | None = None,
-) -> Any:
+) -> Starlette:
     """Create a Starlette ASGI app that serves only the keys belonging to a
     zarr ``Array`` or ``Group``.
 
