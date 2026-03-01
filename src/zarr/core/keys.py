@@ -15,7 +15,7 @@ For a **group** the valid keys are:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from zarr.core.common import ZARR_JSON, ZARRAY_JSON, ZATTRS_JSON, ZGROUP_JSON, ZMETADATA_V2_JSON
 
@@ -44,7 +44,7 @@ def metadata_keys(zarr_format: int) -> frozenset[str]:
     return _METADATA_KEYS_V2
 
 
-def decode_chunk_key(array: Array, key: str) -> tuple[int, ...] | None:
+def decode_chunk_key(array: Array[Any], key: str) -> tuple[int, ...] | None:
     """Try to decode *key* into chunk coordinates for *array*.
 
     Parameters
@@ -85,7 +85,7 @@ def decode_chunk_key(array: Array, key: str) -> tuple[int, ...] | None:
         return None
 
 
-def is_valid_chunk_key(array: Array, key: str) -> bool:
+def is_valid_chunk_key(array: Array[Any], key: str) -> bool:
     """Check whether *key* is a valid chunk key for *array*.
 
     Tries to decode the key and checks that the resulting coordinates fall
@@ -112,7 +112,7 @@ def is_valid_chunk_key(array: Array, key: str) -> bool:
     return all(0 <= c < g for c, g in zip(coords, grid, strict=True))
 
 
-def is_valid_array_key(array: Array, key: str) -> bool:
+def is_valid_array_key(array: Array[Any], key: str) -> bool:
     """Check whether *key* is a valid store key for *array*.
 
     Valid keys are metadata documents and chunk keys.
@@ -133,7 +133,7 @@ def is_valid_array_key(array: Array, key: str) -> bool:
     return is_valid_chunk_key(array, key)
 
 
-def is_valid_node_key(node: Array | Group, key: str) -> bool:
+def is_valid_node_key(node: Array[Any] | Group, key: str) -> bool:
     """Check whether *key* is a valid store key relative to *node*.
 
     For an ``Array``, valid keys are metadata documents and chunk keys.
@@ -154,7 +154,6 @@ def is_valid_node_key(node: Array | Group, key: str) -> bool:
     bool
     """
     from zarr.core.array import Array
-    from zarr.core.group import Group
 
     if isinstance(node, Array):
         return is_valid_array_key(node, key)
@@ -176,6 +175,4 @@ def is_valid_node_key(node: Array | Group, key: str) -> bool:
     except KeyError:
         return False
 
-    if isinstance(child, (Array, Group)):
-        return is_valid_node_key(child, remainder)
-    return False
+    return is_valid_node_key(child, remainder)

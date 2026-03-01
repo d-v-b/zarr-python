@@ -1,30 +1,29 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import numpy as np
 import pytest
 
 import zarr
 from zarr.core.buffer import cpu
 from zarr.core.sync import sync
-from zarr.storage import MemoryStore
+
+if TYPE_CHECKING:
+    from zarr.abc.store import Store
 
 pytest.importorskip("starlette")
 pytest.importorskip("httpx")
 
 from starlette.testclient import TestClient
 
-from zarr.experimental.serve import serve_node, serve_store
+from zarr.experimental.serve import CorsOptions, _parse_range_header, serve_node, serve_store
 
 
 @pytest.fixture
-def memory_store() -> MemoryStore:
-    return MemoryStore()
-
-
-@pytest.fixture
-def group_with_arrays(memory_store: MemoryStore) -> zarr.Group:
+def group_with_arrays(store: Store) -> zarr.Group:
     """Create a group containing a regular array and a sharded array."""
-    root = zarr.open_group(memory_store, mode="w")
+    root = zarr.open_group(store, mode="w")
     zarr.create_array(root.store_path / "regular", shape=(4, 4), chunks=(2, 2), dtype="f8")
     zarr.create_array(
         root.store_path / "sharded",
@@ -36,15 +35,15 @@ def group_with_arrays(memory_store: MemoryStore) -> zarr.Group:
     return root
 
 
+@pytest.mark.parametrize("store", ["memory"], indirect=True)
 class TestServeNodeDoesNotExposeNonZarrKeys:
     """serve_node must never expose keys that are not part of the zarr hierarchy."""
 
-    def test_non_zarr_key_returns_404(
-        self, memory_store: MemoryStore, group_with_arrays: zarr.Group
-    ) -> None:
-        # Plant a non-zarr file in the store.
+    def test_non_zarr_key_returns_404(self, store: Store, group_with_arrays: zarr.Group) -> None:
+        """A key that is not valid zarr metadata or a valid chunk key should return 404,
+        even if the underlying store contains data at that path."""
         non_zarr_buf = cpu.buffer_prototype.buffer.from_bytes(b"secret data")
-        sync(memory_store.set("secret.txt", non_zarr_buf))
+        sync(store.set("secret.txt", non_zarr_buf))
 
         app = serve_node(group_with_arrays)
         client = TestClient(app)
@@ -54,12 +53,12 @@ class TestServeNodeDoesNotExposeNonZarrKeys:
         assert response.status_code == 404
 
     def test_non_zarr_key_nested_returns_404(
-        self, memory_store: MemoryStore, group_with_arrays: zarr.Group
+        self, store: Store, group_with_arrays: zarr.Group
     ) -> None:
-        # Plant a non-zarr file under a path that shares a prefix with a
-        # real array, but is not a valid chunk or metadata key.
+        """A non-zarr key nested under a real array's path should return 404,
+        even though the path prefix matches a valid zarr node."""
         non_zarr_buf = cpu.buffer_prototype.buffer.from_bytes(b"not a chunk")
-        sync(memory_store.set("regular/notes.txt", non_zarr_buf))
+        sync(store.set("regular/notes.txt", non_zarr_buf))
 
         app = serve_node(group_with_arrays)
         client = TestClient(app)
@@ -68,6 +67,8 @@ class TestServeNodeDoesNotExposeNonZarrKeys:
         assert response.status_code == 404
 
     def test_valid_metadata_is_accessible(self, group_with_arrays: zarr.Group) -> None:
+        """Zarr metadata keys (zarr.json) for both the root group and child arrays
+        should be served with a 200 status."""
         app = serve_node(group_with_arrays)
         client = TestClient(app)
 
@@ -80,8 +81,10 @@ class TestServeNodeDoesNotExposeNonZarrKeys:
         assert response.status_code == 200
 
     def test_valid_chunk_is_accessible(self, group_with_arrays: zarr.Group) -> None:
-        # Write some data so the chunk actually exists in the store.
+        """A valid, in-bounds chunk key for an array with written data should
+        be served with a 200 status."""
         arr = group_with_arrays["regular"]
+        assert isinstance(arr, zarr.Array)
         arr[:] = np.ones((4, 4))
 
         app = serve_node(group_with_arrays)
@@ -91,12 +94,40 @@ class TestServeNodeDoesNotExposeNonZarrKeys:
         response = client.get("/regular/c/0/0")
         assert response.status_code == 200
 
+    def test_out_of_bounds_chunk_key_returns_404(self, group_with_arrays: zarr.Group) -> None:
+        """A chunk key that is syntactically valid but references indices beyond
+        the array's chunk grid should return 404."""
+        arr = group_with_arrays["regular"]
+        assert isinstance(arr, zarr.Array)
+        arr[:] = np.ones((4, 4))
 
+        app = serve_node(group_with_arrays)
+        client = TestClient(app)
+
+        # (4,4) array with (2,2) chunks has grid shape (2,2), so c/99/99 is
+        # syntactically valid but out of bounds.
+        response = client.get("/regular/c/99/99")
+        assert response.status_code == 404
+
+    def test_empty_path_returns_404(self, group_with_arrays: zarr.Group) -> None:
+        """A request to the root path '/' should return 404 because an empty
+        string is not a valid zarr key."""
+        app = serve_node(group_with_arrays)
+        client = TestClient(app)
+
+        response = client.get("/")
+        assert response.status_code == 404
+
+
+@pytest.mark.parametrize("store", ["memory"], indirect=True)
 class TestShardedArrayByteRangeReads:
     """Byte-range reads against a sharded array served via serve_node."""
 
     def test_range_read_returns_206(self, group_with_arrays: zarr.Group) -> None:
+        """A Range header requesting a specific byte range (e.g. bytes=0-7) should
+        return 206 Partial Content with exactly those bytes."""
         arr = group_with_arrays["sharded"]
+        assert isinstance(arr, zarr.Array)
         arr[:] = np.arange(64, dtype="i4").reshape((8, 8))
 
         app = serve_node(group_with_arrays)
@@ -113,7 +144,10 @@ class TestShardedArrayByteRangeReads:
         assert range_response.content == full_body[:8]
 
     def test_suffix_range_read(self, group_with_arrays: zarr.Group) -> None:
+        """A suffix byte range (e.g. bytes=-4) should return the last N bytes
+        of the resource with a 206 status."""
         arr = group_with_arrays["sharded"]
+        assert isinstance(arr, zarr.Array)
         arr[:] = np.arange(64, dtype="i4").reshape((8, 8))
 
         app = serve_node(group_with_arrays)
@@ -128,7 +162,10 @@ class TestShardedArrayByteRangeReads:
         assert range_response.content == full_body[-4:]
 
     def test_offset_range_read(self, group_with_arrays: zarr.Group) -> None:
+        """An offset byte range (e.g. bytes=4-) should return all bytes from
+        the given offset to the end, with a 206 status."""
         arr = group_with_arrays["sharded"]
+        assert isinstance(arr, zarr.Array)
         arr[:] = np.arange(64, dtype="i4").reshape((8, 8))
 
         app = serve_node(group_with_arrays)
@@ -143,11 +180,100 @@ class TestShardedArrayByteRangeReads:
         assert range_response.content == full_body[4:]
 
 
+@pytest.mark.parametrize("store", ["memory"], indirect=True)
+class TestMalformedRangeHeaders:
+    """Malformed Range headers must return 416, never crash the server."""
+
+    @pytest.mark.parametrize(
+        "header",
+        [
+            "bytes=abc-def",
+            "bytes=-abc",
+            "bytes=abc-",
+            "bytes=0-7,10-20",
+        ],
+    )
+    def test_malformed_range_returns_416(self, store: Store, header: str) -> None:
+        """Range headers with non-numeric values, multiple ranges, or other
+        malformed syntax should return 416 Range Not Satisfiable instead of
+        crashing the server."""
+        buf = cpu.buffer_prototype.buffer.from_bytes(b"some data here")
+        sync(store.set("key", buf))
+
+        app = serve_store(store)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.get("/key", headers={"Range": header})
+        assert response.status_code == 416
+
+    def test_non_bytes_unit_returns_416(self, store: Store) -> None:
+        """A Range header using a unit other than 'bytes' (e.g. 'chars=0-7')
+        should return 416 because only byte ranges are supported."""
+        buf = cpu.buffer_prototype.buffer.from_bytes(b"some data")
+        sync(store.set("key", buf))
+
+        app = serve_store(store)
+        client = TestClient(app)
+
+        response = client.get("/key", headers={"Range": "chars=0-7"})
+        assert response.status_code == 416
+
+
+class TestParseRangeHeader:
+    """Unit tests for _parse_range_header."""
+
+    def test_valid_range(self) -> None:
+        """'bytes=0-99' should parse into a RangeByteRequest with start=0 and
+        end=100 (end is exclusive, so the inclusive HTTP end is incremented)."""
+        from zarr.abc.store import RangeByteRequest
+
+        result = _parse_range_header("bytes=0-99")
+        assert result == RangeByteRequest(start=0, end=100)
+
+    def test_valid_suffix(self) -> None:
+        """'bytes=-50' should parse into a SuffixByteRequest requesting the
+        last 50 bytes of the resource."""
+        from zarr.abc.store import SuffixByteRequest
+
+        result = _parse_range_header("bytes=-50")
+        assert result == SuffixByteRequest(suffix=50)
+
+    def test_valid_offset(self) -> None:
+        """'bytes=10-' should parse into an OffsetByteRequest starting at
+        byte 10 and reading to the end of the resource."""
+        from zarr.abc.store import OffsetByteRequest
+
+        result = _parse_range_header("bytes=10-")
+        assert result == OffsetByteRequest(offset=10)
+
+    def test_non_bytes_unit(self) -> None:
+        """A Range header with a non-'bytes' unit should return None."""
+        assert _parse_range_header("chars=0-7") is None
+
+    def test_garbage_values(self) -> None:
+        """Non-numeric values in the byte range should return None instead
+        of raising a ValueError."""
+        assert _parse_range_header("bytes=abc-def") is None
+
+    def test_multi_range(self) -> None:
+        """Multi-range requests (e.g. bytes=0-7,10-20) are not supported and
+        should return None."""
+        assert _parse_range_header("bytes=0-7,10-20") is None
+
+    def test_empty_spec(self) -> None:
+        """A Range header with no range specifier after 'bytes=' should
+        return None."""
+        assert _parse_range_header("bytes=") is None
+
+
+@pytest.mark.parametrize("store", ["memory"], indirect=True)
 class TestWriteViaPut:
     """serve_store and serve_node can be configured to accept PUT writes."""
 
-    def test_put_writes_to_store(self, memory_store: MemoryStore) -> None:
-        app = serve_store(memory_store, methods={"GET", "PUT"})
+    def test_put_writes_to_store(self, store: Store) -> None:
+        """A PUT request to serve_store with PUT enabled should write the
+        request body into the store at the given key."""
+        app = serve_store(store, methods={"GET", "PUT"})
         client = TestClient(app)
 
         payload = b"hello zarr"
@@ -155,12 +281,14 @@ class TestWriteViaPut:
         assert response.status_code == 204
 
         # Verify the data landed in the store.
-        buf = sync(memory_store.get("some/key", cpu.buffer_prototype))
+        buf = sync(store.get("some/key", cpu.buffer_prototype))
         assert buf is not None
         assert buf.to_bytes() == payload
 
-    def test_put_then_get_roundtrip(self, memory_store: MemoryStore) -> None:
-        app = serve_store(memory_store, methods={"GET", "PUT"})
+    def test_put_then_get_roundtrip(self, store: Store) -> None:
+        """Data written via PUT should be retrievable via a subsequent GET
+        at the same key."""
+        app = serve_store(store, methods={"GET", "PUT"})
         client = TestClient(app)
 
         payload = b"\x00\x01\x02\x03"
@@ -170,20 +298,200 @@ class TestWriteViaPut:
         assert response.status_code == 200
         assert response.content == payload
 
-    def test_put_rejected_when_not_configured(self, memory_store: MemoryStore) -> None:
-        # Default methods is {"GET"} only.
-        app = serve_store(memory_store)
+    def test_put_rejected_when_not_configured(self, store: Store) -> None:
+        """PUT requests should return 405 Method Not Allowed when the server
+        is created with the default methods (GET only)."""
+        app = serve_store(store)
         client = TestClient(app)
 
         response = client.put("/some/key", content=b"data")
         assert response.status_code == 405
 
-    def test_put_on_node_validates_key(
-        self, memory_store: MemoryStore, group_with_arrays: zarr.Group
-    ) -> None:
+    def test_put_on_node_validates_key(self, store: Store, group_with_arrays: zarr.Group) -> None:
+        """PUT requests via serve_node should be rejected with 404 when the
+        target key is not a valid zarr key (metadata or chunk)."""
         app = serve_node(group_with_arrays, methods={"GET", "PUT"})
         client = TestClient(app)
 
-        # Writing to a non-zarr key should be rejected.
         response = client.put("/not_a_zarr_key.bin", content=b"data")
         assert response.status_code == 404
+
+    def test_put_to_valid_chunk_key_succeeds(self, group_with_arrays: zarr.Group) -> None:
+        """PUT requests via serve_node to a valid chunk key should succeed
+        with 204, and the written data should be retrievable via GET."""
+        app = serve_node(group_with_arrays, methods={"GET", "PUT"})
+        client = TestClient(app)
+
+        payload = b"\x00" * 32
+        response = client.put("/regular/c/0/0", content=payload)
+        assert response.status_code == 204
+
+        # Confirm it round-trips.
+        get_response = client.get("/regular/c/0/0")
+        assert get_response.status_code == 200
+        assert get_response.content == payload
+
+
+@pytest.mark.parametrize("store", ["memory"], indirect=True)
+class TestServeStoreEdgeCases:
+    """Edge cases for serve_store."""
+
+    def test_get_nonexistent_key_returns_404(self, store: Store) -> None:
+        """GET for a key that does not exist in the store should return 404."""
+        app = serve_store(store)
+        client = TestClient(app)
+
+        response = client.get("/no/such/key")
+        assert response.status_code == 404
+
+    def test_empty_path_returns_404(self, store: Store) -> None:
+        """GET to the root path '/' (empty key) should return 404 because
+        an empty string is not a valid store key."""
+        app = serve_store(store)
+        client = TestClient(app)
+
+        response = client.get("/")
+        assert response.status_code == 404
+
+
+@pytest.mark.parametrize("store", ["memory"], indirect=True)
+class TestServeNodeDirectArray:
+    """Serve a single array directly (not through a group)."""
+
+    def test_serve_nested_array_directly(self, store: Store) -> None:
+        """When serve_node is given a nested array (not a group), requests
+        should use keys relative to that array's path. Metadata and in-bounds
+        chunks should return 200, and out-of-bounds chunks should return 404."""
+        root = zarr.open_group(store, mode="w")
+        arr = zarr.create_array(
+            root.store_path / "sub/nested",
+            shape=(4,),
+            chunks=(2,),
+            dtype="f8",
+        )
+        arr[:] = np.arange(4, dtype="f8")
+
+        # Serve the array directly — its prefix is "sub/nested".
+        app = serve_node(arr)
+        client = TestClient(app)
+
+        # Metadata should be accessible at the array root.
+        response = client.get("/zarr.json")
+        assert response.status_code == 200
+
+        # Chunk keys are relative to the array.
+        response = client.get("/c/0")
+        assert response.status_code == 200
+
+        response = client.get("/c/1")
+        assert response.status_code == 200
+
+        # Out of bounds.
+        response = client.get("/c/99")
+        assert response.status_code == 404
+
+    def test_serve_root_array(self, store: Store) -> None:
+        """When serve_node is given an array stored at the root of a store
+        (empty prefix), metadata and chunk keys should be accessible at
+        their natural paths."""
+        arr = zarr.create_array(
+            store,
+            shape=(6,),
+            chunks=(3,),
+            dtype="i4",
+        )
+        arr[:] = np.arange(6, dtype="i4")
+
+        # Root-level array has prefix = "".
+        app = serve_node(arr)
+        client = TestClient(app)
+
+        response = client.get("/zarr.json")
+        assert response.status_code == 200
+
+        response = client.get("/c/0")
+        assert response.status_code == 200
+
+        response = client.get("/c/1")
+        assert response.status_code == 200
+
+        response = client.get("/c/2")
+        assert response.status_code == 404
+
+
+@pytest.mark.parametrize("store", ["memory"], indirect=True)
+class TestContentType:
+    """Responses should have the correct Content-Type."""
+
+    def test_metadata_has_json_content_type(self, group_with_arrays: zarr.Group) -> None:
+        """Zarr metadata files (zarr.json) should be served with
+        Content-Type: application/json."""
+        app = serve_node(group_with_arrays)
+        client = TestClient(app)
+
+        response = client.get("/zarr.json")
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "application/json"
+
+    def test_chunk_has_octet_stream_content_type(self, group_with_arrays: zarr.Group) -> None:
+        """Chunk data should be served with Content-Type: application/octet-stream
+        since it is binary data."""
+        arr = group_with_arrays["regular"]
+        assert isinstance(arr, zarr.Array)
+        arr[:] = np.ones((4, 4))
+
+        app = serve_node(group_with_arrays)
+        client = TestClient(app)
+
+        response = client.get("/regular/c/0/0")
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "application/octet-stream"
+
+
+@pytest.mark.parametrize("store", ["memory"], indirect=True)
+class TestCorsMiddleware:
+    """CORS middleware should add the expected headers."""
+
+    def test_cors_headers_present(self, store: Store) -> None:
+        """When cors_options are provided, responses should include the
+        Access-Control-Allow-Origin header matching the request origin."""
+        buf = cpu.buffer_prototype.buffer.from_bytes(b"data")
+        sync(store.set("key", buf))
+
+        cors = CorsOptions(allow_origins=["https://example.com"], allow_methods=["GET"])
+        app = serve_store(store, cors_options=cors)
+        client = TestClient(app)
+
+        response = client.get("/key", headers={"Origin": "https://example.com"})
+        assert response.status_code == 200
+        assert response.headers["access-control-allow-origin"] == "https://example.com"
+
+    def test_cors_preflight(self, store: Store) -> None:
+        """CORS preflight OPTIONS requests should return 200 with the
+        Access-Control-Allow-Origin header when CORS is configured."""
+        cors = CorsOptions(allow_origins=["*"], allow_methods=["GET", "PUT"])
+        app = serve_store(store, methods={"GET", "PUT"}, cors_options=cors)
+        client = TestClient(app)
+
+        response = client.options(
+            "/any/path",
+            headers={
+                "Origin": "https://example.com",
+                "Access-Control-Request-Method": "PUT",
+            },
+        )
+        assert response.status_code == 200
+        assert "access-control-allow-origin" in response.headers
+
+    def test_no_cors_headers_without_option(self, store: Store) -> None:
+        """When no cors_options are provided, responses should not include
+        any CORS headers, even if the request includes an Origin header."""
+        buf = cpu.buffer_prototype.buffer.from_bytes(b"data")
+        sync(store.set("key", buf))
+
+        app = serve_store(store)
+        client = TestClient(app)
+
+        response = client.get("/key", headers={"Origin": "https://example.com"})
+        assert response.status_code == 200
+        assert "access-control-allow-origin" not in response.headers

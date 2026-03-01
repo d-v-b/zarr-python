@@ -40,21 +40,24 @@ def _parse_range_header(range_header: str) -> ByteRequest | None:
     if not range_header.startswith("bytes="):
         return None
     range_spec = range_header[len("bytes=") :]
-    if range_spec.startswith("-"):
-        # suffix request: bytes=-N
-        suffix = int(range_spec[1:])
-        return SuffixByteRequest(suffix=suffix)
-    parts = range_spec.split("-", 1)
-    if len(parts) != 2:
+    try:
+        if range_spec.startswith("-"):
+            # suffix request: bytes=-N
+            suffix = int(range_spec[1:])
+            return SuffixByteRequest(suffix=suffix)
+        parts = range_spec.split("-", 1)
+        if len(parts) != 2:
+            return None
+        start_str, end_str = parts
+        start = int(start_str)
+        if end_str == "":
+            # offset request: bytes=N-
+            return OffsetByteRequest(offset=start)
+        # range request: bytes=N-M (HTTP end is inclusive, ByteRequest end is exclusive)
+        end = int(end_str) + 1
+        return RangeByteRequest(start=start, end=end)
+    except ValueError:
         return None
-    start_str, end_str = parts
-    start = int(start_str)
-    if end_str == "":
-        # offset request: bytes=N-
-        return OffsetByteRequest(offset=start)
-    # range request: bytes=N-M (HTTP end is inclusive, ByteRequest end is exclusive)
-    end = int(end_str) + 1
-    return RangeByteRequest(start=start, end=end)
 
 
 async def _get_response(store: Store, path: str, byte_range: ByteRequest | None = None) -> Response:
@@ -77,7 +80,7 @@ async def _handle_request(request: Request) -> Response:
     from starlette.responses import Response
 
     store: Store = request.app.state.store
-    node: Array | Group | None = request.app.state.node
+    node: Array[Any] | Group | None = request.app.state.node
     prefix: str = request.app.state.prefix
     path = request.path_params.get("path", "")
 
@@ -166,7 +169,7 @@ def serve_store(
 
 
 def serve_node(
-    node: Array | Group,
+    node: Array[Any] | Group,
     *,
     methods: set[HTTPMethod] | None = None,
     cors_options: CorsOptions | None = None,
