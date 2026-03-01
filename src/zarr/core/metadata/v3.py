@@ -229,7 +229,7 @@ class ArrayV3Metadata(Metadata):
         """
 
         shape_parsed = parse_shapelike(shape)
-        chunk_grid_parsed = parse_chunk_grid(chunk_grid)
+        chunk_grid_parsed = parse_chunk_grid(chunk_grid, array_shape=shape_parsed)
         chunk_key_encoding_parsed = parse_chunk_key_encoding(chunk_key_encoding)
         dimension_names_parsed = parse_dimension_names(dimension_names)
         # Note: relying on a type method is numpy-specific
@@ -436,7 +436,7 @@ class ArrayV3Metadata(Metadata):
         return out_dict
 
     def update_shape(self, shape: tuple[int, ...]) -> Self:
-        return replace(self, shape=shape)
+        return replace(self, shape=shape, chunk_grid=self.chunk_grid.update_shape(shape))
 
     def update_attributes(self, attributes: dict[str, JSON]) -> Self:
         return replace(self, attributes=attributes)

@@ -18,6 +18,8 @@ register_chunk_grid("regular", RegularChunkGrid)
 
 def parse_chunk_grid(
     data: dict[str, JSON] | ChunkGrid | NamedConfig[str, Any],
+    *,
+    array_shape: tuple[int, ...],
 ) -> ChunkGrid:
     """Parse a chunk grid from a dictionary, returning existing ChunkGrid instances as-is.
 
@@ -28,6 +30,8 @@ def parse_chunk_grid(
     data : dict[str, JSON] | ChunkGrid | NamedConfig[str, Any]
         Either a ChunkGrid instance (returned as-is) or a dictionary with
         'name' and 'configuration' keys.
+    array_shape : tuple[int, ...]
+        The shape of the array this chunk grid is bound to.
 
     Returns
     -------
@@ -46,7 +50,7 @@ def parse_chunk_grid(
         chunk_grid_cls = get_chunk_grid_class(name_parsed)
     except KeyError as e:
         raise ValueError(f"Unknown chunk grid. Got {name_parsed}.") from e
-    return chunk_grid_cls.from_dict(data)  # type: ignore[arg-type]
+    return chunk_grid_cls.from_dict(data, array_shape=array_shape)  # type: ignore[arg-type, call-arg]
 
 
 __all__ = [

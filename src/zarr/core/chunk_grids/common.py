@@ -3,9 +3,8 @@ from __future__ import annotations
 import math
 import numbers
 import warnings
-from abc import abstractmethod
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING, Any, Literal, Self
 
 import numpy as np
 import numpy.typing as npt
@@ -16,144 +15,63 @@ from zarr.errors import ZarrUserWarning
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
-    from typing import Self
 
     from zarr.core.array import ShardsLike
     from zarr.core.common import JSON
 
 
-@dataclass(frozen=True)
-class ChunkGrid(Metadata):
+class ChunkGrid(ABC, Metadata):
+    @property
+    @abstractmethod
+    def array_shape(self) -> tuple[int, ...]:
+        """The shape of the array this chunk grid is bound to."""
+        ...
+
     @abstractmethod
     def to_dict(self) -> dict[str, JSON]: ...
 
     @abstractmethod
     def update_shape(self, new_shape: tuple[int, ...]) -> Self:
-        pass
+        """Return a new ChunkGrid with the given array_shape."""
+        ...
 
     @abstractmethod
-    def all_chunk_coords(self, array_shape: tuple[int, ...]) -> Iterator[tuple[int, ...]]:
-        pass
+    def all_chunk_coords(self) -> Iterator[tuple[int, ...]]: ...
 
     @abstractmethod
-    def get_nchunks(self, array_shape: tuple[int, ...]) -> int:
-        pass
+    def get_nchunks(self) -> int: ...
 
     @abstractmethod
-    def get_chunk_shape(
-        self, array_shape: tuple[int, ...], chunk_coord: tuple[int, ...]
-    ) -> tuple[int, ...]:
-        """
-        Get the shape of a specific chunk.
-
-        Parameters
-        ----------
-        array_shape : tuple[int, ...]
-            Shape of the full array.
-        chunk_coord : tuple[int, ...]
-            Coordinates of the chunk in the chunk grid.
-
-        Returns
-        -------
-        tuple[int, ...]
-            Shape of the chunk at the given coordinates.
-        """
+    def get_chunk_shape(self, chunk_coord: tuple[int, ...]) -> tuple[int, ...]:
+        """Get the shape of a specific chunk."""
+        ...
 
     @abstractmethod
-    def get_chunk_start(
-        self, array_shape: tuple[int, ...], chunk_coord: tuple[int, ...]
-    ) -> tuple[int, ...]:
-        """
-        Get the starting position of a chunk in the array.
-
-        Parameters
-        ----------
-        array_shape : tuple[int, ...]
-            Shape of the full array.
-        chunk_coord : tuple[int, ...]
-            Coordinates of the chunk in the chunk grid.
-
-        Returns
-        -------
-        tuple[int, ...]
-            Starting position (offset) of the chunk in the array.
-        """
+    def get_chunk_start(self, chunk_coord: tuple[int, ...]) -> tuple[int, ...]:
+        """Get the starting position of a chunk in the array."""
+        ...
 
     @abstractmethod
-    def array_index_to_chunk_coord(
-        self, array_shape: tuple[int, ...], array_index: tuple[int, ...]
-    ) -> tuple[int, ...]:
-        """
-        Map an array index to the chunk coordinates that contain it.
-
-        Parameters
-        ----------
-        array_shape : tuple[int, ...]
-            Shape of the full array.
-        array_index : tuple[int, ...]
-            Index in the array.
-
-        Returns
-        -------
-        tuple[int, ...]
-            Coordinates of the chunk containing the array index.
-        """
+    def array_index_to_chunk_coord(self, array_index: tuple[int, ...]) -> tuple[int, ...]:
+        """Map an array index to the chunk coordinates that contain it."""
+        ...
 
     @abstractmethod
     def array_indices_to_chunk_dim(
-        self, array_shape: tuple[int, ...], dim: int, indices: npt.NDArray[np.intp]
+        self, dim: int, indices: npt.NDArray[np.intp]
     ) -> npt.NDArray[np.intp]:
-        """
-        Map an array of indices along one dimension to chunk coordinates (vectorized).
-
-        Parameters
-        ----------
-        array_shape : tuple[int, ...]
-            Shape of the full array.
-        dim : int
-            Dimension index.
-        indices : np.ndarray
-            Array of indices along the given dimension.
-
-        Returns
-        -------
-        np.ndarray
-            Array of chunk coordinates, same shape as indices.
-        """
+        """Map an array of indices along one dimension to chunk coordinates (vectorized)."""
+        ...
 
     @abstractmethod
-    def chunks_per_dim(self, array_shape: tuple[int, ...], dim: int) -> int:
-        """
-        Get the number of chunks along a specific dimension.
-
-        Parameters
-        ----------
-        array_shape : tuple[int, ...]
-            Shape of the full array.
-        dim : int
-            Dimension index.
-
-        Returns
-        -------
-        int
-            Number of chunks along the dimension.
-        """
+    def chunks_per_dim(self, dim: int) -> int:
+        """Get the number of chunks along a specific dimension."""
+        ...
 
     @abstractmethod
-    def get_chunk_grid_shape(self, array_shape: tuple[int, ...]) -> tuple[int, ...]:
-        """
-        Get the shape of the chunk grid (number of chunks along each dimension).
-
-        Parameters
-        ----------
-        array_shape : tuple[int, ...]
-            Shape of the full array.
-
-        Returns
-        -------
-        tuple[int, ...]
-            Number of chunks along each dimension.
-        """
+    def get_chunk_grid_shape(self) -> tuple[int, ...]:
+        """Get the shape of the chunk grid (number of chunks along each dimension)."""
+        ...
 
 
 def _guess_chunks(
