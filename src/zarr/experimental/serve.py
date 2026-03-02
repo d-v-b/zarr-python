@@ -55,8 +55,11 @@ class BackgroundServer:
     ...     # server is shut down when the block exits
     """
 
-    def __init__(self, server: uvicorn.Server, *, host: str, port: int) -> None:
+    def __init__(
+        self, server: uvicorn.Server, thread: threading.Thread, *, host: str, port: int
+    ) -> None:
         self._server = server
+        self._thread = thread
         self.host = host
         self.port = port
 
@@ -66,8 +69,9 @@ class BackgroundServer:
         return f"http://{self.host}:{self.port}"
 
     def shutdown(self) -> None:
-        """Signal the server to shut down."""
+        """Signal the server to shut down and wait for it to stop."""
         self._server.should_exit = True
+        self._thread.join()
 
     def __enter__(self) -> Self:
         return self
@@ -215,6 +219,11 @@ def _start_server(
         server.run()
         return None
 
+    # Signal handlers can only be installed on the main thread, so
+    # disable them when running in a background thread.
+    # See https://github.com/encode/uvicorn/issues/742
+    server.install_signal_handlers = lambda: None
+
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
 
@@ -224,7 +233,7 @@ def _start_server(
             raise RuntimeError("Server failed to start within 5 seconds")
         time.sleep(0.01)
 
-    return BackgroundServer(server, host=host, port=port)
+    return BackgroundServer(server, thread, host=host, port=port)
 
 
 def store_app(
