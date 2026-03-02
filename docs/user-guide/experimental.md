@@ -290,33 +290,31 @@ Install the server dependencies with:
 pip install zarr[server]
 ```
 
-### Serving a Store
+### Building an ASGI App
 
-[`zarr.experimental.serve.serve_store`][] creates an ASGI app that exposes every key
+[`zarr.experimental.serve.store_app`][] creates an ASGI app that exposes every key
 in a store:
 
 ```python
 import zarr
-from zarr.experimental.serve import serve_store
+from zarr.experimental.serve import store_app
 
 store = zarr.storage.MemoryStore()
 zarr.create_array(store, shape=(100, 100), chunks=(10, 10), dtype="float64")
 
-app = serve_store(store)
+app = store_app(store)
 
-# Run with Uvicorn:
+# Run with any ASGI server, e.g. Uvicorn:
 # uvicorn my_module:app --host 0.0.0.0 --port 8000
 ```
 
-### Serving a Node
-
-[`zarr.experimental.serve.serve_node`][] creates an ASGI app that only serves keys
+[`zarr.experimental.serve.node_app`][] creates an ASGI app that only serves keys
 belonging to a specific `Array` or `Group`.  Requests for keys outside the node
 receive a 404, even if those keys exist in the underlying store:
 
 ```python
 import zarr
-from zarr.experimental.serve import serve_node
+from zarr.experimental.serve import node_app
 
 store = zarr.storage.MemoryStore()
 root = zarr.open_group(store)
@@ -325,19 +323,57 @@ root.create_array("b", shape=(20,), dtype="float64")
 
 # Only serve the array at "a" — requests for "b" will return 404.
 arr = root["a"]
-app = serve_node(arr)
+app = node_app(arr)
+```
+
+### Running the Server
+
+[`zarr.experimental.serve.serve_store`][] and [`zarr.experimental.serve.serve_node`][]
+build an ASGI app *and* start a [Uvicorn](https://www.uvicorn.org/) server.
+By default they block until the server is shut down:
+
+```python
+from zarr.experimental.serve import serve_store
+
+serve_store(store, host="127.0.0.1", port=8000)
+```
+
+Pass `background=True` to start the server in a daemon thread and return
+immediately.  The returned `uvicorn.Server` object can be used to shut down
+the server:
+
+```python
+import numpy as np
+
+import zarr
+from zarr.experimental.serve import serve_node
+from zarr.storage import MemoryStore
+
+store = MemoryStore()
+arr = zarr.create_array(store, shape=(100,), chunks=(10,), dtype="float64")
+arr[:] = np.arange(100, dtype="float64")
+
+server = serve_node(arr, host="127.0.0.1", port=8000, background=True)
+
+# Now open the served array from another zarr client.
+remote = zarr.open_array("http://127.0.0.1:8000", mode="r")
+np.testing.assert_array_equal(remote[:], arr[:])
+
+# Shut down when finished.
+server.should_exit = True
 ```
 
 ### CORS Support
 
-Both `serve_store` and `serve_node` accept a [`CorsOptions`][zarr.experimental.serve.CorsOptions]
-parameter to enable [CORS](https://developer.mozilla.org/en-US/docs/Web/HTTP/CORS)
-middleware for browser-based clients:
+Both `store_app` and `node_app` (and their `serve_*` counterparts) accept a
+[`CorsOptions`][zarr.experimental.serve.CorsOptions] parameter to enable
+[CORS](https://developer.mozilla.org/en-US/docs/Web/HTTP/CORS) middleware for
+browser-based clients:
 
 ```python
-from zarr.experimental.serve import CorsOptions, serve_store
+from zarr.experimental.serve import CorsOptions, store_app
 
-app = serve_store(
+app = store_app(
     store,
     cors_options=CorsOptions(
         allow_origins=["*"],
@@ -365,44 +401,7 @@ By default only `GET` requests are accepted.  To enable writes, pass
 `methods={"GET", "PUT"}`:
 
 ```python
-app = serve_store(store, methods={"GET", "PUT"})
+app = store_app(store, methods={"GET", "PUT"})
 ```
 
 A `PUT` request stores the request body at the given path and returns 204 (No Content).
-
-### Running the Server in a Background Thread
-
-Because `serve_store` and `serve_node` return a standard ASGI app, you can run the
-server in a daemon thread and interact with it from the same process. This is
-useful for notebooks, scripts, and interactive exploration:
-
-```python
-import threading
-
-import numpy as np
-import uvicorn
-
-import zarr
-from zarr.experimental.serve import serve_node
-from zarr.storage import MemoryStore
-
-# Create an array with some data.
-store = MemoryStore()
-arr = zarr.create_array(store, shape=(100,), chunks=(10,), dtype="float64")
-arr[:] = np.arange(100, dtype="float64")
-
-# Build the ASGI app and launch Uvicorn in a daemon thread.
-app = serve_node(arr)
-config = uvicorn.Config(app, host="127.0.0.1", port=8000)
-server = uvicorn.Server(config)
-thread = threading.Thread(target=server.run, daemon=True)
-thread.start()
-
-# Now open the served array from another zarr client.
-remote = zarr.open_array("http://127.0.0.1:8000", mode="r")
-np.testing.assert_array_equal(remote[:], arr[:])
-
-# Shut down when finished.
-server.should_exit = True
-thread.join()
-```

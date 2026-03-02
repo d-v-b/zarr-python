@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Literal, TypedDict
+import threading
+import time
+from typing import TYPE_CHECKING, Any, Literal, TypedDict, overload
 
 from zarr.abc.store import OffsetByteRequest, RangeByteRequest, SuffixByteRequest
 from zarr.core.buffer import cpu
 from zarr.core.keys import is_valid_node_key
 
 if TYPE_CHECKING:
+    import uvicorn
     from starlette.applications import Starlette
     from starlette.requests import Request
     from starlette.responses import Response
@@ -15,7 +18,7 @@ if TYPE_CHECKING:
     from zarr.core.array import Array
     from zarr.core.group import Group
 
-__all__ = ["CorsOptions", "HTTPMethod", "serve_node", "serve_store"]
+__all__ = ["CorsOptions", "HTTPMethod", "node_app", "serve_node", "serve_store", "store_app"]
 
 
 class CorsOptions(TypedDict):
@@ -142,7 +145,42 @@ def _make_starlette_app(
     return app
 
 
-def serve_store(
+def _start_server(
+    app: Starlette,
+    *,
+    host: str,
+    port: int,
+    background: bool,
+) -> uvicorn.Server | None:
+    """Create a uvicorn server for *app* and either block or run in a daemon thread."""
+    try:
+        import uvicorn
+    except ImportError as e:
+        raise ImportError(
+            "The zarr server requires the 'uvicorn' package. "
+            "Install it with: pip install zarr[server]"
+        ) from e
+
+    config = uvicorn.Config(app, host=host, port=port)
+    server = uvicorn.Server(config)
+
+    if not background:
+        server.run()
+        return None
+
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+
+    deadline = time.monotonic() + 5.0
+    while not server.started:
+        if time.monotonic() > deadline:
+            raise RuntimeError("Server failed to start within 5 seconds")
+        time.sleep(0.01)
+
+    return server
+
+
+def store_app(
     store: Store,
     *,
     methods: set[HTTPMethod] | None = None,
@@ -171,7 +209,7 @@ def serve_store(
     return app
 
 
-def serve_node(
+def node_app(
     node: Array[Any] | Group,
     *,
     methods: set[HTTPMethod] | None = None,
@@ -209,3 +247,143 @@ def serve_node(
     app.state.node = node
     app.state.prefix = node.store_path.path
     return app
+
+
+@overload
+def serve_store(
+    store: Store,
+    *,
+    host: str = ...,
+    port: int = ...,
+    methods: set[HTTPMethod] | None = ...,
+    cors_options: CorsOptions | None = ...,
+    background: Literal[False] = ...,
+) -> None: ...
+
+
+@overload
+def serve_store(
+    store: Store,
+    *,
+    host: str = ...,
+    port: int = ...,
+    methods: set[HTTPMethod] | None = ...,
+    cors_options: CorsOptions | None = ...,
+    background: Literal[True],
+) -> uvicorn.Server: ...
+
+
+def serve_store(
+    store: Store,
+    *,
+    host: str = "127.0.0.1",
+    port: int = 8000,
+    methods: set[HTTPMethod] | None = None,
+    cors_options: CorsOptions | None = None,
+    background: bool = False,
+) -> uvicorn.Server | None:
+    """Serve every key in a zarr ``Store`` over HTTP.
+
+    Builds a Starlette ASGI app (see :func:`store_app`) and starts a
+    `Uvicorn <https://www.uvicorn.org/>`_ server.
+
+    Parameters
+    ----------
+    store : Store
+        The zarr store to serve.
+    host : str, optional
+        The host to bind to. Defaults to ``"127.0.0.1"``.
+    port : int, optional
+        The port to bind to. Defaults to ``8000``.
+    methods : set of HTTPMethod, optional
+        The HTTP methods to accept. Defaults to ``{"GET"}``.
+    cors_options : CorsOptions, optional
+        If provided, CORS middleware will be added with the given options.
+    background : bool, optional
+        If ``False`` (the default), the server blocks until shut down.
+        If ``True``, the server runs in a daemon thread and this function
+        returns immediately.
+
+    Returns
+    -------
+    uvicorn.Server or None
+        The running server when ``background=True``, or ``None`` when
+        the server has been shut down after blocking.
+    """
+    app = store_app(store, methods=methods, cors_options=cors_options)
+    return _start_server(app, host=host, port=port, background=background)
+
+
+@overload
+def serve_node(
+    node: Array[Any] | Group,
+    *,
+    host: str = ...,
+    port: int = ...,
+    methods: set[HTTPMethod] | None = ...,
+    cors_options: CorsOptions | None = ...,
+    background: Literal[False] = ...,
+) -> None: ...
+
+
+@overload
+def serve_node(
+    node: Array[Any] | Group,
+    *,
+    host: str = ...,
+    port: int = ...,
+    methods: set[HTTPMethod] | None = ...,
+    cors_options: CorsOptions | None = ...,
+    background: Literal[True],
+) -> uvicorn.Server: ...
+
+
+def serve_node(
+    node: Array[Any] | Group,
+    *,
+    host: str = "127.0.0.1",
+    port: int = 8000,
+    methods: set[HTTPMethod] | None = None,
+    cors_options: CorsOptions | None = None,
+    background: bool = False,
+) -> uvicorn.Server | None:
+    """Serve only the keys belonging to a zarr ``Array`` or ``Group`` over HTTP.
+
+    Builds a Starlette ASGI app (see :func:`node_app`) and starts a
+    `Uvicorn <https://www.uvicorn.org/>`_ server.
+
+    For an ``Array``, the served keys are the metadata document(s) and all
+    chunk (or shard) keys whose coordinates fall within the array's grid.
+
+    For a ``Group``, the served keys are the group's own metadata plus any
+    path that resolves through the group's members to a valid array metadata
+    document or chunk key.
+
+    Requests for keys outside this set receive a 404 response, even if the
+    underlying store contains data at that path.
+
+    Parameters
+    ----------
+    node : Array or Group
+        The zarr array or group to serve.
+    host : str, optional
+        The host to bind to. Defaults to ``"127.0.0.1"``.
+    port : int, optional
+        The port to bind to. Defaults to ``8000``.
+    methods : set of HTTPMethod, optional
+        The HTTP methods to accept. Defaults to ``{"GET"}``.
+    cors_options : CorsOptions, optional
+        If provided, CORS middleware will be added with the given options.
+    background : bool, optional
+        If ``False`` (the default), the server blocks until shut down.
+        If ``True``, the server runs in a daemon thread and this function
+        returns immediately.
+
+    Returns
+    -------
+    uvicorn.Server or None
+        The running server when ``background=True``, or ``None`` when
+        the server has been shut down after blocking.
+    """
+    app = node_app(node, methods=methods, cors_options=cors_options)
+    return _start_server(app, host=host, port=port, background=background)

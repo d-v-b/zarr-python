@@ -26,7 +26,7 @@ custom ``V2AsV3Store`` intercepts reads and translates metadata:
 * The v2 metadata files (``.zarray``, ``.zattrs``) are hidden so only
   v3 keys are visible.
 
-The translated store is then served over HTTP with ``serve_store``.  A test
+The translated store is then served over HTTP with ``store_app``.  A test
 at the bottom opens the served data *as a v3 array* and verifies it can
 read the values back.
 """
@@ -272,12 +272,12 @@ def test_serve_roundtrip() -> None:
     """Serve the translated store over HTTP and read it back as v3."""
     from starlette.testclient import TestClient
 
-    from zarr.experimental.serve import serve_store
+    from zarr.experimental.serve import store_app
 
     v2_store, _data = create_v2_array()
     v3_store = V2AsV3Store(v2_store)
 
-    app = serve_store(v3_store)
+    app = store_app(v3_store)
     client = TestClient(app)
 
     # Metadata should be valid v3 JSON.
@@ -328,7 +328,7 @@ if __name__ == "__main__":
     print("\n4. Store listing")
     test_listing()
 
-    print("\n5. HTTP round-trip via serve_store")
+    print("\n5. HTTP round-trip via store_app")
     test_serve_roundtrip()
 
     print("\n6. Open as v3 array")

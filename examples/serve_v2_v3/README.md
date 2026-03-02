@@ -2,7 +2,7 @@
 
 This example demonstrates how to build a custom read-only `Store` that
 translates Zarr v2 data into v3 format on the fly, and serve it over HTTP
-using `zarr.experimental.serve.serve_store`.
+using `zarr.experimental.serve.store_app`.
 
 The example shows how to:
 
