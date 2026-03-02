@@ -339,8 +339,8 @@ serve_store(store, host="127.0.0.1", port=8000)
 ```
 
 Pass `background=True` to start the server in a daemon thread and return
-immediately.  The returned `uvicorn.Server` object can be used to shut down
-the server:
+immediately.  The returned [`BackgroundServer`][zarr.experimental.serve.BackgroundServer]
+can be used as a context manager for automatic shutdown:
 
 ```python
 import numpy as np
@@ -353,14 +353,11 @@ store = MemoryStore()
 arr = zarr.create_array(store, shape=(100,), chunks=(10,), dtype="float64")
 arr[:] = np.arange(100, dtype="float64")
 
-server = serve_node(arr, host="127.0.0.1", port=8000, background=True)
-
-# Now open the served array from another zarr client.
-remote = zarr.open_array("http://127.0.0.1:8000", mode="r")
-np.testing.assert_array_equal(remote[:], arr[:])
-
-# Shut down when finished.
-server.should_exit = True
+with serve_node(arr, host="127.0.0.1", port=8000, background=True) as server:
+    # Now open the served array from another zarr client.
+    remote = zarr.open_array(server.url, mode="r")
+    np.testing.assert_array_equal(remote[:], arr[:])
+# Server is shut down automatically when the block exits.
 ```
 
 ### CORS Support

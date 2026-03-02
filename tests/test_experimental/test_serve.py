@@ -595,8 +595,8 @@ class TestServeBackground:
     """Test serve_store and serve_node with background=True."""
 
     def test_serve_store_background(self, store: Store) -> None:
-        """serve_store(background=True) should start a server in a daemon
-        thread and return a uvicorn.Server that responds to HTTP requests."""
+        """serve_store(background=True) should return a BackgroundServer
+        that responds to HTTP requests and can be used as a context manager."""
         import httpx
 
         from zarr.experimental.serve import serve_store
@@ -605,20 +605,18 @@ class TestServeBackground:
         sync(store.set("key", buf))
 
         port = _get_free_port()
-        server = serve_store(store, host="127.0.0.1", port=port, background=True)
-        try:
-            assert server is not None
-            assert server.started
+        with serve_store(store, host="127.0.0.1", port=port, background=True) as server:
+            assert server.host == "127.0.0.1"
+            assert server.port == port
+            assert server.url == f"http://127.0.0.1:{port}"
 
-            response = httpx.get(f"http://127.0.0.1:{port}/key")
+            response = httpx.get(f"{server.url}/key")
             assert response.status_code == 200
             assert response.content == b"hello"
-        finally:
-            server.should_exit = True
 
     def test_serve_node_background(self, store: Store) -> None:
-        """serve_node(background=True) should start a server in a daemon
-        thread and return a uvicorn.Server that responds to HTTP requests."""
+        """serve_node(background=True) should return a BackgroundServer
+        that responds to HTTP requests and can be used as a context manager."""
         import httpx
 
         from zarr.experimental.serve import serve_node
@@ -627,12 +625,6 @@ class TestServeBackground:
         arr[:] = np.arange(4, dtype="f8")
 
         port = _get_free_port()
-        server = serve_node(arr, host="127.0.0.1", port=port, background=True)
-        try:
-            assert server is not None
-            assert server.started
-
-            response = httpx.get(f"http://127.0.0.1:{port}/zarr.json")
+        with serve_node(arr, host="127.0.0.1", port=port, background=True) as server:
+            response = httpx.get(f"{server.url}/zarr.json")
             assert response.status_code == 200
-        finally:
-            server.should_exit = True

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import TYPE_CHECKING, Any, Literal, TypedDict, overload
+from typing import TYPE_CHECKING, Any, Literal, Self, TypedDict, overload
 
 from zarr.abc.store import OffsetByteRequest, RangeByteRequest, SuffixByteRequest
 from zarr.core.buffer import cpu
@@ -18,7 +18,15 @@ if TYPE_CHECKING:
     from zarr.core.array import Array
     from zarr.core.group import Group
 
-__all__ = ["CorsOptions", "HTTPMethod", "node_app", "serve_node", "serve_store", "store_app"]
+__all__ = [
+    "BackgroundServer",
+    "CorsOptions",
+    "HTTPMethod",
+    "node_app",
+    "serve_node",
+    "serve_store",
+    "store_app",
+]
 
 
 class CorsOptions(TypedDict):
@@ -27,6 +35,45 @@ class CorsOptions(TypedDict):
 
 
 HTTPMethod = Literal["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"]
+
+
+class BackgroundServer:
+    """A running background HTTP server that can be used as a context manager.
+
+    Wraps a ``uvicorn.Server`` running in a daemon thread.  When used as a
+    context manager the server is shut down automatically on exit.
+
+    Parameters
+    ----------
+    server : uvicorn.Server
+        The running uvicorn server instance.
+
+    Examples
+    --------
+    >>> with serve_node(arr, background=True) as server:  # doctest: +SKIP
+    ...     print(f"Listening on {server.host}:{server.port}")
+    ...     # server is shut down when the block exits
+    """
+
+    def __init__(self, server: uvicorn.Server, *, host: str, port: int) -> None:
+        self._server = server
+        self.host = host
+        self.port = port
+
+    @property
+    def url(self) -> str:
+        """The base URL of the running server."""
+        return f"http://{self.host}:{self.port}"
+
+    def shutdown(self) -> None:
+        """Signal the server to shut down."""
+        self._server.should_exit = True
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.shutdown()
 
 
 def _parse_range_header(range_header: str) -> ByteRequest | None:
@@ -151,7 +198,7 @@ def _start_server(
     host: str,
     port: int,
     background: bool,
-) -> uvicorn.Server | None:
+) -> BackgroundServer | None:
     """Create a uvicorn server for *app* and either block or run in a daemon thread."""
     try:
         import uvicorn
@@ -177,7 +224,7 @@ def _start_server(
             raise RuntimeError("Server failed to start within 5 seconds")
         time.sleep(0.01)
 
-    return server
+    return BackgroundServer(server, host=host, port=port)
 
 
 def store_app(
@@ -270,7 +317,7 @@ def serve_store(
     methods: set[HTTPMethod] | None = ...,
     cors_options: CorsOptions | None = ...,
     background: Literal[True],
-) -> uvicorn.Server: ...
+) -> BackgroundServer: ...
 
 
 def serve_store(
@@ -281,7 +328,7 @@ def serve_store(
     methods: set[HTTPMethod] | None = None,
     cors_options: CorsOptions | None = None,
     background: bool = False,
-) -> uvicorn.Server | None:
+) -> BackgroundServer | None:
     """Serve every key in a zarr ``Store`` over HTTP.
 
     Builds a Starlette ASGI app (see :func:`store_app`) and starts a
@@ -306,9 +353,11 @@ def serve_store(
 
     Returns
     -------
-    uvicorn.Server or None
+    BackgroundServer or None
         The running server when ``background=True``, or ``None`` when
-        the server has been shut down after blocking.
+        the server has been shut down after blocking.  The
+        ``BackgroundServer`` can be used as a context manager for
+        automatic shutdown.
     """
     app = store_app(store, methods=methods, cors_options=cors_options)
     return _start_server(app, host=host, port=port, background=background)
@@ -335,7 +384,7 @@ def serve_node(
     methods: set[HTTPMethod] | None = ...,
     cors_options: CorsOptions | None = ...,
     background: Literal[True],
-) -> uvicorn.Server: ...
+) -> BackgroundServer: ...
 
 
 def serve_node(
@@ -346,7 +395,7 @@ def serve_node(
     methods: set[HTTPMethod] | None = None,
     cors_options: CorsOptions | None = None,
     background: bool = False,
-) -> uvicorn.Server | None:
+) -> BackgroundServer | None:
     """Serve only the keys belonging to a zarr ``Array`` or ``Group`` over HTTP.
 
     Builds a Starlette ASGI app (see :func:`node_app`) and starts a
@@ -381,9 +430,11 @@ def serve_node(
 
     Returns
     -------
-    uvicorn.Server or None
+    BackgroundServer or None
         The running server when ``background=True``, or ``None`` when
-        the server has been shut down after blocking.
+        the server has been shut down after blocking.  The
+        ``BackgroundServer`` can be used as a context manager for
+        automatic shutdown.
     """
     app = node_app(node, methods=methods, cors_options=cors_options)
     return _start_server(app, host=host, port=port, background=background)
