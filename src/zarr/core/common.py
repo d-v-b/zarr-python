@@ -15,6 +15,7 @@ from typing import (
     Generic,
     Literal,
     NotRequired,
+    TypeAlias,
     TypedDict,
     TypeVar,
     cast,
@@ -43,11 +44,12 @@ ShapeLike = Iterable[int | np.integer[Any]] | int | np.integer[Any]
 ChunkCoords = tuple[int, ...]
 ZarrFormat = Literal[2, 3]
 NodeType = Literal["array", "group"]
-JSON = str | int | float | bool | Mapping[str, "JSON"] | Sequence["JSON"] | None
+JSON: TypeAlias = str | int | float | bool | Mapping[str, "JSON"] | Sequence["JSON"] | None
 MemoryOrder = Literal["C", "F"]
 AccessModeLiteral = Literal["r", "r+", "a", "w", "w-"]
 ANY_ACCESS_MODE: Final = "r", "r+", "a", "w", "w-"
-DimensionNames = Iterable[str | None] | None
+DimensionNamesLike = Iterable[str | None] | None
+DimensionNames = DimensionNamesLike  # backwards compatibility
 
 TName = TypeVar("TName", bound=str)
 TConfig = TypeVar("TConfig", bound=Mapping[str, object])

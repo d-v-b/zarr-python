@@ -4,8 +4,15 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, NotRequired, TypedDict, TypeGuard, cast
 
 from zarr.abc.metadata import Metadata
+from zarr.abc.serializable import JSONSerializable
 from zarr.core.buffer.core import default_buffer_prototype
-from zarr.core.dtype import VariableLengthUTF8, ZDType, get_data_type_from_json
+from zarr.core.dtype import (
+    VariableLengthUTF8,
+    ZDType,
+    ZDTypeLike,
+    get_data_type_from_json,
+    parse_dtype,
+)
 from zarr.core.dtype.common import check_dtype_spec_v3
 
 if TYPE_CHECKING:
@@ -33,8 +40,9 @@ from zarr.core.chunk_key_encodings import (
 from zarr.core.common import (
     JSON,
     ZARR_JSON,
-    DimensionNames,
+    DimensionNamesLike,
     NamedConfig,
+    ShapeLike,
     parse_named_configuration,
     parse_shapelike,
 )
@@ -156,27 +164,35 @@ def check_allowed_extra_field(data: object) -> TypeGuard[AllowedExtraField]:
 
 
 def parse_extra_fields(
-    data: Mapping[str, AllowedExtraField] | None,
+    data: Mapping[str, object] | None,
 ) -> dict[str, AllowedExtraField]:
     if data is None:
         return {}
-    else:
-        conflict_keys = ARRAY_METADATA_KEYS & set(data.keys())
-        if len(conflict_keys) > 0:
-            msg = (
-                "Invalid extra fields. "
-                "The following keys: "
-                f"{sorted(conflict_keys)} "
-                "are invalid because they collide with keys reserved for use by the "
-                "array metadata document."
-            )
-            raise ValueError(msg)
-        return dict(data)
+
+    conflict_keys = ARRAY_METADATA_KEYS & set(data.keys())
+    if len(conflict_keys) > 0:
+        msg = (
+            "Invalid extra fields. "
+            "The following keys: "
+            f"{sorted(conflict_keys)} "
+            "are invalid because they collide with keys reserved for use by the "
+            "array metadata document."
+        )
+        raise ValueError(msg)
+
+    disallowed = {k: v for k, v in data.items() if not check_allowed_extra_field(v)}
+    if disallowed:
+        raise MetadataValidationError(
+            f"Disallowed extra fields: {sorted(disallowed.keys())}. "
+            'Extra fields must be a mapping with "must_understand" set to False.'
+        )
+
+    return dict(data)  # type: ignore[arg-type]
 
 
 class ArrayMetadataJSON_V3(TypedDict):
     """
-    A typed dictionary model for zarr v3 metadata.
+    A typed dictionary model for Zarr v3 array metadata.
     """
 
     zarr_format: Literal[3]
@@ -194,9 +210,130 @@ class ArrayMetadataJSON_V3(TypedDict):
 
 ARRAY_METADATA_KEYS = set(ArrayMetadataJSON_V3.__annotations__.keys())
 
+ChunkGridLike = dict[str, JSON] | ChunkGrid | NamedConfig[str, Any]
+CodecLike = Codec | dict[str, JSON] | NamedConfig[str, Any] | str
+
+# Required keys in ArrayMetadataJSONLike_V3 (excludes zarr_format and node_type,
+# which are identity fields consumed by the I/O layer before reaching this point).
+_REQUIRED_JSONLIKE_KEYS = frozenset(
+    {"shape", "data_type", "chunk_grid", "chunk_key_encoding", "codecs", "fill_value"}
+)
+
+
+def narrow_array_metadata_json(data: object) -> ArrayMetadataJSONLike_V3:
+    """
+    Narrow an untrusted object to ``ArrayMetadataJSONLike_V3``.
+
+    Performs only structural type checking — verifies that ``data`` is a mapping
+    with the expected keys and that each value has an acceptable Python type.
+    Does **not** validate the semantic correctness of values (e.g. whether a
+    data type string is a recognized dtype, or whether extra fields satisfy
+    ``must_understand``). That validation is the responsibility of ``__init__``.
+
+    This function allows ``zarr_format`` and ``node_type`` to be absent. The
+    expectation is that these values have already been validated as a
+    precondition for invoking this function.
+    """
+    errors: list[str] = []
+
+    if not isinstance(data, Mapping):
+        raise MetadataValidationError(f"Expected a mapping, got {type(data).__name__}")
+
+    # --- required keys ---
+    missing = _REQUIRED_JSONLIKE_KEYS - set(data.keys())
+    if missing:
+        errors.append(f"Missing required keys: {sorted(missing)}")
+
+    # --- shape: Iterable (but not str or Mapping) ---
+    shape = data.get("shape")
+    if shape is not None and (not isinstance(shape, Iterable) or isinstance(shape, str | Mapping)):
+        errors.append(f"Invalid shape: expected an iterable, got {type(shape).__name__}")
+
+    # --- data_type: str, Mapping, or ZDType ---
+    data_type_json = data.get("data_type")
+    if data_type_json is not None and not isinstance(data_type_json, str | Mapping | ZDType):
+        errors.append(
+            f"Invalid data_type: expected a string, mapping, or ZDType, got {type(data_type_json).__name__}"
+        )
+
+    # --- chunk_grid: Mapping or ChunkGrid ---
+    chunk_grid = data.get("chunk_grid")
+    if chunk_grid is not None and not isinstance(chunk_grid, Mapping | ChunkGrid):
+        errors.append(
+            f"Invalid chunk_grid: expected a mapping or ChunkGrid, got {type(chunk_grid).__name__}"
+        )
+
+    # --- chunk_key_encoding: Mapping or ChunkKeyEncoding ---
+    chunk_key_encoding = data.get("chunk_key_encoding")
+    if chunk_key_encoding is not None and not isinstance(
+        chunk_key_encoding, Mapping | ChunkKeyEncoding
+    ):
+        errors.append(
+            f"Invalid chunk_key_encoding: expected a mapping or ChunkKeyEncoding, got {type(chunk_key_encoding).__name__}"
+        )
+
+    # --- codecs: Iterable (but not str or Mapping) ---
+    codecs = data.get("codecs")
+    if codecs is not None and (
+        not isinstance(codecs, Iterable) or isinstance(codecs, str | Mapping)
+    ):
+        errors.append(f"Invalid codecs: expected an iterable, got {type(codecs).__name__}")
+
+    # --- fill_value: any type is allowed, just must be present (checked via required keys) ---
+
+    # --- attributes (optional): Mapping ---
+    attributes = data.get("attributes")
+    if attributes is not None and not isinstance(attributes, Mapping):
+        errors.append(f"Invalid attributes: expected a mapping, got {type(attributes).__name__}")
+
+    # --- dimension_names (optional): Iterable (but not str) ---
+    dimension_names = data.get("dimension_names")
+    if dimension_names is not None and (
+        not isinstance(dimension_names, Iterable) or isinstance(dimension_names, str)
+    ):
+        errors.append(
+            f"Invalid dimension_names: expected an iterable or None, got {type(dimension_names).__name__}"
+        )
+
+    # --- storage_transformers (optional): Iterable (but not str or Mapping) ---
+    storage_transformers = data.get("storage_transformers")
+    if storage_transformers is not None and (
+        not isinstance(storage_transformers, Iterable)
+        or isinstance(storage_transformers, str | Mapping)
+    ):
+        errors.append(
+            f"Invalid storage_transformers: expected an iterable, got {type(storage_transformers).__name__}"
+        )
+
+    if errors:
+        raise MetadataValidationError(
+            "Cannot interpret input as Zarr v3 array metadata:\n"
+            + "\n".join(f"  - {e}" for e in errors)
+        )
+
+    return cast(ArrayMetadataJSONLike_V3, data)
+
+
+class ArrayMetadataJSONLike_V3(TypedDict):
+    """
+    A typed dictionary model of JSON-like input that can be used to create ArrayV3Metadata
+    """
+
+    zarr_format: NotRequired[Literal[3]]
+    node_type: NotRequired[Literal["array"]]
+    shape: ShapeLike
+    data_type: ZDTypeLike
+    chunk_grid: ChunkGridLike
+    chunk_key_encoding: ChunkKeyEncodingLike
+    codecs: Iterable[CodecLike]
+    fill_value: object
+    attributes: NotRequired[dict[str, JSON]]
+    dimension_names: NotRequired[DimensionNamesLike]
+    storage_transformers: NotRequired[Iterable[dict[str, JSON]]]
+
 
 @dataclass(frozen=True, kw_only=True)
-class ArrayV3Metadata(Metadata):
+class ArrayV3Metadata(Metadata, JSONSerializable[ArrayMetadataJSON_V3, ArrayMetadataJSONLike_V3]):
     shape: tuple[int, ...]
     data_type: ZDType[TBaseDType, TBaseScalar]
     chunk_grid: ChunkGrid
@@ -213,14 +350,14 @@ class ArrayV3Metadata(Metadata):
     def __init__(
         self,
         *,
-        shape: Iterable[int],
-        data_type: ZDType[TBaseDType, TBaseScalar],
+        shape: ShapeLike,
+        data_type: ZDTypeLike,
         chunk_grid: dict[str, JSON] | ChunkGrid | NamedConfig[str, Any],
         chunk_key_encoding: ChunkKeyEncodingLike,
         fill_value: object,
         codecs: Iterable[Codec | dict[str, JSON] | NamedConfig[str, Any] | str],
         attributes: dict[str, JSON] | None,
-        dimension_names: DimensionNames,
+        dimension_names: DimensionNamesLike,
         storage_transformers: Iterable[dict[str, JSON]] | None = None,
         extra_fields: Mapping[str, AllowedExtraField] | None = None,
     ) -> None:
@@ -229,27 +366,27 @@ class ArrayV3Metadata(Metadata):
         """
 
         shape_parsed = parse_shapelike(shape)
+        data_type_parsed = parse_dtype(data_type, zarr_format=3)
         chunk_grid_parsed = ChunkGrid.from_dict(chunk_grid)
         chunk_key_encoding_parsed = parse_chunk_key_encoding(chunk_key_encoding)
         dimension_names_parsed = parse_dimension_names(dimension_names)
-        # Note: relying on a type method is numpy-specific
-        fill_value_parsed = data_type.cast_scalar(fill_value)
+        fill_value_parsed = data_type_parsed.cast_scalar(fill_value)
         attributes_parsed = parse_attributes(attributes)
         codecs_parsed_partial = parse_codecs(codecs)
         storage_transformers_parsed = parse_storage_transformers(storage_transformers)
         extra_fields_parsed = parse_extra_fields(extra_fields)
         array_spec = ArraySpec(
             shape=shape_parsed,
-            dtype=data_type,
+            dtype=data_type_parsed,
             fill_value=fill_value_parsed,
             config=ArrayConfig.from_dict({}),  # TODO: config is not needed here.
             prototype=default_buffer_prototype(),  # TODO: prototype is not needed here.
         )
         codecs_parsed = tuple(c.evolve_from_array_spec(array_spec) for c in codecs_parsed_partial)
-        validate_codecs(codecs_parsed_partial, data_type)
+        validate_codecs(codecs_parsed_partial, data_type_parsed)
 
         object.__setattr__(self, "shape", shape_parsed)
-        object.__setattr__(self, "data_type", data_type)
+        object.__setattr__(self, "data_type", data_type_parsed)
         object.__setattr__(self, "chunk_grid", chunk_grid_parsed)
         object.__setattr__(self, "chunk_key_encoding", chunk_key_encoding_parsed)
         object.__setattr__(self, "codecs", codecs_parsed)
@@ -410,7 +547,7 @@ class ArrayV3Metadata(Metadata):
             storage_transformers=_data_typed.get("storage_transformers", ()),  # type: ignore[arg-type]
         )
 
-    def to_dict(self) -> dict[str, JSON]:
+    def to_json(self) -> ArrayMetadataJSON_V3:
         out_dict = super().to_dict()
         extra_fields = out_dict.pop("extra_fields")
         out_dict = out_dict | extra_fields  # type: ignore[operator]
@@ -426,14 +563,44 @@ class ArrayV3Metadata(Metadata):
         if out_dict["dimension_names"] is None:
             out_dict.pop("dimension_names")
 
-        # TODO: replace the `to_dict` / `from_dict` on the `Metadata`` class with
-        # to_json, from_json, and have ZDType inherit from `Metadata`
-        # until then, we have this hack here, which relies on the fact that to_dict will pass through
-        # any non-`Metadata` fields as-is.
+        # TODO: have ZDType inherit from JSONSerializable so we can remove this hack
         dtype_meta = out_dict["data_type"]
         if isinstance(dtype_meta, ZDType):
             out_dict["data_type"] = dtype_meta.to_json(zarr_format=3)  # type: ignore[unreachable]
-        return out_dict
+        return cast(ArrayMetadataJSON_V3, out_dict)
+
+    def to_dict(self) -> dict[str, JSON]:
+        return dict(self.to_json())  # type: ignore[arg-type]
+
+    @classmethod
+    def from_json(cls, obj: ArrayMetadataJSONLike_V3) -> Self:
+        """
+        Construct from a trusted, typed input. No validation of the input structure
+        is performed beyond what ``__init__`` already does.
+        """
+        _known_keys = set(ArrayMetadataJSONLike_V3.__annotations__)
+        extra_fields = {k: v for k, v in obj.items() if k not in _known_keys}
+        return cls(
+            shape=obj["shape"],
+            data_type=obj["data_type"],
+            chunk_grid=obj["chunk_grid"],
+            chunk_key_encoding=obj["chunk_key_encoding"],
+            codecs=obj["codecs"],
+            fill_value=obj["fill_value"],
+            attributes=obj.get("attributes"),
+            dimension_names=obj.get("dimension_names"),
+            storage_transformers=obj.get("storage_transformers"),
+            extra_fields=extra_fields or None,  # type: ignore[arg-type]
+        )
+
+    @classmethod
+    def try_from_json(cls, obj: object) -> Self:
+        """
+        Construct from an untrusted input (e.g. JSON read from disk).
+        Validates the structure and raises a ``MetadataValidationError``
+        listing all problems found.
+        """
+        return cls.from_json(narrow_array_metadata_json(obj))
 
     def update_shape(self, shape: tuple[int, ...]) -> Self:
         return replace(self, shape=shape)

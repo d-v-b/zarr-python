@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 import re
-from typing import TYPE_CHECKING, Literal
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Generic, Literal, TypeVar
 
 import numpy as np
 import pytest
@@ -10,6 +11,7 @@ import pytest
 from zarr import consolidate_metadata, create_group
 from zarr.codecs.bytes import BytesCodec
 from zarr.core.buffer import default_buffer_prototype
+from zarr.core.chunk_grids import RegularChunkGrid
 from zarr.core.chunk_key_encodings import DefaultChunkKeyEncoding, V2ChunkKeyEncoding
 from zarr.core.config import config
 from zarr.core.dtype import UInt8, get_data_type_from_native_dtype
@@ -19,6 +21,7 @@ from zarr.core.group import GroupMetadata, parse_node_type
 from zarr.core.metadata.v3 import (
     ArrayMetadataJSON_V3,
     ArrayV3Metadata,
+    ChunkGridLike,
     parse_codecs,
     parse_dimension_names,
     parse_zarr_format,
@@ -31,12 +34,14 @@ from zarr.errors import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterable, Sequence
     from typing import Any
 
     from zarr.core.types import JSON
 
     from zarr.abc.codec import Codec
+    from zarr.core.chunk_key_encodings import ChunkKeyEncodingLike
+    from zarr.core.common import DimensionNamesLike
 
 
 from zarr.core.metadata.v3 import (
@@ -461,3 +466,139 @@ def test_group_to_dict(use_consolidated: bool, attributes: None | dict[str, Any]
         expect = {"node_type": "group", "zarr_format": 3, "attributes": expect_attributes}
 
     assert meta.to_dict() == expect
+
+
+TIn = TypeVar("TIn")
+TOut = TypeVar("TOut")
+
+
+class _Unset:
+    """Sentinel for 'key not provided in the input dict'."""
+
+
+UNSET = _Unset()
+
+
+@dataclass(frozen=True)
+class Expect(Generic[TIn, TOut]):
+    """An (input, expected output) pair for parametrized tests."""
+
+    input: TIn
+    expected: TOut
+
+
+@pytest.mark.parametrize("shape", [Expect((10,), (10,)), Expect([5], (5,))])
+@pytest.mark.parametrize("data_type", [Expect(UInt8(), UInt8())])
+@pytest.mark.parametrize(
+    "chunk_grid",
+    [
+        Expect(
+            {"name": "regular", "configuration": {"chunk_shape": (10,)}},
+            RegularChunkGrid(chunk_shape=(10,)),
+        ),
+        Expect(RegularChunkGrid(chunk_shape=(10,)), RegularChunkGrid(chunk_shape=(10,))),
+    ],
+)
+@pytest.mark.parametrize(
+    "chunk_key_encoding",
+    [
+        Expect(
+            {"name": "default", "configuration": {"separator": "/"}},
+            DefaultChunkKeyEncoding(separator="/"),
+        ),
+        Expect(DefaultChunkKeyEncoding(separator="."), DefaultChunkKeyEncoding(separator=".")),
+    ],
+)
+@pytest.mark.parametrize("codecs", [Expect((BytesCodec(),), (BytesCodec(endian=None),))])
+@pytest.mark.parametrize(
+    "fill_value",
+    [Expect(0, np.uint8(0)), Expect(42, np.uint8(42))],
+)
+@pytest.mark.parametrize(
+    "attributes",
+    [Expect({"key": "val"}, {"key": "val"}), Expect(None, {}), Expect(UNSET, {})],
+)
+@pytest.mark.parametrize(
+    "dimension_names",
+    [Expect(("x",), ("x",)), Expect(None, None), Expect(UNSET, None)],
+)
+@pytest.mark.parametrize(
+    "extra_fields",
+    [
+        Expect(UNSET, {}),
+        Expect({"ext": {"must_understand": False}}, {"ext": {"must_understand": False}}),
+    ],
+)
+def test_from_json(
+    shape: Expect[Iterable[int], tuple[int, ...]],
+    data_type: Expect[UInt8, UInt8],
+    chunk_grid: Expect[ChunkGridLike, RegularChunkGrid],
+    chunk_key_encoding: Expect[ChunkKeyEncodingLike, DefaultChunkKeyEncoding],
+    codecs: Expect[tuple[Codec, ...], tuple[Codec, ...]],
+    fill_value: Expect[object, np.uint8],
+    attributes: Expect[dict[str, JSON] | _Unset, dict[str, JSON]],
+    dimension_names: Expect[DimensionNamesLike | _Unset, tuple[str | None, ...] | None],
+    extra_fields: Expect[dict[str, object] | _Unset, dict[str, object]],
+) -> None:
+    """
+    Test that ArrayV3Metadata.from_json correctly parses each field.
+    """
+    data: dict[str, object] = {
+        "shape": shape.input,
+        "data_type": data_type.input,
+        "chunk_grid": chunk_grid.input,
+        "chunk_key_encoding": chunk_key_encoding.input,
+        "codecs": codecs.input,
+        "fill_value": fill_value.input,
+    }
+    if not isinstance(attributes.input, _Unset):
+        data["attributes"] = attributes.input
+    if not isinstance(dimension_names.input, _Unset):
+        data["dimension_names"] = dimension_names.input
+    if not isinstance(extra_fields.input, _Unset):
+        data.update(extra_fields.input)
+
+    result = ArrayV3Metadata.from_json(data)  # type: ignore[arg-type]
+    assert result.shape == shape.expected
+    assert result.data_type == data_type.expected
+    assert result.chunk_grid == chunk_grid.expected
+    assert result.chunk_key_encoding == chunk_key_encoding.expected
+    assert result.codecs == codecs.expected
+    assert result.fill_value == fill_value.expected
+    assert result.attributes == attributes.expected
+    assert result.dimension_names == dimension_names.expected
+    assert result.extra_fields == extra_fields.expected
+
+    # try_from_json should produce the same result for the same input
+    assert ArrayV3Metadata.try_from_json(data) == result
+
+
+_VALID_TRY_FROM_JSON_INPUT: dict[str, object] = {
+    "shape": (10,),
+    "data_type": "uint8",
+    "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": (10,)}},
+    "chunk_key_encoding": {"name": "default", "configuration": {"separator": "/"}},
+    "codecs": ({"name": "bytes"},),
+    "fill_value": 0,
+}
+
+
+@pytest.mark.parametrize(
+    ("data", "error_match"),
+    [
+        ("not a dict", "Expected a mapping"),
+        ({}, "Missing required keys"),
+        ({**_VALID_TRY_FROM_JSON_INPUT, "shape": "not a shape"}, "shape"),
+        ({**_VALID_TRY_FROM_JSON_INPUT, "data_type": 12345}, "data_type"),
+        ({**_VALID_TRY_FROM_JSON_INPUT, "chunk_grid": "not a mapping"}, "chunk_grid"),
+        (
+            {**_VALID_TRY_FROM_JSON_INPUT, "chunk_key_encoding": "not a mapping"},
+            "chunk_key_encoding",
+        ),
+        ({**_VALID_TRY_FROM_JSON_INPUT, "codecs": "not iterable"}, "codecs"),
+        ({**_VALID_TRY_FROM_JSON_INPUT, "unknown_field": "value"}, "Disallowed extra fields"),
+    ],
+)
+def test_try_from_json_invalid(data: object, error_match: str) -> None:
+    with pytest.raises(MetadataValidationError, match=error_match):
+        ArrayV3Metadata.try_from_json(data)
