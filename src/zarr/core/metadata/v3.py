@@ -333,7 +333,7 @@ class ArrayMetadataJSONLike_V3(TypedDict):
 
 
 @dataclass(frozen=True, kw_only=True)
-class ArrayV3Metadata(Metadata, JSONSerializable[ArrayMetadataJSON_V3, ArrayMetadataJSONLike_V3]):
+class ArrayV3Metadata(Metadata, JSONSerializable[ArrayMetadataJSONLike_V3, ArrayMetadataJSON_V3]):
     shape: tuple[int, ...]
     data_type: ZDType[TBaseDType, TBaseScalar]
     chunk_grid: ChunkGrid

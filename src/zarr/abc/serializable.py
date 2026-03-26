@@ -4,7 +4,7 @@ T_co = TypeVar("T_co", covariant=True)
 T_contra = TypeVar("T_contra", contravariant=True)
 
 
-class JSONSerializable(Protocol[T_co, T_contra]):
+class JSONSerializable(Protocol[T_contra, T_co]):
     @classmethod
     def from_json(cls, obj: T_contra) -> Self:
         """
