@@ -593,15 +593,6 @@ class ArrayV3Metadata(Metadata, JSONSerializable[ArrayMetadataJSON_V3, ArrayMeta
             extra_fields=extra_fields or None,  # type: ignore[arg-type]
         )
 
-    @classmethod
-    def try_from_json(cls, obj: object) -> Self:
-        """
-        Construct from an untrusted input (e.g. JSON read from disk).
-        Validates the structure and raises a ``MetadataValidationError``
-        listing all problems found.
-        """
-        return cls.from_json(narrow_array_metadata_json(obj))
-
     def update_shape(self, shape: tuple[int, ...]) -> Self:
         return replace(self, shape=shape)
 

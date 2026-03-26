@@ -12,14 +12,6 @@ class JSONSerializable(Protocol[T_co, T_contra]):
         """
         ...
 
-    @classmethod
-    def try_from_json(cls, obj: object) -> Self:
-        """
-        Deserialize from an unknown object. Details of any
-        deserialization failure should be conveyed via an exception.
-        """
-        ...
-
     def to_json(self) -> T_co:
         """
         Serialize to JSON.
