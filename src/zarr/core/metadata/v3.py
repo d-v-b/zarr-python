@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, NotRequired, TypedDict, TypeGuard, cast
+from typing import TYPE_CHECKING, Final, NotRequired, TypeGuard, cast
+
+from typing_extensions import TypedDict
 
 from zarr.abc.metadata import Metadata
 from zarr.abc.serializable import JSONSerializable
@@ -190,7 +192,7 @@ def parse_extra_fields(
     return dict(data)  # type: ignore[arg-type]
 
 
-class ArrayMetadataJSON_V3(TypedDict):
+class ArrayMetadataJSON_V3(TypedDict, extra_items=AllowedExtraField):  # type: ignore[call-arg]
     """
     A typed dictionary model for Zarr v3 array metadata.
     """
@@ -219,8 +221,25 @@ _REQUIRED_JSONLIKE_KEYS = frozenset(
     {"shape", "data_type", "chunk_grid", "chunk_key_encoding", "codecs", "fill_value"}
 )
 
+# All keys defined by the zarr v3 array metadata spec.
+_ARRAY_METADATA_KNOWN_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "zarr_format",
+        "node_type",
+        "shape",
+        "data_type",
+        "chunk_grid",
+        "chunk_key_encoding",
+        "codecs",
+        "fill_value",
+        "attributes",
+        "dimension_names",
+        "storage_transformers",
+    }
+)
 
-def narrow_array_metadata_json(data: object) -> ArrayMetadataJSONLike_V3:
+
+def check_array_metadata_like(data: object) -> ArrayMetadataJSONLike_V3:
     """
     Narrow an untrusted object to ``ArrayMetadataJSONLike_V3``.
 
@@ -305,6 +324,17 @@ def narrow_array_metadata_json(data: object) -> ArrayMetadataJSONLike_V3:
             f"Invalid storage_transformers: expected an iterable, got {type(storage_transformers).__name__}"
         )
 
+    # --- extra fields: must be AllowedExtraField (mapping with must_understand=False) ---
+    _known_keys = _ARRAY_METADATA_KNOWN_KEYS
+    data_map = cast(Mapping[str, object], data)
+    extra_keys = set(data_map.keys()) - _known_keys
+    disallowed = [k for k in extra_keys if not check_allowed_extra_field(data_map[k])]
+    if disallowed:
+        errors.append(
+            f"Disallowed extra fields: {sorted(disallowed)}. "
+            'Extra fields must be a mapping with "must_understand" set to False.'
+        )
+
     if errors:
         raise MetadataValidationError(
             "Cannot interpret input as Zarr v3 array metadata:\n"
@@ -314,7 +344,7 @@ def narrow_array_metadata_json(data: object) -> ArrayMetadataJSONLike_V3:
     return cast(ArrayMetadataJSONLike_V3, data)
 
 
-class ArrayMetadataJSONLike_V3(TypedDict):
+class ArrayMetadataJSONLike_V3(TypedDict, extra_items=AllowedExtraField):  # type: ignore[call-arg]
     """
     A typed dictionary model of JSON-like input that can be used to create ArrayV3Metadata
     """
@@ -578,7 +608,7 @@ class ArrayV3Metadata(Metadata, JSONSerializable[ArrayMetadataJSONLike_V3, Array
         Construct from a trusted, typed input. No validation of the input structure
         is performed beyond what ``__init__`` already does.
         """
-        _known_keys = set(ArrayMetadataJSONLike_V3.__annotations__)
+        _known_keys = _ARRAY_METADATA_KNOWN_KEYS
         extra_fields = {k: v for k, v in obj.items() if k not in _known_keys}
         return cls(
             shape=obj["shape"],

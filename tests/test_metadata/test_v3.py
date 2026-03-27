@@ -22,7 +22,7 @@ from zarr.core.metadata.v3 import (
     ArrayMetadataJSON_V3,
     ArrayV3Metadata,
     ChunkGridLike,
-    narrow_array_metadata_json,
+    check_array_metadata_like,
     parse_codecs,
     parse_dimension_names,
     parse_zarr_format,
@@ -571,7 +571,7 @@ def test_from_json(
     assert result.extra_fields == extra_fields.expected
 
     # narrow + from_json should produce the same result for the same input
-    assert ArrayV3Metadata.from_json(narrow_array_metadata_json(data)) == result
+    assert ArrayV3Metadata.from_json(check_array_metadata_like(data)) == result
 
 
 _VALID_TRY_FROM_JSON_INPUT: dict[str, object] = {
@@ -600,6 +600,6 @@ _VALID_TRY_FROM_JSON_INPUT: dict[str, object] = {
         ({**_VALID_TRY_FROM_JSON_INPUT, "unknown_field": "value"}, "Disallowed extra fields"),
     ],
 )
-def test_narrow_array_metadata_json_invalid(data: object, error_match: str) -> None:
+def test_check_array_metadata_like_invalid(data: object, error_match: str) -> None:
     with pytest.raises(MetadataValidationError, match=error_match):
-        narrow_array_metadata_json(data)
+        check_array_metadata_like(data)
