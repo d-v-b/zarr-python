@@ -490,7 +490,7 @@ class Expect[TIn, TOut]:
 
 @dataclass(frozen=True)
 class ExpectErr[TIn]:
-    """An (input, expected output) pair for parametrized tests."""
+    """An (input, expected exception, msg) triplet for parametrized tests."""
 
     input: TIn
     err_cls: type[Exception]
