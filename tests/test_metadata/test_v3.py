@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Generic, Literal, TypeVar
+from typing import TYPE_CHECKING, Literal, TypeVar
 
 import numpy as np
 import pytest
@@ -481,11 +481,20 @@ UNSET = _Unset()
 
 
 @dataclass(frozen=True)
-class Expect(Generic[TIn, TOut]):
+class Expect[TIn, TOut]:
     """An (input, expected output) pair for parametrized tests."""
 
     input: TIn
     expected: TOut
+
+
+@dataclass(frozen=True)
+class ExpectErr[TIn]:
+    """An (input, expected output) pair for parametrized tests."""
+
+    input: TIn
+    err_cls: type[Exception]
+    msg: str
 
 
 @pytest.mark.parametrize("shape", [Expect((10,), (10,)), Expect([5], (5,))])
@@ -585,21 +594,29 @@ _VALID_TRY_FROM_JSON_INPUT: dict[str, object] = {
 
 
 @pytest.mark.parametrize(
-    ("data", "error_match"),
+    "case",
     [
-        ("not a dict", "Expected a mapping"),
-        ({}, "Missing required keys"),
-        ({**_VALID_TRY_FROM_JSON_INPUT, "shape": "not a shape"}, "shape"),
-        ({**_VALID_TRY_FROM_JSON_INPUT, "data_type": 12345}, "data_type"),
-        ({**_VALID_TRY_FROM_JSON_INPUT, "chunk_grid": "not a mapping"}, "chunk_grid"),
-        (
+        ExpectErr("not a dict", TypeError, "Expected a mapping"),
+        ExpectErr({}, TypeError, "Missing required keys"),
+        ExpectErr({**_VALID_TRY_FROM_JSON_INPUT, "shape": "not a shape"}, TypeError, "shape"),
+        ExpectErr({**_VALID_TRY_FROM_JSON_INPUT, "data_type": 12345}, TypeError, "data_type"),
+        ExpectErr(
+            {**_VALID_TRY_FROM_JSON_INPUT, "chunk_grid": "not a mapping"}, TypeError, "chunk_grid"
+        ),
+        ExpectErr(
             {**_VALID_TRY_FROM_JSON_INPUT, "chunk_key_encoding": "not a mapping"},
+            TypeError,
             "chunk_key_encoding",
         ),
-        ({**_VALID_TRY_FROM_JSON_INPUT, "codecs": "not iterable"}, "codecs"),
-        ({**_VALID_TRY_FROM_JSON_INPUT, "unknown_field": "value"}, "Disallowed extra fields"),
+        ExpectErr({**_VALID_TRY_FROM_JSON_INPUT, "codecs": "not iterable"}, TypeError, "codecs"),
+        ExpectErr(
+            {**_VALID_TRY_FROM_JSON_INPUT, "unknown_field": "value"},
+            TypeError,
+            "Disallowed extra fields",
+        ),
     ],
 )
-def test_check_array_metadata_like_invalid(data: object, error_match: str) -> None:
-    with pytest.raises(MetadataValidationError, match=error_match):
-        check_array_metadata_like(data)
+def test_check_array_metadata_like_invalid(case: ExpectErr[object]) -> None:
+    """Structurally invalid input is rejected with TypeError."""
+    with pytest.raises(case.err_cls, match=case.msg):
+        check_array_metadata_like(case.input)

@@ -241,22 +241,23 @@ _ARRAY_METADATA_KNOWN_KEYS: Final[frozenset[str]] = frozenset(
 
 def check_array_metadata_like(data: object) -> ArrayMetadataJSONLike_V3:
     """
-    Narrow an untrusted object to ``ArrayMetadataJSONLike_V3``.
+    Narrow an untrusted object to `ArrayMetadataJSONLike_V3`.
 
-    Performs only structural type checking — verifies that ``data`` is a mapping
+    Performs structural type checking — verifies that `data` is a mapping
     with the expected keys and that each value has an acceptable Python type.
+    Raises `TypeError` if the input is structurally wrong.
     Does **not** validate the semantic correctness of values (e.g. whether a
-    data type string is a recognized dtype, or whether extra fields satisfy
-    ``must_understand``). That validation is the responsibility of ``__init__``.
+    data type string is a recognized dtype). That validation is the
+    responsibility of `__init__`, which raises `ValueError`.
 
-    This function allows ``zarr_format`` and ``node_type`` to be absent. The
+    This function allows `zarr_format` and `node_type` to be absent. The
     expectation is that these values have already been validated as a
     precondition for invoking this function.
     """
     errors: list[str] = []
 
     if not isinstance(data, Mapping):
-        raise MetadataValidationError(f"Expected a mapping, got {type(data).__name__}")
+        raise TypeError(f"Expected a mapping, got {type(data).__name__}")
 
     # --- required keys ---
     missing = _REQUIRED_JSONLIKE_KEYS - set(data.keys())
@@ -336,7 +337,7 @@ def check_array_metadata_like(data: object) -> ArrayMetadataJSONLike_V3:
         )
 
     if errors:
-        raise MetadataValidationError(
+        raise TypeError(
             "Cannot interpret input as Zarr v3 array metadata:\n"
             + "\n".join(f"  - {e}" for e in errors)
         )
