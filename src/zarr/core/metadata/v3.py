@@ -607,7 +607,7 @@ class ArrayV3Metadata(Metadata, JSONSerializable[ArrayMetadataJSONLike_V3, Array
     def from_json(cls, obj: ArrayMetadataJSONLike_V3) -> Self:
         """
         Construct from a trusted, typed input. No validation of the input structure
-        is performed beyond what ``__init__`` already does.
+        is performed beyond what `__init__` already does.
         """
         _known_keys = _ARRAY_METADATA_KNOWN_KEYS
         extra_fields = {k: v for k, v in obj.items() if k not in _known_keys}
