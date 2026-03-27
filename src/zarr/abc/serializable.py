@@ -1,10 +1,7 @@
-from typing import Protocol, Self, TypeVar
-
-T_co = TypeVar("T_co", covariant=True)
-T_contra = TypeVar("T_contra", contravariant=True)
+from typing import Protocol, Self
 
 
-class JSONSerializable(Protocol[T_contra, T_co]):
+class JSONSerializable[T_contra, T_co](Protocol):
     @classmethod
     def from_json(cls, obj: T_contra) -> Self:
         """
