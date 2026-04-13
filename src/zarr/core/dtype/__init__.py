@@ -155,6 +155,12 @@ for dtype in ANY_DTYPE:
     # mypy does not know that all the elements of ANY_DTYPE are subclasses of ZDType
     data_type_registry.register(dtype._zarr_v3_name, dtype)  # type: ignore[arg-type]
 
+# Register aliases — these are alternative V3 names that resolve to the same class.
+# VariableLengthUTF8 has _zarr_v3_name="string"; "variable_length_utf8" is its alias.
+data_type_registry.register("variable_length_utf8", VariableLengthUTF8)  # type: ignore[arg-type]
+# VariableLengthBytes has _zarr_v3_name="variable_length_bytes"; "bytes" is its alias.
+data_type_registry.register("bytes", VariableLengthBytes)  # type: ignore[arg-type]
+
 
 # TODO: find a better name for this function
 def get_data_type_from_native_dtype(dtype: npt.DTypeLike) -> ZDType[TBaseDType, TBaseScalar]:

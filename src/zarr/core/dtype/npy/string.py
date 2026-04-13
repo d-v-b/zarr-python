@@ -543,7 +543,7 @@ class UTF8Base[DType: TBaseDType](ZDType[DType, str], HasObjectCodec):
             Whether the input is a valid JSON representation of a variable length UTF-8 string
             data type.
         """
-        return data == cls._zarr_v3_name
+        return data in (cls._zarr_v3_name, "variable_length_utf8")
 
     @classmethod
     def _from_json_v2(cls, data: DTypeJSON) -> Self:
