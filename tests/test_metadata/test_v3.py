@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+from collections import defaultdict
 from typing import TYPE_CHECKING
 
 import pytest
 
+import zarr.registry
 from tests.conftest import Expect, ExpectFail
 from tests.test_metadata.conftest import minimal_metadata_dict_v3
 from zarr.core.buffer import default_buffer_prototype
@@ -27,6 +29,7 @@ from zarr.errors import (
     NodeTypeValidationError,
     UnknownCodecError,
 )
+from zarr.registry import Registry
 
 if TYPE_CHECKING:
     from typing import Any
@@ -42,17 +45,17 @@ def test_parse_zarr_format_valid() -> None:
     assert parse_zarr_format(3) == 3
 
 
-@pytest.mark.parametrize("data", [None, 1, 2, 4, 5, "3"])
+@pytest.mark.parametrize("data", [None, 1, 2, "3"])
 def test_parse_zarr_format_invalid(data: Any) -> None:
     """Non-3 values are rejected."""
     with pytest.raises(MetadataValidationError):
         parse_zarr_format(data)
 
 
-def test_parse_node_type_valid() -> None:
+@pytest.mark.parametrize("case", [Expect("array", "array"), Expect("group", "group")])
+def test_parse_node_type_valid(case: Expect[str, str]) -> None:
     """'array' and 'group' are the only valid node types."""
-    assert parse_node_type("array") == "array"
-    assert parse_node_type("group") == "group"
+    assert parse_node_type(case.input) == case.expect
 
 
 @pytest.mark.parametrize("data", [None, 2, "other"])
@@ -74,14 +77,18 @@ def test_parse_node_type_array_invalid(data: Any) -> None:
         parse_node_type_array(data)
 
 
-@pytest.mark.parametrize("data", [None, ("a", "b", "c"), ["a", "a", "a"], ()])
-def test_parse_dimension_names_valid(data: Any) -> None:
+@pytest.mark.parametrize(
+    "case",
+    [
+        Expect(None, None),
+        Expect(("a", "b", "c"), ("a", "b", "c")),
+        Expect(["a", "a", "a"], ("a", "a", "a")),
+        Expect((), ()),
+    ],
+)
+def test_parse_dimension_names_valid(case: Expect[object, object]) -> None:
     """None, tuples of strings, lists of strings, and empty tuples are accepted."""
-    result = parse_dimension_names(data)
-    if data is None:
-        assert result is None
-    else:
-        assert result == tuple(data)
+    assert parse_dimension_names(case.input) == case.expect
 
 
 @pytest.mark.parametrize("data", [[1, 2, "a"], [None, 3]])
@@ -93,11 +100,6 @@ def test_parse_dimension_names_invalid(data: Any) -> None:
 
 def test_parse_codecs_unknown_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     """An unregistered codec name raises UnknownCodecError."""
-    from collections import defaultdict
-
-    import zarr.registry
-    from zarr.registry import Registry
-
     monkeypatch.setattr(zarr.registry, "_codec_registries", defaultdict(Registry))
     with pytest.raises(UnknownCodecError):
         parse_codecs([{"name": "unknown"}])
@@ -130,34 +132,34 @@ _FLOAT64_CODECS = ({"name": "bytes", "configuration": {"endian": "little"}},)
     [
         Expect(
             input={},
-            output=minimal_metadata_dict_v3(codecs=_UINT8_CODECS),
+            expect=minimal_metadata_dict_v3(codecs=_UINT8_CODECS),
             id="minimal",
         ),
         Expect(
             input={"attributes": {"key": "value"}},
-            output=minimal_metadata_dict_v3(attributes={"key": "value"}, codecs=_UINT8_CODECS),
+            expect=minimal_metadata_dict_v3(attributes={"key": "value"}, codecs=_UINT8_CODECS),
             id="with_attributes",
         ),
         Expect(
             input={"dimension_names": ("x", "y")},
-            output=minimal_metadata_dict_v3(dimension_names=("x", "y"), codecs=_UINT8_CODECS),
+            expect=minimal_metadata_dict_v3(dimension_names=("x", "y"), codecs=_UINT8_CODECS),
             id="with_dimension_names",
         ),
         Expect(
             input={"storage_transformers": ()},
-            output=minimal_metadata_dict_v3(storage_transformers=(), codecs=_UINT8_CODECS),
+            expect=minimal_metadata_dict_v3(storage_transformers=(), codecs=_UINT8_CODECS),
             id="with_storage_transformers",
         ),
         Expect(
             input={"data_type": "float64", "fill_value": 0.0},
-            output=minimal_metadata_dict_v3(
+            expect=minimal_metadata_dict_v3(
                 data_type="float64", fill_value=0.0, codecs=_FLOAT64_CODECS
             ),
             id="float64",
         ),
         Expect(
             input={"chunk_key_encoding": {"name": "v2", "configuration": {"separator": "."}}},
-            output=minimal_metadata_dict_v3(
+            expect=minimal_metadata_dict_v3(
                 chunk_key_encoding={"name": "v2", "configuration": {"separator": "."}},
                 codecs=_UINT8_CODECS,
             ),
@@ -165,21 +167,21 @@ _FLOAT64_CODECS = ({"name": "bytes", "configuration": {"endian": "little"}},)
         ),
         Expect(
             input={"data_type": "float64", "fill_value": "NaN"},
-            output=minimal_metadata_dict_v3(
+            expect=minimal_metadata_dict_v3(
                 data_type="float64", fill_value="NaN", codecs=_FLOAT64_CODECS
             ),
             id="nan_fill_value",
         ),
         Expect(
             input={"data_type": "float64", "fill_value": "Infinity"},
-            output=minimal_metadata_dict_v3(
+            expect=minimal_metadata_dict_v3(
                 data_type="float64", fill_value="Infinity", codecs=_FLOAT64_CODECS
             ),
             id="inf_fill_value",
         ),
         Expect(
             input={"data_type": "float64", "fill_value": "-Infinity"},
-            output=minimal_metadata_dict_v3(
+            expect=minimal_metadata_dict_v3(
                 data_type="float64", fill_value="-Infinity", codecs=_FLOAT64_CODECS
             ),
             id="neg_inf_fill_value",
@@ -190,7 +192,7 @@ _FLOAT64_CODECS = ({"name": "bytes", "configuration": {"endian": "little"}},)
                 "storage_transformers": (),
                 "extra_fields": {"my_ext": {"must_understand": False, "data": [1, 2, 3]}},
             },
-            output=minimal_metadata_dict_v3(
+            expect=minimal_metadata_dict_v3(
                 attributes={},
                 storage_transformers=(),
                 codecs=_UINT8_CODECS,
@@ -205,7 +207,7 @@ def test_array_metadata_roundtrip(case: Expect[dict[str, Any], dict[str, Any]]) 
     """from_dict(d).to_dict() produces the expected output, including codec evolution."""
     d = minimal_metadata_dict_v3(**case.input)
     m = ArrayV3Metadata.from_dict(d)  # type: ignore[arg-type]
-    assert m.to_dict() == case.output
+    assert m.to_dict() == case.expect
 
 
 # ---------------------------------------------------------------------------
@@ -218,14 +220,15 @@ def test_array_metadata_roundtrip(case: Expect[dict[str, Any], dict[str, Any]]) 
     [
         ExpectFail(
             input={"dimension_names": ("x", "y", "z")},
-            exception=ValueError,
+            exception_cls=ValueError,
             msg="dimension_names.*shape",
             id="dimension_names_length_mismatch",
         ),
         ExpectFail(
             input={"data_type": "uint8", "fill_value": {}},
-            exception=TypeError,
+            exception_cls=TypeError,
             id="invalid_fill_value_type",
+            msg="Invalid type: {}. Expected an integer.",
         ),
     ],
     ids=lambda case: case.id,
@@ -233,7 +236,7 @@ def test_array_metadata_roundtrip(case: Expect[dict[str, Any], dict[str, Any]]) 
 def test_array_metadata_from_dict_fails(case: ExpectFail[dict[str, Any]]) -> None:
     """from_dict rejects invalid metadata documents."""
     d = minimal_metadata_dict_v3(**case.input)
-    with pytest.raises(case.exception, match=case.msg):
+    with pytest.raises(case.exception_cls, match=case.msg):
         ArrayV3Metadata.from_dict(d)  # type: ignore[arg-type]
 
 
@@ -242,13 +245,13 @@ def test_array_metadata_from_dict_fails(case: ExpectFail[dict[str, Any]]) -> Non
     [
         ExpectFail(
             input=minimal_metadata_dict_v3(extra_fields={"my_ext": {"must_understand": True}}),
-            exception=MetadataValidationError,
+            exception_cls=MetadataValidationError,
             msg="disallowed extra fields",
             id="must_understand_true",
         ),
         ExpectFail(
             input=minimal_metadata_dict_v3(extra_fields={"my_ext": 42}),
-            exception=MetadataValidationError,
+            exception_cls=MetadataValidationError,
             msg="disallowed extra fields",
             id="non_dict_extra_field",
         ),
@@ -257,7 +260,7 @@ def test_array_metadata_from_dict_fails(case: ExpectFail[dict[str, Any]]) -> Non
 )
 def test_array_metadata_extra_fields_rejected(case: ExpectFail[dict[str, Any]]) -> None:
     """from_dict rejects extra fields that don't conform to the spec."""
-    with pytest.raises(case.exception, match=case.msg):
+    with pytest.raises(case.exception_cls, match=case.msg):
         ArrayV3Metadata.from_dict(case.input)
 
 

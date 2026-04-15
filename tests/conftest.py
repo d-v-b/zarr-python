@@ -59,21 +59,48 @@ if TYPE_CHECKING:
 
 
 @dataclass
-class Expect[TIn, TOut]:
-    """A test case with explicit input, expected output, and a human-readable id."""
+class Expect[TInput, TExpect]:
+    """
+    A test case with explicit input, expected output, and a human-readable id.
 
-    input: TIn
-    output: TOut
-    id: str
+    Attributes
+    ----------
+
+    input : TInput
+        The input for the test case.
+    expect : TExpect
+        The expected output for the test case.
+    id : str | None, optional
+        A human-readable id for the test case, by default None
+
+    """
+
+    input: TInput
+    expect: TExpect
+    id: str | None = None
 
 
 @dataclass
-class ExpectFail[TIn]:
-    """A test case that should raise an exception."""
+class ExpectFail[TInput]:
+    """
+    A test case that should raise an exception.
 
-    input: TIn
-    exception: type[Exception]
-    id: str
+    Attributes
+    ----------
+
+    input : TInput
+        The input for the test case.
+    exception_cls : type[Exception]
+        The type of exception that should be raised.
+    id : str | None, optional
+        A human-readable id for the test case, by default None
+    msg : str | None, optional
+        An optional message to check for in the exception, by default None
+    """
+
+    input: TInput
+    exception_cls: type[Exception]
+    id: str | None = None
     msg: str | None = None
 
 
