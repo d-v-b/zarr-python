@@ -21,7 +21,14 @@ import numpy as np
 from typing_extensions import deprecated
 
 import zarr
-from zarr.abc.codec import ArrayArrayCodec, ArrayBytesCodec, BytesBytesCodec, Codec
+from zarr.abc.codec import (
+    ArrayArrayCodec,
+    ArrayBytesCodec,
+    BytesBytesCodec,
+    Codec,
+    ReadBatchItem,
+    WriteBatchItem,
+)
 from zarr.abc.numcodec import Numcodec, _is_numcodec
 from zarr.codecs._v2 import V2Codec
 from zarr.codecs.bytes import BytesCodec
@@ -5506,14 +5513,16 @@ async def _get_selection(
         default_spec = _get_default_chunk_spec(metadata, chunk_grid, _config, prototype)
         results = await codec_pipeline.read(
             [
-                (
-                    store_path / metadata.encode_chunk_key(chunk_coords),
-                    default_spec
-                    if default_spec is not None
-                    else _get_chunk_spec(metadata, chunk_grid, chunk_coords, _config, prototype),
-                    chunk_selection,
-                    out_selection,
-                    is_complete_chunk,
+                ReadBatchItem(
+                    byte_getter=store_path / metadata.encode_chunk_key(chunk_coords),
+                    chunk_spec=(
+                        default_spec
+                        if default_spec is not None
+                        else _get_chunk_spec(metadata, chunk_grid, chunk_coords, _config, prototype)
+                    ),
+                    chunk_selection=chunk_selection,
+                    out_selection=out_selection,
+                    is_complete=is_complete_chunk,
                 )
                 for chunk_coords, chunk_selection, out_selection, is_complete_chunk in indexed_chunks
             ],
@@ -5852,14 +5861,16 @@ async def _set_selection(
     default_spec = _get_default_chunk_spec(metadata, chunk_grid, _config, prototype)
     await codec_pipeline.write(
         [
-            (
-                store_path / metadata.encode_chunk_key(chunk_coords),
-                default_spec
-                if default_spec is not None
-                else _get_chunk_spec(metadata, chunk_grid, chunk_coords, _config, prototype),
-                chunk_selection,
-                out_selection,
-                is_complete_chunk,
+            WriteBatchItem(
+                byte_setter=store_path / metadata.encode_chunk_key(chunk_coords),
+                chunk_spec=(
+                    default_spec
+                    if default_spec is not None
+                    else _get_chunk_spec(metadata, chunk_grid, chunk_coords, _config, prototype)
+                ),
+                chunk_selection=chunk_selection,
+                out_selection=out_selection,
+                is_complete=is_complete_chunk,
             )
             for chunk_coords, chunk_selection, out_selection, is_complete_chunk in indexer
         ],

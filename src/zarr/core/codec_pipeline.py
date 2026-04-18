@@ -17,7 +17,9 @@ from zarr.abc.codec import (
     Codec,
     CodecPipeline,
     GetResult,
+    ReadBatchItem,
     SupportsSyncCodec,
+    WriteBatchItem,
 )
 from zarr.core.common import concurrent_map
 from zarr.core.config import config
@@ -35,13 +37,6 @@ if TYPE_CHECKING:
     from zarr.core.dtype.wrapper import TBaseDType, TBaseScalar, ZDType
     from zarr.core.metadata.v3 import ChunkGridMetadata
 
-    # The 5-tuple shape of a per-chunk batch item, used everywhere in the
-    # sync pipeline. Aliased for readability — the historical name
-    # `batch_info: Iterable[tuple[..., bool]]` says nothing about the
-    # field meanings.
-    ReadBatchItem = tuple[ByteGetter, ArraySpec, SelectorTuple, SelectorTuple, bool]
-    WriteBatchItem = tuple[ByteSetter, ArraySpec, SelectorTuple, SelectorTuple, bool]
-
 
 _pool: ThreadPoolExecutor | None = None
 _pool_size: int = 0
@@ -55,10 +50,16 @@ def _reset_pool_after_fork() -> None:
     only the bookkeeping state is copied. Without this hook, a child
     process inheriting an active pool would deadlock on the first
     ``pool.map`` call (waiting on workers that don't exist).
+
+    Also replaces ``_pool_lock``: if a thread in the parent was holding
+    the lock at the moment of fork, the child inherits a locked lock
+    with no thread to release it. The next ``_get_pool`` call in the
+    child would then deadlock on ``with _pool_lock:``.
     """
-    global _pool, _pool_size
+    global _pool, _pool_size, _pool_lock
     _pool = None
     _pool_size = 0
+    _pool_lock = threading.Lock()
 
 
 os.register_at_fork(after_in_child=_reset_pool_after_fork)
@@ -455,7 +456,7 @@ class BatchedCodecPipeline(CodecPipeline):
 
     async def read_batch(
         self,
-        batch_info: Iterable[tuple[ByteGetter, ArraySpec, SelectorTuple, SelectorTuple, bool]],
+        batch_info: Iterable[ReadBatchItem],
         out: NDBuffer,
         drop_axes: tuple[int, ...] = (),
     ) -> tuple[GetResult, ...]:
@@ -557,7 +558,7 @@ class BatchedCodecPipeline(CodecPipeline):
 
     async def write_batch(
         self,
-        batch_info: Iterable[tuple[ByteSetter, ArraySpec, SelectorTuple, SelectorTuple, bool]],
+        batch_info: Iterable[WriteBatchItem],
         value: NDBuffer,
         drop_axes: tuple[int, ...] = (),
     ) -> None:
@@ -686,7 +687,7 @@ class BatchedCodecPipeline(CodecPipeline):
 
     async def read(
         self,
-        batch_info: Iterable[tuple[ByteGetter, ArraySpec, SelectorTuple, SelectorTuple, bool]],
+        batch_info: Iterable[ReadBatchItem],
         out: NDBuffer,
         drop_axes: tuple[int, ...] = (),
     ) -> tuple[GetResult, ...]:
@@ -705,7 +706,7 @@ class BatchedCodecPipeline(CodecPipeline):
 
     async def write(
         self,
-        batch_info: Iterable[tuple[ByteSetter, ArraySpec, SelectorTuple, SelectorTuple, bool]],
+        batch_info: Iterable[WriteBatchItem],
         value: NDBuffer,
         drop_axes: tuple[int, ...] = (),
     ) -> None:
@@ -798,8 +799,8 @@ register_pipeline(BatchedCodecPipeline)
 #   - dispatch       — choose sequential or threaded execution
 #   - scatter_into   — assign one chunk array into a slice of an output buffer
 #   - merge_chunk    — combine an existing chunk with a write region
-#   - is_chunk_empty — write_empty_chunks predicate
-#   - read_region / write_region / delete_region — single-key store IO
+#   - should_skip_chunk — write_empty_chunks predicate
+#   - read_key / write_key / delete_key — single-key store IO
 #   - read_chunk     — fetch + decode + slice a single chunk (no scatter)
 #   - write_chunk    — read-modify-write OR full-overwrite for a single chunk
 #
@@ -894,28 +895,28 @@ def merge_chunk(
     return chunk_array
 
 
-def is_chunk_empty(chunk_array: NDBuffer, chunk_spec: ArraySpec) -> bool:
+def should_skip_chunk(chunk_array: NDBuffer, chunk_spec: ArraySpec) -> bool:
     """Should this chunk be omitted from the store?
 
     True iff ``write_empty_chunks=False`` and the chunk equals fill_value.
-    Callers use this to decide between ``write_region`` and ``delete_region``.
+    Callers use this to decide between ``write_key`` and ``delete_key``.
     """
     return not chunk_spec.config.write_empty_chunks and chunk_array.all_equal(
         fill_value_or_default(chunk_spec)
     )
 
 
-def read_region(byte_getter: ByteGetter, prototype: BufferPrototype) -> Buffer | None:
+def read_key(byte_getter: ByteGetter, prototype: BufferPrototype) -> Buffer | None:
     """Synchronously fetch a single store key. Returns None if absent."""
     return byte_getter.get_sync(prototype=prototype)  # type: ignore[attr-defined,no-any-return]
 
 
-def write_region(byte_setter: ByteSetter, value: Buffer) -> None:
+def write_key(byte_setter: ByteSetter, value: Buffer) -> None:
     """Synchronously write a single store key, overwriting any existing value."""
     byte_setter.set_sync(value)  # type: ignore[attr-defined]
 
 
-def delete_region(byte_setter: ByteSetter) -> None:
+def delete_key(byte_setter: ByteSetter) -> None:
     """Synchronously delete a single store key. No-op if absent."""
     byte_setter.delete_sync()  # type: ignore[attr-defined]
 
@@ -935,7 +936,7 @@ def read_chunk(
     For full-chunk reads (``chunk_selection`` selects the whole chunk),
     the slice is a view; no copy until the caller scatters.
     """
-    raw = read_region(byte_getter, chunk_spec.prototype)
+    raw = read_key(byte_getter, chunk_spec.prototype)
     if raw is None:
         return None
     decoded = transform.decode_chunk(raw, chunk_spec)
@@ -963,7 +964,7 @@ def write_chunk(
     """
     existing: NDBuffer | None = None
     if not is_complete:
-        existing_bytes = read_region(byte_setter, chunk_spec.prototype)
+        existing_bytes = read_key(byte_setter, chunk_spec.prototype)
         if existing_bytes is not None:
             existing = transform.decode_chunk(existing_bytes, chunk_spec)
 
@@ -971,15 +972,15 @@ def write_chunk(
         existing, value, chunk_spec, chunk_selection, out_selection, is_complete, drop_axes
     )
 
-    if is_chunk_empty(chunk_array, chunk_spec):
-        delete_region(byte_setter)
+    if should_skip_chunk(chunk_array, chunk_spec):
+        delete_key(byte_setter)
         return
 
     encoded = transform.encode_chunk(chunk_array, chunk_spec)
     if encoded is None:
-        delete_region(byte_setter)
+        delete_key(byte_setter)
     else:
-        write_region(byte_setter, encoded)
+        write_key(byte_setter, encoded)
 
 
 # ---------------------------------------------------------------------------
@@ -1270,7 +1271,7 @@ class SyncCodecPipeline(CodecPipeline):
 
     async def read(
         self,
-        batch_info: Iterable[tuple[ByteGetter, ArraySpec, SelectorTuple, SelectorTuple, bool]],
+        batch_info: Iterable[ReadBatchItem],
         out: NDBuffer,
         drop_axes: tuple[int, ...] = (),
     ) -> tuple[GetResult, ...]:
@@ -1319,7 +1320,7 @@ class SyncCodecPipeline(CodecPipeline):
 
     async def write(
         self,
-        batch_info: Iterable[tuple[ByteSetter, ArraySpec, SelectorTuple, SelectorTuple, bool]],
+        batch_info: Iterable[WriteBatchItem],
         value: NDBuffer,
         drop_axes: tuple[int, ...] = (),
     ) -> None:

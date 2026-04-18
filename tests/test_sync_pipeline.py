@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 import zarr
+from zarr.abc.codec import ReadBatchItem, WriteBatchItem
 from zarr.abc.store import SupportsSetRange
 from zarr.codecs.bytes import BytesCodec
 from zarr.codecs.gzip import GzipCodec
@@ -121,7 +122,15 @@ def test_read_write_roundtrip(dtype: str, shape: tuple[int, ...]) -> None:
     store_path = StorePath(store, "c/0")
     sync(
         pipeline.write(
-            [(store_path, spec, chunk_selection, out_selection, True)],
+            [
+                WriteBatchItem(
+                    byte_setter=store_path,
+                    chunk_spec=spec,
+                    chunk_selection=chunk_selection,
+                    out_selection=out_selection,
+                    is_complete=True,
+                )
+            ],
             value,
         )
     )
@@ -130,7 +139,15 @@ def test_read_write_roundtrip(dtype: str, shape: tuple[int, ...]) -> None:
     out = CPUNDBuffer.from_numpy_array(np.zeros(shape, dtype=dtype))
     sync(
         pipeline.read(
-            [(store_path, spec, chunk_selection, out_selection, True)],
+            [
+                ReadBatchItem(
+                    byte_getter=store_path,
+                    chunk_spec=spec,
+                    chunk_selection=chunk_selection,
+                    out_selection=out_selection,
+                    is_complete=True,
+                )
+            ],
             out,
         )
     )
@@ -165,7 +182,15 @@ def test_read_missing_chunk_fills() -> None:
 
     sync(
         pipeline.read(
-            [(store_path, spec, chunk_sel, chunk_sel, True)],
+            [
+                ReadBatchItem(
+                    byte_getter=store_path,
+                    chunk_spec=spec,
+                    chunk_selection=chunk_sel,
+                    out_selection=chunk_sel,
+                    is_complete=True,
+                )
+            ],
             out,
         )
     )
@@ -216,14 +241,30 @@ def test_read_write_sync_roundtrip(dtype: str, shape: tuple[int, ...]) -> None:
 
     # Write sync
     pipeline.write_sync(
-        [(store_path, spec, chunk_selection, out_selection, True)],
+        [
+            WriteBatchItem(
+                byte_setter=store_path,
+                chunk_spec=spec,
+                chunk_selection=chunk_selection,
+                out_selection=out_selection,
+                is_complete=True,
+            )
+        ],
         value,
     )
 
     # Read sync
     out = CPUNDBuffer.from_numpy_array(np.zeros(shape, dtype=dtype))
     pipeline.read_sync(
-        [(store_path, spec, chunk_selection, out_selection, True)],
+        [
+            ReadBatchItem(
+                byte_getter=store_path,
+                chunk_spec=spec,
+                chunk_selection=chunk_selection,
+                out_selection=out_selection,
+                is_complete=True,
+            )
+        ],
         out,
     )
 
@@ -255,7 +296,15 @@ def test_read_sync_missing_chunk_fills() -> None:
     chunk_sel = (slice(0, 10),)
 
     pipeline.read_sync(
-        [(store_path, spec, chunk_sel, chunk_sel, True)],
+        [
+            ReadBatchItem(
+                byte_getter=store_path,
+                chunk_spec=spec,
+                chunk_selection=chunk_sel,
+                out_selection=chunk_sel,
+                is_complete=True,
+            )
+        ],
         out,
     )
 
@@ -290,7 +339,15 @@ def test_sync_write_async_read_roundtrip() -> None:
 
     # Write sync
     pipeline.write_sync(
-        [(store_path, spec, chunk_sel, chunk_sel, True)],
+        [
+            WriteBatchItem(
+                byte_setter=store_path,
+                chunk_spec=spec,
+                chunk_selection=chunk_sel,
+                out_selection=chunk_sel,
+                is_complete=True,
+            )
+        ],
         value,
     )
 
@@ -298,7 +355,15 @@ def test_sync_write_async_read_roundtrip() -> None:
     out = CPUNDBuffer.from_numpy_array(np.zeros(100, dtype="float64"))
     sync(
         pipeline.read(
-            [(store_path, spec, chunk_sel, chunk_sel, True)],
+            [
+                ReadBatchItem(
+                    byte_getter=store_path,
+                    chunk_spec=spec,
+                    chunk_selection=chunk_sel,
+                    out_selection=chunk_sel,
+                    is_complete=True,
+                )
+            ],
             out,
         )
     )

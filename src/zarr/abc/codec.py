@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import abstractmethod
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Literal, Protocol, TypeGuard, runtime_checkable
+from typing import TYPE_CHECKING, Literal, NamedTuple, Protocol, TypeGuard, runtime_checkable
 
 from typing_extensions import ReadOnly, TypedDict
 
@@ -33,7 +33,9 @@ __all__ = [
     "CodecOutput",
     "CodecPipeline",
     "GetResult",
+    "ReadBatchItem",
     "SupportsSyncCodec",
+    "WriteBatchItem",
 ]
 
 
@@ -41,6 +43,28 @@ class GetResult(TypedDict):
     """Metadata about a store get operation."""
 
     status: Literal["present", "missing"]
+
+
+# The shape of a per-chunk batch item passed to CodecPipeline.read / write.
+# ``NamedTuple`` (rather than a plain tuple type alias) so every call site
+# documents itself via field access, and so construction sites read
+# top-to-bottom as labelled fields instead of positional slots.
+# ``NamedTuple`` subclasses ``tuple``, so existing positional destructuring
+# (``for bg, spec, csel, osel, ic in batch``) still works unchanged.
+class ReadBatchItem(NamedTuple):
+    byte_getter: ByteGetter
+    chunk_spec: ArraySpec
+    chunk_selection: SelectorTuple
+    out_selection: SelectorTuple
+    is_complete: bool
+
+
+class WriteBatchItem(NamedTuple):
+    byte_setter: ByteSetter
+    chunk_spec: ArraySpec
+    chunk_selection: SelectorTuple
+    out_selection: SelectorTuple
+    is_complete: bool
 
 
 type CodecInput = NDBuffer | Buffer
@@ -433,7 +457,7 @@ class CodecPipeline:
     @abstractmethod
     async def read(
         self,
-        batch_info: Iterable[tuple[ByteGetter, ArraySpec, SelectorTuple, SelectorTuple, bool]],
+        batch_info: Iterable[ReadBatchItem],
         out: NDBuffer,
         drop_axes: tuple[int, ...] = (),
     ) -> tuple[GetResult, ...]:
@@ -465,7 +489,7 @@ class CodecPipeline:
     @abstractmethod
     async def write(
         self,
-        batch_info: Iterable[tuple[ByteSetter, ArraySpec, SelectorTuple, SelectorTuple, bool]],
+        batch_info: Iterable[WriteBatchItem],
         value: NDBuffer,
         drop_axes: tuple[int, ...] = (),
     ) -> None:

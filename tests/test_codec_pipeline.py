@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 import zarr
+from zarr.abc.codec import ReadBatchItem
 from zarr.core.array import _get_chunk_spec
 from zarr.core.buffer.core import default_buffer_prototype
 from zarr.core.config import config as zarr_config
@@ -84,12 +85,14 @@ async def test_read_returns_get_results(
 
     results = await pipeline.read(
         [
-            (
-                async_arr.store_path / metadata.encode_chunk_key(chunk_coords),
-                _get_chunk_spec(metadata, async_arr._chunk_grid, chunk_coords, config, prototype),
-                chunk_selection,
-                out_selection,
-                is_complete_chunk,
+            ReadBatchItem(
+                byte_getter=async_arr.store_path / metadata.encode_chunk_key(chunk_coords),
+                chunk_spec=_get_chunk_spec(
+                    metadata, async_arr._chunk_grid, chunk_coords, config, prototype
+                ),
+                chunk_selection=chunk_selection,
+                out_selection=out_selection,
+                is_complete=is_complete_chunk,
             )
             for chunk_coords, chunk_selection, out_selection, is_complete_chunk in indexer
         ],

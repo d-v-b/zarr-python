@@ -21,15 +21,15 @@ from zarr.core.array_spec import ArrayConfig, ArraySpec
 from zarr.core.buffer import default_buffer_prototype
 from zarr.core.codec_pipeline import (
     ChunkTransform,
-    delete_region,
+    delete_key,
     dispatch,
-    is_chunk_empty,
     merge_chunk,
     read_chunk,
-    read_region,
+    read_key,
     scatter_into,
+    should_skip_chunk,
     write_chunk,
-    write_region,
+    write_key,
 )
 from zarr.core.dtype import get_data_type_from_native_dtype
 
@@ -188,53 +188,53 @@ def test_merge_chunk_overwrites_existing_region() -> None:
 
 
 # ---------------------------------------------------------------------------
-# is_chunk_empty
+# should_skip_chunk
 # ---------------------------------------------------------------------------
 
 
-def test_is_chunk_empty_true_when_all_fill_and_skip_empty() -> None:
+def test_should_skip_chunk_true_when_all_fill_and_skip_empty() -> None:
     spec = _spec(shape=(4,), fill_value=7, write_empty_chunks=False)
     chunk = _ndbuffer_from_array(np.full(4, 7, dtype="uint8"))
-    assert is_chunk_empty(chunk, spec)
+    assert should_skip_chunk(chunk, spec)
 
 
-def test_is_chunk_empty_false_when_write_empty_chunks_true() -> None:
+def test_should_skip_chunk_false_when_write_empty_chunks_true() -> None:
     """write_empty_chunks=True means no chunk is ever 'empty'."""
     spec = _spec(shape=(4,), fill_value=7, write_empty_chunks=True)
     chunk = _ndbuffer_from_array(np.full(4, 7, dtype="uint8"))
-    assert not is_chunk_empty(chunk, spec)
+    assert not should_skip_chunk(chunk, spec)
 
 
-def test_is_chunk_empty_false_when_chunk_differs_from_fill() -> None:
+def test_should_skip_chunk_false_when_chunk_differs_from_fill() -> None:
     spec = _spec(shape=(4,), fill_value=0, write_empty_chunks=False)
     chunk = _ndbuffer_from_array(np.array([0, 1, 0, 0], dtype="uint8"))
-    assert not is_chunk_empty(chunk, spec)
+    assert not should_skip_chunk(chunk, spec)
 
 
 # ---------------------------------------------------------------------------
-# read_region / write_region / delete_region
+# read_key / write_key / delete_key
 # ---------------------------------------------------------------------------
 
 
-def test_read_region_calls_get_sync_with_prototype() -> None:
+def test_read_key_calls_get_sync_with_prototype() -> None:
     bg = MagicMock()
     bg.get_sync.return_value = "fake_buffer"
     proto = default_buffer_prototype()
-    result = read_region(bg, proto)
+    result = read_key(bg, proto)
     assert result == "fake_buffer"
     bg.get_sync.assert_called_once_with(prototype=proto)
 
 
-def test_write_region_calls_set_sync() -> None:
+def test_write_key_calls_set_sync() -> None:
     bs = MagicMock()
     buf = MagicMock(spec=["__len__"])
-    write_region(bs, buf)
+    write_key(bs, buf)
     bs.set_sync.assert_called_once_with(buf)
 
 
-def test_delete_region_calls_delete_sync() -> None:
+def test_delete_key_calls_delete_sync() -> None:
     bs = MagicMock()
-    delete_region(bs)
+    delete_key(bs)
     bs.delete_sync.assert_called_once_with()
 
 
