@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -25,7 +26,7 @@ from zarr.errors import ZarrUserWarning
 from zarr.registry import register_pipeline
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator
+    from collections.abc import Callable, Iterable, Iterator
     from typing import Self
 
     from zarr.abc.store import ByteGetter, ByteSetter
@@ -34,10 +35,33 @@ if TYPE_CHECKING:
     from zarr.core.dtype.wrapper import TBaseDType, TBaseScalar, ZDType
     from zarr.core.metadata.v3 import ChunkGridMetadata
 
+    # The 5-tuple shape of a per-chunk batch item, used everywhere in the
+    # sync pipeline. Aliased for readability — the historical name
+    # `batch_info: Iterable[tuple[..., bool]]` says nothing about the
+    # field meanings.
+    ReadBatchItem = tuple[ByteGetter, ArraySpec, SelectorTuple, SelectorTuple, bool]
+    WriteBatchItem = tuple[ByteSetter, ArraySpec, SelectorTuple, SelectorTuple, bool]
+
 
 _pool: ThreadPoolExecutor | None = None
 _pool_size: int = 0
 _pool_lock = threading.Lock()
+
+
+def _reset_pool_after_fork() -> None:
+    """Drop references to the parent's thread pool after fork.
+
+    A ThreadPoolExecutor's worker threads do not survive ``fork()`` —
+    only the bookkeeping state is copied. Without this hook, a child
+    process inheriting an active pool would deadlock on the first
+    ``pool.map`` call (waiting on workers that don't exist).
+    """
+    global _pool, _pool_size
+    _pool = None
+    _pool_size = 0
+
+
+os.register_at_fork(after_in_child=_reset_pool_after_fork)
 
 
 def _resolve_max_workers() -> int:
@@ -61,11 +85,9 @@ def _resolve_max_workers() -> int:
     Compressed chunks shift the threshold lower because decode is real
     CPU work that benefits from parallelism.
     """
-    import os as _os
-
     cfg = config.get("codec_pipeline.max_workers", default=None)
     if cfg is None:
-        return _os.cpu_count() or 1
+        return os.cpu_count() or 1
     return max(1, int(cfg))
 
 
@@ -764,6 +786,285 @@ def codecs_from_list(
 register_pipeline(BatchedCodecPipeline)
 
 
+# ---------------------------------------------------------------------------
+# Per-chunk primitives for the SyncCodecPipeline
+# ---------------------------------------------------------------------------
+#
+# These functions are the building blocks the pipeline composes. They are
+# free functions, not methods, because they have no shared state — each
+# operates on its arguments only. Each function is small (≤ 30 lines),
+# named for the one thing it does, and testable in isolation:
+#
+#   - dispatch       — choose sequential or threaded execution
+#   - scatter_into   — assign one chunk array into a slice of an output buffer
+#   - merge_chunk    — combine an existing chunk with a write region
+#   - is_chunk_empty — write_empty_chunks predicate
+#   - read_region / write_region / delete_region — single-key store IO
+#   - read_chunk     — fetch + decode + slice a single chunk (no scatter)
+#   - write_chunk    — read-modify-write OR full-overwrite for a single chunk
+#
+# The pipeline class (SyncCodecPipeline below) is a thin coordinator that
+# composes these. No method on the pipeline does more than orchestrate.
+
+
+def dispatch[T, R](items: list[T], fn: Callable[[T], R], max_workers: int) -> list[R]:
+    """Apply ``fn`` to each item, sequentially or via the module thread pool.
+
+    When ``max_workers > 1`` and there is more than one item, tasks run on
+    the shared pool with up to ``max_workers`` concurrent workers.
+    Otherwise everything runs in the calling thread.
+
+    The pool is a module-level singleton; ``max_workers`` only affects the
+    *concurrency cap* for this call (the pool may have more workers
+    available from a previous larger call).
+
+    Pure scheduling. ``fn`` may do IO, compute, anything — ``dispatch``
+    only orchestrates.
+    """
+    if max_workers > 1 and len(items) > 1:
+        pool = _get_pool(max_workers)
+        return list(pool.map(fn, items))
+    return [fn(item) for item in items]
+
+
+def scatter_into(
+    out: NDBuffer,
+    out_selection: SelectorTuple,
+    chunk_array: NDBuffer,
+    drop_axes: tuple[int, ...] = (),
+) -> None:
+    """Assign ``chunk_array`` into ``out[out_selection]``, optionally squeezing axes.
+
+    Thread-safe across calls when the ``out_selection``s are non-overlapping
+    (which is guaranteed for chunks of a regular grid).
+    """
+    if drop_axes:
+        chunk_array = chunk_array.squeeze(axis=drop_axes)
+    out[out_selection] = chunk_array
+
+
+def merge_chunk(
+    existing: NDBuffer | None,
+    value: NDBuffer,
+    chunk_spec: ArraySpec,
+    chunk_selection: SelectorTuple,
+    out_selection: SelectorTuple,
+    is_complete: bool,
+    drop_axes: tuple[int, ...] = (),
+) -> NDBuffer:
+    """Combine an existing chunk array with a new write region.
+
+    For ``is_complete=True`` writes that already span the chunk's full
+    shape, the value is returned directly (zero-copy).
+
+    Otherwise, build a chunk-shaped buffer (from ``existing`` if present,
+    else fill_value) and write the selected region into it.
+
+    Pure ndarray operation — no IO, no codecs.
+    """
+    if (
+        is_complete
+        and value.shape == chunk_spec.shape
+        and value[out_selection].shape == chunk_spec.shape
+    ):
+        return value
+
+    if existing is None:
+        chunk_array = chunk_spec.prototype.nd_buffer.create(
+            shape=chunk_spec.shape,
+            dtype=chunk_spec.dtype.to_native_dtype(),
+            order=chunk_spec.order,
+            fill_value=fill_value_or_default(chunk_spec),
+        )
+    else:
+        chunk_array = existing.copy()
+
+    if chunk_selection == () or is_scalar(
+        value.as_ndarray_like(), chunk_spec.dtype.to_native_dtype()
+    ):
+        chunk_value = value
+    else:
+        chunk_value = value[out_selection]
+        if drop_axes:
+            item = tuple(
+                None if idx in drop_axes else slice(None) for idx in range(chunk_spec.ndim)
+            )
+            chunk_value = chunk_value[item]
+    chunk_array[chunk_selection] = chunk_value
+    return chunk_array
+
+
+def is_chunk_empty(chunk_array: NDBuffer, chunk_spec: ArraySpec) -> bool:
+    """Should this chunk be omitted from the store?
+
+    True iff ``write_empty_chunks=False`` and the chunk equals fill_value.
+    Callers use this to decide between ``write_region`` and ``delete_region``.
+    """
+    return not chunk_spec.config.write_empty_chunks and chunk_array.all_equal(
+        fill_value_or_default(chunk_spec)
+    )
+
+
+def read_region(byte_getter: ByteGetter, prototype: BufferPrototype) -> Buffer | None:
+    """Synchronously fetch a single store key. Returns None if absent."""
+    return byte_getter.get_sync(prototype=prototype)  # type: ignore[attr-defined,no-any-return]
+
+
+def write_region(byte_setter: ByteSetter, value: Buffer) -> None:
+    """Synchronously write a single store key, overwriting any existing value."""
+    byte_setter.set_sync(value)  # type: ignore[attr-defined]
+
+
+def delete_region(byte_setter: ByteSetter) -> None:
+    """Synchronously delete a single store key. No-op if absent."""
+    byte_setter.delete_sync()  # type: ignore[attr-defined]
+
+
+def read_chunk(
+    byte_getter: ByteGetter,
+    transform: ChunkTransform,
+    chunk_spec: ArraySpec,
+    chunk_selection: SelectorTuple,
+) -> NDBuffer | None:
+    """Fetch, decode, and slice a single chunk.
+
+    Returns the requested region as an ``NDBuffer``, or ``None`` if the
+    chunk is absent from the store. Does not scatter into any output —
+    the caller decides what to do with the result.
+
+    For full-chunk reads (``chunk_selection`` selects the whole chunk),
+    the slice is a view; no copy until the caller scatters.
+    """
+    raw = read_region(byte_getter, chunk_spec.prototype)
+    if raw is None:
+        return None
+    decoded = transform.decode_chunk(raw, chunk_spec)
+    return decoded[chunk_selection]
+
+
+def write_chunk(
+    byte_setter: ByteSetter,
+    transform: ChunkTransform,
+    chunk_spec: ArraySpec,
+    value: NDBuffer,
+    chunk_selection: SelectorTuple,
+    out_selection: SelectorTuple,
+    is_complete: bool,
+    drop_axes: tuple[int, ...] = (),
+) -> None:
+    """Read-modify-write (or full-overwrite) a single chunk.
+
+    For ``is_complete=True``, skips the existence read and just encodes
+    ``value`` directly. Otherwise reads any existing chunk, merges in the
+    new region, and re-encodes.
+
+    Honors ``write_empty_chunks``: if the merged chunk equals fill_value,
+    the store key is deleted instead of written.
+    """
+    existing: NDBuffer | None = None
+    if not is_complete:
+        existing_bytes = read_region(byte_setter, chunk_spec.prototype)
+        if existing_bytes is not None:
+            existing = transform.decode_chunk(existing_bytes, chunk_spec)
+
+    chunk_array = merge_chunk(
+        existing, value, chunk_spec, chunk_selection, out_selection, is_complete, drop_axes
+    )
+
+    if is_chunk_empty(chunk_array, chunk_spec):
+        delete_region(byte_setter)
+        return
+
+    encoded = transform.encode_chunk(chunk_array, chunk_spec)
+    if encoded is None:
+        delete_region(byte_setter)
+    else:
+        write_region(byte_setter, encoded)
+
+
+# ---------------------------------------------------------------------------
+# Batch-item adapters
+# ---------------------------------------------------------------------------
+#
+# The pipeline's batch interface speaks in 5-tuples and a shared output
+# buffer. The per-chunk primitives above don't — they take individual
+# arguments and return values. These adapters bridge the two:
+#
+#   - unpack the batch tuple
+#   - call the right primitive (read_chunk vs partial-decode codec;
+#     write_chunk vs partial-encode codec)
+#   - scatter results into ``out`` / propagate ``GetResult`` for reads
+#
+# Each adapter is small and shaped to plug straight into ``dispatch``.
+
+_MISSING = GetResult(status="missing")
+_PRESENT = GetResult(status="present")
+
+
+def _read_chunk_into(
+    item: ReadBatchItem,
+    transform: ChunkTransform,
+    out: NDBuffer,
+    drop_axes: tuple[int, ...],
+) -> GetResult:
+    """Read one chunk via the codec chain and scatter into ``out``."""
+    byte_getter, chunk_spec, chunk_selection, out_selection, _ = item
+    chunk = read_chunk(byte_getter, transform, chunk_spec, chunk_selection)
+    if chunk is None:
+        out[out_selection] = fill_value_or_default(chunk_spec)
+        return _MISSING
+    scatter_into(out, out_selection, chunk, drop_axes)
+    return _PRESENT
+
+
+def _read_chunk_partial(
+    item: ReadBatchItem,
+    codec: ArrayBytesCodecPartialDecodeMixin,
+    out: NDBuffer,
+    drop_axes: tuple[int, ...],
+) -> GetResult:
+    """Read one chunk via the codec's partial-decode IO and scatter into ``out``."""
+    byte_getter, chunk_spec, chunk_selection, out_selection, _ = item
+    decoded = codec._decode_partial_sync(byte_getter, chunk_selection, chunk_spec)  # type: ignore[attr-defined]
+    if decoded is None:
+        out[out_selection] = fill_value_or_default(chunk_spec)
+        return _MISSING
+    scatter_into(out, out_selection, decoded, drop_axes)
+    return _PRESENT
+
+
+def _write_chunk_into(
+    item: WriteBatchItem,
+    transform: ChunkTransform,
+    value: NDBuffer,
+    drop_axes: tuple[int, ...],
+) -> None:
+    """Write one chunk via the codec chain (RMW or full-overwrite)."""
+    byte_setter, chunk_spec, chunk_selection, out_selection, is_complete = item
+    write_chunk(
+        byte_setter,
+        transform,
+        chunk_spec,
+        value,
+        chunk_selection,
+        out_selection,
+        is_complete,
+        drop_axes,
+    )
+
+
+def _write_chunk_partial(
+    item: WriteBatchItem,
+    codec: ArrayBytesCodecPartialEncodeMixin,
+    value: NDBuffer,
+    scalar: bool,
+) -> None:
+    """Write one chunk via the codec's partial-encode IO (e.g. shard slot patch)."""
+    byte_setter, chunk_spec, chunk_selection, out_selection, _is_complete = item
+    chunk_value = value if scalar else value[out_selection]
+    codec._encode_partial_sync(byte_setter, chunk_value, chunk_selection, chunk_spec)  # type: ignore[attr-defined]
+
+
 @dataclass(frozen=True)
 class SyncCodecPipeline(CodecPipeline):
     """Codec pipeline that uses the codec chain directly.
@@ -891,73 +1192,24 @@ class SyncCodecPipeline(CodecPipeline):
             )
         return chunk_bytes_batch
 
-    # -- merge helper --
-
-    @staticmethod
-    def _merge_chunk_array(
-        existing_chunk_array: NDBuffer | None,
-        value: NDBuffer,
-        out_selection: SelectorTuple,
-        chunk_spec: ArraySpec,
-        chunk_selection: SelectorTuple,
-        is_complete_chunk: bool,
-        drop_axes: tuple[int, ...],
-    ) -> NDBuffer:
-        if (
-            is_complete_chunk
-            and value.shape == chunk_spec.shape
-            and value[out_selection].shape == chunk_spec.shape
-        ):
-            return value
-        if existing_chunk_array is None:
-            chunk_array = chunk_spec.prototype.nd_buffer.create(
-                shape=chunk_spec.shape,
-                dtype=chunk_spec.dtype.to_native_dtype(),
-                order=chunk_spec.order,
-                fill_value=fill_value_or_default(chunk_spec),
-            )
-        else:
-            chunk_array = existing_chunk_array.copy()
-        if chunk_selection == () or is_scalar(
-            value.as_ndarray_like(), chunk_spec.dtype.to_native_dtype()
-        ):
-            chunk_value = value
-        else:
-            chunk_value = value[out_selection]
-            if drop_axes:
-                item = tuple(
-                    None if idx in drop_axes else slice(None) for idx in range(chunk_spec.ndim)
-                )
-                chunk_value = chunk_value[item]
-        chunk_array[chunk_selection] = chunk_value
-        return chunk_array
-
     # -- sync read/write --
 
     def read_sync(
         self,
-        batch_info: Iterable[tuple[ByteGetter, ArraySpec, SelectorTuple, SelectorTuple, bool]],
+        batch_info: Iterable[ReadBatchItem],
         out: NDBuffer,
         drop_axes: tuple[int, ...] = (),
         max_workers: int = 1,
     ) -> tuple[GetResult, ...]:
-        """Synchronous read: fetch -> decode -> scatter, per chunk.
+        """Synchronously decode a batch of chunks into ``out``.
 
-        When ``max_workers > 1`` and there are multiple chunks, each
-        chunk's full lifecycle (fetch + decode + scatter) runs as one
-        task on a thread pool sized to ``max_workers`` — overlapping IO
-        of one chunk with decode/scatter of another. Scatter is
-        thread-safe because the chunks have non-overlapping output
-        selections.
+        Each chunk runs through ``read_chunk`` (or ``_decode_partial_sync``
+        for partial-decode-capable codecs like sharding). Results are
+        scattered into ``out`` at each chunk's ``out_selection``.
 
-        ``max_workers=1`` runs everything sequentially in the calling
-        thread (no pool involvement).
-
-        Mirrors ``BatchedCodecPipeline.read_batch``: when the AB codec
-        supports partial decoding (e.g. sharding), the codec handles its
-        own IO and only fetches the inner-chunk byte ranges that overlap
-        the read selection. Otherwise the pipeline fetches the full
-        blob and decodes the whole chunk.
+        Concurrency is controlled by ``max_workers``: see ``dispatch``.
+        Scatter is thread-safe because chunks have non-overlapping
+        ``out_selection``s.
         """
         assert self._sync_transform is not None
         transform = self._sync_transform
@@ -966,76 +1218,32 @@ class SyncCodecPipeline(CodecPipeline):
         if not batch:
             return ()
 
-        fill = fill_value_or_default(batch[0][1])
-        _missing = GetResult(status="missing")
+        codec = self.array_bytes_codec
+        if isinstance(codec, ArrayBytesCodecPartialDecodeMixin):
+            partial_codec = codec
+            read_one_chunk = lambda item: _read_chunk_partial(  # noqa: E731
+                item, partial_codec, out, drop_axes
+            )
+        else:
+            read_one_chunk = lambda item: _read_chunk_into(  # noqa: E731
+                item, transform, out, drop_axes
+            )
 
-        # Partial-decode fast path: the AB codec owns IO (read only the
-        # byte ranges needed for the requested selection). Same condition
-        # and dispatch as BatchedCodecPipeline.read_batch.
-        if self.supports_partial_decode:
-            codec = self.array_bytes_codec
-            assert hasattr(codec, "_decode_partial_sync")
-
-            def _read_one_partial(
-                item: tuple[Any, ArraySpec, SelectorTuple, SelectorTuple, bool],
-            ) -> GetResult:
-                byte_getter, chunk_spec, chunk_selection, out_selection, _ = item
-                decoded = codec._decode_partial_sync(byte_getter, chunk_selection, chunk_spec)
-                if decoded is None:
-                    out[out_selection] = fill
-                    return _missing
-                if drop_axes:
-                    decoded = decoded.squeeze(axis=drop_axes)
-                out[out_selection] = decoded
-                return GetResult(status="present")
-
-            if max_workers > 1 and len(batch) > 1:
-                pool = _get_pool(max_workers)
-                return tuple(pool.map(_read_one_partial, batch))
-            return tuple(_read_one_partial(item) for item in batch)
-
-        # Per-chunk fused path: fetch + decode + scatter as one task.
-        def _read_one(
-            item: tuple[Any, ArraySpec, SelectorTuple, SelectorTuple, bool],
-        ) -> GetResult:
-            byte_getter, chunk_spec, chunk_selection, out_selection, _ = item
-            raw = byte_getter.get_sync(prototype=chunk_spec.prototype)
-            if raw is None:
-                out[out_selection] = fill
-                return _missing
-            decoded = transform.decode_chunk(raw, chunk_spec)
-            selected = decoded[chunk_selection]
-            if drop_axes:
-                selected = selected.squeeze(axis=drop_axes)
-            out[out_selection] = selected
-            return GetResult(status="present")
-
-        if max_workers > 1 and len(batch) > 1:
-            pool = _get_pool(max_workers)
-            return tuple(pool.map(_read_one, batch))
-        return tuple(_read_one(item) for item in batch)
+        return tuple(dispatch(batch, read_one_chunk, max_workers))
 
     def write_sync(
         self,
-        batch_info: Iterable[tuple[ByteSetter, ArraySpec, SelectorTuple, SelectorTuple, bool]],
+        batch_info: Iterable[WriteBatchItem],
         value: NDBuffer,
         drop_axes: tuple[int, ...] = (),
         max_workers: int = 1,
     ) -> None:
-        """Synchronous write: fetch existing -> merge+encode -> store.
+        """Synchronously encode and store a batch of chunks.
 
-        When ``max_workers > 1`` and there are multiple chunks, each
-        chunk's full lifecycle (get-existing + merge + encode + set/delete)
-        runs as one task on a thread pool sized to ``max_workers`` —
-        overlapping IO of one chunk with compute of another.
-
-        ``max_workers=1`` runs everything sequentially in the calling
-        thread (no pool involvement).
-
-        When the codec pipeline supports partial encoding (e.g. a
-        sharding codec with no outer AA/BB codecs), the AB codec handles
-        the full write cycle — reading existing data, merging, encoding,
-        and writing — matching the async ``BatchedCodecPipeline`` path.
+        Each chunk runs through ``write_chunk`` (or
+        ``_encode_partial_sync`` for partial-encode-capable codecs like
+        sharding). Concurrency is controlled by ``max_workers``: see
+        ``dispatch``.
         """
         assert self._sync_transform is not None
         transform = self._sync_transform
@@ -1044,71 +1252,19 @@ class SyncCodecPipeline(CodecPipeline):
         if not batch:
             return
 
-        # Partial-encode path: the AB codec owns IO (read, merge, encode,
-        # write).  Same condition and calling convention as
-        # BatchedCodecPipeline.write_batch.
-        if self.supports_partial_encode:
-            codec = self.array_bytes_codec
-            assert hasattr(codec, "_encode_partial_sync")
+        codec = self.array_bytes_codec
+        if isinstance(codec, ArrayBytesCodecPartialEncodeMixin):
+            partial_codec = codec
             scalar = len(value.shape) == 0
-
-            def _encode_one_partial(
-                item: tuple[Any, ArraySpec, SelectorTuple, SelectorTuple, bool],
-            ) -> None:
-                bs, chunk_spec, chunk_selection, out_selection, _is_complete = item
-                chunk_value = value if scalar else value[out_selection]
-                codec._encode_partial_sync(bs, chunk_value, chunk_selection, chunk_spec)
-
-            if max_workers > 1 and len(batch) > 1:
-                pool = _get_pool(max_workers)
-                # consume the iterator to surface exceptions
-                list(pool.map(_encode_one_partial, batch))
-            else:
-                for item in batch:
-                    _encode_one_partial(item)
-            return
-
-        # Per-chunk fused path: get-existing + merge + encode + set/delete as one task.
-        def _write_one(
-            item: tuple[Any, ArraySpec, SelectorTuple, SelectorTuple, bool],
-        ) -> None:
-            bs, chunk_spec, chunk_selection, out_selection, is_complete = item
-            existing_bytes: Buffer | None = None
-            if not is_complete:
-                existing_bytes = bs.get_sync(prototype=chunk_spec.prototype)
-
-            existing_chunk_array: NDBuffer | None = None
-            if existing_bytes is not None:
-                existing_chunk_array = transform.decode_chunk(existing_bytes, chunk_spec)
-
-            chunk_array = self._merge_chunk_array(
-                existing_chunk_array,
-                value,
-                out_selection,
-                chunk_spec,
-                chunk_selection,
-                is_complete,
-                drop_axes,
+            write_one_chunk = lambda item: _write_chunk_partial(  # noqa: E731
+                item, partial_codec, value, scalar
+            )
+        else:
+            write_one_chunk = lambda item: _write_chunk_into(  # noqa: E731
+                item, transform, value, drop_axes
             )
 
-            if not chunk_spec.config.write_empty_chunks and chunk_array.all_equal(
-                fill_value_or_default(chunk_spec)
-            ):
-                bs.delete_sync()
-                return
-
-            encoded = transform.encode_chunk(chunk_array, chunk_spec)
-            if encoded is None:
-                bs.delete_sync()
-            else:
-                bs.set_sync(encoded)
-
-        if max_workers > 1 and len(batch) > 1:
-            pool = _get_pool(max_workers)
-            list(pool.map(_write_one, batch))
-        else:
-            for item in batch:
-                _write_one(item)
+        dispatch(batch, write_one_chunk, max_workers)
 
     # -- async read/write --
 
@@ -1212,12 +1368,12 @@ class SyncCodecPipeline(CodecPipeline):
         )
 
         chunk_array_merged = [
-            self._merge_chunk_array(
+            merge_chunk(
                 chunk_array,
                 value,
-                out_selection,
                 chunk_spec,
                 chunk_selection,
+                out_selection,
                 is_complete_chunk,
                 drop_axes,
             )
