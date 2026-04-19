@@ -250,6 +250,16 @@ class ArrayBytesCodecPartialDecodeMixin:
     ) -> NDBuffer | None:
         raise NotImplementedError
 
+    def _decode_partial_sync(
+        self, byte_getter: ByteGetter, selection: SelectorTuple, chunk_spec: ArraySpec
+    ) -> NDBuffer | None:
+        """Synchronous partial decode. Default implementation raises NotImplementedError.
+
+        Codecs that support sync IO (e.g. ShardingCodec) override this so the
+        SyncCodecPipeline can dispatch through them without an event loop.
+        """
+        raise NotImplementedError
+
     async def decode_partial(
         self,
         batch_info: Iterable[tuple[ByteGetter, SelectorTuple, ArraySpec]],
@@ -287,6 +297,20 @@ class ArrayBytesCodecPartialEncodeMixin:
         selection: SelectorTuple,
         chunk_spec: ArraySpec,
     ) -> None:
+        raise NotImplementedError  # pragma: no cover
+
+    def _encode_partial_sync(
+        self,
+        byte_setter: ByteSetter,
+        chunk_array: NDBuffer,
+        selection: SelectorTuple,
+        chunk_spec: ArraySpec,
+    ) -> None:
+        """Synchronous partial encode. Default implementation raises NotImplementedError.
+
+        Codecs that support sync IO (e.g. ShardingCodec) override this so the
+        SyncCodecPipeline can dispatch through them without an event loop.
+        """
         raise NotImplementedError  # pragma: no cover
 
     async def encode_partial(

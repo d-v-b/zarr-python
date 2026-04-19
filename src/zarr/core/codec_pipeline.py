@@ -512,50 +512,6 @@ class BatchedCodecPipeline(CodecPipeline):
                     results.append(GetResult(status="missing"))
         return tuple(results)
 
-    def _merge_chunk_array(
-        self,
-        existing_chunk_array: NDBuffer | None,
-        value: NDBuffer,
-        out_selection: SelectorTuple,
-        chunk_spec: ArraySpec,
-        chunk_selection: SelectorTuple,
-        is_complete_chunk: bool,
-        drop_axes: tuple[int, ...],
-    ) -> NDBuffer:
-        if (
-            is_complete_chunk
-            and value.shape == chunk_spec.shape
-            # Guard that this is not a partial chunk at the end with is_complete_chunk=True
-            and value[out_selection].shape == chunk_spec.shape
-        ):
-            return value
-        if existing_chunk_array is None:
-            chunk_array = chunk_spec.prototype.nd_buffer.create(
-                shape=chunk_spec.shape,
-                dtype=chunk_spec.dtype.to_native_dtype(),
-                order=chunk_spec.order,
-                fill_value=fill_value_or_default(chunk_spec),
-            )
-        else:
-            chunk_array = existing_chunk_array.copy()  # make a writable copy
-        if chunk_selection == () or is_scalar(
-            value.as_ndarray_like(), chunk_spec.dtype.to_native_dtype()
-        ):
-            chunk_value = value
-        else:
-            chunk_value = value[out_selection]
-            # handle missing singleton dimensions
-            if drop_axes:
-                item = tuple(
-                    None  # equivalent to np.newaxis
-                    if idx in drop_axes
-                    else slice(None)
-                    for idx in range(chunk_spec.ndim)
-                )
-                chunk_value = chunk_value[item]
-        chunk_array[chunk_selection] = chunk_value
-        return chunk_array
-
     async def write_batch(
         self,
         batch_info: Iterable[WriteBatchItem],
@@ -610,12 +566,12 @@ class BatchedCodecPipeline(CodecPipeline):
             )
 
             chunk_array_merged = [
-                self._merge_chunk_array(
+                merge_chunk(
                     chunk_array,
                     value,
-                    out_selection,
                     chunk_spec,
                     chunk_selection,
+                    out_selection,
                     is_complete_chunk,
                     drop_axes,
                 )
@@ -627,19 +583,12 @@ class BatchedCodecPipeline(CodecPipeline):
                     is_complete_chunk,
                 ) in zip(chunk_array_decoded, batch_info, strict=False)
             ]
-            chunk_array_batch: list[NDBuffer | None] = []
-            for chunk_array, (_, chunk_spec, *_) in zip(
-                chunk_array_merged, batch_info, strict=False
-            ):
-                if chunk_array is None:
-                    chunk_array_batch.append(None)  # type: ignore[unreachable]
-                else:
-                    if not chunk_spec.config.write_empty_chunks and chunk_array.all_equal(
-                        fill_value_or_default(chunk_spec)
-                    ):
-                        chunk_array_batch.append(None)
-                    else:
-                        chunk_array_batch.append(chunk_array)
+            chunk_array_batch: list[NDBuffer | None] = [
+                None if should_skip_chunk(chunk_array, chunk_spec) else chunk_array
+                for chunk_array, (_, chunk_spec, *_) in zip(
+                    chunk_array_merged, batch_info, strict=False
+                )
+            ]
 
             chunk_bytes_batch = await self.encode_batch(
                 [
@@ -790,22 +739,8 @@ register_pipeline(BatchedCodecPipeline)
 # ---------------------------------------------------------------------------
 # Per-chunk primitives for the SyncCodecPipeline
 # ---------------------------------------------------------------------------
-#
-# These functions are the building blocks the pipeline composes. They are
-# free functions, not methods, because they have no shared state — each
-# operates on its arguments only. Each function is small (≤ 30 lines),
-# named for the one thing it does, and testable in isolation:
-#
-#   - dispatch       — choose sequential or threaded execution
-#   - scatter_into   — assign one chunk array into a slice of an output buffer
-#   - merge_chunk    — combine an existing chunk with a write region
-#   - should_skip_chunk — write_empty_chunks predicate
-#   - read_key / write_key / delete_key — single-key store IO
-#   - read_chunk     — fetch + decode + slice a single chunk (no scatter)
-#   - write_chunk    — read-modify-write OR full-overwrite for a single chunk
-#
-# The pipeline class (SyncCodecPipeline below) is a thin coordinator that
-# composes these. No method on the pipeline does more than orchestrate.
+# Free functions, not methods: no shared state, testable in isolation.
+# SyncCodecPipeline composes them; it does not duplicate their logic.
 
 
 def dispatch[T, R](items: list[T], fn: Callable[[T], R], max_workers: int) -> list[R]:
@@ -866,6 +801,8 @@ def merge_chunk(
     if (
         is_complete
         and value.shape == chunk_spec.shape
+        # Guards against partial chunks at the array edge with is_complete=True
+        # but an out_selection that doesn't fill the chunk shape.
         and value[out_selection].shape == chunk_spec.shape
     ):
         return value
@@ -998,9 +935,6 @@ def write_chunk(
 #
 # Each adapter is small and shaped to plug straight into ``dispatch``.
 
-_MISSING = GetResult(status="missing")
-_PRESENT = GetResult(status="present")
-
 
 def _read_chunk_into(
     item: ReadBatchItem,
@@ -1013,9 +947,9 @@ def _read_chunk_into(
     chunk = read_chunk(byte_getter, transform, chunk_spec, chunk_selection)
     if chunk is None:
         out[out_selection] = fill_value_or_default(chunk_spec)
-        return _MISSING
+        return GetResult(status="missing")
     scatter_into(out, out_selection, chunk, drop_axes)
-    return _PRESENT
+    return GetResult(status="present")
 
 
 def _read_chunk_partial(
@@ -1026,12 +960,12 @@ def _read_chunk_partial(
 ) -> GetResult:
     """Read one chunk via the codec's partial-decode IO and scatter into ``out``."""
     byte_getter, chunk_spec, chunk_selection, out_selection, _ = item
-    decoded = codec._decode_partial_sync(byte_getter, chunk_selection, chunk_spec)  # type: ignore[attr-defined]
+    decoded = codec._decode_partial_sync(byte_getter, chunk_selection, chunk_spec)
     if decoded is None:
         out[out_selection] = fill_value_or_default(chunk_spec)
-        return _MISSING
+        return GetResult(status="missing")
     scatter_into(out, out_selection, decoded, drop_axes)
-    return _PRESENT
+    return GetResult(status="present")
 
 
 def _write_chunk_into(
@@ -1063,7 +997,7 @@ def _write_chunk_partial(
     """Write one chunk via the codec's partial-encode IO (e.g. shard slot patch)."""
     byte_setter, chunk_spec, chunk_selection, out_selection, _is_complete = item
     chunk_value = value if scalar else value[out_selection]
-    codec._encode_partial_sync(byte_setter, chunk_value, chunk_selection, chunk_spec)  # type: ignore[attr-defined]
+    codec._encode_partial_sync(byte_setter, chunk_value, chunk_selection, chunk_spec)
 
 
 @dataclass(frozen=True)
@@ -1212,8 +1146,12 @@ class SyncCodecPipeline(CodecPipeline):
         Scatter is thread-safe because chunks have non-overlapping
         ``out_selection``s.
         """
-        assert self._sync_transform is not None
         transform = self._sync_transform
+        if transform is None:
+            raise TypeError(
+                "SyncCodecPipeline.read_sync/write_sync requires a sync codec chain; "
+                "call evolve_from_array_spec(...) first to construct one."
+            )
 
         batch = list(batch_info)
         if not batch:
@@ -1246,8 +1184,12 @@ class SyncCodecPipeline(CodecPipeline):
         sharding). Concurrency is controlled by ``max_workers``: see
         ``dispatch``.
         """
-        assert self._sync_transform is not None
         transform = self._sync_transform
+        if transform is None:
+            raise TypeError(
+                "SyncCodecPipeline.read_sync/write_sync requires a sync codec chain; "
+                "call evolve_from_array_spec(...) first to construct one."
+            )
 
         batch = list(batch_info)
         if not batch:
