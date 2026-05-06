@@ -18,7 +18,7 @@ from typing import (
 from warnings import warn
 
 import numpy as np
-from typing_extensions import deprecated
+from typing_extensions import Sentinel, deprecated
 
 import zarr
 from zarr.abc.codec import ArrayArrayCodec, ArrayBytesCodec, BytesBytesCodec, Codec
@@ -160,7 +160,6 @@ if TYPE_CHECKING:
 # Array and AsyncArray are defined in the base ``zarr`` namespace
 __all__ = [
     "DEFAULT_FILL_VALUE",
-    "DefaultFillValue",
     "create_codec_pipeline",
     "parse_array_metadata",
 ]
@@ -168,22 +167,17 @@ __all__ = [
 logger = getLogger(__name__)
 
 
-class DefaultFillValue:
-    """
-    Sentinel class to indicate that the default fill value should be used.
+DEFAULT_FILL_VALUE = Sentinel("DEFAULT_FILL_VALUE")
+"""Sentinel value indicating that the dtype-appropriate default fill value should be used.
 
-    This class exists because conventional values used to convey "defaultness" like ``None`` or
-    ``"auto"` are ambiguous when specifying the fill value parameter of a Zarr array.
-    The value ``None`` is ambiguous because it is a valid fill value for Zarr V2
-    (resulting in ``"fill_value": null`` in array metadata).
-    A string like ``"auto"`` is ambiguous because such a string is a valid fill value for an array
-    with a string data type.
-    An instance of this class lies outside the space of valid fill values, which means it can
-    umambiguously express that the default fill value should be used.
-    """
+This sentinel exists because conventional defaultness markers like ``None`` and ``"auto"``
+are ambiguous as fill values: ``None`` is a valid Zarr V2 fill value (serialized as JSON
+``null``), and ``"auto"`` is a valid fill value for arrays with a string data type. The
+sentinel lies outside the space of valid fill values, so it can unambiguously mean
+"use the default."
 
-
-DEFAULT_FILL_VALUE = DefaultFillValue()
+Compare against this value with identity checks (``fill_value is DEFAULT_FILL_VALUE``).
+"""
 
 
 def _chunk_sizes_from_shape(
@@ -534,9 +528,8 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         else:
             chunk_key_encoding_parsed = chunk_key_encoding
 
-        if isinstance(fill_value, DefaultFillValue) or fill_value is None:
-            # Use dtype's default scalar for DefaultFillValue sentinel
-            # For v3, None is converted to DefaultFillValue behavior
+        if fill_value is DEFAULT_FILL_VALUE or fill_value is None:
+            # For v3, None is treated as DEFAULT_FILL_VALUE: use the dtype's default scalar.
             fill_value_parsed = dtype.default_scalar()
         else:
             fill_value_parsed = fill_value
@@ -618,8 +611,7 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         if dimension_separator is None:
             dimension_separator = "."
 
-        # Handle DefaultFillValue sentinel
-        if isinstance(fill_value, DefaultFillValue):
+        if fill_value is DEFAULT_FILL_VALUE:
             fill_value_parsed: Any = dtype.default_scalar()
         else:
             # For v2, preserve None as-is (backward compatibility)
