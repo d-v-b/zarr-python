@@ -70,6 +70,7 @@ __all__ = [
     "copy",
     "copy_all",
     "copy_store",
+    "create",
     "create_array",
     "create_hierarchy",
     "empty",
@@ -843,6 +844,87 @@ async def open_group(
         )
     msg = f"No group found in store {store!r} at path {store_path.path!r}"
     raise GroupNotFoundError(msg)
+
+
+@deprecated(
+    "Use zarr.create_array instead.",
+    category=ZarrDeprecationWarning,
+)
+async def create(
+    shape: tuple[int, ...] | int,
+    *,  # Note: this is a change from v2
+    chunks: tuple[int, ...] | int | bool | None = None,
+    dtype: ZDTypeLike | None = None,
+    compressor: CompressorLike = "auto",
+    fill_value: Any | None = DEFAULT_FILL_VALUE,
+    order: MemoryOrder | None = None,
+    store: StoreLike | None = None,
+    synchronizer: Any | None = None,
+    overwrite: bool = False,
+    path: PathLike | None = None,
+    chunk_store: StoreLike | None = None,
+    filters: Iterable[dict[str, JSON] | Numcodec] | None = None,
+    cache_metadata: bool | None = None,
+    cache_attrs: bool | None = None,
+    read_only: bool | None = None,
+    object_codec: Codec | None = None,
+    dimension_separator: Literal[".", "/"] | None = None,
+    write_empty_chunks: bool | None = None,
+    zarr_format: ZarrFormat | None = None,
+    meta_array: Any | None = None,
+    attributes: dict[str, JSON] | None = None,
+    chunk_shape: tuple[int, ...] | int | None = None,
+    chunk_key_encoding: (
+        ChunkKeyEncoding
+        | tuple[Literal["default"], Literal[".", "/"]]
+        | tuple[Literal["v2"], Literal[".", "/"]]
+        | None
+    ) = None,
+    codecs: Iterable[Codec | dict[str, JSON]] | None = None,
+    dimension_names: DimensionNamesLike = None,
+    storage_options: dict[str, Any] | None = None,
+    config: ArrayConfigLike | None = None,
+    **kwargs: Any,
+) -> AnyAsyncArray:
+    """Create an array.
+
+    !!! warning "Deprecated"
+        `zarr.create` is deprecated since v3.2 and will be removed in v3.3.0.
+        Use [`zarr.create_array`][] instead.
+
+    See [`zarr.api.asynchronous._create_array_compat`][] for the full parameter
+    documentation.
+    """
+    return await _create_array_compat(
+        shape=shape,
+        chunks=chunks,
+        dtype=dtype,
+        compressor=compressor,
+        fill_value=fill_value,
+        order=order,
+        store=store,
+        synchronizer=synchronizer,
+        overwrite=overwrite,
+        path=path,
+        chunk_store=chunk_store,
+        filters=filters,
+        cache_metadata=cache_metadata,
+        cache_attrs=cache_attrs,
+        read_only=read_only,
+        object_codec=object_codec,
+        dimension_separator=dimension_separator,
+        write_empty_chunks=write_empty_chunks,
+        zarr_format=zarr_format,
+        meta_array=meta_array,
+        attributes=attributes,
+        chunk_shape=chunk_shape,
+        chunk_key_encoding=chunk_key_encoding,
+        codecs=codecs,
+        dimension_names=dimension_names,
+        storage_options=storage_options,
+        config=config,
+        **kwargs,
+    )
 
 
 async def _create_array_compat(
