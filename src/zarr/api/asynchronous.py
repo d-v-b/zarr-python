@@ -100,6 +100,45 @@ _READ_MODES: tuple[AccessModeLiteral, ...] = ("r", "r+", "a")
 _CREATE_MODES: tuple[AccessModeLiteral, ...] = ("a", "w", "w-")
 _OVERWRITE_MODES: tuple[AccessModeLiteral, ...] = ("w",)
 
+#: Keyword arguments accepted by the deprecated ``create`` but not by
+#: ``create_array``. The array-creation convenience functions still accept
+#: these in 3.2.x but will drop them in 3.3.0.
+_LEGACY_CREATE_KWARGS: frozenset[str] = frozenset(
+    {
+        "compressor",
+        "synchronizer",
+        "cache_metadata",
+        "cache_attrs",
+        "read_only",
+        "object_codec",
+        "dimension_separator",
+        "write_empty_chunks",
+        "meta_array",
+        "chunk_shape",
+        "codecs",
+        "path",
+        "chunk_store",
+    }
+)
+
+
+def _warn_legacy_create_kwargs(kwargs: dict[str, Any]) -> None:
+    """Warn if ``kwargs`` contains a keyword argument that ``create_array``
+    does not accept. The array-creation convenience functions will change
+    their keyword arguments to match ``create_array`` in zarr-python 3.3.0.
+    """
+    legacy = sorted(_LEGACY_CREATE_KWARGS & kwargs.keys())
+    if legacy:
+        warnings.warn(
+            ZarrDeprecationWarning(
+                f"The keyword argument(s) {legacy!r} will not be accepted in "
+                f"zarr-python 3.3.0. The array-creation convenience functions "
+                f"will change their keyword arguments to match `zarr.create_array`. "
+                f"Migrate to `zarr.create_array`."
+            ),
+            stacklevel=3,
+        )
+
 
 def _infer_overwrite(mode: AccessModeLiteral) -> bool:
     """
@@ -1165,6 +1204,7 @@ async def empty(shape: tuple[int, ...], **kwargs: Any) -> AnyAsyncArray:
     retrieve data from an empty Zarr array, any values may be returned,
     and these are not guaranteed to be stable from one access to the next.
     """
+    _warn_legacy_create_kwargs(kwargs)
     return await _create_array_compat(shape=shape, **kwargs)
 
 
@@ -1215,6 +1255,7 @@ async def full(shape: tuple[int, ...], fill_value: Any, **kwargs: Any) -> AnyAsy
     Array
         The new array.
     """
+    _warn_legacy_create_kwargs(kwargs)
     return await _create_array_compat(shape=shape, fill_value=fill_value, **kwargs)
 
 
@@ -1256,6 +1297,7 @@ async def ones(shape: tuple[int, ...], **kwargs: Any) -> AnyAsyncArray:
     Array
         The new array.
     """
+    _warn_legacy_create_kwargs(kwargs)
     return await _create_array_compat(shape=shape, fill_value=1, **kwargs)
 
 
@@ -1310,6 +1352,7 @@ async def open_array(
         The opened array.
     """
 
+    _warn_legacy_create_kwargs(kwargs)
     mode = kwargs.pop("mode", None)
     store_path = await make_store_path(store, path=path, mode=mode, storage_options=storage_options)
 
@@ -1371,6 +1414,7 @@ async def zeros(shape: tuple[int, ...], **kwargs: Any) -> AnyAsyncArray:
     Array
         The new array.
     """
+    _warn_legacy_create_kwargs(kwargs)
     return await _create_array_compat(shape=shape, fill_value=0, **kwargs)
 
 
