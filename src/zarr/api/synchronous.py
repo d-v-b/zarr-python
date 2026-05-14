@@ -49,7 +49,6 @@ __all__ = [
     "copy",
     "copy_all",
     "copy_store",
-    "create",
     "create_array",
     "create_hierarchy",
     "empty",
@@ -762,7 +761,7 @@ def create(
     """
     return Array(
         sync(
-            async_api.create(
+            async_api._create_array_compat(
                 shape=shape,
                 chunks=chunks,
                 dtype=dtype,

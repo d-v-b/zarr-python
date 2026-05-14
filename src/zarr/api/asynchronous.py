@@ -70,7 +70,6 @@ __all__ = [
     "copy",
     "copy_all",
     "copy_store",
-    "create",
     "create_array",
     "create_hierarchy",
     "empty",
@@ -616,7 +615,7 @@ async def array(data: npt.ArrayLike | AnyArray, **kwargs: Any) -> AnyAsyncArray:
         raise ValueError("read_only=True is no longer supported when creating new arrays")
 
     # instantiate array
-    z = await create(**kwargs)
+    z = await _create_array_compat(**kwargs)
 
     # fill with data
     await z.setitem(Ellipsis, data)
@@ -846,7 +845,7 @@ async def open_group(
     raise GroupNotFoundError(msg)
 
 
-async def create(
+async def _create_array_compat(
     shape: tuple[int, ...] | int,
     *,  # Note: this is a change from v2
     chunks: tuple[int, ...] | int | bool | None = None,
@@ -883,7 +882,10 @@ async def create(
     config: ArrayConfigLike | None = None,
     **kwargs: Any,
 ) -> AnyAsyncArray:
-    """Create an array.
+    """Create an array (private engine for the deprecated public ``create``).
+
+    This carries the full legacy ``create`` signature. Public ``create`` (sync
+    and async) and the array-creation convenience functions forward here.
 
     Parameters
     ----------
@@ -1084,7 +1086,7 @@ async def empty(shape: tuple[int, ...], **kwargs: Any) -> AnyAsyncArray:
     retrieve data from an empty Zarr array, any values may be returned,
     and these are not guaranteed to be stable from one access to the next.
     """
-    return await create(shape=shape, **kwargs)
+    return await _create_array_compat(shape=shape, **kwargs)
 
 
 async def empty_like(a: ArrayLike, **kwargs: Any) -> AnyAsyncArray:
@@ -1134,7 +1136,7 @@ async def full(shape: tuple[int, ...], fill_value: Any, **kwargs: Any) -> AnyAsy
     Array
         The new array.
     """
-    return await create(shape=shape, fill_value=fill_value, **kwargs)
+    return await _create_array_compat(shape=shape, fill_value=fill_value, **kwargs)
 
 
 # TODO: add type annotations for kwargs
@@ -1175,7 +1177,7 @@ async def ones(shape: tuple[int, ...], **kwargs: Any) -> AnyAsyncArray:
     Array
         The new array.
     """
-    return await create(shape=shape, fill_value=1, **kwargs)
+    return await _create_array_compat(shape=shape, fill_value=1, **kwargs)
 
 
 async def ones_like(a: ArrayLike, **kwargs: Any) -> AnyAsyncArray:
@@ -1241,7 +1243,7 @@ async def open_array(
         if not store_path.read_only and mode in _CREATE_MODES:
             overwrite = _infer_overwrite(mode)
             _zarr_format = zarr_format or _default_zarr_format()
-            return await create(
+            return await _create_array_compat(
                 store=store_path,
                 zarr_format=_zarr_format,
                 overwrite=overwrite,
@@ -1290,7 +1292,7 @@ async def zeros(shape: tuple[int, ...], **kwargs: Any) -> AnyAsyncArray:
     Array
         The new array.
     """
-    return await create(shape=shape, fill_value=0, **kwargs)
+    return await _create_array_compat(shape=shape, fill_value=0, **kwargs)
 
 
 async def zeros_like(a: ArrayLike, **kwargs: Any) -> AnyAsyncArray:
