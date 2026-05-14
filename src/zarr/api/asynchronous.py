@@ -889,11 +889,8 @@ async def create(
     """Create an array.
 
     !!! warning "Deprecated"
-        `zarr.create` is deprecated since v3.2 and will be removed in v3.3.0.
+        `zarr.create` is deprecated since v3.2.0 and will be removed in v3.3.0.
         Use [`zarr.create_array`][] instead.
-
-    See [`zarr.api.asynchronous._create_array_compat`][] for the full parameter
-    documentation.
     """
     return await _create_array_compat(
         shape=shape,
