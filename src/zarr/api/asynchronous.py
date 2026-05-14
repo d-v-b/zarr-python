@@ -882,9 +882,9 @@ async def _create_array_compat(
     config: ArrayConfigLike | None = None,
     **kwargs: Any,
 ) -> AnyAsyncArray:
-    """Create an array (private engine for the deprecated public ``create``).
+    """Create an array (private engine for the deprecated public `create`).
 
-    This carries the full legacy ``create`` signature. Public ``create`` (sync
+    This carries the full legacy `create` signature. Public `create` (sync
     and async) and the array-creation convenience functions forward here.
 
     Parameters
