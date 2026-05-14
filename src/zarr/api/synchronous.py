@@ -599,6 +599,10 @@ def create_group(
 
 
 # TODO: add type annotations for kwargs
+@deprecated(
+    "Use zarr.create_array instead.",
+    category=ZarrDeprecationWarning,
+)
 def create(
     shape: tuple[int, ...] | int,
     *,  # Note: this is a change from v2
@@ -637,6 +641,10 @@ def create(
     **kwargs: Any,
 ) -> AnyArray:
     """Create an array.
+
+    !!! warning "Deprecated"
+        `zarr.create` is deprecated since v3.2.0 and will be removed in v3.3.0.
+        Use [`zarr.create_array`][] instead.
 
     Parameters
     ----------
