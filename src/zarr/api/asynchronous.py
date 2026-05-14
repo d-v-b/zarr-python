@@ -100,9 +100,10 @@ _READ_MODES: tuple[AccessModeLiteral, ...] = ("r", "r+", "a")
 _CREATE_MODES: tuple[AccessModeLiteral, ...] = ("a", "w", "w-")
 _OVERWRITE_MODES: tuple[AccessModeLiteral, ...] = ("w",)
 
-#: Keyword arguments accepted by the deprecated ``create`` but not by
-#: ``create_array``. The array-creation convenience functions still accept
-#: these in 3.2.x but will drop them in 3.3.0.
+#: Keyword arguments accepted by the deprecated `create` but not by
+#: `create_array`. The array-creation convenience functions still accept
+#: these in 3.2.x but will drop them in 3.3.0. See
+#: `zarr.core.array.create_array` for the authoritative parameter list.
 _LEGACY_CREATE_KWARGS: frozenset[str] = frozenset(
     {
         "compressor",
@@ -123,19 +124,18 @@ _LEGACY_CREATE_KWARGS: frozenset[str] = frozenset(
 
 
 def _warn_legacy_create_kwargs(kwargs: dict[str, Any]) -> None:
-    """Warn if ``kwargs`` contains a keyword argument that ``create_array``
+    """Warn if `kwargs` contains a keyword argument that `create_array`
     does not accept. The array-creation convenience functions will change
-    their keyword arguments to match ``create_array`` in zarr-python 3.3.0.
+    their keyword arguments to match `create_array` in zarr-python 3.3.0.
     """
     legacy = sorted(_LEGACY_CREATE_KWARGS & kwargs.keys())
     if legacy:
         warnings.warn(
-            ZarrDeprecationWarning(
-                f"The keyword argument(s) {legacy!r} will not be accepted in "
-                f"zarr-python 3.3.0. The array-creation convenience functions "
-                f"will change their keyword arguments to match `zarr.create_array`. "
-                f"Migrate to `zarr.create_array`."
-            ),
+            f"The keyword argument(s) {legacy!r} will not be accepted in "
+            f"zarr-python 3.3.0. The array-creation convenience functions "
+            f"will change their keyword arguments to match `zarr.create_array`. "
+            f"Migrate to `zarr.create_array`.",
+            ZarrDeprecationWarning,
             stacklevel=3,
         )
 
