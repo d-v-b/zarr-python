@@ -348,3 +348,46 @@ def test_np_array_copy_true_materializes(sample_array: Any) -> None:
     actual = np.array(lazy[1:5], copy=True)
     expected = np.asarray(sample_array[1:5])
     np.testing.assert_array_equal(actual, expected)
+
+
+# ---------------------------------------------------------------------------
+# __setitem__ materializing write-through
+# ---------------------------------------------------------------------------
+
+
+def test_lazy_setitem_writes_through_basic(sample_array: Any) -> None:
+    """lazy[sel] = value writes through the eager set path; a subsequent read
+    of the same coordinate sees the new value."""
+    t = IndexTransform.from_shape(sample_array.shape)
+    lazy = _LazyArray(_array=sample_array, _transform=t)
+    lazy[5, 10] = -1
+    assert sample_array[5, 10] == -1
+
+
+def test_lazy_setitem_writes_through_basic_slice(sample_array: Any) -> None:
+    """lazy[slice] = value writes a slab through the eager set path."""
+    t = IndexTransform.from_shape(sample_array.shape)
+    lazy = _LazyArray(_array=sample_array, _transform=t)
+    lazy[0, :] = -2
+    np.testing.assert_array_equal(sample_array[0, :], np.full(20, -2, dtype="int32"))
+
+
+def test_lazy_oindex_setitem_writes_through(sample_array: Any) -> None:
+    """lazy.oindex[sel] = value writes through array.oindex[sel] = value;
+    multiple rows selected, each gets the broadcast value."""
+    t = IndexTransform.from_shape(sample_array.shape)
+    lazy = _LazyArray(_array=sample_array, _transform=t)
+    lazy.oindex[np.array([1, 3], dtype=np.intp), :] = -99
+    np.testing.assert_array_equal(sample_array[1, :], np.full(20, -99, dtype="int32"))
+    np.testing.assert_array_equal(sample_array[3, :], np.full(20, -99, dtype="int32"))
+
+
+def test_lazy_vindex_setitem_writes_through(sample_array: Any) -> None:
+    """lazy.vindex[sel] = value writes through array.vindex[sel] = value;
+    correlated point selection assigns the value at each (row, col) pair."""
+    t = IndexTransform.from_shape(sample_array.shape)
+    lazy = _LazyArray(_array=sample_array, _transform=t)
+    lazy.vindex[(np.array([1, 3, 5], dtype=np.intp), np.array([2, 4, 6], dtype=np.intp))] = -7
+    assert sample_array[1, 2] == -7
+    assert sample_array[3, 4] == -7
+    assert sample_array[5, 6] == -7

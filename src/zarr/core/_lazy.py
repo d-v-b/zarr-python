@@ -68,6 +68,25 @@ class _LazyArray:
         new_transform = selection_to_transform(selection, self._transform, "basic")
         return _LazyArray(_array=self._array, _transform=new_transform)
 
+    def __setitem__(self, selection: Any, value: Any) -> None:
+        """Materializing write: composes the selection onto the current
+        transform, recovers a (selection, mode) tuple, and writes through
+        the underlying array's eager set_* methods.
+
+        Lazy writes are NOT deferred; the value is written immediately. This
+        matches the design: the lazy view is for deferred *reads*. Use
+        `lazy.oindex[sel] = value` / `lazy.vindex[sel] = value` for
+        orthogonal / vectorized writes (helpers below).
+        """
+        new_transform = selection_to_transform(selection, self._transform, "basic")
+        sel, mode = transform_to_selection(new_transform)
+        if mode == "basic":
+            self._array[sel] = value
+        elif mode == "orthogonal":
+            self._array.oindex[sel] = value
+        else:  # vectorized
+            self._array.vindex[sel] = value
+
     @property
     def oindex(self) -> _LazyOIndex:
         """Helper for orthogonal lazy indexing: `lazy.oindex[selection]`."""
@@ -124,7 +143,8 @@ class _LazyOIndex:
     """Helper for orthogonal lazy indexing: `lazy.oindex[selection]`.
 
     Composes the selection onto the parent _LazyArray's transform in
-    orthogonal mode; returns a new _LazyArray.
+    orthogonal mode; returns a new _LazyArray. Setitem writes through
+    the underlying array's `oindex[sel] = value`.
     """
 
     _parent: _LazyArray
@@ -133,13 +153,21 @@ class _LazyOIndex:
         new_transform = selection_to_transform(selection, self._parent._transform, "orthogonal")
         return _LazyArray(_array=self._parent._array, _transform=new_transform)
 
+    def __setitem__(self, selection: Any, value: Any) -> None:
+        """Materializing orthogonal write: `lazy.oindex[sel] = value` writes
+        through `underlying.oindex[recovered_sel] = value`."""
+        new_transform = selection_to_transform(selection, self._parent._transform, "orthogonal")
+        sel, _mode = transform_to_selection(new_transform)
+        self._parent._array.oindex[sel] = value
+
 
 @dataclass(frozen=True, slots=True)
 class _LazyVIndex:
     """Helper for vectorized lazy indexing: `lazy.vindex[selection]`.
 
     Composes the selection onto the parent _LazyArray's transform in
-    vectorized mode; returns a new _LazyArray.
+    vectorized mode; returns a new _LazyArray. Setitem writes through
+    the underlying array's `vindex[sel] = value`.
     """
 
     _parent: _LazyArray
@@ -147,6 +175,13 @@ class _LazyVIndex:
     def __getitem__(self, selection: Any) -> _LazyArray:
         new_transform = selection_to_transform(selection, self._parent._transform, "vectorized")
         return _LazyArray(_array=self._parent._array, _transform=new_transform)
+
+    def __setitem__(self, selection: Any, value: Any) -> None:
+        """Materializing vectorized write: `lazy.vindex[sel] = value` writes
+        through `underlying.vindex[recovered_sel] = value`."""
+        new_transform = selection_to_transform(selection, self._parent._transform, "vectorized")
+        sel, _mode = transform_to_selection(new_transform)
+        self._parent._array.vindex[sel] = value
 
 
 # Type alias for the selection that we hand to eager indexing.
