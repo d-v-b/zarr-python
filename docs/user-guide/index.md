@@ -34,6 +34,7 @@ Take your skills to the next level:
 - **[GPU](gpu.md)** - Leverage GPU acceleration
 - **[Extending](extending.md)** - Extend functionality with custom code
 - **[Consolidated Metadata](consolidated_metadata.md)** - Advanced metadata management
+- **[Lazy Indexing](lazy-indexing.md)** - Compose deferred selections without I/O
 
 ## Reference
 

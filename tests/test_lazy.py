@@ -391,3 +391,47 @@ def test_lazy_vindex_setitem_writes_through(sample_array: Any) -> None:
     assert sample_array[1, 2] == -7
     assert sample_array[3, 4] == -7
     assert sample_array[5, 6] == -7
+
+
+# ---------------------------------------------------------------------------
+# Array.lazy property — the public user-facing entry point.
+# ---------------------------------------------------------------------------
+
+
+def test_array_lazy_property_returns_lazy_array(sample_array: Any) -> None:
+    """arr.lazy returns a _LazyArray over the full array (identity transform)."""
+    lazy = sample_array.lazy
+    assert isinstance(lazy, _LazyArray)
+    assert lazy.shape == sample_array.shape
+    assert lazy.dtype == sample_array.dtype
+
+
+def test_array_lazy_end_to_end_basic(sample_array: Any) -> None:
+    """arr.lazy[a][b].result() composes through both selections and yields
+    the same data as the equivalent eager indexing."""
+    actual = sample_array.lazy[2:8, 5:15][1:3, 2:5].result()
+    expected = sample_array[2:8, 5:15][1:3, 2:5]
+    np.testing.assert_array_equal(actual, expected)
+
+
+def test_array_lazy_end_to_end_oindex(sample_array: Any) -> None:
+    """arr.lazy.oindex[...] matches arr.oindex[...] from the public entry point."""
+    sel = (np.array([1, 3, 5], dtype=np.intp), slice(2, 10))
+    actual = sample_array.lazy.oindex[sel].result()
+    expected = sample_array.oindex[sel]
+    np.testing.assert_array_equal(actual, expected)
+
+
+def test_array_lazy_end_to_end_vindex(sample_array: Any) -> None:
+    """arr.lazy.vindex[...] matches arr.vindex[...] from the public entry point."""
+    sel = (np.array([1, 3, 5], dtype=np.intp), np.array([2, 4, 6], dtype=np.intp))
+    actual = sample_array.lazy.vindex[sel].result()
+    expected = sample_array.vindex[sel]
+    np.testing.assert_array_equal(actual, expected)
+
+
+def test_array_lazy_np_asarray_interop(sample_array: Any) -> None:
+    """np.asarray(arr.lazy[sel]) returns the materialized eager-indexed array."""
+    actual = np.asarray(sample_array.lazy[3:7, 2:8])
+    expected = np.asarray(sample_array[3:7, 2:8])
+    np.testing.assert_array_equal(actual, expected)

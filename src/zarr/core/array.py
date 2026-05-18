@@ -154,6 +154,7 @@ if TYPE_CHECKING:
     from zarr.abc.codec import CodecPipeline
     from zarr.abc.store import Store
     from zarr.codecs.sharding import ShardingCodecIndexLocation
+    from zarr.core._lazy import _LazyArray
     from zarr.core.dtype.wrapper import TBaseDType, TBaseScalar
     from zarr.storage import StoreLike
     from zarr.types import AnyArray, AnyAsyncArray, ArrayV2, ArrayV3, AsyncArrayV2, AsyncArrayV3
@@ -3787,6 +3788,31 @@ class Array[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         [set_block_selection][zarr.Array.set_block_selection] for documentation and
         examples."""
         return BlockIndex(self)
+
+    @property
+    def lazy(self) -> _LazyArray:
+        """Lazy indexing view over this array.
+
+        Indexing into `arr.lazy[...]` composes a deferred selection without
+        performing any I/O. Call `.result()` (or `np.asarray()`) to materialize
+        the view as a numpy array. Orthogonal and vectorized indexing are
+        available via `arr.lazy.oindex[...]` and `arr.lazy.vindex[...]`.
+
+        Examples
+        --------
+        >>> view = arr.lazy[2:8]              # no I/O
+        >>> sub = view[1:3]                   # no I/O; composes selections
+        >>> data = sub.result()               # materializes; equivalent to arr[3:5]
+
+        See [_LazyArray][zarr.core._lazy._LazyArray] for the full API.
+        """
+        from zarr.core._lazy import _LazyArray
+        from zarr.core._transforms import IndexTransform
+
+        return _LazyArray(
+            _array=self,
+            _transform=IndexTransform.from_shape(self.shape),
+        )
 
     def resize(self, new_shape: ShapeLike) -> None:
         """
