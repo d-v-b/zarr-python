@@ -13,11 +13,13 @@ in the module name signals this.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
+
+import numpy as np
+
+from zarr.core._transforms.output_map import ArrayMap, ConstantMap, DimensionMap
 
 if TYPE_CHECKING:
-    import numpy as np
-
     from zarr.core._transforms import IndexTransform
     from zarr.core.array import Array
 
@@ -52,3 +54,73 @@ class _LazyArray:
             f"<_LazyArray {path} shape={self.shape} dtype={self.dtype} "
             f"domain={self._transform.selection_repr}>"
         )
+
+
+# Type alias for the selection that we hand to eager indexing.
+_Selection = tuple[Any, ...]  # tuple of int | slice | np.ndarray; loose at runtime
+_Mode = Literal["basic", "orthogonal", "vectorized"]
+
+
+def _classify_mode(t: IndexTransform) -> _Mode:
+    """Determine the indexing mode from the structure of t.output.
+
+    Rules:
+    - No ArrayMaps → "basic".
+    - One or more ArrayMaps with disjoint input_dimensions → "orthogonal".
+    - Two or more ArrayMaps sharing at least one input_dim → "vectorized".
+    """
+    array_maps = [m for m in t.output if isinstance(m, ArrayMap)]
+    if len(array_maps) == 0:
+        return "basic"
+    seen: set[int] = set()
+    for m in array_maps:
+        dims = set(m.input_dimensions)
+        if len(seen & dims) > 0:
+            return "vectorized"
+        seen.update(dims)
+    return "orthogonal"
+
+
+def transform_to_selection(t: IndexTransform) -> tuple[_Selection, _Mode]:
+    """Convert an IndexTransform back into a selection tuple and indexing mode.
+
+    The returned (selection, mode) tuple can be dispatched through zarr's
+    existing eager indexing API:
+    - mode="basic"      → array[selection]
+    - mode="orthogonal" → array.oindex[selection]
+    - mode="vectorized" → array.vindex[selection]
+
+    Constraints relied on by this function:
+    - `DimensionMap.stride` is positive (enforced by `IndexTransform.__post_init__`).
+      Negative-stride DimensionMaps would produce ambiguous `slice(start, stop, -k)`
+      because Python interprets the resulting negative `stop` as from-the-end.
+    - For the orthogonal path, each `ArrayMap.index_array` must be 1-D (zarr's
+      `oindex` expects one 1-D selector per axis). Multi-dimensional ArrayMaps,
+      which are legal at the `IndexTransform` level, are rejected here.
+    """
+    mode = _classify_mode(t)
+    entries: list[Any] = []
+    for m in t.output:
+        if isinstance(m, ConstantMap):
+            entries.append(m.offset)
+        elif isinstance(m, DimensionMap):
+            d = m.input_dimension
+            lo = t.domain.inclusive_min[d]
+            hi = t.domain.exclusive_max[d]
+            start = m.offset + m.stride * lo
+            stop = m.offset + m.stride * hi
+            if m.stride == 1:
+                entries.append(slice(start, stop))
+            else:
+                entries.append(slice(start, stop, m.stride))
+        else:  # ArrayMap
+            assert isinstance(m, ArrayMap)
+            if mode == "orthogonal" and m.index_array.ndim > 1:
+                raise NotImplementedError(
+                    "transform_to_selection: multi-dimensional ArrayMap in "
+                    "orthogonal mode is not supported; zarr's oindex requires "
+                    "1-D per-axis selectors"
+                )
+            coords = m.offset + m.stride * m.index_array
+            entries.append(coords.astype(np.intp))
+    return tuple(entries), mode
