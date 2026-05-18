@@ -295,3 +295,56 @@ def test_lazy_vindex_returns_lazy_array(sample_array: Any) -> None:
     lazy = _LazyArray(_array=sample_array, _transform=t)
     result = lazy.vindex[(np.array([1, 3], dtype=np.intp), np.array([2, 4], dtype=np.intp))]
     assert isinstance(result, _LazyArray)
+
+
+# ---------------------------------------------------------------------------
+# __array__ numpy interop
+# ---------------------------------------------------------------------------
+
+
+def test_np_asarray_materializes_lazy(sample_array: Any) -> None:
+    """np.asarray(lazy[sel]) materializes the lazy view and returns the
+    eager-indexing result."""
+    t = IndexTransform.from_shape(sample_array.shape)
+    lazy = _LazyArray(_array=sample_array, _transform=t)
+    actual = np.asarray(lazy[2:8, 5:15])
+    expected = np.asarray(sample_array[2:8, 5:15])
+    np.testing.assert_array_equal(actual, expected)
+
+
+def test_np_asarray_with_dtype_cast(sample_array: Any) -> None:
+    """np.asarray(lazy, dtype=...) materializes and then casts to the requested
+    dtype, preserving the cast value."""
+    t = IndexTransform.from_shape(sample_array.shape)
+    lazy = _LazyArray(_array=sample_array, _transform=t)
+    actual = np.asarray(lazy[:2, :2], dtype="float64")
+    assert actual.dtype == np.dtype("float64")
+    np.testing.assert_array_equal(actual, np.asarray(sample_array[:2, :2]).astype("float64"))
+
+
+def test_np_array_constructor_materializes_lazy(sample_array: Any) -> None:
+    """np.array(lazy) also materializes via __array__ (equivalent path to np.asarray)."""
+    t = IndexTransform.from_shape(sample_array.shape)
+    lazy = _LazyArray(_array=sample_array, _transform=t)
+    actual = np.array(lazy[1:5])
+    expected = np.array(sample_array[1:5])
+    np.testing.assert_array_equal(actual, expected)
+
+
+def test_np_array_copy_false_raises(sample_array: Any) -> None:
+    """NumPy 2.0's __array__ protocol requires raising ValueError when copy=False
+    cannot be honored. _LazyArray.__array__ must materialize (allocate), so
+    copy=False can never be satisfied."""
+    t = IndexTransform.from_shape(sample_array.shape)
+    lazy = _LazyArray(_array=sample_array, _transform=t)
+    with pytest.raises(ValueError, match="copy=False"):
+        np.array(lazy[1:5], copy=False)
+
+
+def test_np_array_copy_true_materializes(sample_array: Any) -> None:
+    """Explicit copy=True behaves the same as copy=None (default): materialize."""
+    t = IndexTransform.from_shape(sample_array.shape)
+    lazy = _LazyArray(_array=sample_array, _transform=t)
+    actual = np.array(lazy[1:5], copy=True)
+    expected = np.asarray(sample_array[1:5])
+    np.testing.assert_array_equal(actual, expected)

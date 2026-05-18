@@ -21,6 +21,8 @@ from zarr.core._transforms.output_map import ArrayMap, ConstantMap, DimensionMap
 from zarr.core._transforms.transform import selection_to_transform
 
 if TYPE_CHECKING:
+    import numpy.typing as npt
+
     from zarr.core._transforms import IndexTransform
     from zarr.core.array import Array
 
@@ -94,6 +96,27 @@ class _LazyArray:
             return self._array.oindex[selection]
         # mode == "vectorized"
         return self._array.vindex[selection]
+
+    def __array__(
+        self,
+        dtype: npt.DTypeLike | None = None,
+        copy: bool | None = None,
+    ) -> np.ndarray[Any, np.dtype[Any]]:
+        """NumPy interop: `np.asarray(lazy)` and `np.array(lazy)` materialize
+        the lazy view by calling `.result()`.
+
+        Honors the NumPy 2.0 `__array__` `copy` parameter contract:
+        - `copy=None` (default) or `copy=True`: materialize freely.
+        - `copy=False`: raise `ValueError`, because materialization itself
+          allocates a new array — there is no zero-copy path through the
+          eager indexing dispatch we use under the hood.
+        """
+        if copy is False:
+            raise ValueError(
+                "_LazyArray cannot satisfy copy=False; materialization always "
+                "allocates a new array via the eager indexing path"
+            )
+        return np.asarray(self.result(), dtype=dtype)
 
 
 @dataclass(frozen=True, slots=True)
