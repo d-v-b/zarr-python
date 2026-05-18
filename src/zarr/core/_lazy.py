@@ -61,18 +61,28 @@ class _LazyArray:
         Returns a new _LazyArray; no I/O is performed.
 
         For orthogonal-style array indexing or vectorized indexing, use
-        `lazy.oindex[...]` / `lazy.vindex[...]` (helpers added in a follow-up).
+        `lazy.oindex[...]` / `lazy.vindex[...]`.
         """
         new_transform = selection_to_transform(selection, self._transform, "basic")
         return _LazyArray(_array=self._array, _transform=new_transform)
+
+    @property
+    def oindex(self) -> _LazyOIndex:
+        """Helper for orthogonal lazy indexing: `lazy.oindex[selection]`."""
+        return _LazyOIndex(_parent=self)
+
+    @property
+    def vindex(self) -> _LazyVIndex:
+        """Helper for vectorized lazy indexing: `lazy.vindex[selection]`."""
+        return _LazyVIndex(_parent=self)
 
     def result(self) -> Any:
         """Materialize the lazy view by dispatching through the underlying
         array's eager indexing path.
 
-        Currently supports basic mode only. Orthogonal and vectorized modes
-        come in a follow-up commit and currently raise NotImplementedError
-        with a clear message naming the unsupported mode.
+        Dispatch is governed by the transform's structure (see
+        `transform_to_selection`): basic → `array[selection]`, orthogonal →
+        `array.oindex[selection]`, vectorized → `array.vindex[selection]`.
 
         Return type is `Any` rather than `np.ndarray` because basic indexing
         with an integer scalar returns a numpy scalar, not an array.
@@ -80,10 +90,40 @@ class _LazyArray:
         selection, mode = transform_to_selection(self._transform)
         if mode == "basic":
             return self._array[selection]
-        raise NotImplementedError(
-            f"_LazyArray.result() does not yet support mode={mode!r}; "
-            "oindex/vindex come in a follow-up commit"
-        )
+        if mode == "orthogonal":
+            return self._array.oindex[selection]
+        # mode == "vectorized"
+        return self._array.vindex[selection]
+
+
+@dataclass(frozen=True, slots=True)
+class _LazyOIndex:
+    """Helper for orthogonal lazy indexing: `lazy.oindex[selection]`.
+
+    Composes the selection onto the parent _LazyArray's transform in
+    orthogonal mode; returns a new _LazyArray.
+    """
+
+    _parent: _LazyArray
+
+    def __getitem__(self, selection: Any) -> _LazyArray:
+        new_transform = selection_to_transform(selection, self._parent._transform, "orthogonal")
+        return _LazyArray(_array=self._parent._array, _transform=new_transform)
+
+
+@dataclass(frozen=True, slots=True)
+class _LazyVIndex:
+    """Helper for vectorized lazy indexing: `lazy.vindex[selection]`.
+
+    Composes the selection onto the parent _LazyArray's transform in
+    vectorized mode; returns a new _LazyArray.
+    """
+
+    _parent: _LazyArray
+
+    def __getitem__(self, selection: Any) -> _LazyArray:
+        new_transform = selection_to_transform(selection, self._parent._transform, "vectorized")
+        return _LazyArray(_array=self._parent._array, _transform=new_transform)
 
 
 # Type alias for the selection that we hand to eager indexing.

@@ -205,22 +205,6 @@ def test_lazy_basic_indexing_composes(sample_array: Any) -> None:
     np.testing.assert_array_equal(actual, expected)
 
 
-def test_lazy_result_orthogonal_raises_not_implemented() -> None:
-    """Until oindex/vindex helpers land, .result() on an orthogonal transform
-    raises NotImplementedError with a clear message naming the mode."""
-    src = zarr.create_array(
-        store=zarr.storage.MemoryStore(), shape=(10,), dtype="int32", chunks=(5,)
-    )
-    src[:] = np.arange(10, dtype="int32")
-    t = IndexTransform(
-        domain=IndexDomain.from_shape((3,)),
-        output=(ArrayMap(index_array=np.array([0, 2, 4], dtype=np.intp), input_dimensions=(0,)),),
-    )
-    lazy = _LazyArray(_array=src, _transform=t)
-    with pytest.raises(NotImplementedError, match="orthogonal"):
-        lazy.result()
-
-
 def test_lazy_getitem_on_nonzero_origin_domain() -> None:
     """Basic indexing into a _LazyArray whose transform has a non-zero-origin
     domain materializes correctly. Not a common case for the public API but
@@ -236,3 +220,78 @@ def test_lazy_getitem_on_nonzero_origin_domain() -> None:
     lazy = _LazyArray(_array=src, _transform=t)
     result = lazy.result()
     np.testing.assert_array_equal(result, np.arange(5, 10, dtype="int32"))
+
+
+# ---------------------------------------------------------------------------
+# _LazyOIndex and _LazyVIndex helpers
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [
+        pytest.param(np.array([1, 3, 5], dtype=np.intp), id="1d-int-array"),
+        pytest.param(
+            (np.array([1, 3], dtype=np.intp), np.array([2, 4, 6], dtype=np.intp)),
+            id="2d-two-arrays",
+        ),
+        pytest.param(
+            (np.array([1, 3, 5], dtype=np.intp), slice(None)),
+            id="2d-array-and-slice",
+        ),
+        pytest.param(
+            np.array([True, False, True, False, True, False, True, False, True, False]),
+            id="1d-bool-mask",
+        ),
+    ],
+)
+def test_lazy_oindex_matches_eager(sample_array: Any, selection: Any) -> None:
+    """arr.lazy.oindex[sel].result() == arr.oindex[sel]."""
+    t = IndexTransform.from_shape(sample_array.shape)
+    lazy = _LazyArray(_array=sample_array, _transform=t)
+    actual = lazy.oindex[selection].result()
+    expected = sample_array.oindex[selection]
+    np.testing.assert_array_equal(actual, expected)
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [
+        pytest.param(
+            (np.array([1, 3, 5], dtype=np.intp), np.array([2, 4, 6], dtype=np.intp)),
+            id="2d-two-correlated-arrays",
+        ),
+        pytest.param(
+            (
+                np.array([[1, 2], [3, 4]], dtype=np.intp),
+                np.array([[5, 6], [7, 8]], dtype=np.intp),
+            ),
+            id="2d-broadcasted-arrays",
+        ),
+    ],
+)
+def test_lazy_vindex_matches_eager(sample_array: Any, selection: Any) -> None:
+    """arr.lazy.vindex[sel].result() == arr.vindex[sel]."""
+    t = IndexTransform.from_shape(sample_array.shape)
+    lazy = _LazyArray(_array=sample_array, _transform=t)
+    actual = lazy.vindex[selection].result()
+    expected = sample_array.vindex[selection]
+    np.testing.assert_array_equal(actual, expected)
+
+
+def test_lazy_oindex_returns_lazy_array(sample_array: Any) -> None:
+    """lazy.oindex[sel] returns a _LazyArray (composition friendly) rather
+    than materializing immediately. Calling .result() then materializes."""
+    t = IndexTransform.from_shape(sample_array.shape)
+    lazy = _LazyArray(_array=sample_array, _transform=t)
+    result = lazy.oindex[np.array([1, 3, 5], dtype=np.intp)]
+    assert isinstance(result, _LazyArray)
+
+
+def test_lazy_vindex_returns_lazy_array(sample_array: Any) -> None:
+    """lazy.vindex[sel] returns a _LazyArray (composition friendly) rather
+    than materializing immediately."""
+    t = IndexTransform.from_shape(sample_array.shape)
+    lazy = _LazyArray(_array=sample_array, _transform=t)
+    result = lazy.vindex[(np.array([1, 3], dtype=np.intp), np.array([2, 4], dtype=np.intp))]
+    assert isinstance(result, _LazyArray)
