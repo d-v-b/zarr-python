@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import numpy as np
 
 from zarr.core._transforms.output_map import ArrayMap, ConstantMap, DimensionMap
+from zarr.core._transforms.transform import selection_to_transform
 
 if TYPE_CHECKING:
     from zarr.core._transforms import IndexTransform
@@ -53,6 +54,35 @@ class _LazyArray:
         return (
             f"<_LazyArray {path} shape={self.shape} dtype={self.dtype} "
             f"domain={self._transform.selection_repr}>"
+        )
+
+    def __getitem__(self, selection: Any) -> _LazyArray:
+        """Compose a basic-indexing selection onto the underlying transform.
+        Returns a new _LazyArray; no I/O is performed.
+
+        For orthogonal-style array indexing or vectorized indexing, use
+        `lazy.oindex[...]` / `lazy.vindex[...]` (helpers added in a follow-up).
+        """
+        new_transform = selection_to_transform(selection, self._transform, "basic")
+        return _LazyArray(_array=self._array, _transform=new_transform)
+
+    def result(self) -> Any:
+        """Materialize the lazy view by dispatching through the underlying
+        array's eager indexing path.
+
+        Currently supports basic mode only. Orthogonal and vectorized modes
+        come in a follow-up commit and currently raise NotImplementedError
+        with a clear message naming the unsupported mode.
+
+        Return type is `Any` rather than `np.ndarray` because basic indexing
+        with an integer scalar returns a numpy scalar, not an array.
+        """
+        selection, mode = transform_to_selection(self._transform)
+        if mode == "basic":
+            return self._array[selection]
+        raise NotImplementedError(
+            f"_LazyArray.result() does not yet support mode={mode!r}; "
+            "oindex/vindex come in a follow-up commit"
         )
 
 

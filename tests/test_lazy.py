@@ -166,3 +166,73 @@ def test_transform_to_selection_orthogonal_multi_dim_arraymap_raises() -> None:
     )
     with pytest.raises(NotImplementedError, match="multi-dimensional ArrayMap"):
         transform_to_selection(t)
+
+
+# ---------------------------------------------------------------------------
+# _LazyArray.__getitem__ (basic) + .result()
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [
+        pytest.param(slice(None), id="full-slice"),
+        pytest.param(slice(2, 8), id="narrowing-slice"),
+        pytest.param(slice(None, None, 2), id="strided-slice"),
+        pytest.param(3, id="int-drops-leading-dim"),
+        pytest.param((slice(2, 8), slice(5, 15)), id="2d-narrowing-slices"),
+        pytest.param((3, slice(None)), id="2d-int-and-slice"),
+        pytest.param((slice(None), 5), id="2d-slice-and-int"),
+        pytest.param(..., id="ellipsis"),
+        pytest.param((slice(2, 8), ...), id="leading-slice-then-ellipsis"),
+    ],
+)
+def test_lazy_basic_indexing_matches_eager(sample_array: Any, selection: Any) -> None:
+    """For each basic selection, arr.lazy[sel].result() == arr[sel]."""
+    t = IndexTransform.from_shape(sample_array.shape)
+    lazy = _LazyArray(_array=sample_array, _transform=t)
+    actual = lazy[selection].result()
+    expected = sample_array[selection]
+    np.testing.assert_array_equal(actual, expected)
+
+
+def test_lazy_basic_indexing_composes(sample_array: Any) -> None:
+    """Composed slices on a _LazyArray equal the same composed slices on the array."""
+    t = IndexTransform.from_shape(sample_array.shape)
+    lazy = _LazyArray(_array=sample_array, _transform=t)
+    actual = lazy[2:8][1:4].result()
+    expected = sample_array[2:8][1:4]
+    np.testing.assert_array_equal(actual, expected)
+
+
+def test_lazy_result_orthogonal_raises_not_implemented() -> None:
+    """Until oindex/vindex helpers land, .result() on an orthogonal transform
+    raises NotImplementedError with a clear message naming the mode."""
+    src = zarr.create_array(
+        store=zarr.storage.MemoryStore(), shape=(10,), dtype="int32", chunks=(5,)
+    )
+    src[:] = np.arange(10, dtype="int32")
+    t = IndexTransform(
+        domain=IndexDomain.from_shape((3,)),
+        output=(ArrayMap(index_array=np.array([0, 2, 4], dtype=np.intp), input_dimensions=(0,)),),
+    )
+    lazy = _LazyArray(_array=src, _transform=t)
+    with pytest.raises(NotImplementedError, match="orthogonal"):
+        lazy.result()
+
+
+def test_lazy_getitem_on_nonzero_origin_domain() -> None:
+    """Basic indexing into a _LazyArray whose transform has a non-zero-origin
+    domain materializes correctly. Not a common case for the public API but
+    exercises the bridge between transform domains and eager selections."""
+    src = zarr.create_array(
+        store=zarr.storage.MemoryStore(), shape=(10,), dtype="int32", chunks=(10,)
+    )
+    src[:] = np.arange(10, dtype="int32")
+    t = IndexTransform(
+        domain=IndexDomain(inclusive_min=(5,), exclusive_max=(10,)),
+        output=(DimensionMap(input_dimension=0, offset=0, stride=1),),
+    )
+    lazy = _LazyArray(_array=src, _transform=t)
+    result = lazy.result()
+    np.testing.assert_array_equal(result, np.arange(5, 10, dtype="int32"))
