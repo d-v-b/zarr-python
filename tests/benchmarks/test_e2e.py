@@ -14,7 +14,6 @@ if TYPE_CHECKING:
     from pytest_benchmark.fixture import BenchmarkFixture
 
     from zarr.abc.store import Store
-    from zarr.core.common import NamedConfig
 
 from operator import getitem, setitem
 from typing import Any, Literal
@@ -27,10 +26,23 @@ from zarr.testing.store import LatencyStore
 
 CompressorName = Literal["gzip"] | None
 
-compressors: dict[CompressorName, NamedConfig[Any, Any] | None] = {
-    None: None,
-    "gzip": {"name": "gzip", "configuration": {"level": 1}},
-}
+
+def _compressor(name: CompressorName, zarr_format: Literal[2, 3]) -> Any:
+    """Resolve a compressor for the given format.
+
+    The v3 GzipCodec and the numcodecs (v2) Gzip are not interchangeable —
+    create_array rejects each in the other format — so the gzip spelling must
+    depend on zarr_format.
+    """
+    if name is None:
+        return None
+    if name == "gzip":
+        if zarr_format == 2:
+            import numcodecs
+
+            return numcodecs.GZip(level=1)
+        return {"name": "gzip", "configuration": {"level": 1}}
+    raise AssertionError(name)
 
 
 layouts: tuple[Layout, ...] = (
@@ -84,6 +96,19 @@ def pipeline(request: pytest.FixtureRequest) -> Iterator[str]:
         yield name
 
 
+@pytest.fixture(params=[2, 3], ids=lambda v: f"v{v}")
+def zarr_format(request: pytest.FixtureRequest, layout: Layout) -> Literal[2, 3]:
+    """Zarr format axis. v2 uses the V2Codec path (filters + compressor) rather
+    than the v3 array->array / array->bytes / bytes->bytes chain, so the codec
+    pipeline behaves differently — worth measuring on both pipelines. Sharding
+    is v3-only, so skip v2 cells that request shards.
+    """
+    fmt = request.param
+    if fmt == 2 and layout.shards is not None:
+        pytest.skip("zarr v2 does not support sharding")
+    return fmt  # type: ignore[no-any-return]
+
+
 @pytest.mark.parametrize("compression_name", [None, "gzip"])
 @pytest.mark.parametrize("layout", layouts, ids=str)
 @pytest.mark.parametrize("store", ["memory", "local"], indirect=["store"])
@@ -92,6 +117,7 @@ def test_write_array(
     layout: Layout,
     compression_name: CompressorName,
     pipeline: str,
+    zarr_format: Literal[2, 3],
     benchmark: BenchmarkFixture,
 ) -> None:
     """
@@ -103,8 +129,9 @@ def test_write_array(
         shape=layout.shape,
         chunks=layout.chunks,
         shards=layout.shards,
-        compressors=compressors[compression_name],  # type: ignore[arg-type]
+        compressors=_compressor(compression_name, zarr_format),
         fill_value=0,
+        zarr_format=zarr_format,
     )
 
     benchmark(setitem, arr, Ellipsis, 1)
@@ -118,6 +145,7 @@ def test_read_array(
     layout: Layout,
     compression_name: CompressorName,
     pipeline: str,
+    zarr_format: Literal[2, 3],
     benchmark: BenchmarkFixture,
 ) -> None:
     """
@@ -129,8 +157,9 @@ def test_read_array(
         shape=layout.shape,
         chunks=layout.chunks,
         shards=layout.shards,
-        compressors=compressors[compression_name],  # type: ignore[arg-type]
+        compressors=_compressor(compression_name, zarr_format),
         fill_value=0,
+        zarr_format=zarr_format,
     )
     arr[:] = 1
     benchmark(getitem, arr, Ellipsis)
