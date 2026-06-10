@@ -25,7 +25,7 @@ from zarr.errors import ZarrUserWarning
 from zarr.registry import register_pipeline
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator
+    from collections.abc import Iterable, Iterator, Sequence
     from typing import Self
 
     from zarr.abc.store import ByteGetter, ByteSetter
@@ -302,10 +302,10 @@ async def _async_read_fallback(
     )
     if isinstance(pipeline, FusedCodecPipeline) and pipeline.sync_transform is not None:
         chunk_array_batch = pipeline.decode_sync(
-            (
+            [
                 (chunk_bytes, chunk_spec)
                 for chunk_bytes, (_, chunk_spec, *_) in zip(chunk_bytes_batch, batch, strict=False)
-            ),
+            ],
         )
     else:
         chunk_array_batch = await pipeline.decode(
@@ -375,10 +375,10 @@ async def _async_write_fallback(
         isinstance(pipeline, FusedCodecPipeline) and pipeline.sync_transform is not None
     ):
         chunk_array_decoded = pipeline.decode_sync(
-            (
+            [
                 (chunk_bytes, chunk_spec)
                 for chunk_bytes, (_, chunk_spec, *_) in zip(chunk_bytes_batch, batch, strict=False)
-            ),
+            ],
         )
     else:
         chunk_array_decoded = await pipeline.decode(
@@ -419,10 +419,10 @@ async def _async_write_fallback(
 
     if use_sync:
         chunk_bytes_batch = cast(FusedCodecPipeline, pipeline).encode_sync(
-            (
+            [
                 (chunk_array, chunk_spec)
                 for chunk_array, (_, chunk_spec, *_) in zip(chunk_array_batch, batch, strict=False)
-            ),
+            ],
         )
     else:
         chunk_bytes_batch = await pipeline.encode(
@@ -1126,16 +1126,24 @@ class FusedCodecPipeline(CodecPipeline):
 
     def decode_sync(
         self,
-        chunk_bytes_and_specs: Iterable[tuple[Buffer | None, ArraySpec]],
+        chunk_bytes_and_specs: Sequence[tuple[Buffer | None, ArraySpec]],
     ) -> Iterable[NDBuffer | None]:
         transform = self.sync_transform
         if transform is None:
             raise RuntimeError("Do not call this method without a sync transform")
-        pool = _get_pool(_resolve_max_workers())
-        return pool.map(
-            lambda item: None if item[0] is None else transform.decode_chunk(item[0], item[1]),
-            chunk_bytes_and_specs,
-        )
+        max_workers = _resolve_max_workers()
+
+        def _decode(item: tuple[Buffer | None, ArraySpec]) -> NDBuffer | None:
+            return None if item[0] is None else transform.decode_chunk(item[0], item[1])
+
+        if max_workers > 1 and len(chunk_bytes_and_specs) > 1:
+            pool = _get_pool(max_workers)
+            return pool.map(
+                _decode,
+                chunk_bytes_and_specs,
+            )
+        else:
+            return (_decode(item) for item in chunk_bytes_and_specs)
 
     async def encode(
         self,
@@ -1152,16 +1160,25 @@ class FusedCodecPipeline(CodecPipeline):
 
     def encode_sync(
         self,
-        chunk_arrays_and_specs: Iterable[tuple[NDBuffer | None, ArraySpec]],
+        chunk_arrays_and_specs: Sequence[tuple[NDBuffer | None, ArraySpec]],
     ) -> Iterable[Buffer | None]:
         transform = self.sync_transform
         if transform is None:
             raise RuntimeError("Do not call this method without a sync transform")
-        pool = _get_pool(_resolve_max_workers())
-        return pool.map(
-            lambda item: None if item[0] is None else transform.encode_chunk(item[0], item[1]),
-            chunk_arrays_and_specs,
-        )
+
+        max_workers = _resolve_max_workers()
+
+        def _encode(item: tuple[NDBuffer | None, ArraySpec]) -> Buffer | None:
+            return None if item[0] is None else transform.encode_chunk(item[0], item[1])
+
+        if max_workers > 1 and len(chunk_arrays_and_specs) > 1:
+            pool = _get_pool(max_workers)
+            return pool.map(
+                _encode,
+                chunk_arrays_and_specs,
+            )
+        else:
+            return (_encode(item) for item in chunk_arrays_and_specs)
 
     # -- sync read/write --
 
