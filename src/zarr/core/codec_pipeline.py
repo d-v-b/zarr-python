@@ -1132,6 +1132,22 @@ class FusedCodecPipeline(CodecPipeline):
         self,
         chunk_bytes_and_specs: Sequence[tuple[Buffer | None, ArraySpec]],
     ) -> Iterable[NDBuffer | None]:
+        """A sync version of `decode`.
+
+        Parameters
+        ----------
+        chunk_bytes_and_specs
+            The chunks and their descriptions (i.e., shape, fill value etc.)
+
+        Returns
+        -------
+            An iterator over decoded chunks
+
+        Raises
+        ------
+        RuntimeError
+            If there is no sync transform
+        """
         transform = self.sync_transform
         if transform is None:
             raise RuntimeError("Do not call this method without a sync transform")
@@ -1142,12 +1158,14 @@ class FusedCodecPipeline(CodecPipeline):
 
         if max_workers > 1 and len(chunk_bytes_and_specs) > 1:
             pool = _get_pool(max_workers)
-            return pool.map(
-                _decode,
-                chunk_bytes_and_specs,
+            return list(
+                pool.map(
+                    _decode,
+                    chunk_bytes_and_specs,
+                )
             )
         else:
-            return (_decode(item) for item in chunk_bytes_and_specs)
+            return [_decode(item) for item in chunk_bytes_and_specs]
 
     async def encode(
         self,
@@ -1166,6 +1184,22 @@ class FusedCodecPipeline(CodecPipeline):
         self,
         chunk_arrays_and_specs: Sequence[tuple[NDBuffer | None, ArraySpec]],
     ) -> Iterable[Buffer | None]:
+        """A sync version of `encode`.
+
+        Parameters
+        ----------
+        chunk_arrays_and_specs
+            The chunks and their descriptions (i.e., shape, fill value etc.)
+
+        Returns
+        -------
+            An iterator over encoded chunks
+
+        Raises
+        ------
+        RuntimeError
+            If there is no sync transform
+        """
         transform = self.sync_transform
         if transform is None:
             raise RuntimeError("Do not call this method without a sync transform")
@@ -1177,12 +1211,14 @@ class FusedCodecPipeline(CodecPipeline):
 
         if max_workers > 1 and len(chunk_arrays_and_specs) > 1:
             pool = _get_pool(max_workers)
-            return pool.map(
-                _encode,
-                chunk_arrays_and_specs,
+            return list(
+                pool.map(
+                    _encode,
+                    chunk_arrays_and_specs,
+                )
             )
         else:
-            return (_encode(item) for item in chunk_arrays_and_specs)
+            return [_encode(item) for item in chunk_arrays_and_specs]
 
     # -- sync read/write --
 
