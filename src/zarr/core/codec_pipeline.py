@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -301,7 +302,8 @@ async def _async_read_fallback(
         config.get("async.concurrency"),
     )
     if isinstance(pipeline, FusedCodecPipeline) and pipeline.sync_transform is not None:
-        chunk_array_batch = pipeline.decode_sync(
+        chunk_array_batch = await asyncio.to_thread(
+            pipeline.decode_sync,
             [
                 (chunk_bytes, chunk_spec)
                 for chunk_bytes, (_, chunk_spec, *_) in zip(chunk_bytes_batch, batch, strict=False)
@@ -374,7 +376,8 @@ async def _async_write_fallback(
     if use_sync := (
         isinstance(pipeline, FusedCodecPipeline) and pipeline.sync_transform is not None
     ):
-        chunk_array_decoded = pipeline.decode_sync(
+        chunk_array_decoded = await asyncio.to_thread(
+            pipeline.decode_sync,
             [
                 (chunk_bytes, chunk_spec)
                 for chunk_bytes, (_, chunk_spec, *_) in zip(chunk_bytes_batch, batch, strict=False)
@@ -418,7 +421,8 @@ async def _async_write_fallback(
                 chunk_array_batch.append(chunk_array)
 
     if use_sync:
-        chunk_bytes_batch = cast(FusedCodecPipeline, pipeline).encode_sync(
+        chunk_bytes_batch = await asyncio.to_thread(
+            cast(FusedCodecPipeline, pipeline).encode_sync,
             [
                 (chunk_array, chunk_spec)
                 for chunk_array, (_, chunk_spec, *_) in zip(chunk_array_batch, batch, strict=False)
