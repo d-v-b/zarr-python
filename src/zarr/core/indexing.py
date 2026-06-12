@@ -545,6 +545,32 @@ class ChunkProjection(NamedTuple):
     is_complete_chunk: bool
 
 
+def _iter_chunk_projections(
+    dim_indexers: Sequence[IntDimIndexer | SliceDimIndexer],
+) -> Iterator[ChunkProjection]:
+    """Yield a ChunkProjection for each chunk touched by the product of ``dim_indexers``.
+
+    Shared by BasicIndexer and BlockIndexer, whose iteration is identical. The four
+    per-chunk fields (chunk coords, chunk selection, out selection, completeness) are
+    built in a single pass over each chunk's dim projections rather than four.
+    """
+    for dim_projections in itertools.product(*dim_indexers):
+        chunk_coords: list[int] = []
+        chunk_selection: list[Selector] = []
+        out_selection: list[Selector] = []
+        is_complete_chunk = True
+        for p in dim_projections:
+            chunk_coords.append(p.dim_chunk_ix)
+            chunk_selection.append(p.dim_chunk_sel)
+            if p.dim_out_sel is not None:
+                out_selection.append(p.dim_out_sel)
+            if not p.is_complete_chunk:
+                is_complete_chunk = False
+        yield ChunkProjection(
+            tuple(chunk_coords), tuple(chunk_selection), tuple(out_selection), is_complete_chunk
+        )
+
+
 def is_slice(s: Any) -> TypeGuard[slice]:
     return isinstance(s, slice)
 
@@ -610,14 +636,7 @@ class BasicIndexer(Indexer):
         object.__setattr__(self, "drop_axes", ())
 
     def __iter__(self) -> Iterator[ChunkProjection]:
-        for dim_projections in itertools.product(*self.dim_indexers):
-            chunk_coords = tuple(p.dim_chunk_ix for p in dim_projections)
-            chunk_selection = tuple(p.dim_chunk_sel for p in dim_projections)
-            out_selection = tuple(
-                p.dim_out_sel for p in dim_projections if p.dim_out_sel is not None
-            )
-            is_complete_chunk = all(p.is_complete_chunk for p in dim_projections)
-            yield ChunkProjection(chunk_coords, chunk_selection, out_selection, is_complete_chunk)
+        yield from _iter_chunk_projections(self.dim_indexers)
 
 
 @dataclass(frozen=True)
@@ -1118,14 +1137,7 @@ class BlockIndexer(Indexer):
         object.__setattr__(self, "drop_axes", ())
 
     def __iter__(self) -> Iterator[ChunkProjection]:
-        for dim_projections in itertools.product(*self.dim_indexers):
-            chunk_coords = tuple(p.dim_chunk_ix for p in dim_projections)
-            chunk_selection = tuple(p.dim_chunk_sel for p in dim_projections)
-            out_selection = tuple(
-                p.dim_out_sel for p in dim_projections if p.dim_out_sel is not None
-            )
-            is_complete_chunk = all(p.is_complete_chunk for p in dim_projections)
-            yield ChunkProjection(chunk_coords, chunk_selection, out_selection, is_complete_chunk)
+        yield from _iter_chunk_projections(self.dim_indexers)
 
 
 @dataclass(frozen=True)
