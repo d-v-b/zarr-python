@@ -9,7 +9,7 @@ from typing_extensions import ReadOnly, TypedDict
 from zarr.abc.metadata import Metadata
 from zarr.core.buffer import Buffer, NDBuffer
 from zarr.core.common import NamedConfig, concurrent_map
-from zarr.core.config import config
+from zarr.core.config import get_async_concurrency
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
@@ -249,7 +249,7 @@ class ArrayBytesCodecPartialDecodeMixin:
         return await concurrent_map(
             list(batch_info),
             self._decode_partial_single,
-            config.get("async.concurrency"),
+            get_async_concurrency(),
         )
 
 
@@ -286,7 +286,7 @@ class ArrayBytesCodecPartialEncodeMixin:
         await concurrent_map(
             list(batch_info),
             self._encode_partial_single,
-            config.get("async.concurrency"),
+            get_async_concurrency(),
         )
 
 
@@ -493,7 +493,7 @@ async def _batching_helper[CI: CodecInput, CO: CodecOutput](
     return await concurrent_map(
         list(batch_info),
         _noop_for_none(func),
-        config.get("async.concurrency"),
+        get_async_concurrency(),
     )
 
 

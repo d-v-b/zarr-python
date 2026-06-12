@@ -3286,6 +3286,13 @@ async def _iter_members(
                 raise ValueError(f"Unexpected type: {type(fetched_node)}")
 
 
+class _Drained:
+    """Sentinel signalling that a subgroup iterator has been fully drained."""
+
+
+_DRAINED = _Drained()
+
+
 async def _iter_members_deep(
     group: AsyncGroup,
     *,
@@ -3344,10 +3351,48 @@ async def _iter_members_deep(
                 node, max_depth=new_depth, skip_keys=skip_keys, semaphore=semaphore
             )
 
-    for prefix, subgroup_iter in to_recurse.items():
-        async for name, node in subgroup_iter:
-            key = f"{prefix}/{name}".lstrip("/")
-            yield key, node
+    # Recurse into sibling subgroups concurrently rather than draining each
+    # subgroup's iterator in sequence, so that sibling subtrees overlap their
+    # latency. The shared ``semaphore`` (threaded into every recursive call)
+    # still bounds the total number of concurrent ``getitem`` operations.
+    # Members are not guaranteed to be ordered, so we yield them as they arrive.
+    queue: asyncio.Queue[tuple[str, AnyAsyncArray | AsyncGroup] | Exception | _Drained] = (
+        asyncio.Queue()
+    )
+
+    async def _drain(
+        prefix: str,
+        subgroup_iter: AsyncGenerator[tuple[str, AnyAsyncArray | AsyncGroup], None],
+    ) -> None:
+        try:
+            async for name, node in subgroup_iter:
+                key = f"{prefix}/{name}".lstrip("/")
+                await queue.put((key, node))
+        except Exception as exc:
+            # Forward the error to the consumer so it surfaces from this
+            # generator just as it would from sequential iteration.
+            await queue.put(exc)
+        finally:
+            await queue.put(_DRAINED)
+
+    tasks = [
+        asyncio.create_task(_drain(prefix, subgroup_iter))
+        for prefix, subgroup_iter in to_recurse.items()
+    ]
+    remaining = len(tasks)
+    try:
+        while remaining:
+            item = await queue.get()
+            if isinstance(item, _Drained):
+                remaining -= 1
+            elif isinstance(item, Exception):
+                raise item
+            else:
+                yield item
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def _read_metadata_v3(store: Store, path: str) -> ArrayV3Metadata | GroupMetadata:
