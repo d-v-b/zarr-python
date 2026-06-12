@@ -10,6 +10,7 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Literal,
+    NotRequired,
     TypedDict,
     cast,
     overload,
@@ -133,6 +134,7 @@ from zarr.errors import (
     ArrayNotFoundError,
     ChunkNotFoundError,
     MetadataValidationError,
+    NodeTypeValidationError,
     ZarrDeprecationWarning,
     ZarrUserWarning,
 )
@@ -154,6 +156,7 @@ if TYPE_CHECKING:
     from zarr.abc.codec import CodecPipeline
     from zarr.abc.store import Store
     from zarr.codecs.sharding import ShardingCodecIndexLocation
+    from zarr.core.buffer import Buffer
     from zarr.core.dtype.wrapper import TBaseDType, TBaseScalar
     from zarr.storage import StoreLike
     from zarr.types import AnyArray, AnyAsyncArray, ArrayV2, ArrayV3, AsyncArrayV2, AsyncArrayV3
@@ -234,9 +237,48 @@ def create_codec_pipeline(metadata: ArrayMetadata, *, store: Store | None = None
     raise TypeError  # pragma: no cover
 
 
-async def get_array_metadata(
+class ArrayMetadataProbe(TypedDict):
+    """Buffers fetched while probing for array metadata.
+
+    Private. Carried on ``ArrayProbeResult`` so callers (e.g. ``zarr.open``) can
+    reuse the ``zarr.json`` and ``.zattrs`` documents when falling back to a group
+    open, instead of fetching them a second time. A key is present only if that
+    document was actually fetched (a ``None`` value means fetched-but-absent). Only
+    the ``zarr_format=None`` probe overlaps with a group probe, so only that case
+    populates these keys.
+    """
+
+    zarr_json: NotRequired[Buffer | None]
+    zattrs: NotRequired[Buffer | None]
+
+
+@dataclass(frozen=True, kw_only=True)
+class ArrayProbeResult:
+    """Outcome of probing a path for array metadata.
+
+    Private. Either ``metadata`` is set (the path holds an array) or ``error`` is
+    set (it does not, or the request was invalid). ``probe`` carries any reusable
+    buffers fetched during a ``zarr_format=None`` probe so a caller can hand them
+    to ``AsyncGroup.open`` without re-fetching.
+    """
+
+    metadata: dict[str, JSON] | None = None
+    error: Exception | None = None
+    probe: ArrayMetadataProbe = field(default_factory=ArrayMetadataProbe)
+
+
+async def _probe_array_metadata(
     store_path: StorePath, zarr_format: ZarrFormat | None = 3
-) -> dict[str, JSON]:
+) -> ArrayProbeResult:
+    """Fetch and parse array metadata without raising on "not an array".
+
+    Returns an ``ArrayProbeResult`` whose ``metadata`` is set on success and whose
+    ``error`` is set (but not raised) when the path does not hold an array or the
+    request is invalid. ``probe`` always carries the reusable buffers fetched
+    during a ``zarr_format=None`` probe, even when ``error`` is set, which is
+    exactly when ``zarr.open`` needs to fall back to a group open.
+    """
+    probe: ArrayMetadataProbe = {}
     if zarr_format == 2:
         zarray_bytes, zattrs_bytes = await gather(
             (store_path / ZARRAY_JSON).get(prototype=cpu_buffer_prototype),
@@ -247,7 +289,7 @@ async def get_array_metadata(
                 "A Zarr V2 array metadata document was not found in store "
                 f"{store_path.store!r} at path {store_path.path!r}."
             )
-            raise ArrayNotFoundError(msg)
+            return ArrayProbeResult(error=ArrayNotFoundError(msg), probe=probe)
     elif zarr_format == 3:
         zarr_json_bytes = await (store_path / ZARR_JSON).get(prototype=cpu_buffer_prototype)
         if zarr_json_bytes is None:
@@ -255,13 +297,16 @@ async def get_array_metadata(
                 "A Zarr V3 array metadata document was not found in store "
                 f"{store_path.store!r} at path {store_path.path!r}."
             )
-            raise ArrayNotFoundError(msg)
+            return ArrayProbeResult(error=ArrayNotFoundError(msg), probe=probe)
     elif zarr_format is None:
         zarr_json_bytes, zarray_bytes, zattrs_bytes = await gather(
             (store_path / ZARR_JSON).get(prototype=cpu_buffer_prototype),
             (store_path / ZARRAY_JSON).get(prototype=cpu_buffer_prototype),
             (store_path / ZATTRS_JSON).get(prototype=cpu_buffer_prototype),
         )
+        # Record the buffers that overlap with a group probe so the caller may
+        # reuse them. These are recorded even when array detection fails below.
+        probe = {"zarr_json": zarr_json_bytes, "zattrs": zattrs_bytes}
         if zarr_json_bytes is not None and zarray_bytes is not None:
             # warn and favor v3
             msg = f"Both zarr.json (Zarr format 3) and .zarray (Zarr format 2) metadata objects exist at {store_path}. Zarr v3 will be used."
@@ -271,7 +316,7 @@ async def get_array_metadata(
                 f"Neither Zarr V3 nor Zarr V2 array metadata documents "
                 f"were found in store {store_path.store!r} at path {store_path.path!r}."
             )
-            raise ArrayNotFoundError(msg)
+            return ArrayProbeResult(error=ArrayNotFoundError(msg), probe=probe)
         # set zarr_format based on which keys were found
         if zarr_json_bytes is not None:
             zarr_format = 3
@@ -279,7 +324,7 @@ async def get_array_metadata(
             zarr_format = 2
     else:
         msg = f"Invalid value for 'zarr_format'. Expected 2, 3, or None. Got '{zarr_format}'."  # type: ignore[unreachable]
-        raise MetadataValidationError(msg)
+        return ArrayProbeResult(error=MetadataValidationError(msg), probe=probe)
 
     metadata_dict: dict[str, JSON]
     if zarr_format == 2:
@@ -293,9 +338,22 @@ async def get_array_metadata(
         assert zarr_json_bytes is not None
         metadata_dict = buffer_to_json_object(zarr_json_bytes)
 
-        parse_node_type_array(metadata_dict.get("node_type"))
+        try:
+            parse_node_type_array(metadata_dict.get("node_type"))
+        except NodeTypeValidationError as exc:
+            return ArrayProbeResult(error=exc, probe=probe)
 
-    return metadata_dict
+    return ArrayProbeResult(metadata=metadata_dict, probe=probe)
+
+
+async def get_array_metadata(
+    store_path: StorePath, zarr_format: ZarrFormat | None = 3
+) -> dict[str, JSON]:
+    result = await _probe_array_metadata(store_path, zarr_format=zarr_format)
+    if result.error is not None:
+        raise result.error
+    assert result.metadata is not None
+    return result.metadata
 
 
 @dataclass(frozen=True)
