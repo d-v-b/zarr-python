@@ -17,7 +17,7 @@ from zarr.abc.codec import (
     SupportsSyncCodec,
 )
 from zarr.core.common import concurrent_map
-from zarr.core.config import config
+from zarr.core.config import async_concurrency_scope, config, get_async_concurrency
 from zarr.core.indexing import SelectorTuple, is_scalar
 from zarr.errors import ZarrUserWarning
 from zarr.registry import register_pipeline
@@ -395,7 +395,7 @@ class BatchedCodecPipeline(CodecPipeline):
                     for byte_getter, array_spec, *_ in batch_info_list
                 ],
                 lambda byte_getter, prototype: byte_getter.get(prototype),
-                config.get("async.concurrency"),
+                get_async_concurrency(),
             )
             chunk_array_batch = await self.decode_batch(
                 [
@@ -505,7 +505,7 @@ class BatchedCodecPipeline(CodecPipeline):
                     for byte_setter, chunk_spec, chunk_selection, _, is_complete_chunk in batch_info
                 ],
                 _read_key,
-                config.get("async.concurrency"),
+                get_async_concurrency(),
             )
             chunk_array_decoded = await self.decode_batch(
                 [
@@ -571,7 +571,7 @@ class BatchedCodecPipeline(CodecPipeline):
                     )
                 ],
                 _write_key,
-                config.get("async.concurrency"),
+                get_async_concurrency(),
             )
 
     async def decode(
@@ -579,8 +579,9 @@ class BatchedCodecPipeline(CodecPipeline):
         chunk_bytes_and_specs: Iterable[tuple[Buffer | None, ArraySpec]],
     ) -> Iterable[NDBuffer | None]:
         output: list[NDBuffer | None] = []
-        for batch_info in batched(chunk_bytes_and_specs, self.batch_size):
-            output.extend(await self.decode_batch(batch_info))
+        with async_concurrency_scope():
+            for batch_info in batched(chunk_bytes_and_specs, self.batch_size):
+                output.extend(await self.decode_batch(batch_info))
         return output
 
     async def encode(
@@ -588,8 +589,9 @@ class BatchedCodecPipeline(CodecPipeline):
         chunk_arrays_and_specs: Iterable[tuple[NDBuffer | None, ArraySpec]],
     ) -> Iterable[Buffer | None]:
         output: list[Buffer | None] = []
-        for single_batch_info in batched(chunk_arrays_and_specs, self.batch_size):
-            output.extend(await self.encode_batch(single_batch_info))
+        with async_concurrency_scope():
+            for single_batch_info in batched(chunk_arrays_and_specs, self.batch_size):
+                output.extend(await self.encode_batch(single_batch_info))
         return output
 
     async def read(
@@ -598,14 +600,15 @@ class BatchedCodecPipeline(CodecPipeline):
         out: NDBuffer,
         drop_axes: tuple[int, ...] = (),
     ) -> tuple[GetResult, ...]:
-        batch_results = await concurrent_map(
-            [
-                (single_batch_info, out, drop_axes)
-                for single_batch_info in batched(batch_info, self.batch_size)
-            ],
-            self.read_batch,
-            config.get("async.concurrency"),
-        )
+        with async_concurrency_scope():
+            batch_results = await concurrent_map(
+                [
+                    (single_batch_info, out, drop_axes)
+                    for single_batch_info in batched(batch_info, self.batch_size)
+                ],
+                self.read_batch,
+                get_async_concurrency(),
+            )
         results: list[GetResult] = []
         for batch in batch_results:
             results.extend(batch)
@@ -617,14 +620,15 @@ class BatchedCodecPipeline(CodecPipeline):
         value: NDBuffer,
         drop_axes: tuple[int, ...] = (),
     ) -> None:
-        await concurrent_map(
-            [
-                (single_batch_info, value, drop_axes)
-                for single_batch_info in batched(batch_info, self.batch_size)
-            ],
-            self.write_batch,
-            config.get("async.concurrency"),
-        )
+        with async_concurrency_scope():
+            await concurrent_map(
+                [
+                    (single_batch_info, value, drop_axes)
+                    for single_batch_info in batched(batch_info, self.batch_size)
+                ],
+                self.write_batch,
+                get_async_concurrency(),
+            )
 
 
 def codecs_from_list(
