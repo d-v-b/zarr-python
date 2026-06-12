@@ -13,6 +13,7 @@ from typing import (
     Any,
     Literal,
     NamedTuple,
+    NoReturn,
     Protocol,
     TypeGuard,
     cast,
@@ -1165,6 +1166,16 @@ def is_mask_selection(selection: Selection, shape: tuple[int, ...]) -> TypeGuard
     )
 
 
+def _raise_vindex_invalid_selection(selection: object) -> NoReturn:
+    """Raise the standard error for a selection that is neither coordinate nor mask."""
+    msg = (
+        "unsupported selection type for vectorized indexing; only "
+        "coordinate selection (tuple of integer arrays) and mask selection "
+        f"(single Boolean array) are supported; got {selection!r}"
+    )
+    raise VindexInvalidSelectionError(msg)
+
+
 @dataclass(frozen=True)
 class CoordinateIndexer(Indexer):
     sel_shape: tuple[int, ...]
@@ -1339,12 +1350,7 @@ class VIndex:
         elif is_mask_selection(new_selection, self.array.shape):
             return self.array.get_mask_selection(new_selection, fields=fields)
         else:
-            msg = (
-                "unsupported selection type for vectorized indexing; only "
-                "coordinate selection (tuple of integer arrays) and mask selection "
-                f"(single Boolean array) are supported; got {new_selection!r}"
-            )
-            raise VindexInvalidSelectionError(msg)
+            _raise_vindex_invalid_selection(new_selection)
 
     def __setitem__(
         self, selection: CoordinateSelection | MaskSelection, value: npt.ArrayLike
@@ -1357,12 +1363,7 @@ class VIndex:
         elif is_mask_selection(new_selection, self.array.shape):
             self.array.set_mask_selection(new_selection, value, fields=fields)
         else:
-            msg = (
-                "unsupported selection type for vectorized indexing; only "
-                "coordinate selection (tuple of integer arrays) and mask selection "
-                f"(single Boolean array) are supported; got {new_selection!r}"
-            )
-            raise VindexInvalidSelectionError(msg)
+            _raise_vindex_invalid_selection(new_selection)
 
 
 @dataclass(frozen=True)
@@ -1388,12 +1389,7 @@ class AsyncVIndex[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         elif is_mask_selection(new_selection, self.array.shape):
             return await self.array.get_mask_selection(new_selection, fields=fields)
         else:
-            msg = (
-                "unsupported selection type for vectorized indexing; only "
-                "coordinate selection (tuple of integer arrays) and mask selection "
-                f"(single Boolean array) are supported; got {new_selection!r}"
-            )
-            raise VindexInvalidSelectionError(msg)
+            _raise_vindex_invalid_selection(new_selection)
 
 
 def check_fields(fields: Fields | None, dtype: np.dtype[Any]) -> np.dtype[Any]:
@@ -1600,12 +1596,7 @@ def get_indexer(
         elif is_mask_selection(new_selection, shape):
             return MaskIndexer(cast("MaskSelection", selection), shape, chunk_grid)
         else:
-            msg = (
-                "unsupported selection type for vectorized indexing; only "
-                "coordinate selection (tuple of integer arrays) and mask selection "
-                f"(single Boolean array) are supported; got {new_selection!r}"
-            )
-            raise VindexInvalidSelectionError(msg)
+            _raise_vindex_invalid_selection(new_selection)
     elif is_pure_orthogonal_indexing(pure_selection, len(shape)):
         return OrthogonalIndexer(cast("OrthogonalSelection", selection), shape, chunk_grid)
     else:
