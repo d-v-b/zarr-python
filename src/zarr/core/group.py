@@ -1204,22 +1204,33 @@ class AsyncGroup:
 
         return ds
 
-    async def update_attributes(self, new_attributes: dict[str, Any]) -> AsyncGroup:
+    async def update_attributes(
+        self, new_attributes: dict[str, Any], *, _replace: bool = False
+    ) -> AsyncGroup:
         """Update group attributes.
 
         Parameters
         ----------
         new_attributes : dict
             New attributes to set on the group.
+        _replace : bool, optional
+            Internal parameter; not part of the public API. When True, replaces all attributes
+            with `new_attributes` instead of merging. Default is False (merge semantics).
 
         Returns
         -------
         self : AsyncGroup
         """
-        self.metadata.attributes.update(new_attributes)
+        merged: dict[str, Any] = (
+            new_attributes if _replace else {**self.metadata.attributes, **new_attributes}
+        )
+        new_metadata = replace(self.metadata, attributes=merged)
 
-        # Write new metadata
-        await self._save_metadata()
+        # Write new metadata first so that a failed write does not corrupt in-memory state.
+        await save_metadata(self.store_path, new_metadata)
+
+        # Update the frozen dataclass metadata field in place.
+        object.__setattr__(self, "metadata", new_metadata)
 
         return self
 
@@ -2052,8 +2063,16 @@ class Group(SyncMixin):
         # Not implemented in 3.x yet.
         return self._async_group.synchronizer
 
-    def update_attributes(self, new_attributes: dict[str, Any]) -> Group:
+    def update_attributes(self, new_attributes: dict[str, Any], *, _replace: bool = False) -> Group:
         """Update the attributes of this group.
+
+        Parameters
+        ----------
+        new_attributes : dict
+            New attributes to merge into the group's existing attributes.
+        _replace : bool, optional
+            Internal parameter; not part of the public API. When True, replaces all attributes
+            with `new_attributes` instead of merging. Default is False (merge semantics).
 
         Examples
         --------
@@ -2062,7 +2081,7 @@ class Group(SyncMixin):
         >>> group.attrs.asdict()
         {'foo': 'bar'}
         """
-        self._sync(self._async_group.update_attributes(new_attributes))
+        self._sync(self._async_group.update_attributes(new_attributes, _replace=_replace))
         return self
 
     def nmembers(self, max_depth: int | None = 0) -> int:
