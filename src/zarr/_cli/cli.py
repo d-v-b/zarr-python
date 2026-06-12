@@ -1,14 +1,16 @@
 import logging
 from enum import StrEnum
-from typing import Annotated, Literal, cast
+from typing import TYPE_CHECKING, Annotated, Literal, cast
 
 import typer
 
 import zarr
 import zarr.metadata.migrate_v3 as migrate_metadata
-from zarr.core.common import ZarrFormat
 from zarr.core.sync import sync
 from zarr.storage._common import make_store
+
+if TYPE_CHECKING:
+    from zarr.core.common import ZarrFormat
 
 app = typer.Typer()
 
@@ -20,7 +22,7 @@ def _set_logging_level(*, verbose: bool) -> None:
         lvl = "INFO"
     else:
         lvl = "WARNING"
-    zarr.set_log_level(cast(Literal["INFO", "WARNING"], lvl))
+    zarr.set_log_level(cast("Literal['INFO', 'WARNING']", lvl))
     zarr.set_format("%(message)s")
 
 
@@ -161,7 +163,7 @@ def remove_metadata(
     sync(
         migrate_metadata.remove_metadata(
             store=input_zarr_store,
-            zarr_format=cast(ZarrFormat, int(zarr_format[1:])),
+            zarr_format=cast("ZarrFormat", int(zarr_format[1:])),
             force=force,
             dry_run=dry_run,
         )

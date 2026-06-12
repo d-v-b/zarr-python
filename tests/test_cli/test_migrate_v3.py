@@ -1,6 +1,6 @@
 import lzma
 from pathlib import Path
-from typing import Literal, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 import numcodecs
 import numcodecs.abc
@@ -22,7 +22,9 @@ from zarr.core.dtype.npy.int import UInt8, UInt16
 from zarr.core.group import Group, GroupMetadata
 from zarr.core.metadata.v3 import ArrayV3Metadata
 from zarr.storage._local import LocalStore
-from zarr.types import AnyArray
+
+if TYPE_CHECKING:
+    from zarr.types import AnyArray
 
 typer_testing = pytest.importorskip(
     "typer.testing", reason="optional cli dependencies aren't installed"
@@ -38,7 +40,7 @@ def test_migrate_array(local_store: LocalStore) -> None:
     dtype = "uint16"
     compressors = numcodecs.Blosc(cname="zstd", clevel=3, shuffle=1)
     fill_value = 2
-    attributes = cast(dict[str, JSON], {"baz": 42, "qux": [1, 4, 7, 12]})
+    attributes = cast("dict[str, JSON]", {"baz": 42, "qux": [1, 4, 7, 12]})
 
     zarr.create_array(
         store=local_store,
@@ -109,7 +111,7 @@ def test_migrate_nested_groups_and_arrays_in_place(
     # Check converted zarr can be opened + metadata accessed at all levels
     zarr_array = zarr.open(local_store.root, zarr_format=3)
     for path in paths:
-        zarr_v3 = cast(AnyArray | Group, zarr_array[path])
+        zarr_v3 = cast("AnyArray | Group", zarr_array[path])
         metadata = zarr_v3.metadata
         assert metadata.zarr_format == 3
         assert metadata.attributes == attributes

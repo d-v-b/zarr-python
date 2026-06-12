@@ -740,7 +740,10 @@ async def test_sharding_with_chunks_per_shard(
 @pytest.mark.parametrize("store", ["local", "memory"], indirect=["store"])
 def test_invalid_metadata(store: Store) -> None:
     spath1 = StorePath(store, "invalid_inner_chunk_shape")
-    with pytest.raises(ValueError):
+    with pytest.raises(
+        ValueError,
+        match=r"same number of dimensions",
+    ):
         zarr.create_array(
             spath1,
             shape=(16, 16),
@@ -750,7 +753,10 @@ def test_invalid_metadata(store: Store) -> None:
             fill_value=0,
         )
     spath2 = StorePath(store, "invalid_inner_chunk_shape")
-    with pytest.raises(ValueError):
+    with pytest.raises(
+        ValueError,
+        match=r"not divisible by the shard's inner chunk size",
+    ):
         zarr.create_array(
             spath2,
             shape=(16, 16),

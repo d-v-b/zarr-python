@@ -63,7 +63,7 @@ class TestZipStore(StoreTests[ZipStore, cpu.Buffer]):
         assert store.read_only
 
         # set
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=r"store was opened in read-only mode"):
             await store.set("foo", cpu.Buffer.from_bytes(b"bar"))
 
     def test_store_repr(self, store: ZipStore) -> None:

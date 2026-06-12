@@ -42,7 +42,7 @@ class WrapperStore[T_Store: Store](Store):
         return cls(store=store)
 
     def with_read_only(self, read_only: bool = False) -> Self:
-        return self._with_store(cast(T_Store, self._store.with_read_only(read_only)))
+        return self._with_store(cast("T_Store", self._store.with_read_only(read_only)))
 
     def __enter__(self) -> Self:
         return self._with_store(self._store.__enter__())

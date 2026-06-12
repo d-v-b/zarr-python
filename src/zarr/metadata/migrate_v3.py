@@ -140,7 +140,7 @@ async def remove_metadata(
             continue
 
         if force or await _metadata_exists(
-            cast(ZarrFormat, alternative_metadata), store_path / parent_path
+            cast("ZarrFormat", alternative_metadata), store_path / parent_path
         ):
             _logger.info("Deleting metadata at %s", store_path / file_path)
             if not dry_run:
@@ -170,7 +170,7 @@ def _convert_group(zarr_v2: Group, output_path: StorePath, dry_run: bool) -> Non
 
 
 def _convert_array(zarr_v2: AnyArray, output_path: StorePath, dry_run: bool) -> None:
-    array_metadata_v3 = _convert_array_metadata(cast(ArrayV2Metadata, zarr_v2.metadata))
+    array_metadata_v3 = _convert_array_metadata(cast("ArrayV2Metadata", zarr_v2.metadata))
     sync(_save_v3_metadata(array_metadata_v3, output_path, dry_run=dry_run))
 
 
@@ -227,7 +227,7 @@ def _convert_filters(filters: tuple[numcodecs.abc.Codec, ...]) -> list[ArrayArra
         if not isinstance(codec, ArrayArrayCodec):
             raise TypeError(f"Filter {type(codec)} is not an ArrayArrayCodec")
 
-    return cast(list[ArrayArrayCodec], filters_codecs)
+    return cast("list[ArrayArrayCodec]", filters_codecs)
 
 
 def _convert_compressor(
