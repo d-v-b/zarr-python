@@ -50,8 +50,10 @@ class Attributes(MutableMapping[str, JSON]):
         #> {'a': '3', 'c': 4}
         ```
         """
-        self._obj.metadata.attributes.clear()
-        self._obj = self._obj.update_attributes(d)
+        # Use replace semantics (_replace=True) so that existing keys absent from `d`
+        # are removed.  This avoids the previous two-step clear-then-update pattern that
+        # both mutated frozen metadata in place and left inconsistent state on write failure.
+        self._obj = self._obj.update_attributes(d, _replace=True)
 
     def asdict(self) -> dict[str, JSON]:
         return dict(self._obj.metadata.attributes)

@@ -1680,7 +1680,9 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         """
         return await _append(self, data, axis)
 
-    async def update_attributes(self, new_attributes: dict[str, JSON]) -> Self:
+    async def update_attributes(
+        self, new_attributes: dict[str, JSON], *, _replace: bool = False
+    ) -> Self:
         """
         Asynchronously update the array's attributes.
 
@@ -1689,6 +1691,9 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         new_attributes : dict of str to JSON
             A dictionary of new attributes to update or add to the array. The keys represent attribute
             names, and the values must be JSON-compatible.
+        _replace : bool, optional
+            Internal parameter; not part of the public API. When True, replaces all attributes
+            with `new_attributes` instead of merging. Default is False (merge semantics).
 
         Returns
         -------
@@ -1706,7 +1711,7 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         - The updated attributes will be merged with existing attributes, and any conflicts will be
           overwritten by the new values.
         """
-        await _update_attributes(self, new_attributes)
+        await _update_attributes(self, new_attributes, _replace=_replace)
         return self
 
     def __repr__(self) -> str:
@@ -3862,7 +3867,7 @@ class Array[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         """
         return sync(self.async_array.append(data, axis=axis))
 
-    def update_attributes(self, new_attributes: dict[str, JSON]) -> Self:
+    def update_attributes(self, new_attributes: dict[str, JSON], *, _replace: bool = False) -> Self:
         """
         Update the array's attributes.
 
@@ -3871,6 +3876,9 @@ class Array[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         new_attributes : dict
             A dictionary of new attributes to update or add to the array. The keys represent attribute
             names, and the values must be JSON-compatible.
+        _replace : bool, optional
+            Internal parameter; not part of the public API. When True, replaces all attributes
+            with `new_attributes` instead of merging. Default is False (merge semantics).
 
         Returns
         -------
@@ -3887,7 +3895,7 @@ class Array[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         - The updated attributes will be merged with existing attributes, and any conflicts will be
           overwritten by the new values.
         """
-        new_array = sync(self.async_array.update_attributes(new_attributes))
+        new_array = sync(self.async_array.update_attributes(new_attributes, _replace=_replace))
         return type(self)(new_array)
 
     def __repr__(self) -> str:
@@ -5992,6 +6000,8 @@ async def _append(
 async def _update_attributes(
     array: AsyncArray[ArrayV2Metadata] | AsyncArray[ArrayV3Metadata],
     new_attributes: dict[str, JSON],
+    *,
+    _replace: bool = False,
 ) -> AsyncArray[ArrayV2Metadata] | AsyncArray[ArrayV3Metadata]:
     """
     Update the array's attributes.
@@ -6002,16 +6012,26 @@ async def _update_attributes(
         The array whose attributes to update.
     new_attributes : dict[str, JSON]
         A dictionary of new attributes to update or add to the array.
+    _replace : bool, optional
+        Internal parameter. When True, replace all attributes with `new_attributes`
+        instead of merging. Default is False (merge semantics). Do not use in
+        external code; this parameter is not part of the public API.
 
     Returns
     -------
     AsyncArray
         The array with the updated attributes.
     """
-    array.metadata.attributes.update(new_attributes)
+    merged: dict[str, JSON] = (
+        new_attributes if _replace else {**array.metadata.attributes, **new_attributes}
+    )
+    new_metadata = array.metadata.update_attributes(merged)
 
-    # Write new metadata
-    await save_metadata(array.store_path, array.metadata)
+    # Write new metadata first so that a failed write does not corrupt in-memory state.
+    await save_metadata(array.store_path, new_metadata)
+
+    # Update the frozen dataclass metadata field in place.
+    object.__setattr__(array, "metadata", new_metadata)
 
     return array
 

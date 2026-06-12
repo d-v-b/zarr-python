@@ -79,7 +79,9 @@ class DefaultChunkKeyEncoding(ChunkKeyEncoding):
     def decode_chunk_key(self, chunk_key: str) -> tuple[int, ...]:
         if chunk_key == "c":
             return ()
-        return tuple(map(int, chunk_key[1:].split(self.separator)))
+        # Skip the leading "c" prefix and the separator that follows it before splitting.
+        # chunk_key[1:] would leave a leading empty token, causing int('') to fail.
+        return tuple(map(int, chunk_key[1 + len(self.separator) :].split(self.separator)))
 
     def encode_chunk_key(self, chunk_coords: tuple[int, ...]) -> str:
         return self.separator.join(map(str, ("c",) + chunk_coords))

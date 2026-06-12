@@ -93,3 +93,92 @@ def test_del_works(group: bool) -> None:
     else:
         z2 = zarr.open_array(store)
     assert dict(z2.attrs) == {"c": 4}
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for frozen-metadata mutation and put semantics
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("group", [True, False])
+def test_update_attributes_does_not_mutate_original_metadata(group: bool) -> None:
+    """update_attributes must not mutate the pre-existing metadata object.
+
+    Previously, both AsyncArray._update_attributes and AsyncGroup.update_attributes
+    called ``metadata.attributes.update(...)`` in place, silently mutating the dict
+    inside a frozen dataclass.  After the fix the old metadata object must be
+    identical to what it was before the call.
+    """
+    store = zarr.storage.MemoryStore()
+    z: zarr.Group | AnyArray
+    if group:
+        z = zarr.create_group(store, attributes={"a": 1})
+    else:
+        z = zarr.create_array(store=store, shape=10, dtype=int, attributes={"a": 1})
+
+    # Capture a reference to the *current* metadata object (not a copy).
+    original_metadata = z.metadata
+    original_attrs_snapshot: dict[str, Any] = dict(original_metadata.attributes)
+
+    z = z.update_attributes({"b": 2})
+
+    # The in-memory view should have the merged result.
+    assert dict(z.attrs) == {"a": 1, "b": 2}
+
+    # The old metadata object must be unchanged.
+    assert dict(original_metadata.attributes) == original_attrs_snapshot
+
+
+@pytest.mark.parametrize("group", [True, False])
+def test_put_replaces_not_merges(group: bool) -> None:
+    """Attributes.put must fully replace attributes, not merge.
+
+    Keys present before put() but absent from the new dict must be removed,
+    both in memory and after re-opening from the store.
+    """
+    store = zarr.storage.MemoryStore()
+    z: zarr.Group | AnyArray
+    if group:
+        z = zarr.create_group(store, attributes={"keep": 1, "remove": 99})
+    else:
+        z = zarr.create_array(
+            store=store, shape=10, dtype=int, attributes={"keep": 1, "remove": 99}
+        )
+
+    z.attrs.put({"keep": 2, "new": 3})
+
+    # In-memory view must match exactly.
+    assert dict(z.attrs) == {"keep": 2, "new": 3}
+
+    # Persisted view must also match.
+    z2: zarr.Group | AnyArray
+    if group:
+        z2 = zarr.open_group(store)
+    else:
+        z2 = zarr.open_array(store)
+    assert dict(z2.attrs) == {"keep": 2, "new": 3}
+
+
+@pytest.mark.parametrize("group", [True, False])
+def test_put_does_not_mutate_metadata_before_write(group: bool) -> None:
+    """put() must not clear in-memory state before the store write completes.
+
+    The old code called ``metadata.attributes.clear()`` before ``update_attributes``,
+    which emptied the live dict before persisting, leaving inconsistent state on
+    write failure and mutating a frozen dataclass.  After the fix the original
+    metadata object must still hold its old attributes.
+    """
+    store = zarr.storage.MemoryStore()
+    z: zarr.Group | AnyArray
+    if group:
+        z = zarr.create_group(store, attributes={"old": 1})
+    else:
+        z = zarr.create_array(store=store, shape=10, dtype=int, attributes={"old": 1})
+
+    old_metadata = z.metadata
+    old_attrs_snapshot: dict[str, Any] = dict(old_metadata.attributes)
+
+    z.attrs.put({"new": 2})
+
+    # After put, the original metadata object should be unchanged (no mutation).
+    assert dict(old_metadata.attributes) == old_attrs_snapshot
