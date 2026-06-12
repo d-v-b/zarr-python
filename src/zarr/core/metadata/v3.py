@@ -207,7 +207,7 @@ def _parse_chunk_shape(chunk_shape: Iterable[int]) -> tuple[int, ...]:
     """
     result = _validate_chunk_shapes(tuple(chunk_shape))
     # Regular grids only have bare ints — cast is safe after validation
-    return cast(tuple[int, ...], result)
+    return cast("tuple[int, ...]", result)
 
 
 def _validate_chunk_shapes(
@@ -649,7 +649,7 @@ class ArrayV3Metadata(Metadata):
             )
             raise MetadataValidationError(msg)
         # TODO: replace this with a real type check!
-        _data_typed = cast(ArrayMetadataJSON_V3, _data)
+        _data_typed = cast("ArrayMetadataJSON_V3", _data)
 
         return cls(
             shape=_data_typed["shape"],

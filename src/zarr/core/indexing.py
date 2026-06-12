@@ -1037,7 +1037,7 @@ class AsyncOIndex[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         new_selection = ensure_tuple(new_selection)
         new_selection = replace_lists(new_selection)
         return await self.array.get_orthogonal_selection(
-            cast(OrthogonalSelection, new_selection), fields=fields
+            cast("OrthogonalSelection", new_selection), fields=fields
         )
 
 
