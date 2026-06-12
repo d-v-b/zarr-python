@@ -275,18 +275,3 @@ class ZDType[DType: TBaseDType, Scalar: TBaseScalar](ABC):
             The JSON-serialized scalar.
         """
         raise NotImplementedError  # pragma: no cover
-
-
-def scalar_failed_type_check_msg(
-    cls_instance: ZDType[TBaseDType, TBaseScalar], bad_scalar: object
-) -> str:
-    """
-    Generate an error message reporting that a particular value failed a type check when attempting
-    to cast that value to a scalar.
-    """
-    return (
-        f"The value {bad_scalar!r} failed a type check. "
-        f"It cannot be safely cast to a scalar compatible with {cls_instance}. "
-        f"Consult the documentation for {cls_instance} to determine the possible values that can "
-        "be cast to scalars of the wrapped data type."
-    )
