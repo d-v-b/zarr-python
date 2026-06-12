@@ -98,7 +98,7 @@ class TestLocalStore(StoreTests[LocalStore, cpu.Buffer]):
         await store.move(destination)
 
         assert store.root == pathlib.Path(destination)
-        assert pathlib.Path(destination).exists()
+        assert pathlib.Path(destination).exists()  # noqa: ASYNC240 — sync check in test is fine
         assert not origin.exists()
         assert np.array_equal(array[...], data)
 
