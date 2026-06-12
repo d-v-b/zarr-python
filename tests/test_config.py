@@ -448,6 +448,6 @@ def test_deprecated_config(key: str) -> None:
     data type category
     """
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"has been removed"):
         with zarr.config.set({key: "foo"}):
             pass

@@ -346,7 +346,6 @@ extend-select = [
 ]
 ignore = [
     "ANN401",
-    "PT011",  # TODO: apply this rule
     "RET505",
     "RET506",
     "RUF005",

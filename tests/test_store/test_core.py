@@ -89,7 +89,7 @@ async def test_contains_invalid_format_raises(local_store: LocalStore, func: _Co
     Test contains_group and contains_array raise errors for invalid zarr_formats
     """
     store_path = StorePath(local_store)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"Invalid zarr_format provided"):
         assert await func(store_path, "3.0")  # type: ignore[arg-type]
 
 
@@ -207,7 +207,7 @@ async def test_store_path_invalid_mode_raises(
     """
     Test that ValueErrors are raise for invalid mode.
     """
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"mode"):
         await StorePath.open(LocalStore(str(tmp_path), read_only=modes[0]), path="", mode=modes[1])  # type: ignore[arg-type]
 
 
@@ -263,7 +263,7 @@ def test_normalize_path_none() -> None:
 
 @pytest.mark.parametrize("path", [".", ".."])
 def test_normalize_path_invalid(path: str) -> None:
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"contains '\.' or '\.\.' segments"):
         normalize_path(path)
 
 

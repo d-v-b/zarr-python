@@ -589,10 +589,10 @@ class TestConsolidated:
     async def test_open_consolidated_raises_async(self, zarr_format: ZarrFormat) -> None:
         store = zarr.storage.MemoryStore()
         await AsyncGroup.from_store(store, zarr_format=zarr_format)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=r"Consolidated metadata requested.*but not found"):
             await zarr.api.asynchronous.open_consolidated(store, zarr_format=zarr_format)
 
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=r"Consolidated metadata requested.*but not found"):
             await zarr.api.asynchronous.open_consolidated(store, zarr_format=None)
 
     @pytest.fixture
