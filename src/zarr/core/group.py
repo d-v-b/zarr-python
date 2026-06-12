@@ -2545,9 +2545,6 @@ class Group(SyncMixin):
         -------
         AsyncArray
         """
-        compressors = _parse_deprecated_compressor(
-            compressor, compressors, zarr_format=self.metadata.zarr_format
-        )
         return Array(
             self._sync(
                 self._async_group.create_array(
@@ -2561,6 +2558,7 @@ class Group(SyncMixin):
                     attributes=attributes,
                     chunk_key_encoding=chunk_key_encoding,
                     compressors=compressors,
+                    compressor=compressor,
                     serializer=serializer,
                     dimension_names=dimension_names,
                     order=order,
