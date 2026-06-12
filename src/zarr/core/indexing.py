@@ -13,6 +13,7 @@ from typing import (
     Any,
     Literal,
     NamedTuple,
+    NoReturn,
     Protocol,
     TypeGuard,
     cast,
@@ -544,6 +545,32 @@ class ChunkProjection(NamedTuple):
     is_complete_chunk: bool
 
 
+def _iter_chunk_projections(
+    dim_indexers: Sequence[IntDimIndexer | SliceDimIndexer],
+) -> Iterator[ChunkProjection]:
+    """Yield a ChunkProjection for each chunk touched by the product of ``dim_indexers``.
+
+    Shared by BasicIndexer and BlockIndexer, whose iteration is identical. The four
+    per-chunk fields (chunk coords, chunk selection, out selection, completeness) are
+    built in a single pass over each chunk's dim projections rather than four.
+    """
+    for dim_projections in itertools.product(*dim_indexers):
+        chunk_coords: list[int] = []
+        chunk_selection: list[Selector] = []
+        out_selection: list[Selector] = []
+        is_complete_chunk = True
+        for p in dim_projections:
+            chunk_coords.append(p.dim_chunk_ix)
+            chunk_selection.append(p.dim_chunk_sel)
+            if p.dim_out_sel is not None:
+                out_selection.append(p.dim_out_sel)
+            if not p.is_complete_chunk:
+                is_complete_chunk = False
+        yield ChunkProjection(
+            tuple(chunk_coords), tuple(chunk_selection), tuple(out_selection), is_complete_chunk
+        )
+
+
 def is_slice(s: Any) -> TypeGuard[slice]:
     return isinstance(s, slice)
 
@@ -609,14 +636,7 @@ class BasicIndexer(Indexer):
         object.__setattr__(self, "drop_axes", ())
 
     def __iter__(self) -> Iterator[ChunkProjection]:
-        for dim_projections in itertools.product(*self.dim_indexers):
-            chunk_coords = tuple(p.dim_chunk_ix for p in dim_projections)
-            chunk_selection = tuple(p.dim_chunk_sel for p in dim_projections)
-            out_selection = tuple(
-                p.dim_out_sel for p in dim_projections if p.dim_out_sel is not None
-            )
-            is_complete_chunk = all(p.is_complete_chunk for p in dim_projections)
-            yield ChunkProjection(chunk_coords, chunk_selection, out_selection, is_complete_chunk)
+        yield from _iter_chunk_projections(self.dim_indexers)
 
 
 @dataclass(frozen=True)
@@ -1117,14 +1137,7 @@ class BlockIndexer(Indexer):
         object.__setattr__(self, "drop_axes", ())
 
     def __iter__(self) -> Iterator[ChunkProjection]:
-        for dim_projections in itertools.product(*self.dim_indexers):
-            chunk_coords = tuple(p.dim_chunk_ix for p in dim_projections)
-            chunk_selection = tuple(p.dim_chunk_sel for p in dim_projections)
-            out_selection = tuple(
-                p.dim_out_sel for p in dim_projections if p.dim_out_sel is not None
-            )
-            is_complete_chunk = all(p.is_complete_chunk for p in dim_projections)
-            yield ChunkProjection(chunk_coords, chunk_selection, out_selection, is_complete_chunk)
+        yield from _iter_chunk_projections(self.dim_indexers)
 
 
 @dataclass(frozen=True)
@@ -1163,6 +1176,16 @@ def is_mask_selection(selection: Selection, shape: tuple[int, ...]) -> TypeGuard
         and is_bool_array(selection[0])
         and selection[0].shape == shape
     )
+
+
+def _raise_vindex_invalid_selection(selection: object) -> NoReturn:
+    """Raise the standard error for a selection that is neither coordinate nor mask."""
+    msg = (
+        "unsupported selection type for vectorized indexing; only "
+        "coordinate selection (tuple of integer arrays) and mask selection "
+        f"(single Boolean array) are supported; got {selection!r}"
+    )
+    raise VindexInvalidSelectionError(msg)
 
 
 @dataclass(frozen=True)
@@ -1339,12 +1362,7 @@ class VIndex:
         elif is_mask_selection(new_selection, self.array.shape):
             return self.array.get_mask_selection(new_selection, fields=fields)
         else:
-            msg = (
-                "unsupported selection type for vectorized indexing; only "
-                "coordinate selection (tuple of integer arrays) and mask selection "
-                f"(single Boolean array) are supported; got {new_selection!r}"
-            )
-            raise VindexInvalidSelectionError(msg)
+            _raise_vindex_invalid_selection(new_selection)
 
     def __setitem__(
         self, selection: CoordinateSelection | MaskSelection, value: npt.ArrayLike
@@ -1357,12 +1375,7 @@ class VIndex:
         elif is_mask_selection(new_selection, self.array.shape):
             self.array.set_mask_selection(new_selection, value, fields=fields)
         else:
-            msg = (
-                "unsupported selection type for vectorized indexing; only "
-                "coordinate selection (tuple of integer arrays) and mask selection "
-                f"(single Boolean array) are supported; got {new_selection!r}"
-            )
-            raise VindexInvalidSelectionError(msg)
+            _raise_vindex_invalid_selection(new_selection)
 
 
 @dataclass(frozen=True)
@@ -1388,12 +1401,7 @@ class AsyncVIndex[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         elif is_mask_selection(new_selection, self.array.shape):
             return await self.array.get_mask_selection(new_selection, fields=fields)
         else:
-            msg = (
-                "unsupported selection type for vectorized indexing; only "
-                "coordinate selection (tuple of integer arrays) and mask selection "
-                f"(single Boolean array) are supported; got {new_selection!r}"
-            )
-            raise VindexInvalidSelectionError(msg)
+            _raise_vindex_invalid_selection(new_selection)
 
 
 def check_fields(fields: Fields | None, dtype: np.dtype[Any]) -> np.dtype[Any]:
@@ -1600,12 +1608,7 @@ def get_indexer(
         elif is_mask_selection(new_selection, shape):
             return MaskIndexer(cast("MaskSelection", selection), shape, chunk_grid)
         else:
-            msg = (
-                "unsupported selection type for vectorized indexing; only "
-                "coordinate selection (tuple of integer arrays) and mask selection "
-                f"(single Boolean array) are supported; got {new_selection!r}"
-            )
-            raise VindexInvalidSelectionError(msg)
+            _raise_vindex_invalid_selection(new_selection)
     elif is_pure_orthogonal_indexing(pure_selection, len(shape)):
         return OrthogonalIndexer(cast("OrthogonalSelection", selection), shape, chunk_grid)
     else:

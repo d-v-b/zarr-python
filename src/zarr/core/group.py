@@ -2400,105 +2400,7 @@ class Group(SyncMixin):
         config: ArrayConfigLike | None = None,
         write_data: bool = True,
     ) -> AnyArray:
-        """Create an array within this group.
-
-        This method lightly wraps [`zarr.core.array.create_array`][].
-
-        Parameters
-        ----------
-        name : str
-            The name of the array relative to the group. If ``path`` is ``None``, the array will be located
-            at the root of the store.
-        shape : ShapeLike, optional
-            Shape of the array. Must be ``None`` if ``data`` is provided.
-        dtype : npt.DTypeLike | None
-            Data type of the array. Must be ``None`` if ``data`` is provided.
-        data : Array-like data to use for initializing the array. If this parameter is provided, the
-            ``shape`` and ``dtype`` parameters must be ``None``.
-        chunks : tuple[int, ...], optional
-            Chunk shape of the array.
-            If not specified, default are guessed based on the shape and dtype.
-        shards : tuple[int, ...], optional
-            Shard shape of the array. The default value of ``None`` results in no sharding at all.
-        filters : Iterable[Codec] | Literal["auto"], optional
-            Iterable of filters to apply to each chunk of the array, in order, before serializing that
-            chunk to bytes.
-
-            For Zarr format 3, a "filter" is a codec that takes an array and returns an array,
-            and these values must be instances of [`zarr.abc.codec.ArrayArrayCodec`][], or a
-            dict representations of [`zarr.abc.codec.ArrayArrayCodec`][].
-
-            For Zarr format 2, a "filter" can be any numcodecs codec; you should ensure that the
-            order of your filters is consistent with the behavior of each filter.
-
-            The default value of ``"auto"`` instructs Zarr to use a default based on the data
-            type of the array and the Zarr format specified. For all data types in Zarr V3, and most
-            data types in Zarr V2, the default filters are empty. The only cases where default filters
-            are not empty is when the Zarr format is 2, and the data type is a variable-length data type like
-            [`zarr.dtype.VariableLengthUTF8`][] or [`zarr.dtype.VariableLengthUTF8`][]. In these cases,
-            the default filters contains a single element which is a codec specific to that particular data type.
-
-            To create an array with no filters, provide an empty iterable or the value ``None``.
-        compressors : Iterable[Codec], optional
-            List of compressors to apply to the array. Compressors are applied in order, and after any
-            filters are applied (if any are specified) and the data is serialized into bytes.
-
-            For Zarr format 3, a "compressor" is a codec that takes a bytestream, and
-            returns another bytestream. Multiple compressors may be provided for Zarr format 3.
-            If no ``compressors`` are provided, a default set of compressors will be used.
-            These defaults can be changed by modifying the value of ``array.v3_default_compressors``
-            in [`zarr.config`][].
-            Use ``None`` to omit default compressors.
-
-            For Zarr format 2, a "compressor" can be any numcodecs codec. Only a single compressor may
-            be provided for Zarr format 2.
-            If no ``compressor`` is provided, a default compressor will be used.
-            in [`zarr.config`][].
-            Use ``None`` to omit the default compressor.
-        compressor : Codec, optional
-            Deprecated in favor of ``compressors``.
-        serializer : dict[str, JSON] | ArrayBytesCodec, optional
-            Array-to-bytes codec to use for encoding the array data.
-            Zarr format 3 only. Zarr format 2 arrays use implicit array-to-bytes conversion.
-            If no ``serializer`` is provided, a default serializer will be used.
-            These defaults can be changed by modifying the value of ``array.v3_default_serializer``
-            in [`zarr.config`][].
-        fill_value : Any, optional
-            Fill value for the array.
-        order : {"C", "F"}, optional
-            The memory order of the array (default is "C").
-            For Zarr format 2, this parameter sets the memory order of the array.
-            For Zarr format 3, this parameter is deprecated, because memory order
-            is a runtime parameter for Zarr format 3 arrays. The recommended way to specify the memory
-            order for Zarr format 3 arrays is via the ``config`` parameter, e.g. ``{'config': 'C'}``.
-            If no ``order`` is provided, a default order will be used.
-            This default can be changed by modifying the value of ``array.order`` in [`zarr.config`][].
-        attributes : dict, optional
-            Attributes for the array.
-        chunk_key_encoding : ChunkKeyEncoding, optional
-            A specification of how the chunk keys are represented in storage.
-            For Zarr format 3, the default is ``{"name": "default", "separator": "/"}}``.
-            For Zarr format 2, the default is ``{"name": "v2", "separator": "."}}``.
-        dimension_names : Iterable[str], optional
-            The names of the dimensions (default is None).
-            Zarr format 3 only. Zarr format 2 arrays should not use this parameter.
-        storage_options : dict, optional
-            If using an fsspec URL to create the store, these will be passed to the backend implementation.
-            Ignored otherwise.
-        overwrite : bool, default False
-            Whether to overwrite an array with the same name in the store, if one exists.
-        config : ArrayConfig or ArrayConfigLike, optional
-            Runtime configuration for the array.
-        write_data : bool
-            If a pre-existing array-like object was provided to this function via the ``data`` parameter
-            then ``write_data`` determines whether the values in that array-like object should be
-            written to the Zarr array created by this function. If ``write_data`` is ``False``, then the
-            array will be left empty.
-
-        Returns
-        -------
-        AsyncArray
-        """
+        """Alias for [`zarr.Group.create_array`][]."""
         return self.create_array(
             name,
             shape=shape,
@@ -2643,9 +2545,6 @@ class Group(SyncMixin):
         -------
         AsyncArray
         """
-        compressors = _parse_deprecated_compressor(
-            compressor, compressors, zarr_format=self.metadata.zarr_format
-        )
         return Array(
             self._sync(
                 self._async_group.create_array(
@@ -2659,6 +2558,7 @@ class Group(SyncMixin):
                     attributes=attributes,
                     chunk_key_encoding=chunk_key_encoding,
                     compressors=compressors,
+                    compressor=compressor,
                     serializer=serializer,
                     dimension_names=dimension_names,
                     order=order,
@@ -3399,32 +3299,20 @@ async def _read_metadata_v2(store: Store, path: str) -> ArrayV2Metadata | GroupM
     return _build_metadata_v2(zmeta, zattrs)
 
 
-async def _read_group_metadata_v2(store: Store, path: str) -> GroupMetadata:
-    """
-    Read group metadata or error
-    """
-    meta = await _read_metadata_v2(store=store, path=path)
-    if not isinstance(meta, GroupMetadata):
-        raise FileNotFoundError(f"Group metadata was not found in {store} at {path}")
-    return meta
-
-
-async def _read_group_metadata_v3(store: Store, path: str) -> GroupMetadata:
-    """
-    Read group metadata or error
-    """
-    meta = await _read_metadata_v3(store=store, path=path)
-    if not isinstance(meta, GroupMetadata):
-        raise FileNotFoundError(f"Group metadata was not found in {store} at {path}")
-    return meta
-
-
 async def _read_group_metadata(
     store: Store, path: str, *, zarr_format: ZarrFormat
 ) -> GroupMetadata:
+    """
+    Read group metadata or error
+    """
+    meta: ArrayV2Metadata | ArrayV3Metadata | GroupMetadata
     if zarr_format == 2:
-        return await _read_group_metadata_v2(store=store, path=path)
-    return await _read_group_metadata_v3(store=store, path=path)
+        meta = await _read_metadata_v2(store=store, path=path)
+    else:
+        meta = await _read_metadata_v3(store=store, path=path)
+    if not isinstance(meta, GroupMetadata):
+        raise FileNotFoundError(f"Group metadata was not found in {store} at {path}")
+    return meta
 
 
 def _build_metadata_v3(zarr_json: dict[str, JSON]) -> ArrayV3Metadata | GroupMetadata:
@@ -3486,44 +3374,6 @@ def _build_node(
             raise ValueError(f"Unexpected metadata type: {type(metadata)}")  # pragma: no cover
 
 
-async def _get_node_v2(store: Store, path: str) -> AsyncArrayV2 | AsyncGroup:
-    """
-    Read a Zarr v2 AsyncArray or AsyncGroup from a path in a Store.
-
-    Parameters
-    ----------
-    store : Store
-        The store-like object to read from.
-    path : str
-        The path to the node to read.
-
-    Returns
-    -------
-    AsyncArray | AsyncGroup
-    """
-    metadata = await _read_metadata_v2(store=store, path=path)
-    return _build_node(store=store, path=path, metadata=metadata)
-
-
-async def _get_node_v3(store: Store, path: str) -> AsyncArrayV3 | AsyncGroup:
-    """
-    Read a Zarr v3 AsyncArray or AsyncGroup from a path in a Store.
-
-    Parameters
-    ----------
-    store : Store
-        The store-like object to read from.
-    path : str
-        The path to the node to read.
-
-    Returns
-    -------
-    AsyncArray | AsyncGroup
-    """
-    metadata = await _read_metadata_v3(store=store, path=path)
-    return _build_node(store=store, path=path, metadata=metadata)
-
-
 async def get_node(store: Store, path: str, zarr_format: ZarrFormat) -> AnyAsyncArray | AsyncGroup:
     """
     Get an AsyncArray or AsyncGroup from a path in a Store.
@@ -3542,13 +3392,15 @@ async def get_node(store: Store, path: str, zarr_format: ZarrFormat) -> AnyAsync
     AsyncArray | AsyncGroup
     """
 
+    metadata: ArrayV2Metadata | ArrayV3Metadata | GroupMetadata
     match zarr_format:
         case 2:
-            return await _get_node_v2(store=store, path=path)
+            metadata = await _read_metadata_v2(store=store, path=path)
         case 3:
-            return await _get_node_v3(store=store, path=path)
+            metadata = await _read_metadata_v3(store=store, path=path)
         case _:  # pragma: no cover
             raise ValueError(f"Unexpected zarr format: {zarr_format}")  # pragma: no cover
+    return _build_node(store=store, path=path, metadata=metadata)
 
 
 async def _set_return_key(

@@ -15,10 +15,11 @@ from zarr.abc.store import (
     Store,
     SuffixByteRequest,
 )
-from zarr.core.buffer import Buffer, BufferPrototype
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable
+
+    from zarr.core.buffer import Buffer, BufferPrototype
 
 ZipStoreAccessModeLiteral = Literal["r", "w", "a"]
 
@@ -213,10 +214,7 @@ class ZipStore(Store):
         if not self._is_open:
             self._sync_open()
         assert isinstance(key, str)
-        if not isinstance(value, Buffer):
-            raise TypeError(
-                f"ZipStore.set(): `value` must be a Buffer instance. Got an instance of {type(value)} instead."
-            )
+        self._check_value(value)
         with self._lock:
             self._set(key, value)
 
