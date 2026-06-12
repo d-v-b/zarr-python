@@ -3301,32 +3301,20 @@ async def _read_metadata_v2(store: Store, path: str) -> ArrayV2Metadata | GroupM
     return _build_metadata_v2(zmeta, zattrs)
 
 
-async def _read_group_metadata_v2(store: Store, path: str) -> GroupMetadata:
-    """
-    Read group metadata or error
-    """
-    meta = await _read_metadata_v2(store=store, path=path)
-    if not isinstance(meta, GroupMetadata):
-        raise FileNotFoundError(f"Group metadata was not found in {store} at {path}")
-    return meta
-
-
-async def _read_group_metadata_v3(store: Store, path: str) -> GroupMetadata:
-    """
-    Read group metadata or error
-    """
-    meta = await _read_metadata_v3(store=store, path=path)
-    if not isinstance(meta, GroupMetadata):
-        raise FileNotFoundError(f"Group metadata was not found in {store} at {path}")
-    return meta
-
-
 async def _read_group_metadata(
     store: Store, path: str, *, zarr_format: ZarrFormat
 ) -> GroupMetadata:
+    """
+    Read group metadata or error
+    """
+    meta: ArrayV2Metadata | ArrayV3Metadata | GroupMetadata
     if zarr_format == 2:
-        return await _read_group_metadata_v2(store=store, path=path)
-    return await _read_group_metadata_v3(store=store, path=path)
+        meta = await _read_metadata_v2(store=store, path=path)
+    else:
+        meta = await _read_metadata_v3(store=store, path=path)
+    if not isinstance(meta, GroupMetadata):
+        raise FileNotFoundError(f"Group metadata was not found in {store} at {path}")
+    return meta
 
 
 def _build_metadata_v3(zarr_json: dict[str, JSON]) -> ArrayV3Metadata | GroupMetadata:
@@ -3388,44 +3376,6 @@ def _build_node(
             raise ValueError(f"Unexpected metadata type: {type(metadata)}")  # pragma: no cover
 
 
-async def _get_node_v2(store: Store, path: str) -> AsyncArrayV2 | AsyncGroup:
-    """
-    Read a Zarr v2 AsyncArray or AsyncGroup from a path in a Store.
-
-    Parameters
-    ----------
-    store : Store
-        The store-like object to read from.
-    path : str
-        The path to the node to read.
-
-    Returns
-    -------
-    AsyncArray | AsyncGroup
-    """
-    metadata = await _read_metadata_v2(store=store, path=path)
-    return _build_node(store=store, path=path, metadata=metadata)
-
-
-async def _get_node_v3(store: Store, path: str) -> AsyncArrayV3 | AsyncGroup:
-    """
-    Read a Zarr v3 AsyncArray or AsyncGroup from a path in a Store.
-
-    Parameters
-    ----------
-    store : Store
-        The store-like object to read from.
-    path : str
-        The path to the node to read.
-
-    Returns
-    -------
-    AsyncArray | AsyncGroup
-    """
-    metadata = await _read_metadata_v3(store=store, path=path)
-    return _build_node(store=store, path=path, metadata=metadata)
-
-
 async def get_node(store: Store, path: str, zarr_format: ZarrFormat) -> AnyAsyncArray | AsyncGroup:
     """
     Get an AsyncArray or AsyncGroup from a path in a Store.
@@ -3444,13 +3394,15 @@ async def get_node(store: Store, path: str, zarr_format: ZarrFormat) -> AnyAsync
     AsyncArray | AsyncGroup
     """
 
+    metadata: ArrayV2Metadata | ArrayV3Metadata | GroupMetadata
     match zarr_format:
         case 2:
-            return await _get_node_v2(store=store, path=path)
+            metadata = await _read_metadata_v2(store=store, path=path)
         case 3:
-            return await _get_node_v3(store=store, path=path)
+            metadata = await _read_metadata_v3(store=store, path=path)
         case _:  # pragma: no cover
             raise ValueError(f"Unexpected zarr format: {zarr_format}")  # pragma: no cover
+    return _build_node(store=store, path=path, metadata=metadata)
 
 
 async def _set_return_key(
