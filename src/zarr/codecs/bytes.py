@@ -4,7 +4,8 @@ import sys
 import warnings
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import TYPE_CHECKING
+from functools import cache
+from typing import TYPE_CHECKING, Any, cast
 
 from zarr.abc.codec import ArrayBytesCodec
 from zarr.core.buffer import Buffer, NDBuffer
@@ -15,7 +16,10 @@ from zarr.core.dtype.npy.structured import Struct
 if TYPE_CHECKING:
     from typing import Self
 
+    import numpy as np
+
     from zarr.core.array_spec import ArraySpec
+    from zarr.core.dtype.wrapper import ZDType
 
 
 class Endian(Enum):
@@ -28,6 +32,21 @@ class Endian(Enum):
 
 
 default_system_endian = Endian(sys.byteorder)
+
+
+@cache
+def _resolve_native_dtype(zdtype: ZDType[Any, Any], endian_str: str | None) -> np.dtype[Any]:
+    """Resolve the native numpy dtype for `zdtype` at the requested endianness.
+
+    The result depends only on `(zdtype, endian_str)`, so it is cached to avoid
+    rebuilding the same native dtype on every chunk. `ZDType` instances are
+    hashable, which makes them safe `lru_cache` keys.
+    """
+    if isinstance(zdtype, HasEndianness):
+        native = replace(zdtype, endianness=endian_str).to_native_dtype()  # type: ignore[call-arg]
+    else:
+        native = zdtype.to_native_dtype()
+    return cast("np.dtype[Any]", native)
 
 
 @dataclass(frozen=True)
@@ -87,10 +106,7 @@ class BytesCodec(ArrayBytesCodec):
     ) -> NDBuffer:
         # TODO: remove endianness enum in favor of literal union
         endian_str = self.endian.value if self.endian is not None else None
-        if isinstance(chunk_spec.dtype, HasEndianness):
-            dtype = replace(chunk_spec.dtype, endianness=endian_str).to_native_dtype()  # type: ignore[call-arg]
-        else:
-            dtype = chunk_spec.dtype.to_native_dtype()
+        dtype = _resolve_native_dtype(chunk_spec.dtype, endian_str)
         as_array_like = chunk_bytes.as_array_like()
         chunk_array = chunk_spec.prototype.nd_buffer.from_ndarray_like(
             as_array_like.view(dtype=dtype)  # type: ignore[attr-defined]
