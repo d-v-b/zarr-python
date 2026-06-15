@@ -8,7 +8,7 @@ import warnings
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field, fields, replace
 from itertools import accumulate
-from typing import TYPE_CHECKING, Literal, assert_never, cast, overload
+from typing import TYPE_CHECKING, Literal, NotRequired, TypedDict, assert_never, cast, overload
 
 import numpy as np
 import numpy.typing as npt
@@ -81,6 +81,21 @@ if TYPE_CHECKING:
     from zarr.types import AnyArray, AnyAsyncArray, ArrayV2, ArrayV3, AsyncArrayV2, AsyncArrayV3
 
 logger = logging.getLogger("zarr.group")
+
+
+class _PreFetchedGroupMetadata(TypedDict):
+    """Already-fetched metadata buffers that ``AsyncGroup.open`` may reuse.
+
+    This is a private optimization used by ``zarr.open`` to avoid re-fetching
+    the ``zarr.json`` and ``.zattrs`` documents it already read while probing
+    for an array. Only the format-detection documents are cached here; the
+    consolidated-metadata document is still fetched by ``AsyncGroup.open``
+    because the key depends on ``use_consolidated``.
+    """
+
+    zarr_json: NotRequired[Buffer | None]
+    zgroup: NotRequired[Buffer | None]
+    zattrs: NotRequired[Buffer | None]
 
 
 def parse_zarr_format(data: Any) -> ZarrFormat:
@@ -490,6 +505,7 @@ class AsyncGroup:
         store: StoreLike,
         zarr_format: ZarrFormat | None = 3,
         use_consolidated: bool | str | None = None,
+        _pre_fetched_metadata: _PreFetchedGroupMetadata | None = None,
     ) -> AsyncGroup:
         """Open a new AsyncGroup
 
@@ -514,6 +530,11 @@ class AsyncGroup:
             Zarr format 2 allowed configuring the key storing the consolidated metadata
             (``.zmetadata`` by default). Specify the custom key as ``use_consolidated``
             to load consolidated metadata from a non-default key.
+        _pre_fetched_metadata : _PreFetchedGroupMetadata or None, default None
+            Private. Already-fetched metadata buffers (``zarr.json``, ``.zgroup``,
+            ``.zattrs``) that this method may reuse instead of re-fetching. Only
+            consulted when ``zarr_format`` is None. Used by ``zarr.open`` to avoid
+            duplicate fetches when falling back from an array probe to a group open.
         """
         store_path = await make_store_path(store)
         if not store_path.store.supports_consolidated_metadata:
@@ -554,16 +575,38 @@ class AsyncGroup:
             if zarr_json_bytes is None:
                 raise FileNotFoundError(store_path)
         elif zarr_format is None:
+            # Reuse any buffers that a caller (e.g. ``zarr.open``) already
+            # fetched while probing for an array, only fetching what is missing.
+            pre_fetched = _pre_fetched_metadata or {}
+            keys = (ZARR_JSON, ZGROUP_JSON, ZATTRS_JSON, str(consolidated_key))
+            cached = (
+                pre_fetched.get("zarr_json"),
+                pre_fetched.get("zgroup"),
+                pre_fetched.get("zattrs"),
+                None,  # consolidated metadata is never pre-fetched
+            )
+            present = (
+                "zarr_json" in pre_fetched,
+                "zgroup" in pre_fetched,
+                "zattrs" in pre_fetched,
+                False,
+            )
+            results = await asyncio.gather(
+                *(
+                    (store_path / key).get()
+                    for key, is_present in zip(keys, present, strict=True)
+                    if not is_present
+                )
+            )
+            results_iter = iter(results)
             (
                 zarr_json_bytes,
                 zgroup_bytes,
                 zattrs_bytes,
                 maybe_consolidated_metadata_bytes,
-            ) = await asyncio.gather(
-                (store_path / ZARR_JSON).get(),
-                (store_path / ZGROUP_JSON).get(),
-                (store_path / ZATTRS_JSON).get(),
-                (store_path / str(consolidated_key)).get(),
+            ) = tuple(
+                value if is_present else next(results_iter)
+                for value, is_present in zip(cached, present, strict=True)
             )
             if zarr_json_bytes is not None and zgroup_bytes is not None:
                 # warn and favor v3

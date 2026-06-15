@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import collections
 import inspect
 import re
 from typing import TYPE_CHECKING, Any
@@ -13,8 +14,10 @@ from zarr.storage._common import StorePath
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+    from typing import Self
 
-    from zarr.abc.store import Store
+    from zarr.abc.store import ByteRequest
+    from zarr.core.buffer import Buffer, BufferPrototype
     from zarr.core.common import JSON, MemoryOrder, ZarrFormat
     from zarr.types import AnyArray
 
@@ -30,6 +33,7 @@ import zarr.api.asynchronous
 import zarr.api.synchronous
 import zarr.core.group
 from zarr import Array, Group
+from zarr.abc.store import Store
 from zarr.api.synchronous import (
     create,
     create_array,
@@ -51,6 +55,7 @@ from zarr.errors import (
 )
 from zarr.storage import MemoryStore
 from zarr.storage._utils import normalize_path
+from zarr.storage._wrapper import WrapperStore
 from zarr.testing.utils import gpu_test
 
 
@@ -1311,6 +1316,115 @@ async def test_open_falls_back_to_open_group_async(zarr_format: ZarrFormat) -> N
     assert isinstance(group, zarr.core.group.AsyncGroup)
     assert group.metadata.zarr_format == zarr_format
     assert group.attrs == {"key": "value"}
+
+
+class _CountingStore(WrapperStore[Store]):
+    """A wrapper store that records the key of every ``get`` request.
+
+    Used to assert that ``zarr.open`` does not fetch the same metadata key twice
+    when it falls back from an array probe to a group open.
+    """
+
+    get_counts: collections.Counter[str]
+
+    def __init__(self, store: Store) -> None:
+        super().__init__(store)
+        self.get_counts = collections.Counter()
+
+    def _with_store(self, store: Store) -> Self:
+        new = type(self)(store)
+        new.get_counts = self.get_counts
+        return new
+
+    async def get(
+        self,
+        key: str,
+        prototype: BufferPrototype,
+        byte_range: ByteRequest | None = None,
+    ) -> Buffer | None:
+        self.get_counts[key] += 1
+        return await self._store.get(key, prototype, byte_range)
+
+
+@pytest.mark.parametrize("zarr_format", [2, 3])
+async def test_open_group_no_duplicate_fetches(zarr_format: ZarrFormat) -> None:
+    """``zarr.open`` on a group path must not fetch any metadata key twice.
+
+    Regression test for the array-then-group double probe: ``open`` used to call
+    ``get_array_metadata`` (fetching zarr.json + .zattrs) and then re-fetch those
+    same keys via ``open_group``.
+    """
+    store = _CountingStore(MemoryStore())
+    await zarr.api.asynchronous.open_group(
+        store, attributes={"key": "value"}, zarr_format=zarr_format
+    )
+
+    store.get_counts.clear()
+    group = await zarr.api.asynchronous.open(store=store)
+    assert isinstance(group, zarr.core.group.AsyncGroup)
+    assert group.metadata.zarr_format == zarr_format
+    assert group.attrs == {"key": "value"}
+
+    duplicates = {key: count for key, count in store.get_counts.items() if count > 1}
+    assert duplicates == {}, f"duplicate metadata fetches: {duplicates}"
+    # Each relevant key is fetched at most once: zarr.json, .zarray, .zattrs,
+    # .zgroup, and the consolidated key .zmetadata. Before the refactor, open()
+    # fetched 7 keys (zarr.json and .zattrs twice). Now it is 5 with no
+    # duplicates -- the two overlapping keys are no longer re-fetched.
+    assert sum(store.get_counts.values()) <= 5
+
+
+@pytest.mark.parametrize("zarr_format", [2, 3])
+async def test_open_array_via_open_unchanged(zarr_format: ZarrFormat) -> None:
+    """``zarr.open`` on an array path still returns the array (no group fallback)."""
+    store = MemoryStore()
+    await zarr.api.asynchronous.create_array(
+        store, shape=(10,), dtype="uint8", zarr_format=zarr_format, attributes={"k": "v"}
+    )
+    arr = await zarr.api.asynchronous.open(store=store)
+    assert isinstance(arr, AsyncArray)
+    assert arr.metadata.zarr_format == zarr_format
+    assert arr.attrs == {"k": "v"}
+
+
+async def test_open_both_formats_present_warns() -> None:
+    """The both-formats warning still fires through ``zarr.open``'s probe."""
+    store = MemoryStore()
+    zarr.create_array(store, shape=(10,), dtype="uint8", zarr_format=3)
+    zarr.create_array(store, shape=(10,), dtype="uint8", zarr_format=2)
+    msg = (
+        f"Both zarr.json (Zarr format 3) and .zarray (Zarr format 2) metadata "
+        f"objects exist at {store}. Zarr v3 will be used."
+    )
+    with pytest.warns(ZarrUserWarning, match=re.escape(msg)):
+        result = await zarr.api.asynchronous.open(store=store)
+    assert isinstance(result, AsyncArray)
+    assert result.metadata.zarr_format == 3
+
+
+async def test_open_missing_node_raises() -> None:
+    """``zarr.open`` on an empty store raises the same error as before."""
+    store = MemoryStore()
+    with pytest.raises(FileNotFoundError):
+        await zarr.api.asynchronous.open(store=store, mode="r")
+
+
+async def test_open_consolidated_via_open() -> None:
+    """``use_consolidated`` still works when passed through ``zarr.open``."""
+    store = MemoryStore()
+    root = await zarr.api.asynchronous.open_group(store, zarr_format=2)
+    await root.create_array(name="a", shape=(3,), dtype="uint8")
+    await zarr.api.asynchronous.consolidate_metadata(store, zarr_format=2)
+
+    group = await zarr.api.asynchronous.open(store=store, use_consolidated=True)
+    assert isinstance(group, zarr.core.group.AsyncGroup)
+    assert group.metadata.consolidated_metadata is not None
+    assert "a" in group.metadata.consolidated_metadata.metadata
+
+    # use_consolidated=False must discard consolidated metadata via open().
+    group_no_cons = await zarr.api.asynchronous.open(store=store, use_consolidated=False)
+    assert isinstance(group_no_cons, zarr.core.group.AsyncGroup)
+    assert group_no_cons.metadata.consolidated_metadata is None
 
 
 @pytest.mark.parametrize("mode", ["r", "r+", "w", "a"])

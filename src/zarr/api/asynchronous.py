@@ -13,11 +13,12 @@ from zarr.abc.store import Store
 from zarr.core.array import (
     DEFAULT_FILL_VALUE,
     Array,
+    ArrayMetadataProbe,
     AsyncArray,
     CompressorLike,
+    _probe_array_metadata,
     create_array,
     from_array,
-    get_array_metadata,
 )
 from zarr.core.array_spec import ArrayConfigLike, parse_array_config
 from zarr.core.buffer import NDArrayLike
@@ -35,6 +36,7 @@ from zarr.core.group import (
     AsyncGroup,
     ConsolidatedMetadata,
     GroupMetadata,
+    _PreFetchedGroupMetadata,
     create_hierarchy,
 )
 from zarr.core.metadata import ArrayMetadataDict, ArrayV2Metadata
@@ -106,6 +108,24 @@ def _infer_overwrite(mode: AccessModeLiteral) -> bool:
     Check that an ``AccessModeLiteral`` is compatible with overwriting an existing Zarr node.
     """
     return mode in _OVERWRITE_MODES
+
+
+def _array_probe_to_group_prefetch(
+    probe: ArrayMetadataProbe,
+) -> _PreFetchedGroupMetadata | None:
+    """Translate array-probe buffers into group-open pre-fetched metadata.
+
+    The ``zarr.json`` and ``.zattrs`` documents fetched while probing for an array
+    are the same documents ``AsyncGroup.open`` would otherwise fetch, so they can
+    be reused to avoid duplicate requests. Returns None if nothing reusable was
+    fetched (e.g. an explicit ``zarr_format`` probe, which does not overlap).
+    """
+    pre_fetched: _PreFetchedGroupMetadata = {}
+    if "zarr_json" in probe:
+        pre_fetched["zarr_json"] = probe["zarr_json"]
+    if "zattrs" in probe:
+        pre_fetched["zattrs"] = probe["zattrs"]
+    return pre_fetched or None
 
 
 def _get_shape_chunks(a: ArrayLike | Any) -> tuple[tuple[int, ...] | None, tuple[int, ...] | None]:
@@ -358,20 +378,33 @@ async def open(
 
     # TODO: the mode check below seems wrong!
     if "shape" not in kwargs and mode in {"a", "r", "r+", "w"}:
-        try:
-            metadata_dict = await get_array_metadata(store_path, zarr_format=zarr_format)
+        # Probe for an array once. The probe also returns the zarr.json/.zattrs
+        # buffers it fetched so the group open below can reuse them instead of
+        # re-fetching (only populated for zarr_format=None).
+        result = await _probe_array_metadata(store_path, zarr_format=zarr_format)
+        if result.metadata is not None:
             # TODO: remove this cast when we fix typing for array metadata dicts
-            _metadata_dict = cast("ArrayMetadataDict", metadata_dict)
-            # for v2, the above would already have raised an exception if not an array
+            _metadata_dict = cast("ArrayMetadataDict", result.metadata)
             zarr_format = _metadata_dict["zarr_format"]
             is_v3_array = zarr_format == 3 and _metadata_dict.get("node_type") == "array"
             if is_v3_array or zarr_format == 2:
                 return AsyncArray(
                     store_path=store_path, metadata=_metadata_dict, config=kwargs.get("config")
                 )
-        except (AssertionError, FileNotFoundError, NodeTypeValidationError):
-            pass
-        return await open_group(store=store_path, zarr_format=zarr_format, mode=mode, **kwargs)
+        elif not isinstance(result.error, (FileNotFoundError, NodeTypeValidationError)):
+            # Only "not an array" errors trigger the group fallback; anything else
+            # (e.g. an invalid zarr_format) is propagated, as it was before.
+            assert result.error is not None
+            raise result.error
+        # Fall back to opening a group, reusing the buffers already fetched during
+        # the array probe (zarr.json, .zattrs) so they are not fetched again.
+        return await open_group(
+            store=store_path,
+            zarr_format=zarr_format,
+            mode=mode,
+            _pre_fetched_metadata=_array_probe_to_group_prefetch(result.probe),
+            **kwargs,
+        )
 
     try:
         return await open_array(store=store_path, zarr_format=zarr_format, mode=mode, **kwargs)
@@ -756,6 +789,7 @@ async def open_group(
     meta_array: Any | None = None,  # not used
     attributes: dict[str, JSON] | None = None,
     use_consolidated: bool | str | None = None,
+    _pre_fetched_metadata: _PreFetchedGroupMetadata | None = None,
 ) -> AsyncGroup:
     """Open a group using file-mode-like semantics.
 
@@ -806,6 +840,10 @@ async def open_group(
         Zarr format 2 allowed configuring the key storing the consolidated metadata
         (``.zmetadata`` by default). Specify the custom key as ``use_consolidated``
         to load consolidated metadata from a non-default key.
+    _pre_fetched_metadata : _PreFetchedGroupMetadata or None, default None
+        Private. Already-fetched metadata buffers that ``AsyncGroup.open`` may
+        reuse instead of re-fetching. Used by ``zarr.open`` to avoid duplicate
+        fetches when falling back from an array probe to a group open.
 
     Returns
     -------
@@ -829,7 +867,10 @@ async def open_group(
     try:
         if mode in _READ_MODES:
             return await AsyncGroup.open(
-                store_path, zarr_format=zarr_format, use_consolidated=use_consolidated
+                store_path,
+                zarr_format=zarr_format,
+                use_consolidated=use_consolidated,
+                _pre_fetched_metadata=_pre_fetched_metadata,
             )
     except (KeyError, FileNotFoundError):
         pass
