@@ -101,6 +101,17 @@ def concurrent_iter[T: tuple[Any, ...], V](
     When `limit` is set, no more than `limit` calls are in flight at once.
     Tasks are returned in input order; callers that want completion order
     should wrap the result in `asyncio.as_completed`.
+
+    Note on `ensure_future`: when the result is passed to `asyncio.gather` or
+    `asyncio.as_completed`, those already wrap awaitables into tasks, so the
+    `ensure_future` here is redundant. It matters for callers that iterate and
+    await tasks one at a time — without eager scheduling, each coroutine would
+    only start when individually awaited, serializing the work and defeating
+    the semaphore. It also makes the return type honest (real `Task`s support
+    `.cancel()`, `.done()`, callbacks) rather than bare coroutines.
+
+    See https://docs.python.org/3/library/asyncio-task.html#coroutines:
+    "Note that simply calling a coroutine will not schedule it to be executed:"
     """
     if limit is None:
         return (asyncio.ensure_future(func(*item)) for item in items)
