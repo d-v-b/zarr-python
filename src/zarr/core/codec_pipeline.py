@@ -250,6 +250,11 @@ async def _async_read_fallback(
         for fetch_coro in asyncio.as_completed(list(fetch_tasks)):
             idx, buffer = await fetch_coro
             chunk_spec = batch[idx][1]
+            # Bridge both paths to asyncio.Future so the final collection loop
+            # can `await` uniformly without blocking the event loop. For the
+            # pool path that means `wrap_future` (not `pool.submit(...).result()`,
+            # which would block the loop thread for the duration of every decode
+            # — freezing any unrelated coroutines sharing this loop).
             if pool is None:
                 decode_futures[idx].set_result(_decode(buffer, chunk_spec))
             else:
