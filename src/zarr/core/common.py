@@ -25,7 +25,7 @@ from zarr.core.config import config as zarr_config
 from zarr.errors import ZarrRuntimeWarning
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+    from collections.abc import Awaitable, Callable, Iterator
 
 
 ZARR_JSON = "zarr.json"
@@ -91,40 +91,19 @@ def ceildiv(a: float, b: float) -> int:
     return math.ceil(a / b)
 
 
-async def concurrent_iter[T: tuple[Any, ...], V](
+def concurrent_iter[T: tuple[Any, ...], V](
     items: Iterable[T],
     func: Callable[..., Awaitable[V]],
     limit: int | None = None,
-) -> AsyncIterator[V]:
-    """Run `func(*item)` for each item concurrently, yielding results as they complete.
+) -> Iterator[asyncio.Task[V]]:
+    """Launch `func(*item)` for each item concurrently, returning the tasks.
 
-    When `limit` is set, no more than `limit` calls are in flight at once. Results
-    are yielded in *completion order*, not input order — callers that need to
-    preserve input order should carry an index through `func`'s return value.
+    When `limit` is set, no more than `limit` calls are in flight at once.
+    Tasks are returned in input order; callers that want completion order
+    should wrap the result in `asyncio.as_completed`.
     """
     if limit is None:
-        tasks = [asyncio.ensure_future(func(*item)) for item in items]
-    else:
-        sem = asyncio.Semaphore(limit)
-
-        async def run(item: T) -> V:
-            async with sem:
-                return await func(*item)
-
-        tasks = [asyncio.ensure_future(run(item)) for item in items]
-
-    for coro in asyncio.as_completed(tasks):
-        yield await coro
-
-
-async def concurrent_map[T: tuple[Any, ...], V](
-    items: Iterable[T],
-    func: Callable[..., Awaitable[V]],
-    limit: int | None = None,
-) -> list[V]:
-    items_list = list(items)
-    if limit is None:
-        return await asyncio.gather(*(func(*item) for item in items_list))
+        return (asyncio.ensure_future(func(*item)) for item in items)
 
     sem = asyncio.Semaphore(limit)
 
@@ -132,7 +111,15 @@ async def concurrent_map[T: tuple[Any, ...], V](
         async with sem:
             return await func(*item)
 
-    return await asyncio.gather(*(run(item) for item in items_list))
+    return (asyncio.ensure_future(run(item)) for item in items)
+
+
+async def concurrent_map[T: tuple[Any, ...], V](
+    items: Iterable[T],
+    func: Callable[..., Awaitable[V]],
+    limit: int | None = None,
+) -> list[V]:
+    return await asyncio.gather(*concurrent_iter(items, func, limit))
 
 
 def enum_names[E: Enum](enum: type[E]) -> Iterator[str]:

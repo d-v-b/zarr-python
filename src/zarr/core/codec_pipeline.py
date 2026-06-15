@@ -239,14 +239,16 @@ async def _async_read_fallback(
         def _decode(buffer: Buffer | None, chunk_spec: ArraySpec) -> NDBuffer | None:
             return None if buffer is None else transform.decode_chunk(buffer, chunk_spec)
 
-        async for idx, buffer in concurrent_iter(
+        fetch_tasks = concurrent_iter(
             [
                 (idx, byte_getter, chunk_spec.prototype)
                 for idx, (byte_getter, chunk_spec, *_) in enumerate(batch)
             ],
             _fetch,
             config.get("async.concurrency"),
-        ):
+        )
+        for fetch_coro in asyncio.as_completed(list(fetch_tasks)):
+            idx, buffer = await fetch_coro
             chunk_spec = batch[idx][1]
             if pool is None:
                 decode_futures[idx].set_result(_decode(buffer, chunk_spec))
