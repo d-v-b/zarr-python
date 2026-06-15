@@ -220,7 +220,7 @@ async def _async_read_fallback(
     `SupportsGetSync` / sync transform is unavailable).
     """
 
-    results: list[GetResult] = [GetResult(status="missing")] * len(batch)
+    chunk_array_batch: list[NDBuffer | None]
 
     if isinstance(pipeline, FusedCodecPipeline) and pipeline.sync_transform is not None:
         transform = pipeline.sync_transform
@@ -253,39 +253,38 @@ async def _async_read_fallback(
             else:
                 decode_futures[idx] = asyncio.wrap_future(pool.submit(_decode, buffer, chunk_spec))
 
-        for idx, (_, chunk_spec, chunk_selection, out_selection, _) in enumerate(batch):
-            chunk_array = await decode_futures[idx]
-            selected = None if chunk_array is None else chunk_array[chunk_selection]
-            results[idx] = scatter_chunk(
-                selected,
-                out,
-                chunk_spec=chunk_spec,
-                out_selection=out_selection,
-                drop_axes=drop_axes,
-            )
+        chunk_array_batch = [await f for f in decode_futures]
     else:
         chunk_bytes_batch = await concurrent_map(
             [(byte_getter, array_spec.prototype) for byte_getter, array_spec, *_ in batch],
             lambda byte_getter, prototype: byte_getter.get(prototype),
             config.get("async.concurrency"),
         )
-        chunk_array_batch = await pipeline.decode(
-            [
-                (chunk_bytes, chunk_spec)
-                for chunk_bytes, (_, chunk_spec, *_) in zip(chunk_bytes_batch, batch, strict=False)
-            ],
+        chunk_array_batch = list(
+            await pipeline.decode(
+                [
+                    (chunk_bytes, chunk_spec)
+                    for chunk_bytes, (_, chunk_spec, *_) in zip(
+                        chunk_bytes_batch, batch, strict=False
+                    )
+                ],
+            )
         )
-        for idx, (chunk_array, (_, chunk_spec, chunk_selection, out_selection, _)) in enumerate(
-            zip(chunk_array_batch, batch, strict=False)
-        ):
-            selected = None if chunk_array is None else chunk_array[chunk_selection]
-            results[idx] = scatter_chunk(
+
+    results: list[GetResult] = []
+    for chunk_array, (_, chunk_spec, chunk_selection, out_selection, _) in zip(
+        chunk_array_batch, batch, strict=True
+    ):
+        selected = None if chunk_array is None else chunk_array[chunk_selection]
+        results.append(
+            scatter_chunk(
                 selected,
                 out,
                 chunk_spec=chunk_spec,
                 out_selection=out_selection,
                 drop_axes=drop_axes,
             )
+        )
     return tuple(results)
 
 
