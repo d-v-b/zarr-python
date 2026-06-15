@@ -28,7 +28,7 @@ from zarr.core.chunk_utils import (
     merge_and_encode_chunk,
     scatter_chunk,
 )
-from zarr.core.common import concurrent_map
+from zarr.core.common import concurrent_iter, concurrent_map
 from zarr.core.config import config
 from zarr.errors import ZarrUserWarning
 from zarr.registry import register_pipeline
@@ -219,40 +219,73 @@ async def _async_read_fallback(
     branch) and `FusedCodecPipeline.read` (when the store is not a
     `SupportsGetSync` / sync transform is unavailable).
     """
-    chunk_bytes_batch = await concurrent_map(
-        [(byte_getter, array_spec.prototype) for byte_getter, array_spec, *_ in batch],
-        lambda byte_getter, prototype: byte_getter.get(prototype),
-        config.get("async.concurrency"),
-    )
+
+    results: list[GetResult] = [GetResult(status="missing")] * len(batch)
+
     if isinstance(pipeline, FusedCodecPipeline) and pipeline.sync_transform is not None:
-        chunk_array_batch = await asyncio.to_thread(
-            pipeline.decode_sync,
+        transform = pipeline.sync_transform
+        max_workers = _resolve_max_workers()
+        pool = _get_pool(max_workers) if max_workers > 1 else None
+        loop = asyncio.get_running_loop()
+        decode_futures: list[asyncio.Future[NDBuffer | None]] = [
+            loop.create_future() for _ in batch
+        ]
+
+        async def _fetch(
+            idx: int, byte_getter: ByteGetter, prototype: BufferPrototype
+        ) -> tuple[int, Buffer | None]:
+            return idx, await byte_getter.get(prototype)
+
+        def _decode(buffer: Buffer | None, chunk_spec: ArraySpec) -> NDBuffer | None:
+            return None if buffer is None else transform.decode_chunk(buffer, chunk_spec)
+
+        async for idx, buffer in concurrent_iter(
             [
-                (chunk_bytes, chunk_spec)
-                for chunk_bytes, (_, chunk_spec, *_) in zip(chunk_bytes_batch, batch, strict=False)
+                (idx, byte_getter, chunk_spec.prototype)
+                for idx, (byte_getter, chunk_spec, *_) in enumerate(batch)
             ],
-        )
-    else:
-        chunk_array_batch = await pipeline.decode(
-            [
-                (chunk_bytes, chunk_spec)
-                for chunk_bytes, (_, chunk_spec, *_) in zip(chunk_bytes_batch, batch, strict=False)
-            ],
-        )
-    results: list[GetResult] = []
-    for chunk_array, (_, chunk_spec, chunk_selection, out_selection, _) in zip(
-        chunk_array_batch, batch, strict=False
-    ):
-        selected = None if chunk_array is None else chunk_array[chunk_selection]
-        results.append(
-            scatter_chunk(
+            _fetch,
+            config.get("async.concurrency"),
+        ):
+            chunk_spec = batch[idx][1]
+            if pool is None:
+                decode_futures[idx].set_result(_decode(buffer, chunk_spec))
+            else:
+                decode_futures[idx] = asyncio.wrap_future(pool.submit(_decode, buffer, chunk_spec))
+
+        for idx, (_, chunk_spec, chunk_selection, out_selection, _) in enumerate(batch):
+            chunk_array = await decode_futures[idx]
+            selected = None if chunk_array is None else chunk_array[chunk_selection]
+            results[idx] = scatter_chunk(
                 selected,
                 out,
                 chunk_spec=chunk_spec,
                 out_selection=out_selection,
                 drop_axes=drop_axes,
             )
+    else:
+        chunk_bytes_batch = await concurrent_map(
+            [(byte_getter, array_spec.prototype) for byte_getter, array_spec, *_ in batch],
+            lambda byte_getter, prototype: byte_getter.get(prototype),
+            config.get("async.concurrency"),
         )
+        chunk_array_batch = await pipeline.decode(
+            [
+                (chunk_bytes, chunk_spec)
+                for chunk_bytes, (_, chunk_spec, *_) in zip(chunk_bytes_batch, batch, strict=False)
+            ],
+        )
+        for idx, (chunk_array, (_, chunk_spec, chunk_selection, out_selection, _)) in enumerate(
+            zip(chunk_array_batch, batch, strict=False)
+        ):
+            selected = None if chunk_array is None else chunk_array[chunk_selection]
+            results[idx] = scatter_chunk(
+                selected,
+                out,
+                chunk_spec=chunk_spec,
+                out_selection=out_selection,
+                drop_axes=drop_axes,
+            )
     return tuple(results)
 
 
