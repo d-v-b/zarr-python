@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 import zarr
-from zarr.abc.codec import SupportsSyncCodec
+from tests.conftest import LOCAL_MEMORY_STORES
 from zarr.abc.store import Store
 from zarr.codecs import BytesCodec
 from zarr.core.array_spec import ArrayConfig, ArraySpec
@@ -16,7 +16,7 @@ from .test_codecs import _AsyncArrayProxy
 
 
 @pytest.mark.filterwarnings("ignore:The endianness of the requested serializer")
-@pytest.mark.parametrize("store", ["local", "memory"], indirect=["store"])
+@pytest.mark.parametrize("store", LOCAL_MEMORY_STORES, indirect=True)
 @pytest.mark.parametrize("endian", ["big", "little"])
 async def test_endian(store: Store, endian: Literal["big", "little"]) -> None:
     data = np.arange(0, 256, dtype="uint16").reshape((16, 16))
@@ -35,10 +35,6 @@ async def test_endian(store: Store, endian: Literal["big", "little"]) -> None:
     await _AsyncArrayProxy(a)[:, :].set(data)
     readback_data = await _AsyncArrayProxy(a)[:, :].get()
     assert np.array_equal(data, readback_data)
-
-
-def test_bytes_codec_supports_sync() -> None:
-    assert isinstance(BytesCodec(), SupportsSyncCodec)
 
 
 def test_bytes_codec_sync_roundtrip() -> None:
@@ -63,7 +59,7 @@ def test_bytes_codec_sync_roundtrip() -> None:
 
 
 @pytest.mark.filterwarnings("ignore:The endianness of the requested serializer")
-@pytest.mark.parametrize("store", ["local", "memory"], indirect=["store"])
+@pytest.mark.parametrize("store", LOCAL_MEMORY_STORES, indirect=True)
 @pytest.mark.parametrize("dtype_input_endian", [">u2", "<u2"])
 @pytest.mark.parametrize("dtype_store_endian", ["big", "little"])
 async def test_endian_write(

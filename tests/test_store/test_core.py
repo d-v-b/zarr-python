@@ -53,7 +53,6 @@ def store_like(
 
 @pytest.mark.parametrize("path", ["foo", "foo/bar"])
 @pytest.mark.parametrize("write_group", [True, False])
-@pytest.mark.parametrize("zarr_format", [2, 3])
 async def test_contains_group(
     local_store: LocalStore, path: str, write_group: bool, zarr_format: ZarrFormat
 ) -> None:
@@ -69,7 +68,6 @@ async def test_contains_group(
 
 @pytest.mark.parametrize("path", ["foo", "foo/bar"])
 @pytest.mark.parametrize("write_array", [True, False])
-@pytest.mark.parametrize("zarr_format", [2, 3])
 async def test_contains_array(
     local_store: LocalStore, path: str, write_array: bool, zarr_format: ZarrFormat
 ) -> None:

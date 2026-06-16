@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Any, TypedDict
 
 import pytest
 
+from tests.conftest import ALL_STORES
 from zarr.abc.store import ByteRequest, Store
 from zarr.core.buffer import Buffer
 from zarr.core.buffer.cpu import Buffer as CPUBuffer
@@ -88,7 +89,7 @@ class TestWrapperStore(StoreTests[WrapperStore[Any], Buffer]):
 @pytest.mark.filterwarnings(
     "ignore:coroutine 'ClientCreatorContext.__aexit__' was never awaited:RuntimeWarning"
 )
-@pytest.mark.parametrize("store", ["local", "memory", "zip"], indirect=True)
+@pytest.mark.parametrize("store", ALL_STORES, indirect=True)
 async def test_wrapped_set(store: Store, capsys: pytest.CaptureFixture[str]) -> None:
     # define a class that prints when it sets
     class NoisySetter(WrapperStore[Store]):
@@ -106,7 +107,7 @@ async def test_wrapped_set(store: Store, capsys: pytest.CaptureFixture[str]) -> 
 
 
 @pytest.mark.filterwarnings("ignore:Unclosed client session:ResourceWarning")
-@pytest.mark.parametrize("store", ["local", "memory", "zip"], indirect=True)
+@pytest.mark.parametrize("store", ALL_STORES, indirect=True)
 async def test_wrapped_get(store: Store, capsys: pytest.CaptureFixture[str]) -> None:
     # define a class that prints when it sets
     class NoisyGetter(WrapperStore[Any]):

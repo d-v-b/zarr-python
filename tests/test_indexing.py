@@ -11,7 +11,7 @@ import pytest
 from numpy.testing import assert_array_equal
 
 import zarr
-from tests.conftest import Expect, ExpectFail
+from tests.conftest import LOCAL_MEMORY_STORES, MEMORY_STORE, Expect, ExpectFail
 from zarr import Array
 from zarr.core.buffer import default_buffer_prototype
 from zarr.core.indexing import (
@@ -1978,7 +1978,7 @@ def test_indexing_with_zarr_array(store: StorePath) -> None:
     assert_array_equal(a[ii], za.oindex[zii])
 
 
-@pytest.mark.parametrize("store", ["local", "memory"], indirect=["store"])
+@pytest.mark.parametrize("store", LOCAL_MEMORY_STORES, indirect=True)
 @pytest.mark.parametrize("shape", [(0, 2, 3), (0,), (3, 0)])
 def test_zero_sized_chunks(store: StorePath, shape: list[int]) -> None:
     """Arrays with zero-extent dimensions can be created and indexed without error; reading back returns the fill value."""
@@ -1989,7 +1989,7 @@ def test_zero_sized_chunks(store: StorePath, shape: list[int]) -> None:
     assert_array_equal(z[...], np.zeros(shape, dtype="f8"))
 
 
-@pytest.mark.parametrize("store", ["memory"], indirect=["store"])
+@pytest.mark.parametrize("store", MEMORY_STORE, indirect=True)
 def test_vectorized_indexing_incompatible_shape(store) -> None:
     """Regression for GH2469: vectorized set-indexing raises ValueError when the value shape is incompatible with the indexer shape."""
     # GH2469
