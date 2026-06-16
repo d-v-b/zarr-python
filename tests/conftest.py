@@ -114,6 +114,18 @@ async def parse_store(
     raise AssertionError
 
 
+# Shared store parametrization lists, used with
+# ``@pytest.mark.parametrize("store", ..., indirect=True)`` together with the ``store`` fixture
+# below. These replace the many ad-hoc literal lists that were previously repeated across the
+# test suite. Only use a constant where the literal list matches it exactly (including order),
+# so that test ids are preserved; leave one-off lists (e.g. ``["memory", "memory_get_latency"]``)
+# inline.
+MEMORY_STORE = ["memory"]
+LOCAL_STORE = ["local"]
+LOCAL_MEMORY_STORES = ["local", "memory"]
+ALL_STORES = ["local", "memory", "zip"]
+
+
 @pytest.fixture(params=[str, pathlib.Path])
 def path_type(request: pytest.FixtureRequest) -> Any:
     return request.param
@@ -149,7 +161,10 @@ async def zip_store(tmpdir: LEGACY_PATH) -> ZipStore:
 @pytest.fixture
 async def store(request: pytest.FixtureRequest, tmpdir: LEGACY_PATH) -> Store:
     param = request.param
-    return await parse_store(param, str(tmpdir))
+    result = await parse_store(param, str(tmpdir))
+    if not isinstance(result, Store):
+        raise TypeError(f"Wrong store class returned by test fixture! got {result} instead")
+    return result
 
 
 @pytest.fixture

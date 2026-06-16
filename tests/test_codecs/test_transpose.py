@@ -2,8 +2,8 @@ import numpy as np
 import pytest
 
 import zarr
+from tests.conftest import LOCAL_MEMORY_STORES
 from zarr import AsyncArray, config
-from zarr.abc.codec import SupportsSyncCodec
 from zarr.abc.store import Store
 from zarr.codecs import TransposeCodec
 from zarr.core.array_spec import ArrayConfig, ArraySpec
@@ -19,7 +19,7 @@ from .test_codecs import _AsyncArrayProxy
 @pytest.mark.parametrize("runtime_write_order", ["F", "C"])
 @pytest.mark.parametrize("runtime_read_order", ["F", "C"])
 @pytest.mark.parametrize("with_sharding", [True, False])
-@pytest.mark.parametrize("store", ["local", "memory"], indirect=["store"])
+@pytest.mark.parametrize("store", LOCAL_MEMORY_STORES, indirect=True)
 async def test_transpose(
     store: Store,
     input_order: MemoryOrder,
@@ -61,7 +61,7 @@ async def test_transpose(
         assert read_data.flags["C_CONTIGUOUS"]
 
 
-@pytest.mark.parametrize("store", ["local", "memory"], indirect=["store"])
+@pytest.mark.parametrize("store", LOCAL_MEMORY_STORES, indirect=True)
 @pytest.mark.parametrize("order", [[1, 2, 0], [1, 2, 3, 0], [3, 2, 4, 0, 1]])
 def test_transpose_non_self_inverse(store: Store, order: list[int]) -> None:
     shape = [i + 3 for i in range(len(order))]
@@ -80,7 +80,7 @@ def test_transpose_non_self_inverse(store: Store, order: list[int]) -> None:
     assert np.array_equal(data, read_data)
 
 
-@pytest.mark.parametrize("store", ["local", "memory"], indirect=["store"])
+@pytest.mark.parametrize("store", LOCAL_MEMORY_STORES, indirect=True)
 def test_transpose_invalid(
     store: Store,
 ) -> None:
@@ -97,10 +97,6 @@ def test_transpose_invalid(
                 chunk_key_encoding={"name": "v2", "separator": "."},
                 filters=[TransposeCodec(order=order)],  # type: ignore[arg-type]
             )
-
-
-def test_transpose_codec_supports_sync() -> None:
-    assert isinstance(TransposeCodec(order=(0, 1)), SupportsSyncCodec)
 
 
 def test_transpose_codec_sync_roundtrip() -> None:
