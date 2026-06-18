@@ -203,6 +203,54 @@ def pipeline_supports_partial_encode(
     return isinstance(array_bytes_codec, ArrayBytesCodecPartialEncodeMixin)
 
 
+async def _fetch_and_decode_as_completed(
+    batch: Sequence[tuple[ByteGetter | None, ArraySpec]],
+    transform: ChunkTransform,
+) -> list[NDBuffer | None]:
+    """Concurrently fetch each chunk's bytes and decode it as fetches complete.
+
+    Decoding overlaps with in-flight fetches: each chunk is decoded the moment
+    its bytes arrive (in a thread pool when one is available, otherwise inline)
+    rather than waiting for the whole batch to land. A `None` byte getter fetches
+    nothing and decodes to `None`. Results are returned in input order.
+    """
+    max_workers = _resolve_max_workers()
+    pool = _get_pool(max_workers) if max_workers > 1 else None
+    loop = asyncio.get_running_loop()
+    decode_futures: list[asyncio.Future[NDBuffer | None]] = [loop.create_future() for _ in batch]
+
+    async def _fetch(
+        idx: int, byte_getter: ByteGetter | None, prototype: BufferPrototype
+    ) -> tuple[int, Buffer | None]:
+        return idx, None if byte_getter is None else await byte_getter.get(prototype)
+
+    def _decode(buffer: Buffer | None, chunk_spec: ArraySpec) -> NDBuffer | None:
+        return None if buffer is None else transform.decode_chunk(buffer, chunk_spec)
+
+    fetch_tasks = concurrent_iter(
+        [
+            (idx, byte_getter, chunk_spec.prototype)
+            for idx, (byte_getter, chunk_spec) in enumerate(batch)
+        ],
+        _fetch,
+        config.get("async.concurrency"),
+    )
+    for fetch_coro in asyncio.as_completed(list(fetch_tasks)):
+        idx, buffer = await fetch_coro
+        chunk_spec = batch[idx][1]
+        # Bridge both paths to asyncio.Future so the final collection loop
+        # can `await` uniformly without blocking the event loop. For the
+        # pool path that means `wrap_future` (not `pool.submit(...).result()`,
+        # which would block the loop thread for the duration of every decode
+        # — freezing any unrelated coroutines sharing this loop).
+        if pool is None:
+            decode_futures[idx].set_result(_decode(buffer, chunk_spec))
+        else:
+            decode_futures[idx] = asyncio.wrap_future(pool.submit(_decode, buffer, chunk_spec))
+
+    return [await f for f in decode_futures]
+
+
 async def _async_read_fallback(
     pipeline: CodecPipeline,
     batch: list[tuple[ByteGetter, ArraySpec, SelectorTuple, SelectorTuple, bool]],
@@ -223,44 +271,10 @@ async def _async_read_fallback(
     chunk_array_batch: list[NDBuffer | None]
 
     if isinstance(pipeline, FusedCodecPipeline) and pipeline.sync_transform is not None:
-        transform = pipeline.sync_transform
-        max_workers = _resolve_max_workers()
-        pool = _get_pool(max_workers) if max_workers > 1 else None
-        loop = asyncio.get_running_loop()
-        decode_futures: list[asyncio.Future[NDBuffer | None]] = [
-            loop.create_future() for _ in batch
-        ]
-
-        async def _fetch(
-            idx: int, byte_getter: ByteGetter, prototype: BufferPrototype
-        ) -> tuple[int, Buffer | None]:
-            return idx, await byte_getter.get(prototype)
-
-        def _decode(buffer: Buffer | None, chunk_spec: ArraySpec) -> NDBuffer | None:
-            return None if buffer is None else transform.decode_chunk(buffer, chunk_spec)
-
-        fetch_tasks = concurrent_iter(
-            [
-                (idx, byte_getter, chunk_spec.prototype)
-                for idx, (byte_getter, chunk_spec, *_) in enumerate(batch)
-            ],
-            _fetch,
-            config.get("async.concurrency"),
+        chunk_array_batch = await _fetch_and_decode_as_completed(
+            [(byte_getter, chunk_spec) for byte_getter, chunk_spec, *_ in batch],
+            pipeline.sync_transform,
         )
-        for fetch_coro in asyncio.as_completed(list(fetch_tasks)):
-            idx, buffer = await fetch_coro
-            chunk_spec = batch[idx][1]
-            # Bridge both paths to asyncio.Future so the final collection loop
-            # can `await` uniformly without blocking the event loop. For the
-            # pool path that means `wrap_future` (not `pool.submit(...).result()`,
-            # which would block the loop thread for the duration of every decode
-            # — freezing any unrelated coroutines sharing this loop).
-            if pool is None:
-                decode_futures[idx].set_result(_decode(buffer, chunk_spec))
-            else:
-                decode_futures[idx] = asyncio.wrap_future(pool.submit(_decode, buffer, chunk_spec))
-
-        chunk_array_batch = [await f for f in decode_futures]
     else:
         chunk_bytes_batch = await concurrent_map(
             [(byte_getter, array_spec.prototype) for byte_getter, array_spec, *_ in batch],
@@ -316,37 +330,38 @@ async def _async_write_fallback(
     `SupportsSetSync` / sync transform is unavailable).
     """
 
-    async def _read_key(
-        byte_setter: ByteSetter | None, prototype: BufferPrototype
-    ) -> Buffer | None:
-        if byte_setter is None:
-            return None
-        return await byte_setter.get(prototype=prototype)
-
-    chunk_bytes_batch: Iterable[Buffer | None]
-    chunk_bytes_batch = await concurrent_map(
-        [
-            (
-                None if is_complete_chunk else byte_setter,
-                chunk_spec.prototype,
-            )
-            for byte_setter, chunk_spec, chunk_selection, _, is_complete_chunk in batch
-        ],
-        _read_key,
-        config.get("async.concurrency"),
-    )
-
     if use_sync := (
         isinstance(pipeline, FusedCodecPipeline) and pipeline.sync_transform is not None
     ):
-        chunk_array_decoded = await asyncio.to_thread(
-            pipeline.decode_sync,
+        # Read each chunk's existing bytes (skipping complete chunks) and decode
+        # as fetches complete, overlapping the sync decode with in-flight reads.
+        chunk_array_decoded: Iterable[NDBuffer | None] = await _fetch_and_decode_as_completed(
             [
-                (chunk_bytes, chunk_spec)
-                for chunk_bytes, (_, chunk_spec, *_) in zip(chunk_bytes_batch, batch, strict=False)
+                (None if is_complete_chunk else byte_setter, chunk_spec)
+                for byte_setter, chunk_spec, _, _, is_complete_chunk in batch
             ],
+            pipeline.sync_transform,
         )
     else:
+
+        async def _read_key(
+            byte_setter: ByteSetter | None, prototype: BufferPrototype
+        ) -> Buffer | None:
+            if byte_setter is None:
+                return None
+            return await byte_setter.get(prototype=prototype)
+
+        chunk_bytes_batch: Iterable[Buffer | None] = await concurrent_map(
+            [
+                (
+                    None if is_complete_chunk else byte_setter,
+                    chunk_spec.prototype,
+                )
+                for byte_setter, chunk_spec, chunk_selection, _, is_complete_chunk in batch
+            ],
+            _read_key,
+            config.get("async.concurrency"),
+        )
         chunk_array_decoded = await pipeline.decode(
             [
                 (chunk_bytes, chunk_spec)
