@@ -15,7 +15,7 @@ from zarr.core.common import JSON, parse_named_configuration
 from zarr.core.dtype.common import HasEndianness
 from zarr.core.dtype.npy.structured import Struct
 
-__all__ = ["ENDIAN", "EndianLiteral"]
+__all__ = ["ENDIAN", "BytesCodec", "Endian", "EndianLiteral"]
 
 if TYPE_CHECKING:
     from typing import Self
