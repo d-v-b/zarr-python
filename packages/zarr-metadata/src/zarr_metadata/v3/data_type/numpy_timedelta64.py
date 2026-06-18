@@ -19,6 +19,25 @@ DateTimeUnit = Literal[
 ]
 """Time unit codes used by numpy.timedelta64."""
 
+DATETIME_UNIT: Final = (
+    "Y",
+    "M",
+    "W",
+    "D",
+    "h",
+    "m",
+    "s",
+    "ms",
+    "us",
+    "μs",
+    "ns",
+    "ps",
+    "fs",
+    "as",
+    "generic",
+)
+"""Runtime tuple of the permitted `numpy.timedelta64`/`numpy.datetime64` unit strings."""
+
 
 class NumpyTimedelta64Configuration(TypedDict):
     """
@@ -51,6 +70,7 @@ Either a JSON integer (a count of `unit * scale_factor`), or the string
 """
 
 __all__ = [
+    "DATETIME_UNIT",
     "NUMPY_TIMEDELTA64_DATA_TYPE_NAME",
     "DateTimeUnit",
     "NumpyTimedelta64",
