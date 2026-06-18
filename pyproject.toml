@@ -37,6 +37,7 @@ dependencies = [
     'google-crc32c>=1.5',
     'typing_extensions>=4.14',
     'donfig>=0.8',
+    'zarr-metadata>=0.2.0,<0.3',
 ]
 
 dynamic = [
@@ -146,6 +147,12 @@ dev = [
     "universal-pathlib",
     "mypy==2.1.0",
 ]
+
+[tool.uv.workspace]
+members = ["packages/zarr-metadata"]
+
+[tool.uv.sources]
+zarr-metadata = { workspace = true }
 
 [tool.coverage.report]
 exclude_also = [
