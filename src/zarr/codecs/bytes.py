@@ -5,7 +5,7 @@ import warnings
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, ClassVar
 
-from zarr_metadata import ENDIAN
+from zarr_metadata import ENDIAN as ENDIAN
 from zarr_metadata import Endian as EndianLiteral
 
 from zarr.abc.codec import ArrayBytesCodec
@@ -15,7 +15,7 @@ from zarr.core.common import JSON, parse_named_configuration
 from zarr.core.dtype.common import HasEndianness
 from zarr.core.dtype.npy.structured import Struct
 
-__all__ = ["ENDIAN", "BytesCodec", "Endian", "EndianLiteral"]
+__all__ = ["ENDIAN", "EndianLiteral"]
 
 if TYPE_CHECKING:
     from typing import Self
