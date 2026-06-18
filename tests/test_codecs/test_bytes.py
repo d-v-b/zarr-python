@@ -171,3 +171,15 @@ def test_bytes_codec_evolve_structured_single_byte_fields_clears_endian() -> Non
     spec = _make_array_spec(dtype)
     evolved = codec.evolve_from_array_spec(spec)
     assert evolved.endian is None
+
+
+def test_endian_pair_sourced_from_zarr_metadata() -> None:
+    from typing import get_args
+
+    import zarr_metadata as zm
+
+    from zarr.codecs.bytes import ENDIAN, EndianLiteral
+
+    assert ENDIAN == zm.ENDIAN
+    assert set(ENDIAN) == set(get_args(EndianLiteral))
+    assert get_args(EndianLiteral) == get_args(zm.Endian)
