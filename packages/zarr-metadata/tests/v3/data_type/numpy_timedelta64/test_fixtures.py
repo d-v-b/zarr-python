@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import get_args
 
 import pytest
 from pydantic import TypeAdapter
 
 from zarr_metadata.v3.data_type.numpy_timedelta64 import (
+    DATETIME_UNIT,
+    DateTimeUnit,
     NumpyTimedelta64,
     NumpyTimedelta64FillValue,
 )
@@ -24,3 +27,7 @@ def test_data_type() -> None:
 @pytest.mark.parametrize("case", FILL_VALUES.values(), ids=list(FILL_VALUES))
 def test_fill_value(case: object) -> None:
     TypeAdapter(NumpyTimedelta64FillValue).validate_python(case)
+
+
+def test_datetime_unit_constant_matches_literal() -> None:
+    assert set(DATETIME_UNIT) == set(get_args(DateTimeUnit))
