@@ -235,7 +235,7 @@ async def _fetch_and_decode_as_completed(
         _fetch,
         config.get("async.concurrency"),
     )
-    for fetch_coro in asyncio.as_completed(list(fetch_tasks)):
+    for fetch_coro in asyncio.as_completed(fetch_tasks):
         idx, buffer = await fetch_coro
         chunk_spec = batch[idx][1]
         # Bridge both paths to asyncio.Future so the final collection loop
@@ -248,7 +248,7 @@ async def _fetch_and_decode_as_completed(
         else:
             decode_futures[idx] = asyncio.wrap_future(pool.submit(_decode, buffer, chunk_spec))
 
-    return [await f for f in decode_futures]
+    return await asyncio.gather(*decode_futures)
 
 
 async def _encode_and_write_as_completed(
