@@ -267,40 +267,40 @@ async def _encode_and_write_as_completed(
     max_workers = _resolve_max_workers()
     pool = _get_pool(max_workers) if max_workers > 1 else None
     loop = asyncio.get_running_loop()
+    semaphore = asyncio.Semaphore(config.get("async.concurrency"))
 
-    def _encode(chunk_array: NDBuffer | None, chunk_spec: ArraySpec) -> Buffer | None:
-        return None if chunk_array is None else transform.encode_chunk(chunk_array, chunk_spec)
+    def _encode(
+        idx: int, chunk_array: NDBuffer | None, chunk_spec: ArraySpec
+    ) -> tuple[int, Buffer | None]:
+        return idx, None if chunk_array is None else transform.encode_chunk(chunk_array, chunk_spec)
 
-    # Submit every encode up front so they run concurrently (in the pool when
-    # available). The pool path bridges to asyncio.Future via `wrap_future` (not
-    # `pool.submit(...).result()`, which would block the loop thread for the
-    # duration of every encode); the inline path resolves immediately.
-    encode_futures: list[asyncio.Future[Buffer | None]] = []
-    for _, chunk_array, chunk_spec in batch:
+    async def _write(idx: int, chunk_bytes: Buffer | None) -> None:
+        byte_setter = batch[idx][0]
+        async with semaphore:
+            if chunk_bytes is None:
+                await byte_setter.delete()
+            else:
+                await byte_setter.set(chunk_bytes)
+
+    # Submit every encode up front. The pool path bridges to asyncio.Future via
+    # `wrap_future` (not `pool.submit(...).result()`, which would block the loop
+    # thread); the inline path resolves immediately.
+    encode_futures: list[asyncio.Future[tuple[int, Buffer | None]]] = []
+    for idx, (_, chunk_array, chunk_spec) in enumerate(batch):
         if pool is None:
-            fut: asyncio.Future[Buffer | None] = loop.create_future()
-            fut.set_result(_encode(chunk_array, chunk_spec))
+            fut: asyncio.Future[tuple[int, Buffer | None]] = loop.create_future()
+            fut.set_result(_encode(idx, chunk_array, chunk_spec))
         else:
-            fut = asyncio.wrap_future(pool.submit(_encode, chunk_array, chunk_spec))
+            fut = asyncio.wrap_future(pool.submit(_encode, idx, chunk_array, chunk_spec))
         encode_futures.append(fut)
 
-    async def _write(byte_setter: ByteSetter, encode_future: asyncio.Future[Buffer | None]) -> None:
-        # Write the instant this chunk's encode lands, overlapping its IO with the
-        # still-running encodes of other chunks.
-        chunk_bytes = await encode_future
-        if chunk_bytes is None:
-            await byte_setter.delete()
-        else:
-            await byte_setter.set(chunk_bytes)
-
-    await concurrent_map(
-        [
-            (byte_setter, encode_future)
-            for (byte_setter, *_), encode_future in zip(batch, encode_futures, strict=True)
-        ],
-        _write,
-        config.get("async.concurrency"),
-    )
+    # Kick off each chunk's write the instant its encode lands, so writes of
+    # already-compressed chunks proceed while the rest are still encoding.
+    write_tasks: list[asyncio.Task[None]] = []
+    for encode_coro in asyncio.as_completed(encode_futures):
+        idx, chunk_bytes = await encode_coro
+        write_tasks.append(asyncio.ensure_future(_write(idx, chunk_bytes)))
+    await asyncio.gather(*write_tasks)
 
 
 async def _async_read_fallback(
