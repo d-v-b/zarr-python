@@ -251,6 +251,58 @@ async def _fetch_and_decode_as_completed(
     return [await f for f in decode_futures]
 
 
+async def _encode_and_write_as_completed(
+    batch: Sequence[tuple[ByteSetter, NDBuffer | None, ArraySpec]],
+    transform: ChunkTransform,
+) -> None:
+    """Encode each chunk and write it out as encodes complete.
+
+    The reverse of `_fetch_and_decode_as_completed`: each chunk is encoded (in a
+    thread pool when one is available, otherwise inline) and its write is launched
+    the moment that chunk's encode finishes — overlapping IO writes with
+    still-running encodes rather than waiting for the whole batch to encode.
+    A `None` chunk array encodes to `None` and is `delete`d. Writes are bounded
+    by `async.concurrency`.
+    """
+    max_workers = _resolve_max_workers()
+    pool = _get_pool(max_workers) if max_workers > 1 else None
+    loop = asyncio.get_running_loop()
+    semaphore = asyncio.Semaphore(config.get("async.concurrency"))
+
+    def _encode(
+        idx: int, chunk_array: NDBuffer | None, chunk_spec: ArraySpec
+    ) -> tuple[int, Buffer | None]:
+        return idx, None if chunk_array is None else transform.encode_chunk(chunk_array, chunk_spec)
+
+    async def _write(idx: int, chunk_bytes: Buffer | None) -> None:
+        byte_setter = batch[idx][0]
+        async with semaphore:
+            if chunk_bytes is None:
+                await byte_setter.delete()
+            else:
+                await byte_setter.set(chunk_bytes)
+
+    # Submit every encode up front. The pool path bridges to asyncio.Future via
+    # `wrap_future` (not `pool.submit(...).result()`, which would block the loop
+    # thread); the inline path resolves immediately.
+    encode_futures: list[asyncio.Future[tuple[int, Buffer | None]]] = []
+    for idx, (_, chunk_array, chunk_spec) in enumerate(batch):
+        if pool is None:
+            fut: asyncio.Future[tuple[int, Buffer | None]] = loop.create_future()
+            fut.set_result(_encode(idx, chunk_array, chunk_spec))
+        else:
+            fut = asyncio.wrap_future(pool.submit(_encode, idx, chunk_array, chunk_spec))
+        encode_futures.append(fut)
+
+    # Kick off each chunk's write the instant its encode lands, so writes of
+    # already-compressed chunks proceed while the rest are still encoding.
+    write_tasks: list[asyncio.Task[None]] = []
+    for encode_coro in asyncio.as_completed(encode_futures):
+        idx, chunk_bytes = await encode_coro
+        write_tasks.append(asyncio.ensure_future(_write(idx, chunk_bytes)))
+    await asyncio.gather(*write_tasks)
+
+
 async def _async_read_fallback(
     pipeline: CodecPipeline,
     batch: list[tuple[ByteGetter, ArraySpec, SelectorTuple, SelectorTuple, bool]],
@@ -397,12 +449,16 @@ async def _async_write_fallback(
                 chunk_array_batch.append(chunk_array)
 
     if use_sync:
-        chunk_bytes_batch = await asyncio.to_thread(
-            cast(FusedCodecPipeline, pipeline).encode_sync,
+        sync_transform = cast(FusedCodecPipeline, pipeline).sync_transform
+        assert sync_transform is not None
+        await _encode_and_write_as_completed(
             [
-                (chunk_array, chunk_spec)
-                for chunk_array, (_, chunk_spec, *_) in zip(chunk_array_batch, batch, strict=False)
+                (byte_setter, chunk_array, chunk_spec)
+                for chunk_array, (byte_setter, chunk_spec, *_) in zip(
+                    chunk_array_batch, batch, strict=False
+                )
             ],
+            sync_transform,
         )
     else:
         chunk_bytes_batch = await pipeline.encode(
@@ -412,20 +468,20 @@ async def _async_write_fallback(
             ],
         )
 
-    async def _write_key(byte_setter: ByteSetter, chunk_bytes: Buffer | None) -> None:
-        if chunk_bytes is None:
-            await byte_setter.delete()
-        else:
-            await byte_setter.set(chunk_bytes)
+        async def _write_key(byte_setter: ByteSetter, chunk_bytes: Buffer | None) -> None:
+            if chunk_bytes is None:
+                await byte_setter.delete()
+            else:
+                await byte_setter.set(chunk_bytes)
 
-    await concurrent_map(
-        [
-            (byte_setter, chunk_bytes)
-            for chunk_bytes, (byte_setter, *_) in zip(chunk_bytes_batch, batch, strict=False)
-        ],
-        _write_key,
-        config.get("async.concurrency"),
-    )
+        await concurrent_map(
+            [
+                (byte_setter, chunk_bytes)
+                for chunk_bytes, (byte_setter, *_) in zip(chunk_bytes_batch, batch, strict=False)
+            ],
+            _write_key,
+            config.get("async.concurrency"),
+        )
 
 
 @dataclass(slots=True, kw_only=True)
