@@ -1025,45 +1025,6 @@ class FusedCodecPipeline(CodecPipeline):
                 out.append(await async_transform.decode_chunk(chunk_bytes, chunk_spec))
         return out
 
-    def decode_sync(
-        self,
-        chunk_bytes_and_specs: Sequence[tuple[Buffer | None, ArraySpec]],
-    ) -> Iterable[NDBuffer | None]:
-        """A sync version of `decode`.
-
-        Parameters
-        ----------
-        chunk_bytes_and_specs
-            The chunks and their descriptions (i.e., shape, fill value etc.)
-
-        Returns
-        -------
-            An iterator over decoded chunks
-
-        Raises
-        ------
-        RuntimeError
-            If there is no sync transform
-        """
-        transform = self.sync_transform
-        if transform is None:
-            raise RuntimeError("Do not call this method without a sync transform")
-        max_workers = _resolve_max_workers()
-
-        def _decode(item: tuple[Buffer | None, ArraySpec]) -> NDBuffer | None:
-            return None if item[0] is None else transform.decode_chunk(item[0], item[1])
-
-        if max_workers > 1 and len(chunk_bytes_and_specs) > 1:
-            pool = _get_pool(max_workers)
-            return list(
-                pool.map(
-                    _decode,
-                    chunk_bytes_and_specs,
-                )
-            )
-        else:
-            return [_decode(item) for item in chunk_bytes_and_specs]
-
     async def encode(
         self,
         chunk_arrays_and_specs: Iterable[tuple[NDBuffer | None, ArraySpec]],
@@ -1076,46 +1037,6 @@ class FusedCodecPipeline(CodecPipeline):
             else:
                 out.append(await async_transform.encode_chunk(chunk_array, chunk_spec))
         return out
-
-    def encode_sync(
-        self,
-        chunk_arrays_and_specs: Sequence[tuple[NDBuffer | None, ArraySpec]],
-    ) -> Iterable[Buffer | None]:
-        """A sync version of `encode`.
-
-        Parameters
-        ----------
-        chunk_arrays_and_specs
-            The chunks and their descriptions (i.e., shape, fill value etc.)
-
-        Returns
-        -------
-            An iterator over encoded chunks
-
-        Raises
-        ------
-        RuntimeError
-            If there is no sync transform
-        """
-        transform = self.sync_transform
-        if transform is None:
-            raise RuntimeError("Do not call this method without a sync transform")
-
-        max_workers = _resolve_max_workers()
-
-        def _encode(item: tuple[NDBuffer | None, ArraySpec]) -> Buffer | None:
-            return None if item[0] is None else transform.encode_chunk(item[0], item[1])
-
-        if max_workers > 1 and len(chunk_arrays_and_specs) > 1:
-            pool = _get_pool(max_workers)
-            return list(
-                pool.map(
-                    _encode,
-                    chunk_arrays_and_specs,
-                )
-            )
-        else:
-            return [_encode(item) for item in chunk_arrays_and_specs]
 
     # -- sync read/write --
 
