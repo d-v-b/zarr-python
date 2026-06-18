@@ -263,6 +263,19 @@ def test_blosc_codec_rejects_unknown(param: str) -> None:
         BloscCodec(**kwargs)
 
 
+def test_blosc_pairs_sourced_from_zarr_metadata() -> None:
+    from typing import get_args
+
+    import zarr_metadata as zm
+
+    from zarr.codecs.blosc import BLOSC_CNAME, BLOSC_SHUFFLE, BloscCnameLiteral, BloscShuffleLiteral
+
+    assert BLOSC_SHUFFLE == zm.BLOSC_SHUFFLE
+    assert BLOSC_CNAME == zm.BLOSC_CNAME
+    assert set(BLOSC_SHUFFLE) == set(get_args(BloscShuffleLiteral))
+    assert set(BLOSC_CNAME) == set(get_args(BloscCnameLiteral))
+
+
 @pytest.mark.parametrize("enum_cls", [BloscShuffle, BloscCname])
 def test_blosc_enum_attribute_error_for_unknown_member(enum_cls: type) -> None:
     """

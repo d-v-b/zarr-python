@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field, replace
 from functools import cached_property
-from typing import TYPE_CHECKING, ClassVar, Final, Literal, NotRequired, TypedDict
+from typing import TYPE_CHECKING, ClassVar, Literal, NotRequired, TypedDict
 
 import numcodecs
 from numcodecs.blosc import Blosc
@@ -21,15 +21,16 @@ if TYPE_CHECKING:
     from zarr.core.array_spec import ArraySpec
     from zarr.core.buffer import Buffer
 
-BloscShuffleLiteral = Literal["noshuffle", "shuffle", "bitshuffle"]
-"""The shuffle values permitted for the blosc codec"""
+from zarr_metadata import BLOSC_CNAME as BLOSC_CNAME
+from zarr_metadata import BLOSC_SHUFFLE as BLOSC_SHUFFLE
+from zarr_metadata import BloscCName as _BloscCName
+from zarr_metadata import BloscShuffle as _BloscShuffle
 
-BLOSC_SHUFFLE: Final = ("noshuffle", "shuffle", "bitshuffle")
-
-BloscCnameLiteral = Literal["lz4", "lz4hc", "blosclz", "snappy", "zlib", "zstd"]
+BloscCnameLiteral = _BloscCName
 """The codec identifiers used in the blosc codec"""
 
-BLOSC_CNAME: Final = ("lz4", "lz4hc", "blosclz", "snappy", "zlib", "zstd")
+BloscShuffleLiteral = _BloscShuffle
+"""The shuffle values permitted for the blosc codec"""
 
 
 class BloscConfigV2(TypedDict):
