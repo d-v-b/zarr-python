@@ -10,10 +10,10 @@ import pytest
 from pydantic import TypeAdapter
 
 from zarr_metadata.v3.data_type.numpy_timedelta64 import (
-    DATETIME_UNIT,
-    DateTimeUnit,
+    NUMPY_TIME_UNIT,
     NumpyTimedelta64,
     NumpyTimedelta64FillValue,
+    NumpyTimeUnit,
 )
 
 DIR = Path(__file__).parent
@@ -29,5 +29,5 @@ def test_fill_value(case: object) -> None:
     TypeAdapter(NumpyTimedelta64FillValue).validate_python(case)
 
 
-def test_datetime_unit_constant_matches_literal() -> None:
-    assert set(DATETIME_UNIT) == set(get_args(DateTimeUnit))
+def test_time_unit_constant_matches_literal() -> None:
+    assert set(NUMPY_TIME_UNIT) == set(get_args(NumpyTimeUnit))

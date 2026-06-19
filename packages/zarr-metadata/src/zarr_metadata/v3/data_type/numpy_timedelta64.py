@@ -14,12 +14,12 @@ NUMPY_TIMEDELTA64_DATA_TYPE_NAME: Final = "numpy.timedelta64"
 NumpyTimedelta64DataTypeName = Literal["numpy.timedelta64"]
 """Literal type of the `name` field of the `numpy.timedelta64` data type."""
 
-DateTimeUnit = Literal[
+NumpyTimeUnit = Literal[
     "Y", "M", "W", "D", "h", "m", "s", "ms", "us", "μs", "ns", "ps", "fs", "as", "generic"
 ]
 """Time unit codes used by numpy.timedelta64."""
 
-DATETIME_UNIT: Final = (
+NUMPY_TIME_UNIT: Final = (
     "Y",
     "M",
     "W",
@@ -51,7 +51,7 @@ class NumpyTimedelta64Configuration(TypedDict):
         The multiplier relative to the unit.
     """
 
-    unit: ReadOnly[DateTimeUnit]
+    unit: ReadOnly[NumpyTimeUnit]
     scale_factor: ReadOnly[int]
 
 
@@ -70,9 +70,9 @@ Either a JSON integer (a count of `unit * scale_factor`), or the string
 """
 
 __all__ = [
-    "DATETIME_UNIT",
     "NUMPY_TIMEDELTA64_DATA_TYPE_NAME",
-    "DateTimeUnit",
+    "NUMPY_TIME_UNIT",
+    "NumpyTimeUnit",
     "NumpyTimedelta64",
     "NumpyTimedelta64Configuration",
     "NumpyTimedelta64DataTypeName",

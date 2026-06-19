@@ -12,7 +12,7 @@ from typing import NotRequired
 from typing_extensions import TypedDict
 
 
-class NamedConfig(TypedDict):
+class NamedConfigV3(TypedDict):
     """
     Externally-tagged union member for a metadata field.
 

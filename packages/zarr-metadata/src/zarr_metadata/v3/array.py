@@ -5,7 +5,7 @@ from typing import Literal, NotRequired
 
 from typing_extensions import TypedDict
 
-from zarr_metadata.v3._common import MetadataFieldV3
+from zarr_metadata.v3._common import MetadataNodeV3
 
 
 class ExtensionFieldV3(TypedDict, extra_items=object):  # type: ignore[call-arg]
@@ -51,14 +51,14 @@ class ArrayMetadataV3(TypedDict, extra_items=ExtensionFieldV3):  # type: ignore[
 
     zarr_format: Literal[3]
     node_type: Literal["array"]
-    data_type: MetadataFieldV3
+    data_type: MetadataNodeV3
     shape: tuple[int, ...]
-    chunk_grid: MetadataFieldV3
-    chunk_key_encoding: MetadataFieldV3
+    chunk_grid: MetadataNodeV3
+    chunk_key_encoding: MetadataNodeV3
     fill_value: object
-    codecs: tuple[MetadataFieldV3, ...]
+    codecs: tuple[MetadataNodeV3, ...]
     attributes: NotRequired[Mapping[str, object]]
-    storage_transformers: NotRequired[tuple[MetadataFieldV3, ...]]
+    storage_transformers: NotRequired[tuple[MetadataNodeV3, ...]]
     dimension_names: NotRequired[tuple[str | None, ...]]
 
 
@@ -87,14 +87,14 @@ class ArrayMetadataV3Partial(TypedDict, total=False, extra_items=ExtensionFieldV
 
     zarr_format: Literal[3]
     node_type: Literal["array"]
-    data_type: MetadataFieldV3
+    data_type: MetadataNodeV3
     shape: tuple[int, ...]
-    chunk_grid: MetadataFieldV3
-    chunk_key_encoding: MetadataFieldV3
+    chunk_grid: MetadataNodeV3
+    chunk_key_encoding: MetadataNodeV3
     fill_value: object
-    codecs: tuple[MetadataFieldV3, ...]
+    codecs: tuple[MetadataNodeV3, ...]
     attributes: NotRequired[Mapping[str, object]]
-    storage_transformers: NotRequired[tuple[MetadataFieldV3, ...]]
+    storage_transformers: NotRequired[tuple[MetadataNodeV3, ...]]
     dimension_names: NotRequired[tuple[str | None, ...]]
 
 

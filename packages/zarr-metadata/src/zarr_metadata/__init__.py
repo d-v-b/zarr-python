@@ -1,6 +1,6 @@
 from importlib.metadata import version
 
-from zarr_metadata._common import NamedConfig
+from zarr_metadata._common import NamedConfigV3
 from zarr_metadata.v2.array import (
     ARRAY_DIMENSION_SEPARATOR_V2,
     ARRAY_ORDER_V2,
@@ -15,7 +15,7 @@ from zarr_metadata.v2.attributes import ZAttrsMetadata
 from zarr_metadata.v2.codec import CodecMetadataV2
 from zarr_metadata.v2.consolidated import ConsolidatedMetadataV2
 from zarr_metadata.v2.group import GroupMetadataV2, GroupMetadataV2Partial, ZGroupMetadata
-from zarr_metadata.v3._common import MetadataFieldV3
+from zarr_metadata.v3._common import MetadataNodeV3
 from zarr_metadata.v3.array import ArrayMetadataV3, ArrayMetadataV3Partial, ExtensionFieldV3
 from zarr_metadata.v3.chunk_grid.rectilinear import (
     RECTILINEAR_CHUNK_GRID_NAME,
@@ -52,19 +52,19 @@ from zarr_metadata.v3.codec.blosc import (
 )
 from zarr_metadata.v3.codec.bytes import (
     BYTES_CODEC_NAME,
-    ENDIAN,
+    ENDIANNESS,
     BytesCodecMetadata,
     BytesCodecName,
-    Endian,
+    Endianness,
 )
 from zarr_metadata.v3.codec.cast_value import (
+    CAST_OUT_OF_RANGE_MODE,
+    CAST_ROUNDING_MODE,
     CAST_VALUE_CODEC_NAME,
-    OUT_OF_RANGE_MODE,
-    ROUNDING_MODE,
+    CastOutOfRangeMode,
+    CastRoundingMode,
     CastValueCodecMetadata,
     CastValueCodecName,
-    OutOfRangeMode,
-    RoundingMode,
 )
 from zarr_metadata.v3.codec.crc32c import CRC32C_CODEC_NAME, Crc32cCodecMetadata, Crc32cCodecName
 from zarr_metadata.v3.codec.gzip import GZIP_CODEC_NAME, GzipCodecMetadata, GzipCodecName
@@ -74,11 +74,11 @@ from zarr_metadata.v3.codec.scale_offset import (
     ScaleOffsetCodecName,
 )
 from zarr_metadata.v3.codec.sharding_indexed import (
-    INDEX_LOCATION,
+    SHARDING_INDEX_LOCATION,
     SHARDING_INDEXED_CODEC_NAME,
-    IndexLocation,
     ShardingIndexedCodecMetadata,
     ShardingIndexedCodecName,
+    ShardingIndexLocation,
 )
 from zarr_metadata.v3.codec.transpose import (
     TRANSPOSE_CODEC_NAME,
@@ -148,11 +148,11 @@ from zarr_metadata.v3.data_type.numpy_datetime64 import (
     NumpyDatetime64FillValue,
 )
 from zarr_metadata.v3.data_type.numpy_timedelta64 import (
-    DATETIME_UNIT,
+    NUMPY_TIME_UNIT,
     NUMPY_TIMEDELTA64_DATA_TYPE_NAME,
-    DateTimeUnit,
     NumpyTimedelta64DataTypeName,
     NumpyTimedelta64FillValue,
+    NumpyTimeUnit,
 )
 from zarr_metadata.v3.data_type.raw import RawBytesDataTypeName, RawBytesFillValue
 from zarr_metadata.v3.data_type.string import (
@@ -199,31 +199,31 @@ __all__ = [
     "BOOL_DATA_TYPE_NAME",
     "BYTES_CODEC_NAME",
     "BYTES_DATA_TYPE_NAME",
+    "CAST_OUT_OF_RANGE_MODE",
+    "CAST_ROUNDING_MODE",
     "CAST_VALUE_CODEC_NAME",
     "COMPLEX64_DATA_TYPE_NAME",
     "COMPLEX128_DATA_TYPE_NAME",
     "CRC32C_CODEC_NAME",
-    "DATETIME_UNIT",
     "DEFAULT_CHUNK_KEY_ENCODING_NAME",
     "DEFAULT_CHUNK_KEY_ENCODING_SEPARATOR",
-    "ENDIAN",
+    "ENDIANNESS",
     "FLOAT16_DATA_TYPE_NAME",
     "FLOAT32_DATA_TYPE_NAME",
     "FLOAT64_DATA_TYPE_NAME",
     "GZIP_CODEC_NAME",
-    "INDEX_LOCATION",
     "INT8_DATA_TYPE_NAME",
     "INT16_DATA_TYPE_NAME",
     "INT32_DATA_TYPE_NAME",
     "INT64_DATA_TYPE_NAME",
     "NUMPY_DATETIME64_DATA_TYPE_NAME",
     "NUMPY_TIMEDELTA64_DATA_TYPE_NAME",
-    "OUT_OF_RANGE_MODE",
+    "NUMPY_TIME_UNIT",
     "RECTILINEAR_CHUNK_GRID_NAME",
     "REGULAR_CHUNK_GRID_NAME",
-    "ROUNDING_MODE",
     "SCALE_OFFSET_CODEC_NAME",
     "SHARDING_INDEXED_CODEC_NAME",
+    "SHARDING_INDEX_LOCATION",
     "STRING_DATA_TYPE_NAME",
     "STRUCT_DATA_TYPE_NAME",
     "TRANSPOSE_CODEC_NAME",
@@ -250,6 +250,8 @@ __all__ = [
     "BytesCodecName",
     "BytesDataTypeName",
     "BytesFillValue",
+    "CastOutOfRangeMode",
+    "CastRoundingMode",
     "CastValueCodecMetadata",
     "CastValueCodecName",
     "CodecMetadataV2",
@@ -262,11 +264,10 @@ __all__ = [
     "Crc32cCodecMetadata",
     "Crc32cCodecName",
     "DataTypeMetadataV2",
-    "DateTimeUnit",
     "DefaultChunkKeyEncodingMetadata",
     "DefaultChunkKeyEncodingName",
     "DefaultChunkKeyEncodingSeparator",
-    "Endian",
+    "Endianness",
     "ExtensionFieldV3",
     "Float16DataTypeName",
     "Float16FillValue",
@@ -280,7 +281,6 @@ __all__ = [
     "GroupMetadataV3Partial",
     "GzipCodecMetadata",
     "GzipCodecName",
-    "IndexLocation",
     "Int8DataTypeName",
     "Int8FillValue",
     "Int16DataTypeName",
@@ -289,22 +289,22 @@ __all__ = [
     "Int32FillValue",
     "Int64DataTypeName",
     "Int64FillValue",
-    "MetadataFieldV3",
-    "NamedConfig",
+    "MetadataNodeV3",
+    "NamedConfigV3",
     "NumpyDatetime64DataTypeName",
     "NumpyDatetime64FillValue",
+    "NumpyTimeUnit",
     "NumpyTimedelta64DataTypeName",
     "NumpyTimedelta64FillValue",
-    "OutOfRangeMode",
     "RawBytesDataTypeName",
     "RawBytesFillValue",
     "RectilinearChunkGridMetadata",
     "RectilinearChunkGridName",
     "RegularChunkGridMetadata",
     "RegularChunkGridName",
-    "RoundingMode",
     "ScaleOffsetCodecMetadata",
     "ScaleOffsetCodecName",
+    "ShardingIndexLocation",
     "ShardingIndexedCodecMetadata",
     "ShardingIndexedCodecName",
     "StringDataTypeName",

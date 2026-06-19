@@ -8,7 +8,7 @@ from typing import Final, Literal, NotRequired
 
 from typing_extensions import TypedDict
 
-from zarr_metadata.v3._common import MetadataFieldV3
+from zarr_metadata.v3._common import MetadataNodeV3
 
 CAST_VALUE_CODEC_NAME: Final = "cast_value"
 """The `name` field value of the `cast_value` codec."""
@@ -16,7 +16,7 @@ CAST_VALUE_CODEC_NAME: Final = "cast_value"
 CastValueCodecName = Literal["cast_value"]
 """Literal type of the `name` field of the `cast_value` codec."""
 
-RoundingMode = Literal[
+CastRoundingMode = Literal[
     "nearest-even",
     "towards-zero",
     "towards-positive",
@@ -28,7 +28,7 @@ RoundingMode = Literal[
 Defaults to `"nearest-even"` if absent.
 """
 
-ROUNDING_MODE: Final = (
+CAST_ROUNDING_MODE: Final = (
     "nearest-even",
     "towards-zero",
     "towards-positive",
@@ -37,13 +37,13 @@ ROUNDING_MODE: Final = (
 )
 """Tuple of permitted values for the `rounding` field of the `cast_value` codec."""
 
-OutOfRangeMode = Literal["clamp", "wrap"]
+CastOutOfRangeMode = Literal["clamp", "wrap"]
 """Literal type of permitted values for the `out_of_range` configuration field.
 
 If absent, out-of-range values are an encoding/decoding error.
 """
 
-OUT_OF_RANGE_MODE: Final = ("clamp", "wrap")
+CAST_OUT_OF_RANGE_MODE: Final = ("clamp", "wrap")
 """Tuple of permitted values for the `out_of_range` field of the `cast_value` codec."""
 
 ScalarMapEntry = tuple[object, object]
@@ -70,9 +70,9 @@ class CastValueCodecConfiguration(TypedDict):
     bare-string primitive name or a `{name, configuration}` envelope.
     """
 
-    data_type: MetadataFieldV3
-    rounding: NotRequired[RoundingMode]
-    out_of_range: NotRequired[OutOfRangeMode]
+    data_type: MetadataNodeV3
+    rounding: NotRequired[CastRoundingMode]
+    out_of_range: NotRequired[CastOutOfRangeMode]
     scalar_map: NotRequired[ScalarMap]
 
 
@@ -90,11 +90,21 @@ CastValueCodecMetadata = CastValueCodecObject
 the short-hand-name form is not permitted by the spec for this codec.
 """
 
+# Deprecated aliases. `RoundingMode`/`OutOfRangeMode` were renamed to
+# `CastRoundingMode`/`CastOutOfRangeMode` to disambiguate them at the top-level
+# `zarr_metadata` front door (the bare names read as generic). These aliases are
+# retained so existing imports keep working and will be removed in a future
+# release; use the `Cast`-prefixed names instead.
+RoundingMode = CastRoundingMode
+OutOfRangeMode = CastOutOfRangeMode
+
 
 __all__ = [
+    "CAST_OUT_OF_RANGE_MODE",
+    "CAST_ROUNDING_MODE",
     "CAST_VALUE_CODEC_NAME",
-    "OUT_OF_RANGE_MODE",
-    "ROUNDING_MODE",
+    "CastOutOfRangeMode",
+    "CastRoundingMode",
     "CastValueCodecConfiguration",
     "CastValueCodecMetadata",
     "CastValueCodecName",
