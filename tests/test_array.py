@@ -931,7 +931,7 @@ def test_append_bad_shape(store: MemoryStore, zarr_format: ZarrFormat) -> None:
     z = zarr.create(shape=a.shape, chunks=10, dtype=a.dtype, store=store, zarr_format=zarr_format)
     z[:] = a
     b = a.reshape(10, 10)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"shape of data to append is not compatible"):
         z.append(b)
 
 

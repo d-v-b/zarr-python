@@ -379,7 +379,7 @@ def test_save(store: Store, n_args: int, n_kwargs: int, path: None | str) -> Non
     kwargs = {f"arg_{i}": data for i in range(n_kwargs)}
 
     if n_kwargs == 0 and n_args == 0:
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=r"at least one array must be provided"):
             save(store, path=path)
     elif n_args == 1 and n_kwargs == 0:
         save(store, *args, path=path)
@@ -398,13 +398,13 @@ def test_save(store: Store, n_args: int, n_kwargs: int, path: None | str) -> Non
 
 
 def test_save_errors() -> None:
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"at least one array must be provided"):
         # no arrays provided
         save_group("data/group.zarr")
     with pytest.raises(TypeError):
         # no array provided
         save_array("data/group.zarr")  # type: ignore[call-arg]
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"at least one array must be provided"):
         # no arrays provided
         save("data/group.zarr")
     a = np.arange(10)
@@ -425,7 +425,7 @@ def test_open_with_mode_r(tmp_path: Path) -> None:
     result = z2[:]
     assert isinstance(result, NDArrayLike)
     assert (result == 1).all()
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"store was opened in read-only mode"):
         z2[:] = 3
 
 

@@ -746,7 +746,7 @@ class ShardingCodec(
             )
         )
         # This cannot be None because we have the bytes already
-        index_array = cast(NDBuffer, index_array)
+        index_array = cast("NDBuffer", index_array)
         return _ShardIndex(chunks_per_shard, index_array.as_numpy_array())
 
     async def _encode_shard_index(self, index: _ShardIndex) -> Buffer:

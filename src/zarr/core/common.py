@@ -107,7 +107,7 @@ async def concurrent_map[T: tuple[Any, ...], V](
             async with sem:
                 return await func(*item)
 
-        return await asyncio.gather(*[asyncio.ensure_future(run(item)) for item in items])
+        return await asyncio.gather(*[asyncio.create_task(run(item)) for item in items])
 
 
 def enum_names[E: Enum](enum: type[E]) -> Iterator[str]:
