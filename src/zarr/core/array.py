@@ -59,6 +59,8 @@ from zarr.core.common import (
     ZARR_JSON,
     ZARRAY_JSON,
     ZATTRS_JSON,
+    ZGROUP_JSON,
+    ZMETADATA_V2_JSON,
     ChunksLike,
     DimensionNamesLike,
     MemoryOrder,
@@ -155,6 +157,7 @@ if TYPE_CHECKING:
     from zarr.abc.store import Store
     from zarr.codecs.sharding import IndexLocation
     from zarr.core.dtype.wrapper import TBaseDType, TBaseScalar
+    from zarr.core.group import GroupMetadata
     from zarr.storage import StoreLike
     from zarr.types import AnyArray, AnyAsyncArray, ArrayV2, ArrayV3, AsyncArrayV2, AsyncArrayV3
 
@@ -3974,9 +3977,9 @@ async def _shards_initialized(
     store_contents = [
         x async for x in array.store_path.store.list_prefix(prefix=array.store_path.path)
     ]
-    store_contents_relative = [
+    store_contents_relative = {
         _relativize_path(path=key, prefix=array.store_path.path) for key in store_contents
-    ]
+    }
     return tuple(
         chunk_key for chunk_key in array._iter_shard_keys() if chunk_key in store_contents_relative
     )
@@ -5190,6 +5193,41 @@ def _iter_shard_keys(
     # Iterate over the coordinates of chunks in chunk grid space.
     _iter = _iter_grid(array._shard_grid_shape, origin=origin, selection_shape=selection_shape)
     return (array.metadata.encode_chunk_key(k) for k in _iter)
+
+
+def _iter_metadata_keys(
+    metadata: ArrayV2Metadata | ArrayV3Metadata | GroupMetadata,
+) -> Iterator[str]:
+    """
+    Iterate over the storage keys of the metadata documents for a node, relative to the node's path.
+
+    These keys are defined entirely by the node's zarr format and type. This is the closed set of
+    metadata keys a node may own; some keys (e.g. v2 consolidated metadata) are only present in the
+    store under certain conditions, so callers that copy or read these keys should tolerate absent
+    ones rather than assuming all are present.
+
+    Parameters
+    ----------
+    metadata : ArrayV2Metadata | ArrayV3Metadata | GroupMetadata
+        The metadata of the node to enumerate keys for.
+
+    Yields
+    ------
+    key: str
+        The relative storage key of each metadata document.
+    """
+    from zarr.core.group import GroupMetadata
+
+    if metadata.zarr_format == 3:
+        yield ZARR_JSON
+    elif isinstance(metadata, GroupMetadata):
+        yield ZGROUP_JSON
+        yield ZATTRS_JSON
+        # Consolidated metadata is only written when the group is consolidated; it may be absent.
+        yield ZMETADATA_V2_JSON
+    else:
+        yield ZARRAY_JSON
+        yield ZATTRS_JSON
 
 
 def _iter_shard_regions(

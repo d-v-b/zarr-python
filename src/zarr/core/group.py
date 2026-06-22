@@ -27,7 +27,9 @@ from zarr.core.array import (
     FiltersLike,
     SerializerLike,
     ShardsLike,
+    _iter_metadata_keys,
     _parse_deprecated_compressor,
+    _shards_initialized,
     create_array,
 )
 from zarr.core.attributes import Attributes
@@ -743,44 +745,31 @@ class AsyncGroup:
 
         prototype = default_buffer_prototype()
 
-        # Determine the metadata keys for a group based on zarr format
-        group_metadata_keys: tuple[str, ...]
-        if self.metadata.zarr_format == 3:
-            group_metadata_keys = (ZARR_JSON,)
-        else:
-            group_metadata_keys = (ZGROUP_JSON, ZATTRS_JSON, ZMETADATA_V2_JSON)
-
         async def _copy_key(src_key: str, dst_key: str) -> None:
             """Copy a single key from source to destination store."""
             data = await src_store.get(src_key, prototype=prototype)
             if data is not None:
                 await dst_store.set(dst_key, data)
 
-        # Copy the root group's metadata keys
-        for key in group_metadata_keys:
-            await _copy_key(
-                f"{src_prefix}{key}" if src_prefix else key,
-                f"{dst_prefix}{key}" if dst_prefix else key,
-            )
+        async def _copy_node(node_prefix: str, relative_keys: Iterable[str]) -> None:
+            """Copy a node's keys, which are relative to ``node_prefix`` within each node's path."""
+            for relative_key in relative_keys:
+                node_key = f"{node_prefix}{relative_key}" if node_prefix else relative_key
+                await _copy_key(f"{src_prefix}{node_key}", f"{dst_prefix}{node_key}")
 
-        # Copy all children discovered via members()
+        # Copy the root group's metadata keys.
+        await _copy_node("", _iter_metadata_keys(self.metadata))
+
+        # Copy all children discovered via members().
         async for child_path, member in self.members(
             max_depth=None, use_consolidated_for_children=use_consolidated_for_children
         ):
-            if isinstance(member, AsyncGroup):
-                # For groups, copy only the known metadata keys
-                for key in group_metadata_keys:
-                    src_key = f"{src_prefix}{child_path}/{key}"
-                    dst_key = f"{dst_prefix}{child_path}/{key}"
-                    await _copy_key(src_key, dst_key)
-            else:
-                # For arrays, list all keys under the array's prefix to get
-                # metadata + only the chunks that actually exist in the store
-                array_src_prefix = f"{src_prefix}{child_path}/"
-                async for src_key in src_store.list_prefix(array_src_prefix):
-                    relative_key = src_key.removeprefix(src_prefix)
-                    dst_key = f"{dst_prefix}{relative_key}" if dst_prefix else relative_key
-                    await _copy_key(src_key, dst_key)
+            node_prefix = f"{child_path}/"
+            await _copy_node(node_prefix, _iter_metadata_keys(member.metadata))
+            if isinstance(member, AsyncArray):
+                # Copy only the data keys that the array's metadata defines and that exist in the
+                # store. This skips both foreign keys under the array prefix and unwritten chunks.
+                await _copy_node(node_prefix, await _shards_initialized(member))
 
         return await type(self).open(target_store_path, zarr_format=self.metadata.zarr_format)
 

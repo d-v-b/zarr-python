@@ -492,6 +492,55 @@ def test_copy_to_with_path(
     check_consolidated_metadata(dst_store, consolidate_metadata, zarr_format, path="sub/snapshot")
 
 
+def test_copy_to_overwrite_false_raises(zarr_format: ZarrFormat) -> None:
+    """copy_to with overwrite=False raises when a node already exists at the destination."""
+    src = zarr.open_group(MemoryStore(), mode="w", zarr_format=zarr_format)
+    dst_store = MemoryStore()
+    zarr.open_group(dst_store, mode="w", zarr_format=zarr_format)
+
+    with pytest.raises((ContainsGroupError, ContainsArrayError)):
+        src.copy_to(dst_store, overwrite=False)
+
+
+def test_copy_to_skips_foreign_keys(zarr_format: ZarrFormat) -> None:
+    """copy_to copies only the data keys an array's metadata defines, not foreign keys under its prefix."""
+    src_store = MemoryStore()
+    src = zarr.open_group(src_store, mode="w", zarr_format=zarr_format)
+    arr = src.create_array("dataset", shape=(10,), chunks=(5,), dtype="int64")
+    arr[:] = np.arange(10)
+
+    # Plant a key under the array prefix that is not a defined chunk or metadata key.
+    foreign_key = "dataset/not_a_chunk_or_metadata_key"
+    sync(src_store.set(foreign_key, default_buffer_prototype().buffer.from_bytes(b"junk")))
+
+    dst_store = MemoryStore()
+    src.copy_to(dst_store, overwrite=True)
+
+    dst_keys = sync(_collect_aiterator(dst_store.list()))
+    assert foreign_key not in dst_keys
+    # The array data itself was copied.
+    assert np.array_equal(zarr.open_group(dst_store)["dataset"][:], np.arange(10))
+
+
+def test_copy_to_skips_unwritten_chunks(zarr_format: ZarrFormat) -> None:
+    """copy_to reproduces exactly the source keys, materializing no unwritten chunks (sparse arrays)."""
+    src_store = MemoryStore()
+    src = zarr.open_group(src_store, mode="w", zarr_format=zarr_format)
+    # 10 chunks, but write only the first, leaving 9 chunks absent from the store.
+    arr = src.create_array("dataset", shape=(100,), chunks=(10,), dtype="int64")
+    arr[0:10] = np.arange(10)
+
+    src_keys = set(sync(_collect_aiterator(src_store.list())))
+    # Guard: the source really is sparse, so the test can detect spuriously created chunks.
+    assert sum(1 for k in src_keys if "dataset" in k and "0" in k.rsplit("/", 1)[-1]) == 1
+
+    dst_store = MemoryStore()
+    src.copy_to(dst_store, overwrite=True)
+
+    # A faithful copy produces exactly the same keys: no unwritten chunks were created.
+    assert set(sync(_collect_aiterator(dst_store.list()))) == src_keys
+
+
 def test_group(store: Store, zarr_format: ZarrFormat) -> None:
     """
     Test basic Group routines.
