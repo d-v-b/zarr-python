@@ -92,6 +92,50 @@ docker exec -it -u node CONTAINER_NAME zsh
 The `-u node` matters: a bare `docker exec` lands you as root, where `claude`
 won't run.
 
+## Remote workflow (laptop → SSH → desktop → container)
+
+When the Docker host is a remote desktop you reach over SSH, and you want to
+drive the agent and browse the code from a laptop:
+
+```
+[laptop: VS Code UI] --Remote-SSH--> [desktop: Docker host] --> [container]
+```
+
+**One-time, on the desktop:** clone a *normal* checkout (not a worktree) and
+install the CLI:
+
+```bash
+git clone https://github.com/<you>/zarr-python.git ~/dev/zarr-python-sandbox
+cd ~/dev/zarr-python-sandbox && git checkout devcontainer   # until merged to main
+npm install -g @devcontainers/cli
+```
+
+**Start the container (over SSH on the desktop)** — it runs independently of any
+editor:
+
+```bash
+cd ~/dev/zarr-python-sandbox
+devcontainer up --workspace-folder .
+```
+
+**Run the agent in tmux** so it survives SSH drops and laptop sleep:
+
+```bash
+devcontainer exec --workspace-folder . zsh
+# inside the container:
+tmux new -s agent
+claude --dangerously-skip-permissions
+# detach with Ctrl-b d; reattach later with: tmux attach -t agent
+```
+
+**Attach an editor from the laptop:** in VS Code, *Remote-SSH: Connect to Host*
+(the desktop), then *Dev Containers: Attach to Running Container* and pick the
+running container. The editor now browses/edits files inside the container; its
+integrated terminal is inside too, so `tmux attach -t agent` reaches the agent.
+
+**Reconnect after a drop:** SSH back to the desktop and `tmux attach -t agent`
+(or reattach VS Code) — the agent and container keep running throughout.
+
 ## Lifecycle
 
 ```bash
