@@ -25,6 +25,38 @@ the host or exfiltrate secrets. Defenses, in layers:
 The sandbox limits *local* blast radius; the scoped agent account limits *GitHub*
 blast radius. Use both.
 
+## Agent GitHub identity (machine user + fine-grained PAT)
+
+The agent uses a **machine user**: an ordinary GitHub user account operated by
+software. GitHub has no special "bot" account type for this — it is a normal
+account that authenticates with a token instead of a browser.
+
+We deliberately use a machine user rather than a **GitHub App**. A GitHub App is
+the more "correct" bot mechanism (first-class `app-name[bot]` identity,
+per-installation scope, auto-expiring ~1h installation tokens), but it requires
+minting installation tokens from a private key and refreshing them hourly, which
+fights the interactive `gh auth login` flow and is overkill for a personal agent.
+The machine user + fine-grained PAT gets most of the scoping benefit with far
+less plumbing. Reconsider an App if this grows to org scale or many agents.
+
+**The PAT — not the account — is the real boundary.** The account could in
+principle do more, but the token cannot. So scope the token tightly:
+
+- **Repositories:** only the ones the agent needs (its forks, plus any repo you
+  explicitly grant) — never "all repositories".
+- **Permissions:** `Contents: read/write` and `Pull requests: write` (add
+  `Issues: write` only if the agent files issues). No admin, workflow, or org
+  permissions.
+- **Expiry:** set one (e.g. 30–90 days) so a leak self-limits.
+
+**To enforce "agents may only write to repos I sanctioned" centrally** (instead
+of relying on per-token discipline), put those repos in a **GitHub organization**
+and enable *Settings → require approval for fine-grained PATs*. Member tokens
+then stay **pending** until you, the owner, approve them, and you can revoke any
+token centrally. This is the closest GitHub gets to account-scoped write
+restriction. (Public org repos remain readable regardless; the gate is on
+non-public access and write.)
+
 ## Prerequisites
 
 - Docker running on the host.
