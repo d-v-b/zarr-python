@@ -49,26 +49,52 @@ This builds the image, applies the bind mount, runs `postCreateCommand`
 (`uv sync --group dev`, installs the `prek` binary), then `postStartCommand`
 (brings up the firewall). First run takes a few minutes.
 
-## 2. Open a shell and start the agent
+## 2. Authenticate GitHub as the agent account
+
+The agent's GitHub credential is the **agent account's** fine-grained,
+fork-only PAT — never your personal token. Store it in the macOS Keychain on the
+host, then pipe it into the container's `gh` over stdin. The token never lands in
+the host environment, a bind mount, or `remoteEnv`; it ends up only in the
+container's `gh` config volume, scoped to the agent's forks.
+
+**Store the PAT in Keychain (one time, on the host):**
+
+```bash
+security add-generic-password -a zarr-agent -s gh-zarr-agent -w
+# (prompts for the PAT without echoing)
+```
+
+**Authenticate the container's gh (once per fresh container):**
+
+```bash
+security find-generic-password -a zarr-agent -s gh-zarr-agent -w \
+  | devcontainer exec --workspace-folder . gh auth login --with-token
+```
+
+**Verify you are the agent account, NOT yourself** — this is the one check that
+matters:
+
+```bash
+devcontainer exec --workspace-folder . gh auth status
+# must show the AGENT account (e.g. "Logged in to github.com account zarr-agent")
+```
+
+`git push` then works transparently: `postCreateCommand` registered `gh` as
+git's credential helper for github.com, so git uses the agent token over HTTPS.
+The auth persists across rebuilds via the `~/.config/gh` named volume. If you
+ever log in wrong, reset with
+`devcontainer exec --workspace-folder . gh auth logout`.
+
+> Never set `GH_TOKEN`/`GITHUB_TOKEN` (or your personal PAT) on the host —
+> `gh`/git auto-pick those up and would authenticate as you.
+
+## 3. Open a shell and start the agent
 
 ```bash
 devcontainer exec --workspace-folder . zsh
 ```
 
-You land as the `node` user in `/workspace`.
-
-**First time only — authenticate GitHub as the agent account.** This is done
-*inside* the container so the token lives only in the container's `gh` config
-volume, never on the host environment:
-
-```bash
-gh auth login    # log in as the AGENT account, paste its fine-grained PAT
-```
-
-This persists across rebuilds (the `~/.config/gh` named volume) and is what the
-agent uses to push to its fork and open PRs.
-
-Start the agent:
+You land as the `node` user in `/workspace`. Start the agent:
 
 ```bash
 claude --dangerously-skip-permissions
@@ -84,7 +110,7 @@ credentials and memories are not mounted. The login (and any memories the agent
 makes) persist in a named volume across rebuilds. Project knowledge the agent
 should have lives in the repo's `CLAUDE.md` at `/workspace/CLAUDE.md`.
 
-## 3. Connect an editor
+## 4. Connect an editor
 
 The container is just a running Docker container; attach however you like.
 

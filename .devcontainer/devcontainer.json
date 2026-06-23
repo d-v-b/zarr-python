@@ -105,7 +105,11 @@
 	// anonymous clone also works.
 	"onCreateCommand": "if [ ! -d /workspace/.git ]; then git clone --branch \"$ZARR_BRANCH\" \"$ZARR_REPO_URL\" /workspace; fi",
 	// Install the project + dev tooling and the prek git hooks.
-	"postCreateCommand": "uv sync --group dev && uv tool install prek && prek install",
+	// Install deps + tooling + hooks, and register gh as git's credential helper
+	// for github.com. Set declaratively (not via `gh auth setup-git`, which needs
+	// gh already authenticated): it takes effect as soon as you `gh auth login`,
+	// so the agent's `git push` over HTTPS transparently uses gh's token.
+	"postCreateCommand": "uv sync --group dev && uv tool install prek && prek install && git config --global credential.\"https://github.com\".helper '!gh auth git-credential'",
 	// Lock down outbound network before the environment is used.
 	"postStartCommand": "sudo /usr/local/bin/init-firewall.sh",
 	"waitFor": "postStartCommand"
