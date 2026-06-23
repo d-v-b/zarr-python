@@ -1,0 +1,117 @@
+{
+	"name": "zarr-python (Claude Code sandbox)",
+	"build": {
+		"dockerfile": "Dockerfile",
+		"args": {
+			"TZ": "${localEnv:TZ:UTC}",
+			"CLAUDE_CODE_VERSION": "latest",
+			"GIT_DELTA_VERSION": "0.18.2",
+			"ZSH_IN_DOCKER_VERSION": "1.2.0"
+		}
+	},
+	// Capabilities required by init-firewall.sh to install iptables/ipset rules.
+	"runArgs": [
+		"--cap-add=NET_ADMIN",
+		"--cap-add=NET_RAW"
+	],
+	// init: proper PID 1 (signal handling / zombie reaping).
+	// updateRemoteUserUID: make files the container writes into the bind-mounted
+	// repo owned by the host user, not root.
+	"init": true,
+	"updateRemoteUserUID": true,
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"anthropic.claude-code",
+				"charliermarsh.ruff",
+				"ms-python.python",
+				"ms-python.mypy-type-checker",
+				"eamodio.gitlens"
+			],
+			"settings": {
+				"python.defaultInterpreterPath": "/home/node/.venv-zarr/bin/python",
+				"python.testing.pytestEnabled": true,
+				"python.testing.pytestArgs": [
+					"tests"
+				],
+				"editor.formatOnSave": true,
+				"[python]": {
+					"editor.defaultFormatter": "charliermarsh.ruff",
+					"editor.codeActionsOnSave": {
+						"source.organizeImports": "explicit"
+					}
+				},
+				"terminal.integrated.defaultProfile.linux": "zsh",
+				"terminal.integrated.profiles.linux": {
+					"bash": {
+						"path": "bash",
+						"icon": "terminal-bash"
+					},
+					"zsh": {
+						"path": "zsh"
+					}
+				}
+			}
+		}
+	},
+	"remoteUser": "node",
+	// Bind-mount the folder you OPEN. Open the main repo (or any normal clone) —
+	// NOT a git worktree, whose .git metadata lives outside the mount and breaks
+	// git/prek/version detection inside the container. Branch isolation comes from
+	// the container + firewall: the agent works on its own branch in here.
+	"workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=delegated",
+	"workspaceFolder": "/workspace",
+	// The container's ~/.claude is a fresh, container-only named volume (NOT the
+	// host's): the sandboxed agent is a separate Claude identity. Auth comes from
+	// the host via remoteEnv (token/API key passthrough), or you log in once
+	// inside; the volume persists it across rebuilds. Host credentials/memories
+	// are deliberately NOT mounted, so a skip-permissions agent cannot read or
+	// exfiltrate them. Project knowledge goes in the repo's CLAUDE.md.
+	// Host .gitconfig is mounted read-only for git identity; GIT_CONFIG_GLOBAL
+	// points elsewhere so the container writes its own git config without
+	// touching the read-only file. .git/config and .git/hooks are read-only so
+	// the agent cannot rewrite the remote or install hooks.
+	// (Patterns from github.com/trailofbits/claude-code-devcontainer.)
+	"mounts": [
+		"source=zarr-devc-bashhistory-${devcontainerId},target=/commandhistory,type=volume",
+		"source=zarr-devc-config-${devcontainerId},target=/home/node/.claude,type=volume",
+		"source=${localEnv:HOME}/.gitconfig,target=/home/node/.gitconfig,type=bind,readonly",
+		"source=${localWorkspaceFolder}/.git/config,target=/workspace/.git/config,type=bind,readonly",
+		"source=${localWorkspaceFolder}/.git/hooks,target=/workspace/.git/hooks,type=bind,readonly"
+	],
+	"containerEnv": {
+		"NODE_OPTIONS": "--max-old-space-size=4096",
+		"CLAUDE_CONFIG_DIR": "/home/node/.claude",
+		"POWERLEVEL9K_DISABLE_GITSTATUS": "true",
+		// Container writes its own global git config here, leaving the read-only
+		// host .gitconfig (mounted for identity) untouched.
+		"GIT_CONFIG_GLOBAL": "/home/node/.gitconfig.local",
+		// Build the project venv OUTSIDE the bind-mounted /workspace, so `uv sync`
+		// does not write a Linux .venv into the host's (macOS) /workspace/.venv.
+		"UV_PROJECT_ENVIRONMENT": "/home/node/.venv-zarr",
+		// uv cache and the venv are on different filesystems (volume vs. image
+		// layer); copy instead of hardlink to avoid cross-device link errors.
+		"UV_LINK_MODE": "copy",
+		// Supply-chain hardening defaults.
+		"NPM_CONFIG_IGNORE_SCRIPTS": "true",
+		"NPM_CONFIG_FUND": "false",
+		"NPM_CONFIG_UPDATE_NOTIFIER": "false",
+		"PYTHONDONTWRITEBYTECODE": "1",
+		"PIP_DISABLE_PIP_VERSION_CHECK": "1"
+	},
+	// Pass host auth through to the container without mounting ~/.claude. Empty if
+	// unset on the host (then `claude` will prompt for interactive login).
+	"remoteEnv": {
+		"CLAUDE_CODE_OAUTH_TOKEN": "${localEnv:CLAUDE_CODE_OAUTH_TOKEN:}",
+		"ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY:}"
+	},
+	// Ensure the host .gitconfig exists so the read-only bind mount has a source.
+	"initializeCommand": "test -f \"$HOME/.gitconfig\" || touch \"$HOME/.gitconfig\"",
+	// Install the project + dev tooling and the prek binary (for manual
+	// `prek run`). We do NOT run `prek install`: .git/hooks is mounted read-only,
+	// and the host's installed hooks are already visible through that mount.
+	"postCreateCommand": "uv sync --group dev && uv tool install prek",
+	// Lock down outbound network before the environment is used.
+	"postStartCommand": "sudo /usr/local/bin/init-firewall.sh",
+	"waitFor": "postStartCommand"
+}
