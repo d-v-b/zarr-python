@@ -15,10 +15,7 @@
 		"--cap-add=NET_RAW"
 	],
 	// init: proper PID 1 (signal handling / zombie reaping).
-	// updateRemoteUserUID: make files the container writes into the bind-mounted
-	// repo owned by the host user, not root.
 	"init": true,
-	"updateRemoteUserUID": true,
 	"customizations": {
 		"vscode": {
 			"extensions": [
@@ -55,43 +52,46 @@
 		}
 	},
 	"remoteUser": "node",
-	// Bind-mount the folder you OPEN. Open the main repo (or any normal clone) —
-	// NOT a git worktree, whose .git metadata lives outside the mount and breaks
-	// git/prek/version detection inside the container. Branch isolation comes from
-	// the container + firewall: the agent works on its own branch in here.
-	"workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=delegated",
 	"workspaceFolder": "/workspace",
-	// The container's ~/.claude is a fresh, container-only named volume (NOT the
-	// host's): the sandboxed agent is a separate Claude identity. Auth comes from
-	// the host via remoteEnv (token/API key passthrough), or you log in once
-	// inside; the volume persists it across rebuilds. Host credentials/memories
-	// are deliberately NOT mounted, so a skip-permissions agent cannot read or
-	// exfiltrate them. Project knowledge goes in the repo's CLAUDE.md.
-	// Host .gitconfig is mounted read-only for git identity; GIT_CONFIG_GLOBAL
-	// points elsewhere so the container writes its own git config without
-	// touching the read-only file. .git/config and .git/hooks are read-only so
-	// the agent cannot rewrite the remote or install hooks.
-	// (Patterns from github.com/trailofbits/claude-code-devcontainer.)
+	// SECURITY MODEL (threat model: a prompt-injected / runaway skip-permissions
+	// agent must not damage the host or exfiltrate secrets):
+	//   - NO host bind mounts. The container clones its OWN copy of the repo
+	//     (onCreateCommand), so the agent's filesystem cannot reach the host repo,
+	//     ~/.ssh, ~/.aws, or the host ~/.gitconfig (which may carry tokens).
+	//   - GitHub access is a SEPARATE agent account with a fork-only, fine-grained,
+	//     expiring PAT. Authenticate once inside via `gh auth login` (see README);
+	//     the token lives only in the container's config volume, never on the host
+	//     env. The agent pushes to its fork; you review/merge PRs from your real
+	//     account. A leaked token can only touch the agent's forks.
+	//   - Egress is default-DENY (init-firewall.sh): even a leaked secret cannot
+	//     leave, except to the allowlisted hosts.
+	//   - ~/.claude is a fresh container-only volume (separate Claude identity).
 	"mounts": [
 		"source=zarr-devc-bashhistory-${devcontainerId},target=/commandhistory,type=volume",
 		"source=zarr-devc-config-${devcontainerId},target=/home/node/.claude,type=volume",
-		"source=${localEnv:HOME}/.gitconfig,target=/home/node/.gitconfig,type=bind,readonly",
-		"source=${localWorkspaceFolder}/.git/config,target=/workspace/.git/config,type=bind,readonly",
-		"source=${localWorkspaceFolder}/.git/hooks,target=/workspace/.git/hooks,type=bind,readonly"
+		"source=zarr-devc-ghconfig-${devcontainerId},target=/home/node/.config/gh,type=volume"
 	],
 	"containerEnv": {
 		"NODE_OPTIONS": "--max-old-space-size=4096",
 		"CLAUDE_CONFIG_DIR": "/home/node/.claude",
 		"POWERLEVEL9K_DISABLE_GITSTATUS": "true",
-		// Container writes its own global git config here, leaving the read-only
-		// host .gitconfig (mounted for identity) untouched.
-		"GIT_CONFIG_GLOBAL": "/home/node/.gitconfig.local",
-		// Build the project venv OUTSIDE the bind-mounted /workspace, so `uv sync`
-		// does not write a Linux .venv into the host's (macOS) /workspace/.venv.
+		// Which fork + branch the container clones. Point REPO_URL at the AGENT
+		// account's fork, not your canonical repo.
+		"ZARR_REPO_URL": "https://github.com/CHANGE-ME-agent-account/zarr-python.git",
+		"ZARR_BRANCH": "main",
+		// Git identity for the agent's commits, supplied WITHOUT mounting the host
+		// ~/.gitconfig (which may contain credential helpers / embedded tokens).
+		"GIT_AUTHOR_NAME": "zarr agent",
+		"GIT_AUTHOR_EMAIL": "agent@example.invalid",
+		"GIT_COMMITTER_NAME": "zarr agent",
+		"GIT_COMMITTER_EMAIL": "agent@example.invalid",
+		// Build the project venv OUTSIDE the cloned /workspace.
 		"UV_PROJECT_ENVIRONMENT": "/home/node/.venv-zarr",
-		// uv cache and the venv are on different filesystems (volume vs. image
-		// layer); copy instead of hardlink to avoid cross-device link errors.
 		"UV_LINK_MODE": "copy",
+		// A shallow clone may lack the tag history hatch-vcs needs; pin so the
+		// editable build is deterministic. Only zarr is built here, so the generic
+		// key (the dist-scoped form is not honored under uv's isolated build) is safe.
+		"SETUPTOOLS_SCM_PRETEND_VERSION": "3.2.2.dev0",
 		// Supply-chain hardening defaults.
 		"NPM_CONFIG_IGNORE_SCRIPTS": "true",
 		"NPM_CONFIG_FUND": "false",
@@ -99,18 +99,13 @@
 		"PYTHONDONTWRITEBYTECODE": "1",
 		"PIP_DISABLE_PIP_VERSION_CHECK": "1"
 	},
-	// Pass host auth through to the container without mounting ~/.claude. Empty if
-	// unset on the host (then `claude` will prompt for interactive login).
-	"remoteEnv": {
-		"CLAUDE_CODE_OAUTH_TOKEN": "${localEnv:CLAUDE_CODE_OAUTH_TOKEN:}",
-		"ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY:}"
-	},
-	// Ensure the host .gitconfig exists so the read-only bind mount has a source.
-	"initializeCommand": "test -f \"$HOME/.gitconfig\" || touch \"$HOME/.gitconfig\"",
-	// Install the project + dev tooling and the prek binary (for manual
-	// `prek run`). We do NOT run `prek install`: .git/hooks is mounted read-only,
-	// and the host's installed hooks are already visible through that mount.
-	"postCreateCommand": "uv sync --group dev && uv tool install prek",
+	// Clone the agent fork into the (pre-created, node-owned) workspace. Runs
+	// during creation while the network is open, before the firewall. The guard
+	// makes re-runs a no-op. Uses gh auth if you logged in; for a public fork the
+	// anonymous clone also works.
+	"onCreateCommand": "if [ ! -d /workspace/.git ]; then git clone --branch \"$ZARR_BRANCH\" \"$ZARR_REPO_URL\" /workspace; fi",
+	// Install the project + dev tooling and the prek git hooks.
+	"postCreateCommand": "uv sync --group dev && uv tool install prek && prek install",
 	// Lock down outbound network before the environment is used.
 	"postStartCommand": "sudo /usr/local/bin/init-firewall.sh",
 	"waitFor": "postStartCommand"

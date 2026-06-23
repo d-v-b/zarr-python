@@ -1,34 +1,49 @@
 # zarr-python agent sandbox (devcontainer)
 
 A sandboxed container for running a coding agent (e.g. Claude Code with
-`--dangerously-skip-permissions`) on an isolated branch. Isolation comes from two
-layers: the container boundary, and an outbound-network firewall
-(`init-firewall.sh`) that allowlists only the hosts the dev workflow needs
-(PyPI, GitHub, the Anthropic API, the VS Code marketplace).
+`--dangerously-skip-permissions`) on an isolated branch.
 
-The container **bind-mounts the folder you open** (`${localWorkspaceFolder}`) at
-`/workspace`. Open the **main repo** (or any normal clone) — its real `.git`
-directory makes git, `prek`, and `hatch-vcs` version detection work inside the
-container. Do **not** open a git *worktree*: a worktree's `.git` metadata lives
-in the main repo outside the mount, which breaks git inside the container.
-Branch isolation comes from the container + firewall; the agent works on its own
-branch in here. The config has no hardcoded host paths, so it is portable.
+## Security model
+
+The threat: a prompt-injected or runaway skip-permissions agent that could damage
+the host or exfiltrate secrets. Defenses, in layers:
+
+- **No host bind mounts.** The container clones its **own** copy of the repo
+  (`onCreateCommand`); the agent's filesystem cannot reach the host repo,
+  `~/.ssh`, `~/.aws`, or the host `~/.gitconfig` (which may carry tokens).
+- **A separate GitHub identity.** Use a **dedicated agent GitHub account** with a
+  **fork-only, fine-grained, expiring** Personal Access Token — never your
+  personal account or a broad token. The agent works on its **fork**; you review
+  and merge PRs from your real account. A leaked token can only touch the agent's
+  forks, not your canonical repos.
+- **Default-deny egress.** `init-firewall.sh` drops all outbound traffic except
+  an allowlist (PyPI, GitHub, the Anthropic API, the VS Code marketplace), so a
+  leaked secret has nowhere to go.
+- **Fresh Claude identity.** `~/.claude` is a container-only volume; your host
+  credentials and memories are not mounted.
+
+The sandbox limits *local* blast radius; the scoped agent account limits *GitHub*
+blast radius. Use both.
 
 ## Prerequisites
 
 - Docker running on the host.
-- The devcontainer CLI: `npm install -g @devcontainers/cli`
-  (or invoke via `npx @devcontainers/cli ...`).
-- Optional, for non-interactive auth: export `CLAUDE_CODE_OAUTH_TOKEN` (or
-  `ANTHROPIC_API_KEY`) on the host before starting; it is passed through via
-  `remoteEnv`. Without it, `claude` prompts for interactive login inside.
+- The devcontainer CLI: `npm install -g @devcontainers/cli`.
+- A **dedicated agent GitHub account** that has **forked** the repo. Create a
+  fine-grained PAT for it scoped to that fork only (`contents: read/write`,
+  `pull requests: write`; no admin/workflow/org scopes; short expiry).
+- In `devcontainer.json`, set `ZARR_REPO_URL` to the agent account's fork and
+  `GIT_AUTHOR_EMAIL`/`GIT_AUTHOR_NAME` to the agent's identity.
 
 ## 1. Start the container
 
 ```bash
-cd /path/to/zarr-python      # a NORMAL clone (not a worktree) with .devcontainer/
+cd /path/to/checkout      # any dir containing .devcontainer/ (NOT a worktree)
 devcontainer up --workspace-folder .
 ```
+
+The container clones `ZARR_REPO_URL` into its own `/workspace` — it does **not**
+use the folder you launched from for code, only for the `.devcontainer/` config.
 
 This builds the image, applies the bind mount, runs `postCreateCommand`
 (`uv sync --group dev`, installs the `prek` binary), then `postStartCommand`
@@ -40,7 +55,20 @@ This builds the image, applies the bind mount, runs `postCreateCommand`
 devcontainer exec --workspace-folder . zsh
 ```
 
-You land as the `node` user in `/workspace`. Start the agent:
+You land as the `node` user in `/workspace`.
+
+**First time only — authenticate GitHub as the agent account.** This is done
+*inside* the container so the token lives only in the container's `gh` config
+volume, never on the host environment:
+
+```bash
+gh auth login    # log in as the AGENT account, paste its fine-grained PAT
+```
+
+This persists across rebuilds (the `~/.config/gh` named volume) and is what the
+agent uses to push to its fork and open PRs.
+
+Start the agent:
 
 ```bash
 claude --dangerously-skip-permissions
@@ -50,12 +78,11 @@ claude --dangerously-skip-permissions
 so this is fine. Run `devcontainer exec ... zsh` again in another terminal for
 additional shells into the same container.
 
-The first time, `claude` will prompt you to log in: the container's `~/.claude`
-is a **fresh, container-only identity**, not your host's. This is deliberate —
-your host credentials and memories are not mounted, so a skip-permissions agent
-can't read or exfiltrate them. The login (and any memories the agent makes)
-persist in a named volume across rebuilds. Project knowledge the agent should
-have lives in the repo's `CLAUDE.md`, which is visible at `/workspace/CLAUDE.md`.
+The first time, `claude` will also prompt you to log in: the container's
+`~/.claude` is a **fresh, container-only identity**, not your host's — your host
+credentials and memories are not mounted. The login (and any memories the agent
+makes) persist in a named volume across rebuilds. Project knowledge the agent
+should have lives in the repo's `CLAUDE.md` at `/workspace/CLAUDE.md`.
 
 ## 3. Connect an editor
 
@@ -149,13 +176,11 @@ devcontainer up --workspace-folder . --remove-existing-container
 
 ## Notes
 
-- Edits inside the container write straight to the bind-mounted main repo, so
-  branch/commit from inside the container; pushes go out through the firewall
-  allowlist (GitHub is allowed).
-- `.git/config` and `.git/hooks` are mounted **read-only**, so the agent cannot
-  rewrite your git remote or install hooks. Your host's existing pre-commit hooks
-  are visible through that mount; `prek install` is therefore not run in-container
-  (it would fail on the read-only mount and is unnecessary). The `prek` binary is
-  installed so you can run `prek run --all-files` manually.
+- The container works on its **own clone** (`/workspace`), not your host repo.
+  Edits never touch host files. The agent commits to a branch and pushes to its
+  fork; you open/merge a PR to your canonical repo from your real account.
+  Pushes go out through the firewall allowlist (GitHub is allowed).
+- The clone is a real repo, so `prek install` runs and git hooks work normally.
 - To change the firewall allowlist, edit `init-firewall.sh` and rebuild — the
   script is baked into the image (`COPY`), so edits need a rebuild to take effect.
+- `--build-no-cache` if a cached `COPY` layer serves a stale `init-firewall.sh`.

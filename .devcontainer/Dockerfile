@@ -44,10 +44,11 @@ RUN SNIPPET="export PROMPT_COMMAND='history -a' && export HISTFILE=/commandhisto
 # Set `DEVCONTAINER` environment variable to help with orientation
 ENV DEVCONTAINER=true
 
-# Create workspace and config directories and set permissions. The workspace is
-# a bind mount at runtime; pre-creating it keeps ownership sane before the mount.
-RUN mkdir -p /workspace /home/node/.claude && \
-  chown -R node:node /workspace /home/node/.claude
+# Create the workspace + config dirs. /workspace must exist and be node-owned
+# before the lifecycle hooks run, because they chdir into it before
+# onCreateCommand populates it via `git clone`.
+RUN mkdir -p /workspace /home/node/.claude /home/node/.config/gh && \
+  chown -R node:node /workspace /home/node/.claude /home/node/.config
 
 WORKDIR /workspace
 
