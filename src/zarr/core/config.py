@@ -29,11 +29,15 @@ For more information, see the Donfig documentation at https://github.com/pytroll
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from donfig import Config as DConfig
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from donfig.config_obj import ConfigSet
 
 
@@ -148,6 +152,47 @@ config = Config(
     ],
     deprecations=deprecations,
 )
+
+
+# Operation-scoped cache for ``async.concurrency``.
+#
+# The per-chunk codec read/write path looks up ``async.concurrency`` many times
+# (once per chunk, plus once per codec per chunk via the batching helper). Each
+# lookup walks Donfig's nested config. To avoid that, a single read/write/
+# encode/decode operation captures the value once via ``async_concurrency_scope``
+# and the hot paths read it through ``get_async_concurrency``. Outside of a
+# scope we fall back to a live ``config.get``, so configuration changes always
+# take effect between operations.
+_async_concurrency_var: contextvars.ContextVar[int | None] = contextvars.ContextVar(
+    "zarr_async_concurrency"
+)
+
+
+def get_async_concurrency() -> int | None:
+    """Return the ``async.concurrency`` limit for the current operation.
+
+    Within an :func:`async_concurrency_scope`, returns the value captured once at
+    the start of the operation. Outside of a scope, falls back to a live
+    ``config.get`` lookup.
+    """
+    try:
+        return _async_concurrency_var.get()
+    except LookupError:
+        return cast("int | None", config.get("async.concurrency"))
+
+
+@contextlib.contextmanager
+def async_concurrency_scope() -> Iterator[None]:
+    """Capture ``async.concurrency`` once for the duration of an operation.
+
+    Reads of :func:`get_async_concurrency` inside this context return the
+    captured value rather than performing a fresh ``config.get`` lookup.
+    """
+    token = _async_concurrency_var.set(cast("int | None", config.get("async.concurrency")))
+    try:
+        yield
+    finally:
+        _async_concurrency_var.reset(token)
 
 
 def parse_indexing_order(data: Any) -> Literal["C", "F"]:
