@@ -185,6 +185,20 @@ class Store(ABC):
         if self.read_only:
             raise ValueError("store was opened in read-only mode and does not support writing")
 
+    def _check_value(self, value: object) -> None:
+        """Raise a TypeError if ``value`` is not a Buffer instance.
+
+        The error message is prefixed with the concrete store class name, e.g.
+        ``MemoryStore.set(): ...``, so that callers do not have to repeat it.
+        """
+        from zarr.core.buffer import Buffer
+
+        if not isinstance(value, Buffer):
+            raise TypeError(
+                f"{type(self).__name__}.set(): `value` must be a Buffer instance. "
+                f"Got an instance of {type(value)} instead."
+            )
+
     @abstractmethod
     def __eq__(self, value: object) -> bool:
         """Equality comparison."""

@@ -17,14 +17,13 @@ from zarr.abc.store import (
     Store,
     SuffixByteRequest,
 )
-from zarr.core.buffer import Buffer
 from zarr.core.buffer.core import default_buffer_prototype
 from zarr.core.common import AccessModeLiteral, concurrent_map
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable, Iterator
 
-    from zarr.core.buffer import BufferPrototype
+    from zarr.core.buffer import Buffer, BufferPrototype
 
 
 def _get(path: Path, prototype: BufferPrototype, byte_range: ByteRequest | None) -> Buffer:
@@ -220,11 +219,7 @@ class LocalStore(Store):
         self._ensure_open_sync()
         self._check_writable()
         assert isinstance(key, str)
-        if not isinstance(value, Buffer):
-            raise TypeError(
-                f"LocalStore.set(): `value` must be a Buffer instance. "
-                f"Got an instance of {type(value)} instead."
-            )
+        self._check_value(value)
         path = self.root / key
         _put(path, value)
 
@@ -285,10 +280,7 @@ class LocalStore(Store):
             await self._open()
         self._check_writable()
         assert isinstance(key, str)
-        if not isinstance(value, Buffer):
-            raise TypeError(
-                f"LocalStore.set(): `value` must be a Buffer instance. Got an instance of {type(value)} instead."
-            )
+        self._check_value(value)
         path = self.root / key
         await asyncio.to_thread(_put, path, value, exclusive=exclusive)
 
