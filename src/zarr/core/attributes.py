@@ -50,8 +50,7 @@ class Attributes(MutableMapping[str, JSON]):
         #> {'a': '3', 'c': 4}
         ```
         """
-        self._obj.metadata.attributes.clear()
-        self._obj = self._obj.update_attributes(d)
+        self._obj = self._obj.replace_attributes(d)
 
     def asdict(self) -> dict[str, JSON]:
         return dict(self._obj.metadata.attributes)

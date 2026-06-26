@@ -1204,24 +1204,65 @@ class AsyncGroup:
 
         return ds
 
+    async def _set_attributes(self, attributes: dict[str, Any]) -> AsyncGroup:
+        """Write `attributes` as the group's attributes, atomically.
+
+        Builds new metadata without mutating the existing (frozen) metadata, writes
+        it to the store first, and only swaps the in-memory metadata once the write
+        has succeeded.
+        """
+        new_metadata = replace(self.metadata, attributes=attributes)
+
+        # Write new metadata to the store first, so a failed write does not corrupt
+        # the in-memory state.
+        await save_metadata(self.store_path, new_metadata)
+
+        # Only swap the in-memory metadata once the write has succeeded.
+        object.__setattr__(self, "metadata", new_metadata)
+
+        return self
+
     async def update_attributes(self, new_attributes: dict[str, Any]) -> AsyncGroup:
         """Update group attributes.
 
         Parameters
         ----------
         new_attributes : dict
-            New attributes to set on the group.
+            New attributes to merge into the group's existing attributes.
 
         Returns
         -------
         self : AsyncGroup
+
+        Notes
+        -----
+        - `new_attributes` is MERGED into the existing attributes: keys that are
+          already present and not in `new_attributes` are preserved, and conflicting
+          keys are overwritten by the new values. To drop keys, use
+          `replace_attributes` instead.
         """
-        self.metadata.attributes.update(new_attributes)
+        merged = {**self.metadata.attributes, **new_attributes}
+        return await self._set_attributes(merged)
 
-        # Write new metadata
-        await self._save_metadata()
+    async def replace_attributes(self, new_attributes: dict[str, Any]) -> AsyncGroup:
+        """Replace all of the group's attributes.
 
-        return self
+        Parameters
+        ----------
+        new_attributes : dict
+            Attributes that will replace the group's existing attributes.
+
+        Returns
+        -------
+        self : AsyncGroup
+
+        Notes
+        -----
+        - This REPLACES all existing attributes with `new_attributes`. Any keys not
+          present in `new_attributes` are removed. To merge into the existing
+          attributes instead, use `update_attributes`.
+        """
+        return await self._set_attributes(dict(new_attributes))
 
     def __repr__(self) -> str:
         return f"<AsyncGroup {self.store_path}>"
@@ -2055,6 +2096,11 @@ class Group(SyncMixin):
     def update_attributes(self, new_attributes: dict[str, Any]) -> Group:
         """Update the attributes of this group.
 
+        `new_attributes` is MERGED into the existing attributes: keys that are
+        already present and not in `new_attributes` are preserved, and conflicting
+        keys are overwritten by the new values. To drop keys, use
+        `replace_attributes` instead.
+
         Examples
         --------
         >>> import zarr
@@ -2063,6 +2109,24 @@ class Group(SyncMixin):
         {'foo': 'bar'}
         """
         self._sync(self._async_group.update_attributes(new_attributes))
+        return self
+
+    def replace_attributes(self, new_attributes: dict[str, Any]) -> Group:
+        """Replace all of the attributes of this group.
+
+        This REPLACES all existing attributes with `new_attributes`. Any keys not
+        present in `new_attributes` are removed. To merge into the existing
+        attributes instead, use `update_attributes`.
+
+        Examples
+        --------
+        >>> import zarr
+        >>> group = zarr.group(attributes={"foo": "bar"})
+        >>> group = group.replace_attributes({"baz": "qux"})
+        >>> group.attrs.asdict()
+        {'baz': 'qux'}
+        """
+        self._sync(self._async_group.replace_attributes(new_attributes))
         return self
 
     def nmembers(self, max_depth: int | None = 0) -> int:
