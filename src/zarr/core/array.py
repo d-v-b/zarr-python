@@ -1704,10 +1704,42 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         Notes
         -----
         - This method is asynchronous and should be awaited.
-        - The updated attributes will be merged with existing attributes, and any conflicts will be
-          overwritten by the new values.
+        - `new_attributes` is MERGED into the existing attributes: keys that are
+          already present and not in `new_attributes` are preserved, and conflicting
+          keys are overwritten by the new values. To drop keys, use
+          `replace_attributes` instead.
         """
-        await _update_attributes(self, new_attributes)
+        await _update_attributes(self, new_attributes, merge=True)
+        return self
+
+    async def replace_attributes(self, new_attributes: dict[str, JSON]) -> Self:
+        """
+        Asynchronously replace all of the array's attributes.
+
+        Parameters
+        ----------
+        new_attributes : dict of str to JSON
+            A dictionary of attributes that will replace the array's existing attributes.
+            The keys represent attribute names, and the values must be JSON-compatible.
+
+        Returns
+        -------
+        AsyncArray
+            The array with the replaced attributes.
+
+        Raises
+        ------
+        ValueError
+            If the attributes are invalid or incompatible with the array's metadata.
+
+        Notes
+        -----
+        - This method is asynchronous and should be awaited.
+        - This REPLACES all existing attributes with `new_attributes`. Any keys not
+          present in `new_attributes` are removed. To merge into the existing
+          attributes instead, use `update_attributes`.
+        """
+        await _update_attributes(self, new_attributes, merge=False)
         return self
 
     def __repr__(self) -> str:
@@ -3885,10 +3917,41 @@ class Array[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
 
         Notes
         -----
-        - The updated attributes will be merged with existing attributes, and any conflicts will be
-          overwritten by the new values.
+        - `new_attributes` is MERGED into the existing attributes: keys that are
+          already present and not in `new_attributes` are preserved, and conflicting
+          keys are overwritten by the new values. To drop keys, use
+          `replace_attributes` instead.
         """
         new_array = sync(self.async_array.update_attributes(new_attributes))
+        return type(self)(new_array)
+
+    def replace_attributes(self, new_attributes: dict[str, JSON]) -> Self:
+        """
+        Replace all of the array's attributes.
+
+        Parameters
+        ----------
+        new_attributes : dict
+            A dictionary of attributes that will replace the array's existing attributes.
+            The keys represent attribute names, and the values must be JSON-compatible.
+
+        Returns
+        -------
+        Array
+            The array with the replaced attributes.
+
+        Raises
+        ------
+        ValueError
+            If the attributes are invalid or incompatible with the array's metadata.
+
+        Notes
+        -----
+        - This REPLACES all existing attributes with `new_attributes`. Any keys not
+          present in `new_attributes` are removed. To merge into the existing
+          attributes instead, use `update_attributes`.
+        """
+        new_array = sync(self.async_array.replace_attributes(new_attributes))
         return type(self)(new_array)
 
     def __repr__(self) -> str:
@@ -5991,26 +6054,41 @@ async def _append(
 async def _update_attributes(
     array: AsyncArray[ArrayV2Metadata] | AsyncArray[ArrayV3Metadata],
     new_attributes: dict[str, JSON],
+    *,
+    merge: bool = True,
 ) -> AsyncArray[ArrayV2Metadata] | AsyncArray[ArrayV3Metadata]:
     """
-    Update the array's attributes.
+    Update or replace the array's attributes.
 
     Parameters
     ----------
     array : AsyncArray
         The array whose attributes to update.
     new_attributes : dict[str, JSON]
-        A dictionary of new attributes to update or add to the array.
+        A dictionary of new attributes for the array.
+    merge : bool, default True
+        If True, merge `new_attributes` into the existing attributes. If False,
+        replace all existing attributes with `new_attributes`.
 
     Returns
     -------
     AsyncArray
         The array with the updated attributes.
     """
-    array.metadata.attributes.update(new_attributes)
+    if merge:
+        attributes = {**array.metadata.attributes, **new_attributes}
+    else:
+        attributes = dict(new_attributes)
 
-    # Write new metadata
-    await save_metadata(array.store_path, array.metadata)
+    # Build new metadata without mutating the existing (frozen) metadata.
+    new_metadata = array.metadata.update_attributes(attributes)
+
+    # Write new metadata to the store first, so a failed write does not corrupt
+    # the in-memory state.
+    await save_metadata(array.store_path, new_metadata)
+
+    # Only swap the in-memory metadata once the write has succeeded.
+    object.__setattr__(array, "metadata", new_metadata)
 
     return array
 
