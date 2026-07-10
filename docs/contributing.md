@@ -38,17 +38,25 @@ Every contribution — code, PR description, issue comment, review response — 
 
 Tools do not change this. If you used one to generate a change, read the change critically and test it before requesting review. If you cannot explain why each part of it is correct and how it fits into the project, it is not ready.
 
-Agents cannot attest on a contributor's behalf. Our [pull request template](https://github.com/zarr-developers/zarr-python/blob/main/.github/PULL_REQUEST_TEMPLATE.md) asks the author to confirm that they have reviewed and understood the changes. An agent must leave that box for its operator to check, and must tell its operator that the expectation exists.
+Agents cannot attest on a contributor's behalf. Our [pull request template](https://github.com/zarr-developers/zarr-python/blob/main/.github/PULL_REQUEST_TEMPLATE.md) asks the author to confirm that they have reviewed and understood the changes. An agent must leave that box for its operator to check, and must tell its operator that the expectation exists. For the same reason, an agent should not open a pull request that no human has asked for and read: a pull request nobody is answerable for is one we would have to close.
+
+Agent-specific instructions live in [`AGENTS.md`](https://github.com/zarr-developers/zarr-python/blob/main/AGENTS.md), which restates the rules below in a form an agent can follow directly. This page remains authoritative.
 
 ### Attribute your sources
 
-Unlabeled text is a claim that you composed it. Where a block of text was composed by a tool, mark where the block begins and name the tool. A line such as the following, immediately before the machine-composed text, is enough:
+Unlabeled text is a claim that you composed it. Where a block of text was composed by a tool, mark where the block begins, name the tool, and say whether you read the text before posting it. A line such as one of these, immediately before the machine-composed text, is enough:
 
 ```markdown
-:robot: _AI-generated text below, from <tool name>_ :robot:
+:robot: _AI-generated text below, from <tool name>. I have read and endorse it._ :robot:
+
+:robot: _AI-generated text below, from <tool name>. Not yet reviewed by a human._ :robot:
 ```
 
+That second clause is the one that carries information. Whether a tool or a person typed the words changes little; whether a person read them before they reached a reviewer changes everything. A reviewer who knows which they are looking at can spend their attention accordingly.
+
 Labeling makes machine-composed text welcome rather than suspect. Once you have read a tool's summary, agreed with it, and can defend it, posting it under a label costs a reviewer nothing and often communicates more thoroughly than prose written in a hurry.
+
+We ask for labeling rather than a blanket disclosure of every use of a tool. Where a tool helped you think, or fixed your grammar, or you rewrote its output until it became yours, there is nothing to label and nothing to declare. The obligation attaches to text a reviewer might otherwise mistake for yours.
 
 Two limits on this:
 
@@ -69,6 +77,14 @@ If you plan a large contribution — a significant refactor, a new subsystem —
 ### Write commit messages for the reader
 
 Pull requests are merged by squashing, so each one leaves a single permanent line in the history of `main` — taken from the pull request title, or from the commit subject when there is only one commit. Write that line as [a Conventional Commit](https://www.conventionalcommits.org/en/v1.0.0/) — `fix: handle 0-d arrays in save_array` — describing what changed, not which files you touched. Someone reading [the commit list](https://github.com/zarr-developers/zarr-python/commits/main/) should come away with an accurate picture of how the project is developing.
+
+Where a tool wrote a meaningful part of a commit, record it with a trailer naming the harness and the model:
+
+```
+Assisted-by: ClaudeCode:claude-opus-4.8
+```
+
+Do not list a tool as an author or `Co-authored-by:`. This project has no Developer Certificate of Origin, so the trailer certifies nothing; it is attribution, and it lets us see later how the project was built. Authorship stays with the person who signed up to answer for the change.
 
 ### Documentation is held to the same standard
 

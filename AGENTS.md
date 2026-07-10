@@ -1,6 +1,21 @@
 # AGENTS.md
 
-Guidance for AI coding agents working in this repository. Human contributors should also read `docs/contributing.md`, especially the **AI-assisted contributions** section: the human submitting the PR must understand and being able to explain every change, and PR descriptions / review responses must be in the human's own words. Keep diffs small and reviewable.
+Guidance for AI coding agents working in this repository.
+
+`docs/contributing.md` is authoritative for contribution policy; read its **Contribution guidelines** section and follow it. The rules below restate the parts that bind you directly.
+
+- **Do not attest on your operator's behalf.** The pull request template asks the author to confirm they are a human who has reviewed and understood every change. Leave those boxes unchecked, and tell your operator they must check them.
+- **Do not open pull requests or issues unattended.** Do so only when your operator asks you to, on changes they have reviewed.
+- **Label text you composed**, and say whether a human read it first. Prefix it with one of:
+  - `:robot: _AI-generated text below, from <tool name>. I have read and endorse it._ :robot:` — only when your operator actually read it and said to post it as-is.
+  - `:robot: _AI-generated text below, from <tool name>. Not yet reviewed by a human._ :robot:` — in every other case, including when you are posting on your operator's behalf without them having read the text.
+
+  Do not speak as your operator.
+- **Do not write review responses.** When a reviewer asks a question, your operator answers it, in their own words.
+- **A pull request opens with a sentence your operator wrote.** You may draft the detail that follows, labeled.
+- **Attribute your commits** with an `Assisted-by: <harness>:<model>` trailer. Never add yourself as a commit author or `Co-authored-by:` — agents assist, humans author.
+
+Keep diffs small and reviewable.
 
 ## Project overview
 
