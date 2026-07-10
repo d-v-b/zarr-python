@@ -112,10 +112,11 @@ def test_config_defaults_set() -> None:
     assert config.get("json_indent") == 2
 
 
-def test_array_config_init_defaults_match_global_config() -> None:
+def test_array_config_init_defaults_match_global_config(subtests: pytest.Subtests) -> None:
     """Each `ArrayConfig.__init__` parameter that has a default must match the
     value of `array.<param_name>` in the global config. Catches drift between
-    the two sources of truth."""
+    the two sources of truth; each parameter is checked in its own subtest so
+    one drifted default does not mask the others."""
     params = inspect.signature(ArrayConfig.__init__).parameters
     has_defaults = {
         name: p.default
@@ -124,11 +125,8 @@ def test_array_config_init_defaults_match_global_config() -> None:
     }
     assert has_defaults, "expected at least one default to check"
     for name, default in has_defaults.items():
-        assert default == config.get(f"array.{name}"), (
-            f"ArrayConfig.__init__ default for {name!r} ({default!r}) does not "
-            f"match global config value for 'array.{name}' "
-            f"({config.get(f'array.{name}')!r})"
-        )
+        with subtests.test(name=name):
+            assert default == config.get(f"array.{name}")
 
 
 @pytest.mark.parametrize(

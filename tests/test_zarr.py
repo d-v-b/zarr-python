@@ -3,14 +3,16 @@ import pytest
 import zarr
 
 
-def test_exports() -> None:
+def test_exports(subtests: pytest.Subtests) -> None:
     """
-    Ensure that everything in __all__ can be imported.
+    Ensure that everything in __all__ can be imported. Each export is checked in its own
+    subtest so one broken export does not mask the others.
     """
     from zarr import __all__
 
     for export in __all__:
-        getattr(zarr, export)
+        with subtests.test(export=export):
+            getattr(zarr, export)
 
 
 def test_print_debug_info(capsys: pytest.CaptureFixture[str]) -> None:
