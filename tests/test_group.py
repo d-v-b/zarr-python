@@ -86,7 +86,9 @@ def test_group_init(store: Store, zarr_format: ZarrFormat) -> None:
     assert group._async_group == agroup
 
 
-async def test_create_creates_parents(store: Store, zarr_format: ZarrFormat) -> None:
+async def test_create_creates_parents(
+    store: Store, zarr_format: ZarrFormat, subtests: pytest.Subtests
+) -> None:
     # prepare a root node, with some data set
     await zarr.api.asynchronous.open_group(
         store=store, path="a", zarr_format=zarr_format, attributes={"key": "value"}
@@ -128,14 +130,16 @@ async def test_create_creates_parents(store: Store, zarr_format: ZarrFormat) -> 
 
     paths = ["a", "a/b", "a/b/c"]
     for path in paths:
-        g = await zarr.api.asynchronous.open_group(store=store, path=path)
-        assert isinstance(g, AsyncGroup)
+        # each parent is an independent claim; a missing intermediate must not mask the rest
+        with subtests.test(path=path):
+            g = await zarr.api.asynchronous.open_group(store=store, path=path)
+            assert isinstance(g, AsyncGroup)
 
-        if path == "a":
-            # ensure we didn't overwrite the root attributes
-            assert g.attrs == {"key": "value"}
-        else:
-            assert g.attrs == {}
+            if path == "a":
+                # ensure we didn't overwrite the root attributes
+                assert g.attrs == {"key": "value"}
+            else:
+                assert g.attrs == {}
 
 
 @pytest.mark.parametrize("store", ["memory"], indirect=True)
@@ -1862,6 +1866,7 @@ async def test_group_create_hierarchy(
     overwrite: bool,
     group_path: str,
     impl: Literal["async", "sync"],
+    subtests: pytest.Subtests,
 ) -> None:
     """
     Test that the Group.create_hierarchy method creates specified nodes and returns them in a dict.
@@ -1895,15 +1900,18 @@ async def test_group_create_hierarchy(
         nodes_created = dict(g.create_hierarchy(node_spec, overwrite=overwrite))
 
     all_members = dict(g.members(max_depth=None))
+    # each node is an independent claim; one wrong node must not mask the others
     for k, v in node_spec.items():
-        assert all_members[k].metadata == v == nodes_created[k].metadata
+        with subtests.test(node=k):
+            assert all_members[k].metadata == v == nodes_created[k].metadata
 
     # if overwrite is True, the extant nodes should be erased
     for k, v in extant_spec.items():
-        if overwrite:
-            assert k in all_members
-        else:
-            assert all_members[k].metadata == v == extant_created[k].metadata
+        with subtests.test(extant_node=k):
+            if overwrite:
+                assert k in all_members
+            else:
+                assert all_members[k].metadata == v == extant_created[k].metadata
     # ensure that we left the root group as-is
     assert (
         sync_group.get_node(store=store, path=group_path, zarr_format=zarr_format).attrs.asdict()
