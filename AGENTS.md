@@ -13,7 +13,7 @@ Guidance for AI coding agents working in this repository.
   Do not speak as your operator.
 - **Write less.** A human reads everything you post here. Say what changed and why it is correct; cut restatement of the diff, hedging, and summary of your own process. If your operator has to trim it before posting, you wrote too much.
 - **Do not write review responses.** When a reviewer asks a question, your operator answers it, in their own words.
-- **A pull request opens with a sentence your operator wrote.** You may draft the detail that follows, labeled.
+- **A pull request opens with a sentence your operator wrote.** Do not write it, and do not draft one for them to paste — the point is that they thought about the change, and a sentence you supplied proves nothing. Leave a placeholder saying so. You may draft the detail that follows, labeled.
 - **Attribute your commits** with an `Assisted-by: <harness>:<model>` trailer. Never add yourself as a commit author or `Co-authored-by:` — agents assist, humans author.
 
 Keep diffs small and reviewable.

@@ -64,7 +64,7 @@ We ask for labeling rather than a blanket disclosure of every use of a tool. Whe
 
 Two limits on this:
 
-**A pull request opens with a sentence you wrote yourself.** Say why the change exists and why it deserves a reviewer's attention. Machine-composed detail can follow, labeled. This one sentence is the part that cannot be produced without having thought about the change, and it is what tells a maintainer whether to spend their afternoon on your diff.
+**A pull request opens with a sentence you wrote yourself.** Say why the change exists and why it deserves a reviewer's attention. Machine-composed detail can follow, labeled. This one sentence is the part that cannot be produced without having thought about the change, and it is what tells a maintainer whether to spend their afternoon on your diff. No agent may write it for you, or draft one for you to paste: a sentence you did not think of proves nothing, which is the only thing this rule is for.
 
 Automated dependency updates are exempt from this, and the reason is worth stating, because it explains the rule. A bot's identity fully supplies its motivation: "a dependency released a new version" is the whole story, and the bot's name tells you so. An agent does not supply the motivation for the work you asked it to do. That judgment is yours, a reader cannot infer it from the fact that an agent ran, and so you have to write it down.
 

@@ -5,7 +5,7 @@
 
 ## Summary
 
-[Open with at least one sentence you wrote yourself: why does this change exist, and why is it worth a reviewer's attention? Machine-composed detail may follow, labeled with the tool that produced it.]
+[Open with at least one sentence you wrote yourself: why does this change exist, and why is it worth a reviewer's attention? No agent may write this sentence for you. Machine-composed detail may follow, labeled with the tool that produced it.]
 
 ## For reviewers
 
