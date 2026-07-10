@@ -20,9 +20,9 @@ g = zarr.group()
 # etc.
 ```
 
-2. An explanation of why the current behaviour is wrong/not desired, and what you expect instead.
+2. An explanation of why the current behavior is wrong/not desired, and what you expect instead.
 
-3. Information about the version of Zarr, along with versions of dependencies and the Python interpreter, and installation information. The version of Zarr can be obtained from the `zarr.__version__` property. Indicate how Zarr was installed, e.g., "installed via pip into a virtual environment", or "installed using conda". Information about other packages installed can be obtained by executing `pip freeze` (if using pip to install packages) or `conda env export` (if using conda to install packages) from the operating system command prompt.
+3. Information about the version of Zarr, along with versions of dependencies and the Python interpreter, and installation information. The version of Zarr can be obtained from the `zarr.__version__` attribute. Indicate how Zarr was installed, e.g., "installed via pip into a virtual environment", or "installed using conda". Information about other packages installed can be obtained by executing `pip freeze` (if using pip to install packages) or `conda env export` (if using conda to install packages) from the operating system command prompt.
 
 ## Enhancement proposals
 
@@ -213,7 +213,7 @@ When submitting a pull request, coverage will also be collected across all suppo
 
 Docstrings for user-facing classes and functions should follow the [numpydoc](https://numpydoc.readthedocs.io/en/stable/format.html#docstring-standard) standard, including sections for Parameters and Examples. All examples should run and pass as doctests under Python 3.12.
 
-Zarr uses mkdocs for documentation, hosted on readthedocs.org. Documentation is written in Markdown (.md files) in the `docs` folder. The documentation consists both of prose and API documentation. All user-facing classes and functions are included in the API documentation, under the `docs/api` folder using the [mkdocstrings](https://mkdocstrings.github.io/) extension. Add new public functions or classes to the relevant markdown file in `docs/api/*.md`. ew features or important usage information should be included in the user-guide (`docs/user-guide`). Any changes should also be included as a new file in the `changes` directory.
+Zarr uses mkdocs for documentation, hosted on readthedocs.org. Documentation is written in Markdown (.md files) in the `docs` folder. The documentation consists both of prose and API documentation. All user-facing classes and functions are included in the API documentation, under the `docs/api` folder using the [mkdocstrings](https://mkdocstrings.github.io/) extension. Add new public functions or classes to the relevant markdown file in `docs/api/*.md`. New features or important usage information should be included in the user-guide (`docs/user-guide`). Any changes should also be included as a new file in the `changes` directory.
 
 The documentation can be built locally by running:
 
@@ -221,9 +221,9 @@ The documentation can be built locally by running:
 hatch --env docs run build
 ```
 
-The resulting built documentation will be available in the `docs/_build/html` folder.
+The resulting built documentation will be available in the `site` folder.
 
-Hatch can also be used to serve continuously updating version of the documentation during development at [http://0.0.0.0:8000/](http://0.0.0.0:8000/). This can be done by running:
+Hatch can also be used to serve continuously updating version of the documentation during development at [http://127.0.0.1:8000/](http://127.0.0.1:8000/). This can be done by running:
 
 ```bash
 hatch --env docs run serve
@@ -295,6 +295,11 @@ that fits the block).
 (`test_no_unvalidated_blocks`) requires **every** Python block to be either `exec="true"`,
 `test="true"`, or `exec="false"` with a reason — so a block can never silently skip
 validation. A bare ` ```python ` fence, or a typo like `exec="on"`, fails that test.
+
+Markdown Exec only renders `exec="true"` fences; the `mkdocs_hooks.py` hook at the
+repository root makes `test="true"` and `exec="false"` fences render as ordinary
+highlighted code blocks. Without it, these fences would fail superfences parsing and
+their contents would spill into the page as raw markdown.
 
 ##### Marker-bound blocks (GPU, S3)
 
@@ -386,7 +391,7 @@ Releases are classified by the library changes contained in that release. This c
 
   Minor releases are safe for most users and downstream projects to adopt.
 
-* **patch** releases (for example, `3.1.0` -> `3.1.1`) are for changes that contain no breaking or behaviour changes for downstream projects or users. Examples of changes suitable for a patch release are bugfixes and documentation improvements.
+* **patch** releases (for example, `3.1.0` -> `3.1.1`) are for changes that contain no breaking or behavior changes for downstream projects or users. Examples of changes suitable for a patch release are bugfixes and documentation improvements.
 
   Users should always feel safe upgrading to the latest patch release.
 
@@ -400,7 +405,7 @@ Zarr developers should make changes as smooth as possible for users. This means 
 
 The Zarr library is an implementation of a file format standard defined externally -- see the [Zarr specifications website](https://zarr-specs.readthedocs.io) for the list of Zarr file format specifications.
 
-If an existing Zarr format version changes, or a new version of the Zarr format is released, then the Zarr library will generally require changes. It is very likely that a new Zarr format will require extensive breaking changes to the Zarr library, and so support for a new Zarr format in the Zarr library will almost certainly come in new `major` release. When the Zarr library adds support for a new Zarr format, there may be a period of accelerated changes as developers refine newly added APIs and deprecate old APIs. In such a transitional phase breaking changes may be more frequent than usual.
+If an existing Zarr format version changes, or a new version of the Zarr format is released, then the Zarr library will generally require changes. It is very likely that a new Zarr format will require extensive breaking changes to the Zarr library, and so support for a new Zarr format in the Zarr library will almost certainly come in a new `major` release. When the Zarr library adds support for a new Zarr format, there may be a period of accelerated changes as developers refine newly added APIs and deprecate old APIs. In such a transitional phase breaking changes may be more frequent than usual.
 
 
 ## Experimental API policy
