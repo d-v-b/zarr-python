@@ -5,7 +5,7 @@
 
 ## Summary
 
-[Describe what this PR changes and why, in your own words.]
+[Open with at least one sentence you wrote yourself: why does this change exist, and why is it worth a reviewer's attention? Machine-composed detail may follow, labeled with the tool that produced it.]
 
 ## For reviewers
 
@@ -13,9 +13,10 @@
 
 ## Author attestation
 
-- [ ] I am a human, these are my changes, and I have reviewed and understood every change and can explain why each is correct.
+- [ ] I am a human. I have reviewed and understood every change, and can explain why each is correct.
+- [ ] The opening of this description is my own, and any machine-composed text below it is labeled.
 
-AI coding assistance is welcome, but a human must be the author and is responsible for the contents of the PR. The description and any review responses must be in your own words. Please read [AI-assisted contributions](https://zarr.readthedocs.io/en/stable/contributing/#ai-assisted-contributions) before opening.
+AI coding assistance is welcome, and so is machine-composed text where it is labeled. But a human must be the author, in the sense of being answerable for every part of this pull request, and review responses must be in your own words. An agent preparing this pull request must leave these boxes for its operator to check. Please read the [contribution guidelines](https://zarr.readthedocs.io/en/stable/contributing/#contribution-guidelines) before opening.
 
 ## TODO
 
