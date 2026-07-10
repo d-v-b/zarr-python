@@ -44,6 +44,8 @@ Agent-specific instructions live in [`AGENTS.md`](https://github.com/zarr-develo
 
 ### Attribute your sources
 
+There are humans here. Every issue, pull request, and review comment is read by a person, and it is the point where your work meets their attention. Arriving at that boundary with text nobody has read is not a procedural violation; it is a discourtesy, because it moves the work of finding out whether the text is any good from you onto them. The rules below exist to keep that from happening, not to police how you write.
+
 Unlabeled text is a claim that you composed it. Where a block of text was composed by a tool, mark where the block begins, name the tool, and say whether you read the text before posting it. A line such as one of these, immediately before the machine-composed text, is enough:
 
 ```markdown
@@ -54,7 +56,9 @@ Unlabeled text is a claim that you composed it. Where a block of text was compos
 
 That second clause is the one that carries information. Whether a tool or a person typed the words changes little; whether a person read them before they reached a reviewer changes everything. A reviewer who knows which they are looking at can spend their attention accordingly.
 
-Labeling makes machine-composed text welcome rather than suspect. Once you have read a tool's summary, agreed with it, and can defend it, posting it under a label costs a reviewer nothing and often communicates more thoroughly than prose written in a hurry.
+Reading it is not enough — cut it. Machine-composed text runs long. It restates the diff, hedges, and pads a finding out to three paragraphs. If you post it under the endorsing label, you are saying you have not only read it but trimmed it to what a reviewer needs, and you are answerable for every sentence that survived. Text you have not edited is text you have not really read, so label it as unreviewed and say so plainly.
+
+Labeling makes machine-composed text welcome rather than suspect. Once you have read a tool's summary, cut it down, agreed with what remains, and can defend it, posting it under a label costs a reviewer nothing and often communicates more thoroughly than prose written in a hurry.
 
 We ask for labeling rather than a blanket disclosure of every use of a tool. Where a tool helped you think, or fixed your grammar, or you rewrote its output until it became yours, there is nothing to label and nothing to declare. The obligation attaches to text a reviewer might otherwise mistake for yours.
 

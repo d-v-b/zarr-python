@@ -14,7 +14,7 @@
 ## Author attestation
 
 - [ ] I am a human. I have reviewed and understood every change, and can explain why each is correct.
-- [ ] The opening of this description is my own, and any machine-composed text below it is labeled with the tool that produced it and whether I have read it.
+- [ ] The opening of this description is my own. Any machine-composed text below it is labeled with the tool that produced it and whether I have read it — and where I endorsed it, I trimmed it to what a reviewer needs.
 
 AI coding assistance is welcome, and so is machine-composed text where it is labeled. But a human must be the author, in the sense of being answerable for every part of this pull request, and review responses must be in your own words. An agent preparing this pull request must leave these boxes for its operator to check. Please read the [contribution guidelines](https://zarr.readthedocs.io/en/stable/contributing/#contribution-guidelines) before opening.
 
