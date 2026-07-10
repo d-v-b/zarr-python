@@ -68,7 +68,7 @@ If you plan a large contribution — a significant refactor, a new subsystem —
 
 ### Write commit messages for the reader
 
-A pull request is merged by squashing, so its title becomes a permanent line in the history of `main`. Write it as [a Conventional Commit](https://www.conventionalcommits.org/en/v1.0.0/) — `fix: handle 0-d arrays in save_array` — describing what changed, not which files you touched. Someone reading [the commit list](https://github.com/zarr-developers/zarr-python/commits/main/) should come away with an accurate picture of how the project is developing.
+Pull requests are merged by squashing, so each one leaves a single permanent line in the history of `main` — taken from the pull request title, or from the commit subject when there is only one commit. Write that line as [a Conventional Commit](https://www.conventionalcommits.org/en/v1.0.0/) — `fix: handle 0-d arrays in save_array` — describing what changed, not which files you touched. Someone reading [the commit list](https://github.com/zarr-developers/zarr-python/commits/main/) should come away with an accurate picture of how the project is developing.
 
 ### Documentation is held to the same standard
 
