@@ -2,13 +2,15 @@
 
 Zarr is a community maintained project. We welcome contributions in the form of bug reports, bug fixes, documentation, enhancement proposals and more. This page provides information on how best to contribute.
 
+These guidelines apply to everyone: new contributors, core developers, and agentic tools acting on behalf of either. If you are an agent reading this page, the guidelines describe obligations you must satisfy on your operator's behalf, and one you cannot satisfy for them (see [Own your changes](#own-your-changes)).
+
 ## Asking for help
 
-If you have a question about how to use Zarr, please post your question on StackOverflow using the ["zarr" tag](https://stackoverflow.com/questions/tagged/zarr). If you don't get a response within a day or two, feel free to raise a [GitHub issue](https://github.com/zarr-developers/zarr-python/issues/new) including a link to your StackOverflow question. We will try to respond to questions as quickly as possible, but please bear in mind that there may be periods where we have limited time to answer questions due to other commitments.
+Please post questions about Zarr usage to our [Zulip chat](https://ossci.zulipchat.com/#narrow/channel/423692-Zarr-Python/). If you don't get a response within a day or two, feel free to raise a [GitHub issue](https://github.com/zarr-developers/zarr-python/issues/new) including a link to your question.
 
 ## Bug reports
 
-If you find a bug, please raise a [GitHub issue](https://github.com/zarr-developers/zarr-python/issues/new). Please include the following items in a bug report:
+Bugs should be reported in [GitHub issues](https://github.com/zarr-developers/zarr-python/issues/new). Please include the following items in a bug report:
 
 1. A minimal, self-contained snippet of Python code reproducing the problem. You can format the code nicely using markdown, e.g.:
 
@@ -20,49 +22,79 @@ g = zarr.group()
 
 2. An explanation of why the current behavior is wrong/not desired, and what you expect instead.
 
-3. Information about the version of Zarr, along with versions of dependencies and the Python interpreter, and installation information. The version of Zarr can be obtained from the `zarr.__version__` attribute. Please also state how Zarr was installed, e.g., "installed via pip into a virtual environment", or "installed using conda". Information about other packages installed can be obtained by executing `pip freeze` (if using pip to install packages) or `conda env export` (if using conda to install packages) from the operating system command prompt. The version of the Python interpreter can be obtained by running a Python interactive session, e.g.:
-
-```console
-python
-```
-
-```ansi
-Python 3.12.7 | packaged by conda-forge | (main, Oct  4 2024, 15:57:01) [Clang 17.0.6 ] on darwin
-```
+3. Information about the version of Zarr, along with versions of dependencies and the Python interpreter, and installation information. The version of Zarr can be obtained from the `zarr.__version__` attribute. Indicate how Zarr was installed, e.g., "installed via pip into a virtual environment", or "installed using conda". Information about other packages installed can be obtained by executing `pip freeze` (if using pip to install packages) or `conda env export` (if using conda to install packages) from the operating system command prompt.
 
 ## Enhancement proposals
 
-If you have an idea about a new feature or some other improvement to Zarr, please raise a [GitHub issue](https://github.com/zarr-developers/zarr-python/issues/new) first to discuss.
+If you have an idea about a new feature or some other improvement to Zarr, please start a conversation in our [Zulip chat](https://ossci.zulipchat.com/#narrow/channel/423692-Zarr-Python/) or open a [GitHub issue](https://github.com/zarr-developers/zarr-python/issues/new).
 
-We very much welcome ideas and suggestions for how to improve Zarr, but please bear in mind that we are likely to be conservative in accepting proposals for new features. The reasons for this are that we would like to keep the Zarr code base lean and focused on a core set of functionalities, and available time for development, review and maintenance of new features is limited. But if you have a great idea, please don't let that stop you from posting it on GitHub, just please don't be offended if we respond cautiously.
+## Contribution guidelines
 
-## AI-assisted contributions
+Two distinct things can be true of any contribution: someone is *accountable* for it, and someone *composed* it. Accountability can never be delegated to a tool. Composition can, as long as you say so. Every guideline below follows from that distinction.
 
-AI coding tools are increasingly common in open source development. These tools are welcome in Zarr-Python, but the same standards apply to all contributions regardless of how they were produced — whether written by hand, with AI assistance, or generated entirely by an AI tool.
+### Own your changes
 
-### You are responsible for your changes
+Every contribution — code, PR description, issue comment, review response — has exactly one human author, meaning the person who is answerable for it. If a maintainer asks why a line is correct, that person answers, from their own understanding, without going back to the tool that produced it.
 
-If you submit a pull request, you are responsible for understanding and having fully reviewed the changes. You must be able to explain why each change is correct and how it fits into the project.
+Tools do not change this. If you used one to generate a change, read the change critically and test it before requesting review. If you cannot explain why each part of it is correct and how it fits into the project, it is not ready.
 
-### Communication must be your own
+Agents cannot attest on a contributor's behalf. Our [pull request template](https://github.com/zarr-developers/zarr-python/blob/main/.github/PULL_REQUEST_TEMPLATE.md) asks the author to confirm that they have reviewed and understood the changes. An agent must leave that box for its operator to check, and must tell its operator that the expectation exists. For the same reason, an agent should not open a pull request that no human has asked for and read: a pull request nobody is answerable for is one we would have to close.
 
-PR descriptions, issue comments, and review responses must be in your own words. The substance and reasoning must come from you. Using AI to polish grammar or phrasing is fine, but do not paste AI-generated text as comments or review responses.
+Agent-specific instructions live in [`AGENTS.md`](https://github.com/zarr-developers/zarr-python/blob/main/AGENTS.md), which restates the rules below in a form an agent can follow directly. This page remains authoritative.
 
-### Review every line
+### Attribute your sources
 
-You must have personally reviewed and understood all changes before submitting. If you used AI to generate code, you are expected to have read it critically and tested it. The PR description should explain the approach and reasoning — do not leave it to reviewers to figure out what the code does and why.
+There are humans here. Every issue, pull request, and review comment is read by a person, and it is the point where your work meets their attention. Arriving at that boundary with text nobody has read is not a procedural violation; it is a discourtesy, because it moves the work of finding out whether the text is any good from you onto them. The rules below exist to keep that from happening, not to police how you write.
+
+Unlabeled text is a claim that you composed it. Where a block of text was composed by a tool, mark where the block begins, name the tool, and say whether you read the text before posting it. A line such as one of these, immediately before the machine-composed text, is enough:
+
+```markdown
+:robot: _AI-generated text below, from <tool name>. I have read and endorse it._ :robot:
+
+:robot: _AI-generated text below, from <tool name>. Not yet reviewed by a human._ :robot:
+```
+
+That second clause is the one that carries information. Whether a tool or a person typed the words changes little; whether a person read them before they reached a reviewer changes everything. A reviewer who knows which they are looking at can spend their attention accordingly.
+
+Reading it is not enough — cut it. Machine-composed text runs long. It restates the diff, hedges, and pads a finding out to three paragraphs. If you post it under the endorsing label, you are saying you have not only read it but trimmed it to what a reviewer needs, and you are answerable for every sentence that survived. Text you have not edited is text you have not really read, so label it as unreviewed and say so plainly.
+
+Labeling makes machine-composed text welcome rather than suspect. Once you have read a tool's summary, cut it down, agreed with what remains, and can defend it, posting it under a label costs a reviewer nothing and often communicates more thoroughly than prose written in a hurry.
+
+We ask for labeling rather than a blanket disclosure of every use of a tool. Where a tool helped you think, or fixed your grammar, or you rewrote its output until it became yours, there is nothing to label and nothing to declare. The obligation attaches to text a reviewer might otherwise mistake for yours.
+
+Two limits on this:
+
+**A pull request opens with a sentence you wrote yourself.** Say why the change exists and why it deserves a reviewer's attention. Machine-composed detail can follow, labeled. This one sentence is the part that cannot be produced without having thought about the change, and it is what tells a maintainer whether to spend their afternoon on your diff. No agent may write it for you, or draft one for you to paste: a sentence you did not think of proves nothing, which is the only thing this rule is for.
+
+Automated dependency updates are exempt from this, and the reason is worth stating, because it explains the rule. A bot's identity fully supplies its motivation: "a dependency released a new version" is the whole story, and the bot's name tells you so. An agent does not supply the motivation for the work you asked it to do. That judgment is yours, a reader cannot infer it from the fact that an agent ran, and so you have to write it down.
+
+**Review responses are owed to a person.** When a reviewer asks you a question, they are asking *you*. Answer in your own words. Do not paste an unread machine reply into a review thread.
 
 ### Keep PRs reviewable
 
-Generating code with AI is fast; reviewing it is not. A large diff shifts the burden from the contributor to the reviewer. PRs that cannot be reviewed in reasonable time with reasonable effort may be closed, regardless of their potential usefulness or correctness. Use AI tools not only to write code but to prepare better, more reviewable PRs — well-structured commits, clear descriptions, and minimal scope.
+Generating a change is fast; reviewing it is not. A large diff shifts the burden from you to the reviewer, and a reviewer's time is the scarcest resource this project has. Pull requests that cannot be reviewed in reasonable time with reasonable effort may be closed, however useful or correct they might be.
 
-If you are planning a large AI-assisted contribution (e.g., a significant refactor or a new subsystem), **open an issue first** to discuss the scope and approach with maintainers. Maintainers may also request that large changes be broken into smaller, reviewable pieces.
+Tools make it cheap to produce a broad, flat set of unrelated fixes. Such a pull request is hard to review and, because its title cannot describe its contents, it is invisible to the people who would have wanted to weigh in on any one part of it. Prefer to split by topic, even when each individual change is safe. Use tools not only to write code but to prepare a better pull request: coherent commits, a clear description, and minimal scope.
 
-### Documentation
+If you plan a large contribution — a significant refactor, a new subsystem — discuss the scope and approach with maintainers first, on our [Zulip chat](https://ossci.zulipchat.com/#narrow/channel/423692-Zarr-Python/) or in an issue. Maintainers may ask that a large change be broken into smaller pieces.
 
-The same principles apply to documentation. Zarr has domain-specific semantics (chunked storage, codec pipelines, Zarr v2/v3 format details) that AI tools frequently get wrong. Do not submit documentation that you haven't carefully read and verified.
+### Write commit messages for the reader
 
-## Contributing code and/or documentation
+Pull requests are merged by squashing, so each one leaves a single permanent line in the history of `main` — taken from the pull request title, or from the commit subject when there is only one commit. Write that line as [a Conventional Commit](https://www.conventionalcommits.org/en/v1.0.0/) — `fix: handle 0-d arrays in save_array` — describing what changed, not which files you touched. Someone reading [the commit list](https://github.com/zarr-developers/zarr-python/commits/main/) should come away with an accurate picture of how the project is developing.
+
+Where a tool wrote a meaningful part of a commit, record it with a trailer naming the harness and the model:
+
+```
+Assisted-by: ClaudeCode:claude-opus-4.8
+```
+
+Do not list a tool as an author or `Co-authored-by:`. This project has no Developer Certificate of Origin, so the trailer certifies nothing; it is attribution, and it lets us see later how the project was built. Authorship stays with the person who signed up to answer for the change.
+
+### Documentation is held to the same standard
+
+Zarr has domain-specific semantics — chunked storage, codec pipelines, the differences between Zarr formats 2 and 3 — that language models frequently get wrong, confidently and plausibly. Do not submit documentation you have not read and verified against the behavior of the code.
+
+## How to contribute
 
 ### Forking the repository
 
@@ -80,7 +112,7 @@ git remote add upstream git@github.com:zarr-developers/zarr-python.git
 
 ### Creating a development environment
 
-To work with the Zarr source code, it is recommended to use [hatch](https://hatch.pypa.io/latest/index.html) to create and manage development environments. Hatch will automatically install all Zarr dependencies using the same versions as are used by the core developers and continuous integration services. Assuming you have a Python 3 interpreter already installed, and you have cloned the Zarr source code and your current working directory is the root of the repository, you can do something like the following:
+To work with the Zarr source code, it is recommended to use [hatch](https://hatch.pypa.io/latest/index.html) to create and manage development environments. Hatch automatically installs the correct Zarr dependencies. Assuming you have a Python 3 interpreter already installed, and you have cloned the Zarr source code and your current working directory is the root of the repository, you can do something like the following:
 
 ```bash
 pip install hatch
@@ -125,17 +157,15 @@ Again, any conflicts need to be resolved before submitting a pull request.
 
 ### Running the test suite
 
-Zarr includes a suite of unit tests. The simplest way to run the unit tests is to activate your development environment (see [creating a development environment](#creating-a-development-environment) above) and invoke:
+Zarr's tests are in the `tests` directory. We use [`pytest`](https://docs.pytest.org/en/stable/). To run the test suite, initialize your development environment (see [creating a development environment](#creating-a-development-environment) above) and invoke:
 
 ```bash
 hatch env run --env test.py3.12-optional run
 ```
 
-All tests are automatically run via GitHub Actions for every pull request and must pass before code can be accepted. Test coverage is also collected automatically via the Codecov service.
+All tests are automatically run via GitHub Actions for every pull request. Automated checks must pass before changes are accepted. Test coverage is also collected automatically via the Codecov service.
 
 ### Code standards - using prek
-
-All code must conform to the PEP8 standard. Regarding line length, lines up to 100 characters are allowed, although please try to keep under 90 wherever possible.
 
 `Zarr` uses a set of git hooks managed by [`prek`](https://github.com/j178/prek), a fast, Rust-based pre-commit hook manager that is fully compatible with `.pre-commit-config.yaml` files. `prek` can be installed locally by running:
 
@@ -179,19 +209,17 @@ To list all available hooks:
 prek list
 ```
 
-If you would like to skip the failing checks and push the code for further discussion, use the `--no-verify` option with `git commit`.
+To skip failing checks and push the code for further discussion, use the `--no-verify` option with `git commit`.
 
 ### Test coverage
 
-> **Note:** Test coverage for Zarr-Python 3 is currently not at 100%. This is a known issue and help is welcome to bring test coverage back to 100%. See issue #2613 for more details.
-
-Zarr strives to maintain 100% test coverage under the latest Python stable release. Both unit tests and docstring doctests are included when computing coverage. Running:
+Zarr strives to maintain high test coverage. Running
 
 ```bash
 hatch env run --env test.py3.12-optional run-coverage
 ```
 
-will automatically run the test suite with coverage and produce an XML coverage report. This should be 100% before code can be accepted into the main code base.
+will automatically run the test suite with coverage and produce an XML coverage report.
 
 You can also generate an HTML coverage report by running:
 
@@ -199,13 +227,13 @@ You can also generate an HTML coverage report by running:
 hatch env run --env test.py3.12-optional run-coverage-html
 ```
 
-When submitting a pull request, coverage will also be collected across all supported Python versions via the Codecov service, and will be reported back within the pull request. Codecov coverage must also be 100% before code can be accepted.
+When submitting a pull request, coverage will also be collected across all supported Python versions via the Codecov service, and will be reported back within the pull request.
 
 ### Documentation
 
 Docstrings for user-facing classes and functions should follow the [numpydoc](https://numpydoc.readthedocs.io/en/stable/format.html#docstring-standard) standard, including sections for Parameters and Examples. All examples should run and pass as doctests under Python 3.12.
 
-Zarr uses mkdocs for documentation, hosted on readthedocs.org. Documentation is written in the Markdown markup language (.md files) in the `docs` folder. The documentation consists both of prose and API documentation. All user-facing classes and functions are included in the API documentation, under the `docs/api` folder using the [mkdocstrings](https://mkdocstrings.github.io/) extension. Add any new public functions or classes to the relevant markdown file in `docs/api/*.md`. Any new features or important usage information should be included in the user-guide (`docs/user-guide`). Any changes should also be included as a new file in the `changes` directory.
+Zarr uses mkdocs for documentation, hosted on readthedocs.org. Documentation is written in Markdown (.md files) in the `docs` folder. The documentation consists both of prose and API documentation. All user-facing classes and functions are included in the API documentation, under the `docs/api` folder using the [mkdocstrings](https://mkdocstrings.github.io/) extension. Add new public functions or classes to the relevant markdown file in `docs/api/*.md`. New features or important usage information should be included in the user-guide (`docs/user-guide`). Any changes should also be included as a new file in the `changes` directory.
 
 The documentation can be built locally by running:
 
@@ -253,10 +281,8 @@ print("Hello world")
 
 #### Validating code blocks: `exec` vs `test`
 
-Every Python code block in the documentation is checked by a test
-(`tests/test_docs.py`) so that examples cannot quietly rot — the bug that motivated
-this was an example calling `zarr.create_array(..., mode="w")`, an argument that does
-not exist, which went unnoticed because nothing ran it. A block declares *how* it is
+Python code blocks in the documentation are checked by tests
+(`tests/test_docs.py`). A block declares *how* it is
 validated using one of two independent attributes:
 
   - **`exec="true"`** — Markdown Exec runs the block **at docs-build time to render its
@@ -320,7 +346,7 @@ Sometimes, you may want the documentation to build quicker. You can disable code
 
 ### Changelog
 
-zarr-python uses [towncrier](https://towncrier.readthedocs.io/en/stable/tutorial.html) to manage release notes. Most pull requests should include at least one news fragment describing the changes. To add a release note, you'll need the GitHub issue or pull request number and the type of your change (`feature`, `bugfix`, `doc`, `removal`, `misc`). With that, run `towncrier create` with your development environment, which will prompt you for the issue number, change type, and the news text:
+Zarr Python uses [towncrier](https://towncrier.readthedocs.io/en/stable/tutorial.html) to manage release notes. Most pull requests should include at least one news fragment describing the changes. To add a release note, you'll need the GitHub issue or pull request number and the type of your change (`feature`, `bugfix`, `doc`, `removal`, `misc`). With that, run `towncrier create` with your development environment, which will prompt you for the issue number, change type, and the news text:
 
 ```bash
 towncrier create
