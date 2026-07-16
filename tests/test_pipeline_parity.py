@@ -48,6 +48,7 @@ from zarr.codecs.sharding import (
     ShardingCodec,
     SubchunkWriteOrder,
 )
+from zarr.codecs.transpose import TransposeCodec
 from zarr.core.config import config as zarr_config
 from zarr.storage import MemoryStore
 
@@ -329,6 +330,50 @@ def test_pipeline_parity(
         batched_reads_sync,
         sync_arr,
         err_msg="BatchedCodecPipeline could not correctly read FusedCodecPipeline's output",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Outer array->array codec wrapping a sharding codec
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.filterwarnings("ignore:Combining a `sharding_indexed` codec:UserWarning")
+@pytest.mark.parametrize("write_pipeline", [_BATCHED, _FUSED])
+@pytest.mark.parametrize("read_pipeline", [_BATCHED, _FUSED])
+def test_outer_array_array_codec_around_sharding(write_pipeline: str, read_pipeline: str) -> None:
+    """An array->array codec *outside* a sharding codec must not be skipped.
+
+    Partial IO hands the chunk straight to the array->bytes codec, which is only
+    sound when that codec is the whole pipeline. With an outer transpose the
+    partial paths must be declined, or the transpose is silently dropped.
+
+    `filters` are applied outside the serializer, so `create_array` reaches this
+    layout — no low-level `codecs=` needed. Every write/read pipeline pairing is
+    checked because each pipeline is self-consistent on its own: it drops the
+    transpose symmetrically on write and read, so the corruption is only visible
+    when the data crosses pipelines (or implementations).
+    """
+    shape, shard_shape, inner_chunk = (20, 20), (10, 10), (5, 5)
+    ref = np.arange(int(np.prod(shape)), dtype="int32").reshape(shape)
+
+    store = MemoryStore()
+    with zarr_config.set({"codec_pipeline.path": write_pipeline}):
+        arr = zarr.create_array(
+            store=store,
+            shape=shape,
+            chunks=shard_shape,
+            dtype="int32",
+            filters=[TransposeCodec(order=(1, 0))],
+            serializer=ShardingCodec(chunk_shape=inner_chunk),
+            compressors=None,
+        )
+        arr[:] = ref
+
+    np.testing.assert_array_equal(
+        _read_under_pipeline(read_pipeline, store),
+        ref,
+        err_msg=f"outer TransposeCodec dropped (write={write_pipeline}, read={read_pipeline})",
     )
 
 
