@@ -132,23 +132,18 @@ def pipeline_supports_partial_decode(
     *,
     array_array_codecs: tuple[ArrayArrayCodec, ...],
     bytes_bytes_codecs: tuple[BytesBytesCodec, ...],
-    require_no_aa_bb: bool,
 ) -> bool:
     """Whether a codec pipeline can decode a partial selection without a full read.
 
     Requires the array->bytes codec to implement
-    ``ArrayBytesCodecPartialDecodeMixin``. When ``require_no_aa_bb`` is True it
-    additionally requires no array->array / bytes->bytes codecs, because those
-    can change the slice<->byte-range correspondence (an AA codec can make the
-    selection non-contiguous, a BB codec can rewrite the bytes), making partial
-    decode infeasible.
-
-    NOTE: the two pipelines currently pass different ``require_no_aa_bb`` values
-    (Batched: True; Fused: False). That divergence is intentional-for-now and
-    tracked separately; this function centralizes the predicate without changing
-    either pipeline's behavior.
+    `ArrayBytesCodecPartialDecodeMixin`, and requires no array->array /
+    bytes->bytes codecs. Partial IO delegates the whole chunk to the
+    array->bytes codec, so it is only sound when that codec is the entire
+    pipeline: an outer AA codec can make the selection non-contiguous and a BB
+    codec can rewrite the bytes, so neither the slice<->byte-range
+    correspondence nor the outer codec itself survives the delegation.
     """
-    if require_no_aa_bb and (len(array_array_codecs) + len(bytes_bytes_codecs)) != 0:
+    if (len(array_array_codecs) + len(bytes_bytes_codecs)) != 0:
         return False
     return isinstance(array_bytes_codec, ArrayBytesCodecPartialDecodeMixin)
 
@@ -158,14 +153,12 @@ def pipeline_supports_partial_encode(
     *,
     array_array_codecs: tuple[ArrayArrayCodec, ...],
     bytes_bytes_codecs: tuple[BytesBytesCodec, ...],
-    require_no_aa_bb: bool,
 ) -> bool:
     """Whether a codec pipeline can encode a partial selection without a full rewrite.
 
-    Mirror of ``pipeline_supports_partial_decode`` for encoding. See its note re:
-    the per-pipeline ``require_no_aa_bb`` divergence.
+    Mirror of `pipeline_supports_partial_decode` for encoding.
     """
-    if require_no_aa_bb and (len(array_array_codecs) + len(bytes_bytes_codecs)) != 0:
+    if (len(array_array_codecs) + len(bytes_bytes_codecs)) != 0:
         return False
     return isinstance(array_bytes_codec, ArrayBytesCodecPartialEncodeMixin)
 
@@ -554,7 +547,6 @@ class BatchedCodecPipeline(CodecPipeline):
             self.array_bytes_codec,
             array_array_codecs=self.array_array_codecs,
             bytes_bytes_codecs=self.bytes_bytes_codecs,
-            require_no_aa_bb=True,
         )
 
     @property
@@ -563,7 +555,6 @@ class BatchedCodecPipeline(CodecPipeline):
             self.array_bytes_codec,
             array_array_codecs=self.array_array_codecs,
             bytes_bytes_codecs=self.bytes_bytes_codecs,
-            require_no_aa_bb=True,
         )
 
     def __iter__(self) -> Iterator[Codec]:
@@ -934,14 +925,12 @@ class FusedCodecPipeline(CodecPipeline):
 
     @property
     def supports_partial_decode(self) -> bool:
-        # NOTE: unlike BatchedCodecPipeline this does NOT require the AA/BB codec
-        # lists to be empty (require_no_aa_bb=False). That divergence is tracked
-        # separately; see pipeline_supports_partial_decode.
+        # Only a single ArrayBytesCodec that supports partial decoding, and no
+        # AA/BB codecs (they break the slice<->byte-range correspondence).
         return pipeline_supports_partial_decode(
             self.array_bytes_codec,
             array_array_codecs=self.array_array_codecs,
             bytes_bytes_codecs=self.bytes_bytes_codecs,
-            require_no_aa_bb=False,
         )
 
     @property
@@ -950,7 +939,6 @@ class FusedCodecPipeline(CodecPipeline):
             self.array_bytes_codec,
             array_array_codecs=self.array_array_codecs,
             bytes_bytes_codecs=self.bytes_bytes_codecs,
-            require_no_aa_bb=False,
         )
 
     def validate(
