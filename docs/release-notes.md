@@ -27,7 +27,12 @@
 - Fixed `BytesCodec.from_dict` so that `BytesCodec` instances roundtrip to / from
   their dict representation. `BytesCodec.from_dict` now interprets a missing
   `endian` configuration as `endian=None` (matching what `BytesCodec.to_dict`
-  emits), instead of falling back to the system's native byte order. ([#3417](https://github.com/zarr-developers/zarr-python/issues/3417))
+  emits), instead of falling back to the system's native byte order. As a
+  consequence, Zarr V3 array metadata that omits the `endian` configuration for
+  a multi-byte data type — which is spec-noncompliant, and only producible by
+  third-party writers, since zarr-python has always written the field —
+  previously opened and decoded assuming machine-native byte order, and now
+  fails at open time with an informative `ValueError`. ([#3417](https://github.com/zarr-developers/zarr-python/issues/3417))
 - Fixed `save_array`, `Group.__setitem__`, and `load` for 0-dimensional arrays. ([#3469](https://github.com/zarr-developers/zarr-python/issues/3469))
 - Fixed inner-codec spec evolution for sharded arrays. The sharding codec now threads the array spec through its inner codec chain when evolving codecs, so a codec that changes the dtype upstream of `BytesCodec` no longer leaves the inner chain evolved against the wrong spec (which previously failed at decode time). This runs on the default `BatchedCodecPipeline` as well. Standard inner chains (`[BytesCodec]`, `[BytesCodec, ZstdCodec]`, transpose + bytes) are byte-identical to before. Restores the behavior of #2179. ([#3885](https://github.com/zarr-developers/zarr-python/issues/3885))
 - Make chunk normalization properly handle `-1` as a compact representation of the
@@ -80,7 +85,9 @@
     ([#4074](https://github.com/zarr-developers/zarr-python/issues/4074))
 
 - Fixed writing Fortran-ordered (F-contiguous) arrays through the variable-length string and bytes codecs and through numcodecs array-array filters such as `Delta`, `FixedScaleOffset` and `PackBits`. Chunks are now passed to numcodecs as C-contiguous arrays, so elements are no longer stored in transposed order. ([#4116](https://github.com/zarr-developers/zarr-python/issues/4116))
-- Fix silent byte-order corruption for structured dtypes with the `bytes` codec: multi-byte fields are now byte-swapped to the codec's configured `endian` on write and decoded honoring it on read, so non-native-endian structured data (e.g. big-endian fields, as produced by virtual references to external data) round-trips correctly. ([#4141](https://github.com/zarr-developers/zarr-python/issues/4141))
+- Fix silent byte-order corruption for structured dtypes with the `bytes` codec: multi-byte fields are now byte-swapped to the codec's configured `endian` on write and decoded honoring it on read, so non-native-endian structured data (e.g. big-endian fields, as produced by virtual references to external data) round-trips correctly.
+
+    **Behavior change for pre-existing data**: structured-dtype arrays written by zarr-python <= 3.2.1 with an explicitly non-native `endian` in the bytes codec configuration (e.g. `endian="big"` on a little-endian machine) were stored un-swapped, in violation of their metadata; 3.3.0 now honors the metadata on read, so such arrays read back byte-swapped relative to what 3.2.1 returned. Data written with the default (native) `endian` configuration — the overwhelmingly common case — is byte-identical and unaffected. ([#4141](https://github.com/zarr-developers/zarr-python/issues/4141))
 
 ### Improved Documentation
 
@@ -129,6 +136,15 @@
   access, and will be removed in a future release. ``BloscCodec.cname`` and
   ``BloscCodec.shuffle`` are now plain strings rather than enum members.
 
+    Because these attributes are now plain strings, enum-specific idioms fail
+    immediately rather than going through a deprecation cycle: accessing
+    ``.value`` or ``.name`` on e.g. ``codec.shuffle`` raises ``AttributeError``;
+    calling the class (``BloscShuffle("bitshuffle")``), subscripting it
+    (``BloscShuffle["bitshuffle"]``), and iterating over it all raise
+    ``TypeError``; and ``isinstance`` checks against the enum classes now always
+    evaluate ``False``. Equality comparisons against enum members still evaluate
+    ``True``.
+
     Additional renames in ``zarr.codecs.blosc`` from the same change: the type
     aliases ``Shuffle`` and ``CName`` are now ``BloscShuffleLiteral`` and
     ``BloscCnameLiteral``, the constant ``SHUFFLE`` is now ``BLOSC_SHUFFLE``
@@ -142,6 +158,14 @@
   on member access, and will be removed in a future release. ``BytesCodec.endian``
   and ``ShardingCodec.index_location`` are now plain strings rather than enum
   members.
+
+    Because these attributes are now plain strings, enum-specific idioms fail
+    immediately rather than going through a deprecation cycle: accessing
+    ``.value`` or ``.name`` on e.g. ``codec.endian`` raises ``AttributeError``;
+    calling the class (``Endian("little")``), subscripting it, and iterating
+    over it all raise ``TypeError``; and ``isinstance`` checks against the enum
+    classes now always evaluate ``False``. Equality comparisons against enum
+    members still evaluate ``True``.
 
     Two follow-on changes from this deprecation:
 
@@ -162,6 +186,7 @@
 
 ### Misc
 
+- The minimum supported version of `typing_extensions` is now 4.14, which is required at runtime for `typing_extensions.Sentinel`. The `gpu` optional-dependency extra no longer installs CuPy on macOS (`cupy-cuda12x` now carries the environment marker `sys_platform != 'darwin'`). ([#4046](https://github.com/zarr-developers/zarr-python/issues/4046))
 - [#214](https://github.com/zarr-developers/zarr-python/issues/214), [#215](https://github.com/zarr-developers/zarr-python/issues/215), [#3908](https://github.com/zarr-developers/zarr-python/issues/3908), [#3972](https://github.com/zarr-developers/zarr-python/issues/3972), [#3975](https://github.com/zarr-developers/zarr-python/issues/3975), [#3979](https://github.com/zarr-developers/zarr-python/issues/3979), [#3990](https://github.com/zarr-developers/zarr-python/issues/3990), [#3998](https://github.com/zarr-developers/zarr-python/issues/3998), [#4000](https://github.com/zarr-developers/zarr-python/issues/4000), [#4001](https://github.com/zarr-developers/zarr-python/issues/4001), [#4046](https://github.com/zarr-developers/zarr-python/issues/4046), [#4054](https://github.com/zarr-developers/zarr-python/issues/4054), [#4073](https://github.com/zarr-developers/zarr-python/issues/4073), [#4086](https://github.com/zarr-developers/zarr-python/issues/4086), [#4138](https://github.com/zarr-developers/zarr-python/issues/4138)
 
 
