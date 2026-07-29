@@ -88,11 +88,15 @@ def _iter_sorted_1d_array_map(
 ) -> Iterator[ChunkTransformResult]:
     """Resolve a sorted 1-D ArrayMap one touched chunk at a time."""
     start = 0
+    last_chunk = dim_grid.index_to_chunk(int(storage[-1]))
     while start < storage.size:
         chunk = dim_grid.index_to_chunk(int(storage[start]))
         chunk_start = dim_grid.chunk_offset(chunk)
-        chunk_stop = chunk_start + dim_grid.chunk_size(chunk)
-        stop = int(np.searchsorted(storage, chunk_stop, side="left"))
+        if chunk == last_chunk:
+            stop = storage.size
+        else:
+            chunk_stop = chunk_start + dim_grid.chunk_size(chunk)
+            stop = int(np.searchsorted(storage, chunk_stop, side="left"))
 
         restricted = IndexTransform(
             domain=IndexDomain(inclusive_min=(0,), exclusive_max=(stop - start,)),
