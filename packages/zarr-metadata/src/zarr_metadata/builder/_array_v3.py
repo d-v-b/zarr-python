@@ -13,6 +13,7 @@ from zarr_metadata.model._validation import (
     ARRAY_METADATA_STANDARD_KEYS_V3,
     MetadataValidationError,
     ValidationProblem,
+    arrays_to_tuples,
     parse_array_metadata_v3,
 )
 
@@ -27,6 +28,18 @@ if TYPE_CHECKING:
         ZarrV3ArrayMetadataJSONPartial,
         ZarrV3ExtensionField,
     )
+
+
+def _normalized(inner: ZarrV3ArrayMetadataJSONPartial) -> ZarrV3ArrayMetadataJSONPartial:
+    """A deep copy of `inner` with JSON arrays materialized as tuples.
+
+    Normalizing at ingestion (rather than deep-copying accessors' return
+    values alone) is what makes the no-shared-mutable-state contract hold
+    for runtime callers the type checker never saw: a list smuggled in as
+    `shape` becomes a tuple here, so no property can hand out a reference
+    whose mutation would corrupt the builder behind the eager rules' back.
+    """
+    return cast("ZarrV3ArrayMetadataJSONPartial", arrays_to_tuples(copy.deepcopy(inner)))
 
 
 class ZarrV3ArrayMetadataBuilder:
@@ -69,9 +82,13 @@ class ZarrV3ArrayMetadataBuilder:
     accumulated so far under an honest partial type. There is no
     `build_unchecked`.
 
-    Instances never share mutable state: input mappings are deep-copied in,
-    and every accessor and serializer deep-copies out. Reading a field via
-    its property answers `UNSET` (PEP 661 sentinel; test with `is UNSET`)
+    Instances never share mutable state: input mappings are deep-copied in
+    with JSON arrays materialized as tuples at every depth, and every
+    accessor and serializer deep-copies out. The tuple normalization also
+    makes equality spelling-insensitive: two builders holding the same
+    document compare equal whether their arrays arrived as lists (e.g.
+    straight from `json.loads`) or as tuples. Reading a field via its
+    property answers `UNSET` (PEP 661 sentinel; test with `is UNSET`)
     when the key is absent.
     """
 
@@ -79,7 +96,7 @@ class ZarrV3ArrayMetadataBuilder:
     _inner: ZarrV3ArrayMetadataJSONPartial
 
     def __init__(self, inner: ZarrV3ArrayMetadataJSONPartial | None = None) -> None:
-        self._inner = copy.deepcopy(inner) if inner is not None else {}
+        self._inner = _normalized(inner) if inner is not None else {}
         self._check(changed=frozenset(self._inner.keys()))
 
     # -- evolution ----------------------------------------------------------
@@ -129,9 +146,7 @@ class ZarrV3ArrayMetadataBuilder:
 
     def _evolved(self, changes: ZarrV3ArrayMetadataJSONPartial) -> Self:
         new = type(self).__new__(type(self))
-        new._inner = copy.deepcopy(
-            cast("ZarrV3ArrayMetadataJSONPartial", {**self._inner, **changes})
-        )
+        new._inner = _normalized(cast("ZarrV3ArrayMetadataJSONPartial", {**self._inner, **changes}))
         new._check(changed=frozenset(changes.keys()))
         return new
 
@@ -200,15 +215,15 @@ class ZarrV3ArrayMetadataBuilder:
 
     @property
     def zarr_format(self) -> Literal[3] | UNSET:
-        return self._inner.get("zarr_format", UNSET)
+        return copy.deepcopy(self._inner.get("zarr_format", UNSET))
 
     @property
     def node_type(self) -> Literal["array"] | UNSET:
-        return self._inner.get("node_type", UNSET)
+        return copy.deepcopy(self._inner.get("node_type", UNSET))
 
     @property
     def shape(self) -> tuple[int, ...] | UNSET:
-        return self._inner.get("shape", UNSET)
+        return copy.deepcopy(self._inner.get("shape", UNSET))
 
     @property
     def data_type(self) -> ZarrV3MetadataFieldJSON | UNSET:
@@ -240,7 +255,7 @@ class ZarrV3ArrayMetadataBuilder:
 
     @property
     def dimension_names(self) -> tuple[str | None, ...] | UNSET:
-        return self._inner.get("dimension_names", UNSET)
+        return copy.deepcopy(self._inner.get("dimension_names", UNSET))
 
     @property
     def extension_fields(self) -> dict[str, ZarrV3ExtensionField]:

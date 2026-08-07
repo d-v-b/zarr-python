@@ -8,23 +8,33 @@ This module provides one branded union per kind over the concrete codec
 types this package defines, plus `TypeIs` guards that classify a codec
 entry by its `name`.
 
-The guards classify; they do not validate. A guard answering `True` means
-"this entry names a codec of this kind (in a JSON shape its spec
-permits)" — it does not re-check the `configuration` contents, which is
-the job of structural validation at parse boundaries. Feed the guards
-metadata that has already been validated (or that you otherwise trust to
-be spec-shaped); classifying a malformed document narrows to a type its
-configuration may not satisfy.
+Two classification surfaces with different contracts:
 
-Codecs this package has no types for (extension codecs from outside
-`zarr-extensions`) answer `False` to every guard: an unknown codec has
-unknown kind. Callers enforcing pipeline structure should treat
-"unclassifiable" as its own case, not as any particular kind.
+- The `TypeIs` guards (`is_array_array_codec`, ...) are *spelling-strict*:
+  they answer `True` only for JSON shapes the codec's canonical type
+  permits, because `TypeIs` narrowing must be sound — a bare `"transpose"`
+  is not a `TransposeCodecObject`, so narrowing it to one would lie to the
+  type checker. Use the guards to narrow a value to a concrete codec type.
+- `codec_kind_of_name` classifies by *name alone*, ignoring spelling. Use
+  it for pipeline-ordering semantics, where a known codec in an invalid
+  spelling must still rank as its kind: two spellings of the same pipeline
+  must never get different ordering verdicts, and a misspelled known codec
+  must not be mistaken for an unknown extension (which would suppress the
+  exactly-one-`array->bytes` count).
+
+Neither surface validates. The guards do not re-check `configuration`
+contents, and `codec_kind_of_name` does not check spelling at all;
+spelling validity for known names is the job of the semantic rule layer
+(`zarr_metadata.builder`). Codecs this package has no types for
+(extension codecs from outside `zarr-extensions`) answer `False` to every
+guard and `None` from `codec_kind_of_name`: an unknown codec has unknown
+kind. Callers enforcing pipeline structure should treat "unclassifiable"
+as its own case, not as any particular kind.
 
 See https://zarr-specs.readthedocs.io/en/latest/v3/codecs/index.html
 """
 
-from typing import Final
+from typing import Final, Literal
 
 from typing_extensions import TypeIs
 
@@ -114,6 +124,27 @@ def is_known_codec(codec: ZarrV3MetadataFieldJSON) -> TypeIs[KnownCodecMetadata]
     return is_array_array_codec(codec) or is_array_bytes_codec(codec) or is_bytes_bytes_codec(codec)
 
 
+CodecKind = Literal["array_array", "array_bytes", "bytes_bytes"]
+"""The three pipeline positions the v3 spec sorts codecs into."""
+
+
+def codec_kind_of_name(name: str) -> CodecKind | None:
+    """The pipeline kind of the codec named `name`, or None if unknown.
+
+    Classifies by name alone, with no spelling judgment: `"transpose"`
+    answers `"array_array"` here even though the bare-string spelling is
+    not valid transpose metadata (the `TypeIs` guards answer False for
+    it). See the module docstring for when to use which surface.
+    """
+    if name in ARRAY_ARRAY_CODEC_NAMES:
+        return "array_array"
+    if name in ARRAY_BYTES_CODEC_NAMES:
+        return "array_bytes"
+    if name in BYTES_BYTES_CODEC_NAMES:
+        return "bytes_bytes"
+    return None
+
+
 __all__ = [
     "ARRAY_ARRAY_CODEC_NAMES",
     "ARRAY_BYTES_CODEC_NAMES",
@@ -121,7 +152,9 @@ __all__ = [
     "ArrayArrayCodecMetadata",
     "ArrayBytesCodecMetadata",
     "BytesBytesCodecMetadata",
+    "CodecKind",
     "KnownCodecMetadata",
+    "codec_kind_of_name",
     "is_array_array_codec",
     "is_array_bytes_codec",
     "is_bytes_bytes_codec",

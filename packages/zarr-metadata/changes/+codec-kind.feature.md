@@ -7,4 +7,8 @@ branded union per spec pipeline kind over the concrete codec types
 `is_known_codec`) that classify a codec entry by its `name` and narrow it
 to the matching union. Unknown codec names answer `False` to every guard,
 so extension codecs classify as "unknown kind" rather than being
-misassigned. All names are re-exported from `zarr_metadata.v3.codec`.
+misassigned. The guards are spelling-strict (narrowing must be sound);
+the companion `codec_kind_of_name` classifies by name alone, returning a
+`CodecKind` literal or `None`, for ordering semantics where a known codec
+in an invalid spelling must still rank as its kind. All names are
+re-exported from `zarr_metadata.v3.codec`.

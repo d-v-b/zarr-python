@@ -281,6 +281,7 @@ _STANDALONE_VOCAB = frozenset(
         "BloscShuffle",
         "CastOutOfRangeMode",
         "CastRoundingMode",
+        "CodecKind",
         "Endianness",
         "HexFloat16",
         "HexFloat32",

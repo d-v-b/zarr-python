@@ -23,7 +23,13 @@ leaves the complaint to the structural validator.
 Extension openness: rules never reject what they cannot interpret. An
 unknown data type name accepts any fill value here (its own validator is
 whoever understands it), an unknown codec has unknown kind, and unknown
-configuration contents pass through untouched.
+configuration contents pass through untouched. Openness is for genuinely
+unknown names only, though: a codec or chunk-grid name this package
+defines is held to its canonical spellings (bare form only where the
+concrete type permits it, required configuration keys present), and a
+known codec ranks as its pipeline kind in every spelling — otherwise a
+misspelled known name would masquerade as an unknown extension and
+silently escape both the spelling and the ordering checks.
 """
 
 from __future__ import annotations
@@ -35,18 +41,49 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, cast
 
 from zarr_metadata.model._validation import ValidationProblem
-from zarr_metadata.v3.codec.kind import (
-    is_array_array_codec,
-    is_array_bytes_codec,
-    is_bytes_bytes_codec,
+from zarr_metadata.v3.chunk_grid.rectilinear import (
+    RECTILINEAR_CHUNK_GRID_NAME,
+    RectilinearChunkGridConfiguration,
+    RectilinearChunkGridObject,
 )
+from zarr_metadata.v3.chunk_grid.regular import (
+    REGULAR_CHUNK_GRID_NAME,
+    RegularChunkGridConfiguration,
+    RegularChunkGridObject,
+)
+from zarr_metadata.v3.codec.blosc import BLOSC_CODEC_NAME, BloscCodecConfiguration, BloscCodecObject
+from zarr_metadata.v3.codec.bytes import BYTES_CODEC_NAME, BytesCodecConfiguration, BytesCodecObject
+from zarr_metadata.v3.codec.cast_value import (
+    CAST_VALUE_CODEC_NAME,
+    CastValueCodecConfiguration,
+    CastValueCodecObject,
+)
+from zarr_metadata.v3.codec.crc32c import CRC32C_CODEC_NAME, Crc32cCodecObject, Empty
+from zarr_metadata.v3.codec.gzip import GZIP_CODEC_NAME, GzipCodecConfiguration, GzipCodecObject
+from zarr_metadata.v3.codec.kind import codec_kind_of_name
+from zarr_metadata.v3.codec.scale_offset import (
+    SCALE_OFFSET_CODEC_NAME,
+    ScaleOffsetCodecConfiguration,
+    ScaleOffsetCodecObject,
+)
+from zarr_metadata.v3.codec.sharding_indexed import (
+    SHARDING_INDEXED_CODEC_NAME,
+    ShardingIndexedCodecConfiguration,
+    ShardingIndexedCodecObject,
+)
+from zarr_metadata.v3.codec.transpose import (
+    TRANSPOSE_CODEC_NAME,
+    TransposeCodecConfiguration,
+    TransposeCodecObject,
+)
+from zarr_metadata.v3.codec.zstd import ZSTD_CODEC_NAME, ZstdCodecConfiguration, ZstdCodecObject
 from zarr_metadata.v3.data_type.bytes import base64_bytes
 from zarr_metadata.v3.data_type.float16 import hex_float16
 from zarr_metadata.v3.data_type.float32 import hex_float32
 from zarr_metadata.v3.data_type.float64 import hex_float64
 
 if TYPE_CHECKING:
-    from zarr_metadata.v3._common import ZarrV3MetadataFieldJSON
+    from zarr_metadata.v3.codec.kind import CodecKind
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,33 +282,36 @@ def _check_fill_matches_dtype(document: Mapping[str, object]) -> list[Validation
 _KIND_RANK: Final = {"array_array": 0, "array_bytes": 1, "bytes_bytes": 2}
 
 
-def _codec_entry(codec: object) -> ZarrV3MetadataFieldJSON | None:
-    """`codec` as a classifiable metadata field, or None.
+def _field_name(value: object) -> str | None:
+    """The `name` of a metadata field entry in any spelling, or None.
 
-    The kind guards take `ZarrV3MetadataFieldJSON`; anything else (or a
-    mapping without a string `name`) is structurally invalid and stays
-    unclassified.
+    A bare string is its own name; an object's name is its `name` member.
+    Anything else (or a mapping without a string `name`) has no name and
+    stays unclassified — its complaint belongs to the structural validator.
     """
-    if isinstance(codec, str):
-        return codec
-    mapping = _as_string_mapping(codec)
-    if mapping is None or not isinstance(mapping.get("name"), str):
+    if isinstance(value, str):
+        return value
+    mapping = _as_string_mapping(value)
+    if mapping is None:
         return None
-    # Sound cast: the guards only read `name`, which we just verified.
-    return cast("ZarrV3MetadataFieldJSON", mapping)
+    name = mapping.get("name")
+    return name if isinstance(name, str) else None
 
 
-def _codec_kind(codec: object) -> str | None:
-    entry = _codec_entry(codec)
-    if entry is None:
+def _codec_kind(codec: object) -> CodecKind | None:
+    """The pipeline kind of `codec`, classified by name alone.
+
+    Spelling-insensitive on purpose: a known codec in an invalid spelling
+    (bare `"transpose"`, config-less `"gzip"` object) still ranks as its
+    kind, so two spellings of the same pipeline always get the same
+    ordering verdict and a misspelled known codec is never mistaken for an
+    unknown extension (which would suppress the exactly-one-`array->bytes`
+    count). Spelling validity itself is `_check_codec_spellings`' job.
+    """
+    name = _field_name(codec)
+    if name is None:
         return None
-    if is_array_array_codec(entry):
-        return "array_array"
-    if is_array_bytes_codec(entry):
-        return "array_bytes"
-    if is_bytes_bytes_codec(entry):
-        return "bytes_bytes"
-    return None  # unknown codec: unknown kind
+    return codec_kind_of_name(name)
 
 
 def _codec_label(codec: object) -> str:
@@ -286,10 +326,12 @@ def _codec_label(codec: object) -> str:
 def _check_codec_pipeline_order(document: Mapping[str, object]) -> list[ValidationProblem]:
     """The spec pipeline shape: `array->array`* `array->bytes` `bytes->bytes`*.
 
-    Codecs of unknown kind are skipped: they impose no ordering constraint,
-    and their presence makes the exactly-one-`array->bytes` count
-    inconclusive (an unknown codec might be the pipeline's `array->bytes`
-    stage), so that check only fires when every codec is classified.
+    Codecs are classified by name across every spelling (see
+    `_codec_kind`). Codecs of genuinely unknown name are skipped: they
+    impose no ordering constraint, and their presence makes the
+    exactly-one-`array->bytes` count inconclusive (an unknown codec might
+    be the pipeline's `array->bytes` stage), so that check only fires when
+    every codec is classified.
     """
     entries = _as_sequence(document["codecs"])
     if entries is None:
@@ -332,6 +374,149 @@ def _check_codec_pipeline_order(document: Mapping[str, object]) -> list[Validati
             )
         )
     return problems
+
+
+# ---------------------------------------------------------------------------
+# known-name spellings
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _KnownFieldSpelling:
+    """The spelling constraints of one known metadata-field name.
+
+    Derived from the concrete TypedDicts' `__required_keys__` rather than
+    restated by hand, so the registry cannot drift from the canonical
+    types: `configuration_required` is whether the object form requires a
+    `configuration` member (which is also exactly when the bare-string
+    short-hand is not part of the canonical union), and
+    `required_configuration_keys` are the keys the configuration itself
+    requires.
+    """
+
+    configuration_required: bool
+    required_configuration_keys: frozenset[str]
+
+
+def _spelling(
+    object_required: frozenset[str], configuration_required: frozenset[str]
+) -> _KnownFieldSpelling:
+    return _KnownFieldSpelling("configuration" in object_required, configuration_required)
+
+
+_KNOWN_CODEC_SPELLINGS: Final[dict[str, _KnownFieldSpelling]] = {
+    BLOSC_CODEC_NAME: _spelling(
+        BloscCodecObject.__required_keys__, BloscCodecConfiguration.__required_keys__
+    ),
+    BYTES_CODEC_NAME: _spelling(
+        BytesCodecObject.__required_keys__, BytesCodecConfiguration.__required_keys__
+    ),
+    CAST_VALUE_CODEC_NAME: _spelling(
+        CastValueCodecObject.__required_keys__, CastValueCodecConfiguration.__required_keys__
+    ),
+    CRC32C_CODEC_NAME: _spelling(Crc32cCodecObject.__required_keys__, Empty.__required_keys__),
+    GZIP_CODEC_NAME: _spelling(
+        GzipCodecObject.__required_keys__, GzipCodecConfiguration.__required_keys__
+    ),
+    SCALE_OFFSET_CODEC_NAME: _spelling(
+        ScaleOffsetCodecObject.__required_keys__, ScaleOffsetCodecConfiguration.__required_keys__
+    ),
+    SHARDING_INDEXED_CODEC_NAME: _spelling(
+        ShardingIndexedCodecObject.__required_keys__,
+        ShardingIndexedCodecConfiguration.__required_keys__,
+    ),
+    TRANSPOSE_CODEC_NAME: _spelling(
+        TransposeCodecObject.__required_keys__, TransposeCodecConfiguration.__required_keys__
+    ),
+    ZSTD_CODEC_NAME: _spelling(
+        ZstdCodecObject.__required_keys__, ZstdCodecConfiguration.__required_keys__
+    ),
+}
+
+_KNOWN_CHUNK_GRID_SPELLINGS: Final[dict[str, _KnownFieldSpelling]] = {
+    REGULAR_CHUNK_GRID_NAME: _spelling(
+        RegularChunkGridObject.__required_keys__, RegularChunkGridConfiguration.__required_keys__
+    ),
+    RECTILINEAR_CHUNK_GRID_NAME: _spelling(
+        RectilinearChunkGridObject.__required_keys__,
+        RectilinearChunkGridConfiguration.__required_keys__,
+    ),
+}
+
+
+def _check_known_spelling(
+    value: object,
+    known: Mapping[str, _KnownFieldSpelling],
+    entity: str,
+    loc: tuple[str | int, ...],
+) -> list[ValidationProblem]:
+    """Spelling problems for one metadata-field entry against `known`.
+
+    Unknown names pass untouched (extension openness); known names must be
+    in a spelling their canonical type permits. Only key *presence* is
+    checked — configuration value types are structural territory. Entries
+    without an interpretable name, and configurations that are not
+    string-keyed mappings, decline in favor of the structural validator.
+    """
+    name = _field_name(value)
+    if name is None:
+        return []
+    spelling = known.get(name)
+    if spelling is None:
+        return []  # unknown name: its spellings are not ours to judge
+    if isinstance(value, str):
+        if not spelling.configuration_required:
+            return []
+        return [
+            ValidationProblem(
+                loc,
+                f"{entity} {name!r} requires a configuration and has no bare short-hand "
+                f"form; use {{'name': {name!r}, 'configuration': {{...}}}}",
+                "invalid_value",
+            )
+        ]
+    mapping = _as_string_mapping(value)
+    if mapping is None:
+        return []
+    if "configuration" not in mapping:
+        if not spelling.configuration_required:
+            return []
+        return [
+            ValidationProblem(
+                (*loc, "configuration"),
+                f"{entity} {name!r} requires a 'configuration' object",
+                "missing_key",
+            )
+        ]
+    configuration = _as_string_mapping(mapping["configuration"])
+    if configuration is None:
+        return []
+    return [
+        ValidationProblem(
+            (*loc, "configuration", key),
+            f"configuration for {entity} {name!r} is missing required key {key!r}",
+            "missing_key",
+        )
+        for key in sorted(spelling.required_configuration_keys - configuration.keys())
+    ]
+
+
+def _check_codec_spellings(document: Mapping[str, object]) -> list[ValidationProblem]:
+    entries = _as_sequence(document["codecs"])
+    if entries is None:
+        return []
+    problems: list[ValidationProblem] = []
+    for index, codec in enumerate(entries):
+        problems.extend(
+            _check_known_spelling(codec, _KNOWN_CODEC_SPELLINGS, "codec", ("codecs", index))
+        )
+    return problems
+
+
+def _check_chunk_grid_spelling(document: Mapping[str, object]) -> list[ValidationProblem]:
+    return _check_known_spelling(
+        document["chunk_grid"], _KNOWN_CHUNK_GRID_SPELLINGS, "chunk grid", ("chunk_grid",)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -384,6 +569,8 @@ def _check_regular_grid_dimensions(document: Mapping[str, object]) -> list[Valid
 ZARR_V3_ARRAY_RULES: Final[tuple[Rule, ...]] = (
     Rule(frozenset({"data_type", "fill_value"}), _check_fill_matches_dtype),
     Rule(frozenset({"codecs"}), _check_codec_pipeline_order),
+    Rule(frozenset({"codecs"}), _check_codec_spellings),
+    Rule(frozenset({"chunk_grid"}), _check_chunk_grid_spelling),
     Rule(frozenset({"shape", "dimension_names"}), _check_dimension_names_length),
     Rule(frozenset({"shape", "chunk_grid"}), _check_regular_grid_dimensions),
 )

@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from zarr_metadata.v3.codec.kind import (
+    codec_kind_of_name,
     is_array_array_codec,
     is_array_bytes_codec,
     is_bytes_bytes_codec,
@@ -77,3 +78,25 @@ def test_classification(codec: ZarrV3MetadataFieldJSON, kind: str | None) -> Non
     assert is_array_bytes_codec(codec) is (kind == "ab")
     assert is_bytes_bytes_codec(codec) is (kind == "bb")
     assert is_known_codec(codec) is (kind is not None)
+
+
+# (codec name, expected kind) — `codec_kind_of_name` classifies by name
+# alone, so a name answers its kind even where the bare spelling is not
+# valid metadata for that codec (unlike the spelling-strict guards above).
+NAME_CASES: dict[str, str | None] = {
+    "transpose": "array_array",
+    "cast_value": "array_array",
+    "scale_offset": "array_array",
+    "bytes": "array_bytes",
+    "sharding_indexed": "array_bytes",
+    "blosc": "bytes_bytes",
+    "crc32c": "bytes_bytes",
+    "gzip": "bytes_bytes",
+    "zstd": "bytes_bytes",
+    "lightspeed": None,
+}
+
+
+@pytest.mark.parametrize(("name", "kind"), NAME_CASES.items(), ids=list(NAME_CASES))
+def test_kind_of_name(name: str, kind: str | None) -> None:
+    assert codec_kind_of_name(name) == kind

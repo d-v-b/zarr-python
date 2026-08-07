@@ -106,6 +106,27 @@ CASES: dict[str, tuple[Sequence[dict[str, Any]], dict[str, Any]]] = {
         _steps(COMPLETE, {"data_type": {"name": "unknowable"}, "fill_value": None}),
         {**COMPLETE, "data_type": {"name": "unknowable"}, "fill_value": None},
     ),
+    "json-loads-input-normalizes-to-tuples": (
+        # Arrays arriving as lists (straight from json.loads) are
+        # materialized as tuples at ingestion, so the built document is
+        # spelling-identical to its tuple-spelled twin.
+        _steps(
+            {
+                **COMPLETE,
+                "shape": [4, 4],
+                "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [2, 2]}},
+                "codecs": ["bytes"],
+            }
+        ),
+        COMPLETE,
+    ),
+    "bare-spellings-where-permitted": (
+        # scale_offset/bytes/crc32c have no required configuration, so
+        # their bare short-hand spellings are canonical and pass the
+        # spelling rule.
+        _steps(COMPLETE, {"codecs": ("scale_offset", "bytes", "crc32c")}),
+        {**COMPLETE, "codecs": ("scale_offset", "bytes", "crc32c")},
+    ),
 }
 
 
@@ -162,6 +183,17 @@ def test_immutability() -> None:
     assert partial == builder.to_partial_json()
     partial["shape"] = (1,)
     assert builder.shape == (4, 4)
+
+
+def test_runtime_list_input_cannot_corrupt_builder() -> None:
+    # Regression: `shape`/`dimension_names` used to hand out the internal
+    # object, so a list smuggled past the type checker could be mutated in
+    # place, corrupting the builder behind the eager rules' back.
+    builder = ZarrV3ArrayMetadataBuilder().evolve(shape=[2, 2], dimension_names=["a", "b"])  # type: ignore[arg-type]
+    assert builder.shape == (2, 2)  # normalized to a tuple: no .append to abuse
+    assert builder.dimension_names == ("a", "b")
+    # and equality is spelling-insensitive as a consequence
+    assert builder == ZarrV3ArrayMetadataBuilder().evolve(shape=(2, 2), dimension_names=("a", "b"))
 
 
 def test_to_partial_json_always_succeeds() -> None:
@@ -223,6 +255,70 @@ def test_error_regular_grid_dimensions() -> None:
             shape=(4, 4),
             chunk_grid={"name": "regular", "configuration": {"chunk_shape": (2,)}},
         )
+
+
+def test_error_bare_spelling_of_config_required_codec() -> None:
+    # Regression: bare "transpose" used to pass as an unknown extension,
+    # suppressing both the spelling check and the exactly-one-array->bytes
+    # count — build() would emit a pipeline with no array->bytes codec.
+    with pytest.raises(MetadataValidationError) as info:
+        ZarrV3ArrayMetadataBuilder().evolve(codecs=("transpose",))
+    messages = [p.message for p in info.value.problems]
+    assert any("no bare short-hand form" in m for m in messages)
+    assert any("no array->bytes codec" in m for m in messages)
+
+
+def test_error_known_codec_missing_configuration_key() -> None:
+    with pytest.raises(MetadataValidationError) as info:
+        ZarrV3ArrayMetadataBuilder().evolve(codecs=("bytes", {"name": "gzip", "configuration": {}}))
+    (problem,) = info.value.problems
+    assert problem.loc == ("codecs", 1, "configuration", "level")
+    assert problem.kind == "missing_key"
+
+
+def test_error_known_codec_missing_configuration_object() -> None:
+    with pytest.raises(MetadataValidationError) as info:
+        ZarrV3ArrayMetadataBuilder().evolve(codecs=({"name": "transpose"}, "bytes"))
+    (problem,) = info.value.problems
+    assert problem.loc == ("codecs", 0, "configuration")
+    assert problem.kind == "missing_key"
+
+
+def test_error_bare_chunk_grid_spelling() -> None:
+    with pytest.raises(MetadataValidationError, match="no bare short-hand form"):
+        ZarrV3ArrayMetadataBuilder().evolve(chunk_grid="regular")
+
+
+def test_error_chunk_grid_missing_configuration_object() -> None:
+    with pytest.raises(MetadataValidationError, match="requires a 'configuration' object"):
+        ZarrV3ArrayMetadataBuilder().evolve(chunk_grid={"name": "regular"})
+
+
+def test_error_chunk_grid_missing_configuration_key() -> None:
+    with pytest.raises(MetadataValidationError) as info:
+        ZarrV3ArrayMetadataBuilder().evolve(chunk_grid={"name": "regular", "configuration": {}})
+    (problem,) = info.value.problems
+    assert problem.loc == ("chunk_grid", "configuration", "chunk_shape")
+    assert problem.kind == "missing_key"
+
+
+def test_spelling_verdicts_agree_across_model_normalization() -> None:
+    # Regression: the model layer collapses empty-config codecs to bare
+    # names, and bare "gzip" used to classify as an unknown extension —
+    # so a document the builder rejected round-tripped through the model
+    # into one the rules accepted. Both spellings must now be rejected.
+    from zarr_metadata.builder._rules import ZARR_V3_ARRAY_RULES, run_rules
+    from zarr_metadata.model import ZarrV3ArrayMetadata
+
+    doc = {
+        **COMPLETE,
+        "codecs": ({"name": "gzip", "configuration": {}}, {"name": "bytes", "configuration": {}}),
+    }
+    with pytest.raises(MetadataValidationError):
+        ZarrV3ArrayMetadataBuilder(doc)
+    normalized = ZarrV3ArrayMetadata.from_json(doc).to_json()
+    assert normalized["codecs"] == ("gzip", "bytes")  # the collapsed spelling
+    assert run_rules(ZARR_V3_ARRAY_RULES, normalized)  # still rejected
 
 
 def test_error_build_incomplete_reports_every_missing_key() -> None:
