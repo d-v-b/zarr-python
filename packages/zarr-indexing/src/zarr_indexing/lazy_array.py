@@ -170,6 +170,7 @@ from zarr_indexing.reader import (
     numpy_reader,
 )
 from zarr_indexing.transform import (
+    BasicSelection,
     IndexTransform,
 )
 
@@ -543,7 +544,7 @@ class Partition:
         return self.projection.coverage == "full"
 
     @property
-    def source_selection(self) -> tuple[int | slice | None, ...]:
+    def source_selection(self) -> BasicSelection:
         """The basic selection on the raw wrapped array that reads this part.
 
         Lowered from `view.transform` by
@@ -586,7 +587,7 @@ class Partition:
         return self.view.transform.as_basic_selection()
 
     @property
-    def chunk_local_selection(self) -> tuple[int | slice | None, ...]:
+    def chunk_local_selection(self) -> BasicSelection:
         """The same read as `source_selection`, relative to the part's grid cell.
 
         Lowered from `projection.chunk_transform`, so coordinate 0 per axis is

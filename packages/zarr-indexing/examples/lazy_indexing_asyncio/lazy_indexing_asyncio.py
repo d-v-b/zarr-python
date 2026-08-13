@@ -22,7 +22,7 @@ import pytest
 import zarr
 import zarr.api.asynchronous
 
-from zarr_indexing import LazyArray, NoBasicSelectionError, Partition
+from zarr_indexing import BasicSelection, LazyArray, NoBasicSelectionError, Partition
 
 
 class AsyncSource(Protocol):
@@ -33,7 +33,7 @@ class AsyncSource(Protocol):
     wrapper, a database. The planner never sees this object.
     """
 
-    async def getitem(self, selection: Any) -> Any: ...
+    async def getitem(self, selection: BasicSelection) -> Any: ...
 
 
 @pytest.fixture

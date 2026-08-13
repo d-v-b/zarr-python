@@ -58,6 +58,20 @@ if TYPE_CHECKING:
     from zarr_indexing.json import IndexTransformJSON
 
 
+type BasicSelection = tuple[int | slice | None, ...]
+"""A selection in NumPy's basic-indexing dialect: one selector per axis.
+
+The request vocabulary of `source[selection]` under basic indexing — also the
+parameter type of `zarr.AsyncArray.getitem`. Denotationally a product of
+arithmetic progressions: an `int` reads one coordinate and drops its axis, a
+`slice` reads an arithmetic progression, and `None` fabricates an axis no
+source axis backs. Produced by
+[`IndexTransform.as_basic_selection`][zarr_indexing.transform.IndexTransform.as_basic_selection]
+and the `Partition` lowering properties; which cells a value denotes is
+relative to the array it is applied to.
+"""
+
+
 @dataclass(frozen=True, slots=True)
 class _PointOutOfBounds(Exception):
     """Internal signal from the shared point kernel: one coordinate left the domain.
@@ -452,7 +466,7 @@ class IndexTransform:
             output=tuple(inverse_output[dimension] for dimension in range(self.input_rank)),
         )
 
-    def as_basic_selection(self) -> tuple[int | slice | None, ...]:
+    def as_basic_selection(self) -> BasicSelection:
         """Lower a box transform to the NumPy basic selection it describes.
 
         Returns one selector per output dimension, plus a `None` for each
@@ -1492,7 +1506,7 @@ def _intersect_general(
     return (result, out_indices.astype(np.intp))
 
 
-def _normalize_basic_selection(selection: Any, ndim: int) -> tuple[int | slice | None, ...]:
+def _normalize_basic_selection(selection: Any, ndim: int) -> BasicSelection:
     """Normalize a selection to a tuple of int, slice, or None (newaxis),
     expanding ellipsis and padding with slice(None) as needed.
     """
@@ -1552,7 +1566,7 @@ def _positional_slice(pos: int, size: int, step: int) -> slice:
 
 def _reindex_array(
     m: ArrayMap,
-    normalized: tuple[int | slice | None, ...],
+    normalized: BasicSelection,
     domain: IndexDomain,
 ) -> np.ndarray[Any, np.dtype[np.intp]]:
     """Apply basic indexing operations to an ArrayMap's index_array.

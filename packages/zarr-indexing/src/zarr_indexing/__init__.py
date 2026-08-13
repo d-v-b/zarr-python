@@ -73,6 +73,7 @@ from zarr_indexing.reader import (
     unit_step_reader,
 )
 from zarr_indexing.transform import (
+    BasicSelection,
     IndexTransform,
 )
 
@@ -81,6 +82,7 @@ __version__ = version("zarr-indexing")
 __all__ = [
     "ArrayMap",
     "BasicReader",
+    "BasicSelection",
     "BoundsCheckError",
     "ChunkCoverage",
     "ChunkGrid",
