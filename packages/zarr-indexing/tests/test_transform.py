@@ -435,13 +435,25 @@ class TestAsBasicSelection:
                 IndexTransform.from_shape((5, 7)).oindex[[3], [2]],
                 id="two-collapsed-gathers",
             ),
+            # An axis nothing reads is one the selection fabricated, in every
+            # position it can hold relative to the axes that are read.
+            pytest.param(IndexTransform.from_shape((5, 7))[None], id="leading-newaxis"),
+            pytest.param(IndexTransform.from_shape((5, 7))[:, None], id="interior-newaxis"),
+            pytest.param(IndexTransform.from_shape((10,))[:, None], id="trailing-newaxis"),
+            pytest.param(IndexTransform.from_shape((10,))[None, None], id="stacked-newaxis"),
+            pytest.param(IndexTransform.from_shape((5, 7))[None, 3], id="newaxis-and-int"),
+            pytest.param(
+                IndexTransform.from_shape((5, 7)).oindex[slice(None), [2]][None],
+                id="newaxis-and-collapsed-gather",
+            ),
         ],
     )
     def test_selection_reproduces_the_transform(self, transform: IndexTransform) -> None:
         """`source[selection]` has the domain's shape and its exact values."""
         source = np.arange(35).reshape(5, 7) if transform.output_rank == 2 else np.arange(10)
         selection = transform.as_basic_selection()
-        assert len(selection) == transform.output_rank
+        # One selector per output dimension, plus one per fabricated axis.
+        assert len(selection) - sum(item is None for item in selection) == transform.output_rank
         read = np.asarray(source[selection])
         assert read.shape == transform.domain.shape
         np.testing.assert_array_equal(read, _pointwise_read(transform, source))
@@ -478,16 +490,10 @@ class TestAsBasicSelection:
         with pytest.raises(ValueError, match="only a singleton axis"):
             transform.as_basic_selection()
 
-    def test_rejects_a_singleton_axis_with_no_selector_left(self) -> None:
+    def test_a_trailing_singleton_axis_lowers_to_a_newaxis(self) -> None:
+        """No output map reads it, so nothing but a newaxis can produce it."""
         transform = IndexTransform(IndexDomain.from_shape((2, 1)), (DimensionMap(0),))
-        with pytest.raises(ValueError, match="no selector is left"):
-            transform.as_basic_selection()
-
-    def test_rejects_a_newaxis(self) -> None:
-        """`None` inserts an axis basic int/slice selectors cannot produce."""
-        transform = IndexTransform.from_shape((5,))[None]
-        with pytest.raises(ValueError, match="increasing order"):
-            transform.as_basic_selection()
+        assert transform.as_basic_selection() == (slice(0, 2, 1), None)
 
     def test_rejects_a_negative_constant_coordinate(self) -> None:
         transform = IndexTransform(IndexDomain.from_shape(()), (ConstantMap(-1),))

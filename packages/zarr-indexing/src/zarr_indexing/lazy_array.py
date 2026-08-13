@@ -543,7 +543,7 @@ class Partition:
         return self.projection.coverage == "full"
 
     @property
-    def source_selection(self) -> tuple[int | slice, ...]:
+    def source_selection(self) -> tuple[int | slice | None, ...]:
         """The basic selection on the raw wrapped array that reads this part.
 
         Lowered from `view.transform` by
@@ -559,13 +559,15 @@ class Partition:
         out[part.out_selection] = await source.getitem(part.source_selection)
         ```
 
-        Defined for box-shaped parts (`view.is_box`); a query part has no
-        slab to request and raises `ValueError`, as does the one degenerate
-        box with no basic-selection spelling (an axis restored by repetition,
-        reached by gathering a collapsed constant with duplicates). A consumer
-        mixing selection kinds catches `ValueError` — or checks `view.is_box`
-        for the common case — and falls back to `view.result()`. A reversing
-        view lowers to a negative-step slice.
+        A query part has no slab to request and raises `ValueError`, as do the
+        two degenerate boxes with no basic-selection spelling: an axis
+        restored by repetition (reached by gathering a collapsed constant with
+        duplicates) and an axis broadcast from one cell. `view.is_box` is
+        therefore necessary but not sufficient — catching `ValueError` is what
+        decides it — and a consumer mixing selection kinds falls back to
+        `view.result()` for the parts that refuse. A reversing view lowers to
+        a negative-step slice and a fabricated axis to `None`, which a backend
+        narrower than NumPy may not accept.
 
         Examples
         --------
@@ -578,7 +580,7 @@ class Partition:
         return self.view.transform.as_basic_selection()
 
     @property
-    def chunk_local_selection(self) -> tuple[int | slice, ...]:
+    def chunk_local_selection(self) -> tuple[int | slice | None, ...]:
         """The same read as `source_selection`, relative to the part's grid cell.
 
         Lowered from `projection.chunk_transform`, so coordinate 0 per axis is

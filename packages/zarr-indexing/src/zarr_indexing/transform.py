@@ -448,10 +448,11 @@ class IndexTransform:
             output=tuple(inverse_output[dimension] for dimension in range(self.input_rank)),
         )
 
-    def as_basic_selection(self) -> tuple[int | slice, ...]:
+    def as_basic_selection(self) -> tuple[int | slice | None, ...]:
         """Lower a box transform to the NumPy basic selection it describes.
 
-        Returns one selector per output dimension such that
+        Returns one selector per output dimension, plus a `None` for each
+        domain axis no output map reads, such that
         `source[transform.as_basic_selection()]` under NumPy indexing
         semantics reads exactly the cells this transform addresses, in domain
         order: the result has shape `domain.shape` exactly, and its element at
@@ -464,20 +465,24 @@ class IndexTransform:
         references (a single-coordinate fancy index collapses to a constant at
         construction, leaving its axis behind: `oindex[:, [2]]`) is instead
         produced by lowering a constant to a length-1 slice, so the result
-        keeps the domain's shape.
+        keeps the domain's shape. An unreferenced axis with no constant to
+        stand in for it is one nothing reads — a `None`/newaxis in the
+        selection that made it — and lowers back to `None`.
 
         This is the boundary for consumers that plan reads here but perform
         them through their own I/O layer — an async store, an HTTP range
         request — whose request vocabulary is a basic selection rather than a
-        transform. A reversing map lowers to a negative-step slice, so a
-        backend restricted to ascending unit-step reads should inspect the
-        steps (or keep such selections out of its plans; compare
-        `UnitStepReader`).
+        transform. Such a backend may accept less than NumPy does: a reversing
+        map lowers to a negative-step slice and a fabricated axis to `None`,
+        neither of which Zarr's own basic selections take, so a consumer whose
+        backend is stricter should inspect the lowered selectors (or keep such
+        views out of its plans; compare `UnitStepReader`).
 
         Returns
         -------
-        tuple of int or slice
-            One selector per output dimension.
+        tuple of int or slice or None
+            One selector per output dimension, interleaved with a `None` for
+            each domain axis no output map reads.
 
         Raises
         ------
@@ -487,10 +492,10 @@ class IndexTransform:
             slab), a `DimensionMap` has stride 0 (a broadcast repeats one
             source cell, which no slice spells), the selectors cannot produce
             the domain's axes in increasing order and exactly once (basic
-            indexing never transposes, repeats, or fabricates axes), an
-            unreferenced domain axis has extent other than 1, or a selected
-            coordinate is negative (NumPy would count it from the end of the
-            source).
+            indexing never transposes or repeats axes), an unreferenced domain
+            axis has extent other than 1 (an axis restored by repetition,
+            where a newaxis would give extent 1), or a selected coordinate is
+            negative (NumPy would count it from the end of the source).
 
         Examples
         --------
@@ -503,6 +508,17 @@ class IndexTransform:
 
         >>> IndexTransform.from_shape((10, 20)).oindex[slice(None), [2]].as_basic_selection()
         (slice(0, 10, 1), slice(2, 3, 1))
+
+        An axis the selection fabricated lowers back to the newaxis that made it:
+
+        >>> IndexTransform.from_shape((10, 20))[:, None].as_basic_selection()
+        (slice(0, 10, 1), None, slice(0, 20, 1))
+
+        unless a constant is due where the axis is, in which case that
+        constant keeps it and no newaxis is needed:
+
+        >>> IndexTransform.from_shape((10, 20))[None, 3].as_basic_selection()
+        (slice(3, 4, 1), slice(0, 20, 1))
 
         A query has no basic-selection spelling:
 
@@ -526,14 +542,30 @@ a query selection is a lookup table, not a slab
                 raise ValueError(
                     f"cannot lower to a basic selection: no output map references "
                     f"input dimension {axis}, whose extent is {extent}; only a "
-                    "singleton axis can be produced by an integer-indexed output "
-                    "dimension"
+                    "singleton axis can be produced without reading a source axis, "
+                    "by an integer-indexed output dimension or a newaxis"
                 )
-        selection: list[int | slice] = []
+        selection: list[int | slice | None] = []
         # The next domain axis a selector has to produce. Slices produce axes
         # in selector order, so walking the outputs left to right must meet the
         # domain axes in increasing order.
         next_axis = 0
+
+        def fabricate_axes_before(axis: int) -> None:
+            """Spell every unreferenced axis due before `axis` as a newaxis.
+
+            An axis no output map reads is one NumPy inserts rather than
+            reads, which is what `None` does. The extent check above already
+            proved each is a singleton, and a constant standing in for one is
+            preferred to this — a length-1 slice reads the coordinate the
+            constant names, where a newaxis would need the constant's own
+            selector to survive as well.
+            """
+            nonlocal next_axis
+            while next_axis < axis and next_axis not in referenced:
+                selection.append(None)
+                next_axis += 1
+
         for output_dimension, output_map in enumerate(self.output):
             if isinstance(output_map, ConstantMap):
                 if output_map.offset < 0:
@@ -558,13 +590,14 @@ a query selection is a lookup table, not a slab
                     "no slice spells a broadcast"
                 )
             d = output_map.input_dimension
+            fabricate_axes_before(d)
             if d != next_axis:
                 raise ValueError(
                     "cannot lower to a basic selection: the selectors must produce "
                     f"the domain's axes in increasing order and exactly once, but "
                     f"output[{output_dimension}] produces input dimension {d} where "
                     f"input dimension {next_axis} is due; basic indexing never "
-                    "transposes, repeats, or fabricates axes"
+                    "transposes or repeats axes"
                 )
             next_axis = d + 1
             lo = self.domain.inclusive_min[d]
@@ -588,12 +621,14 @@ a query selection is a lookup table, not a slab
                 # the front edge instead of wrapping.
                 stop = last + output_map.stride
                 selection.append(slice(first, stop if stop >= 0 else None, output_map.stride))
-        if next_axis != self.input_rank:
-            raise ValueError(
-                "cannot lower to a basic selection: no selector is left to produce "
-                f"input dimension {next_axis}, so a basic read cannot yield that "
-                "axis of the domain"
-            )
+        # Trailing axes no output map reads sit past the last selector, where
+        # the same newaxis spelling puts them at the end of the result.
+        fabricate_axes_before(self.input_rank)
+        assert next_axis == self.input_rank, (
+            f"input dimension {next_axis} of {self.input_rank} went unproduced; "
+            "every referenced axis is produced by the map that references it, and "
+            "every unreferenced one was proven a singleton above"
+        )
         return tuple(selection)
 
     @property

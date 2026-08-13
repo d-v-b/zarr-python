@@ -2693,6 +2693,17 @@ def test_part_of_part_selections_stay_global_and_cell_local() -> None:
     np.testing.assert_array_equal(out, expected)
 
 
+def test_parts_of_a_newaxis_view_lower_like_any_other_box() -> None:
+    """A view can fabricate axes, so its parts have to lower with them."""
+    data = reference()
+    view = LazyArray.from_numpy(data).with_parts((3, 2, 3)).lazy[None, 1:6, :, None, ::2]
+    out = np.full(view.shape, -1, dtype=view.dtype)
+    for part in view.parts():
+        out[part.out_selection] = data[part.source_selection]
+    np.testing.assert_array_equal(out, np.asarray(view.result()))
+    np.testing.assert_array_equal(out, data[None, 1:6, :, None, ::2])
+
+
 def test_query_part_selections_refuse_to_lower() -> None:
     """A query part has no slab; both spellings must say so, not guess."""
     view = LazyArray.from_numpy(reference()).with_parts((3, 2, 3)).lazy.oindex[[6, 1, 1], :, :]
