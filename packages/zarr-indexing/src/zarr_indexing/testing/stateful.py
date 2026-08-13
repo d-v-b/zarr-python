@@ -70,6 +70,7 @@ from hypothesis import HealthCheck, settings
 from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, initialize, invariant, precondition, rule
 
+from zarr_indexing.errors import NoBasicSelectionError
 from zarr_indexing.lazy_array import LazyArray
 from zarr_indexing.output_map import DimensionMap
 from zarr_indexing.reader import ReadContext, Reader, basic_reader
@@ -474,7 +475,7 @@ class ChainedIndexingStateMachine(RuleBasedStateMachine):
         for part in self.view.parts():
             try:
                 source_selection = part.source_selection
-            except ValueError:
+            except NoBasicSelectionError:
                 # Refusal is the documented answer for a query part and for
                 # the two degenerate boxes: an axis restored by repetition
                 # (gathering a collapsed constant with duplicates) and an axis
@@ -490,7 +491,7 @@ class ChainedIndexingStateMachine(RuleBasedStateMachine):
                 cell_lowered = True
                 try:
                     _ = part.chunk_local_selection
-                except ValueError:
+                except NoBasicSelectionError:
                     cell_lowered = False
                 assert not cell_lowered, (
                     f"chunk_local_selection lowered a part whose source_selection "

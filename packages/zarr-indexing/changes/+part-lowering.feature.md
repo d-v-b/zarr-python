@@ -6,7 +6,8 @@ async store, an HTTP range endpoint):
   integers and slices such that `source[selection]` reads exactly the
   transform's cells, at exactly its domain shape. A collapsed
   single-coordinate gather keeps its singleton axis through a length-1 slice;
-  queries, broadcasts, and transposed or repeated axes raise `ValueError`
+  queries, broadcasts, and transposed or repeated axes raise
+  `NoBasicSelectionError` (a `ValueError` subclass)
   instead of guessing a slab.
 - `Partition.source_selection` is that lowering of a part's global read, so an
   async consumer's whole loop is

@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from zarr_indexing.domain import IndexDomain
-from zarr_indexing.errors import BoundsCheckError
+from zarr_indexing.errors import BoundsCheckError, NoBasicSelectionError
 from zarr_indexing.lazy_array import LazyArray
 from zarr_indexing.output_map import ArrayMap, ConstantMap, DimensionMap
 from zarr_indexing.transform import (
@@ -460,34 +460,34 @@ class TestAsBasicSelection:
 
     def test_rejects_an_array_map(self) -> None:
         transform = IndexTransform.from_shape((10,)).oindex[[3, 1, 1]]
-        with pytest.raises(ValueError, match="is an ArrayMap"):
+        with pytest.raises(NoBasicSelectionError, match="is an ArrayMap"):
             transform.as_basic_selection()
 
     def test_rejects_a_zero_stride(self) -> None:
         transform = IndexTransform(
             IndexDomain.from_shape((3,)), (DimensionMap(0, offset=2, stride=0),)
         )
-        with pytest.raises(ValueError, match="stride 0"):
+        with pytest.raises(NoBasicSelectionError, match="stride 0"):
             transform.as_basic_selection()
 
     def test_rejects_a_transposed_dimension_order(self) -> None:
         transform = IndexTransform(
             IndexDomain.from_shape((2, 3)), (DimensionMap(1), DimensionMap(0))
         )
-        with pytest.raises(ValueError, match="increasing order"):
+        with pytest.raises(NoBasicSelectionError, match="increasing order"):
             transform.as_basic_selection()
 
     def test_rejects_a_repeated_input_dimension(self) -> None:
         transform = IndexTransform(
             IndexDomain.from_shape((2,)), (DimensionMap(0), DimensionMap(0, offset=1))
         )
-        with pytest.raises(ValueError, match="increasing order"):
+        with pytest.raises(NoBasicSelectionError, match="increasing order"):
             transform.as_basic_selection()
 
     def test_rejects_an_unreferenced_non_singleton_dimension(self) -> None:
         """An axis restored by repetition — a duplicate gather of a constant."""
         transform = IndexTransform.from_shape((5,)).oindex[[3]].oindex[np.array([0, 0])]
-        with pytest.raises(ValueError, match="only a singleton axis"):
+        with pytest.raises(NoBasicSelectionError, match="only a singleton axis"):
             transform.as_basic_selection()
 
     def test_a_trailing_singleton_axis_lowers_to_a_newaxis(self) -> None:
@@ -497,12 +497,12 @@ class TestAsBasicSelection:
 
     def test_rejects_a_negative_constant_coordinate(self) -> None:
         transform = IndexTransform(IndexDomain.from_shape(()), (ConstantMap(-1),))
-        with pytest.raises(ValueError, match="count from the end"):
+        with pytest.raises(NoBasicSelectionError, match="count from the end"):
             transform.as_basic_selection()
 
     def test_rejects_a_negative_slice_coordinate(self) -> None:
         transform = IndexTransform(IndexDomain.from_shape((2,)), (DimensionMap(0, offset=-3),))
-        with pytest.raises(ValueError, match="count from the end"):
+        with pytest.raises(NoBasicSelectionError, match="count from the end"):
             transform.as_basic_selection()
 
 

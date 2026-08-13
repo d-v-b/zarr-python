@@ -22,7 +22,7 @@ import pytest
 import zarr
 import zarr.api.asynchronous
 
-from zarr_indexing import LazyArray, Partition
+from zarr_indexing import LazyArray, NoBasicSelectionError, Partition
 
 
 class AsyncSource(Protocol):
@@ -154,6 +154,9 @@ def test_query_parts_fall_back(store: dict[str, Any], source: zarr.Array) -> Non
     `source_selection` raises `ValueError` instead of guessing one. A consumer
     mixing selection kinds catches that and resolves the part through
     `part.view.result()`, which reads through the wrapped array's reader.
+    Catching the dedicated subclass — not bare `ValueError` — keeps a genuine
+    defect in the lowering loud instead of silently degrading every part to
+    the fallback path.
     """
     view = LazyArray(source).lazy.oindex[[30, 2, 2], 4:10]
 
@@ -165,7 +168,7 @@ def test_query_parts_fall_back(store: dict[str, Any], source: zarr.Array) -> Non
         async def resolve(part: Partition) -> tuple[Partition, np.ndarray]:
             try:
                 selection = part.source_selection
-            except ValueError:
+            except NoBasicSelectionError:
                 # The gathered axis needs a lookup, not a slab: read this part
                 # through the wrapper (synchronously here; a real consumer
                 # might push it to a thread, or fetch the part's bounding box

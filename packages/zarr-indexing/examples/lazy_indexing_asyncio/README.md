@@ -15,7 +15,8 @@ The example shows how to:
   fetch the cell (`projection.chunk_domain`) once, then serve every overlapping
   view from the cache with `part.chunk_local_selection`
 - Fall back for query partitions (`oindex`/`vindex`/mask selections), whose
-  gathers have no single-slab spelling: `source_selection` raises `ValueError`
+  gathers have no single-slab spelling: `source_selection` raises
+  `NoBasicSelectionError`
   and the part resolves through its own `part.view.result()` instead
 
 The async side only needs one method — `async def getitem(selection)` accepting

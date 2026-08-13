@@ -37,7 +37,11 @@ from zarr_indexing._affine import checked_affine
 from zarr_indexing._selector import as_scalar_index, require_index
 from zarr_indexing.boundary import validate_advanced_selection
 from zarr_indexing.domain import IndexDomain
-from zarr_indexing.errors import BoundsCheckError, VindexInvalidSelectionError
+from zarr_indexing.errors import (
+    BoundsCheckError,
+    NoBasicSelectionError,
+    VindexInvalidSelectionError,
+)
 from zarr_indexing.output_map import (
     ArrayMap,
     ConstantMap,
@@ -487,7 +491,7 @@ class IndexTransform:
 
         Raises
         ------
-        ValueError
+        NoBasicSelectionError
             If the transform cannot be expressed as a basic selection: an
             output map is an `ArrayMap` (a query is a lookup table, not a
             slab), a `DimensionMap` has stride 0 (a broadcast repeats one
@@ -526,21 +530,21 @@ class IndexTransform:
         >>> IndexTransform.from_shape((10,)).oindex[[3, 1, 1]].as_basic_selection()
         Traceback (most recent call last):
             ...
-        ValueError: cannot lower to a basic selection: output[0] is an ArrayMap; \
-a query selection is a lookup table, not a slab
+        zarr_indexing.errors.NoBasicSelectionError: cannot lower to a basic \
+selection: output[0] is an ArrayMap; a query selection is a lookup table, not a slab
         """
         for output_dimension, output_map in enumerate(self.output):
             # Named before the axis bookkeeping below, which would otherwise
             # blame a query's gathered axis for being unreferenced.
             if isinstance(output_map, ArrayMap):
-                raise ValueError(  # noqa: TRY004 - valid map, no basic spelling
+                raise NoBasicSelectionError(
                     f"cannot lower to a basic selection: output[{output_dimension}] "
                     "is an ArrayMap; a query selection is a lookup table, not a slab"
                 )
         referenced = {m.input_dimension for m in self.output if isinstance(m, DimensionMap)}
         for axis, extent in enumerate(self.domain.shape):
             if axis not in referenced and extent != 1:
-                raise ValueError(
+                raise NoBasicSelectionError(
                     f"cannot lower to a basic selection: no output map references "
                     f"input dimension {axis}, whose extent is {extent}; only a "
                     "singleton axis can be produced without reading a source axis, "
@@ -570,7 +574,7 @@ a query selection is a lookup table, not a slab
         for output_dimension, output_map in enumerate(self.output):
             if isinstance(output_map, ConstantMap):
                 if output_map.offset < 0:
-                    raise ValueError(
+                    raise NoBasicSelectionError(
                         f"cannot lower to a basic selection: output[{output_dimension}] "
                         f"addresses coordinate {output_map.offset}, which NumPy would "
                         "count from the end of the source"
@@ -585,7 +589,7 @@ a query selection is a lookup table, not a slab
                 continue
             assert isinstance(output_map, DimensionMap)  # ArrayMap raised above
             if output_map.stride == 0:
-                raise ValueError(
+                raise NoBasicSelectionError(
                     f"cannot lower to a basic selection: output[{output_dimension}] "
                     "has stride 0, which repeats one source cell along an axis; "
                     "no slice spells a broadcast"
@@ -593,7 +597,7 @@ a query selection is a lookup table, not a slab
             d = output_map.input_dimension
             fabricate_axes_before(d)
             if d != next_axis:
-                raise ValueError(
+                raise NoBasicSelectionError(
                     "cannot lower to a basic selection: the selectors must produce "
                     f"the domain's axes in increasing order and exactly once, but "
                     f"output[{output_dimension}] produces input dimension {d} where "
@@ -609,7 +613,7 @@ a query selection is a lookup table, not a slab
                 continue
             first, last = endpoints
             if min(first, last) < 0:
-                raise ValueError(
+                raise NoBasicSelectionError(
                     f"cannot lower to a basic selection: output[{output_dimension}] "
                     f"addresses coordinate {min(first, last)}, which NumPy would "
                     "count from the end of the source"

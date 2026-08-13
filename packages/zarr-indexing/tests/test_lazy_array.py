@@ -30,6 +30,7 @@ from zarr_indexing import (
     FixedDimension,
     IndexTransform,
     LazyArray,
+    NoBasicSelectionError,
     ReadContext,
     VaryingDimension,
     dimension_grids_from_chunks,
@@ -2709,9 +2710,9 @@ def test_query_part_selections_refuse_to_lower() -> None:
     view = LazyArray.from_numpy(reference()).with_parts((3, 2, 3)).lazy.oindex[[6, 1, 1], :, :]
     part = next(view.parts())
     assert not part.view.is_box
-    with pytest.raises(ValueError, match="ArrayMap"):
+    with pytest.raises(NoBasicSelectionError, match="ArrayMap"):
         _ = part.source_selection
-    with pytest.raises(ValueError, match="ArrayMap"):
+    with pytest.raises(NoBasicSelectionError, match="ArrayMap"):
         _ = part.chunk_local_selection
 
 

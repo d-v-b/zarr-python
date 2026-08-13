@@ -1,7 +1,8 @@
-"""Canonical index-error types raised by the transform algebra.
+"""Canonical error types raised by the transform algebra.
 
-Both subclass the built-in `IndexError`, so an `except IndexError` catch site
-keeps working unchanged whichever library raised.
+The index errors subclass the built-in `IndexError` and the lowering refusal
+subclasses `ValueError`, so a catch site written against the built-in keeps
+working unchanged whichever library raised.
 
 `zarr.errors` defines classes of the same names, and they are *not* these
 objects: `zarr.errors.BoundsCheckError is BoundsCheckError` is false. Catching
@@ -13,8 +14,35 @@ from __future__ import annotations
 
 __all__ = [
     "BoundsCheckError",
+    "NoBasicSelectionError",
     "VindexInvalidSelectionError",
 ]
+
+
+class NoBasicSelectionError(ValueError):
+    """The transform has no basic-selection spelling.
+
+    `IndexTransform.as_basic_selection` is a partial function: integers,
+    slices, and `None` spell exactly the reads that take one source axis per
+    result axis, in increasing order, each an arithmetic progression of
+    nonnegative coordinates. A transform outside that set — a query's lookup
+    table, a stride-0 broadcast, transposed or repeated axes, a negative
+    coordinate — is refused with this error rather than approximated.
+
+    Distinct from the `ValueError` a genuine defect would raise, so a
+    consumer's fallback (`except NoBasicSelectionError: use the reader`)
+    cannot silently absorb a bug in the lowering itself. Subclasses
+    `ValueError`, so catch sites written before this class existed keep
+    working.
+
+    Examples
+    --------
+    >>> from zarr_indexing import IndexTransform
+    >>> IndexTransform.from_shape((10,)).oindex[[3, 1, 1]].as_basic_selection()
+    Traceback (most recent call last):
+        ...
+    zarr_indexing.errors.NoBasicSelectionError: ...
+    """
 
 
 class VindexInvalidSelectionError(IndexError):

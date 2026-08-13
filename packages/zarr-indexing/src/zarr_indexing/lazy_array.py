@@ -559,13 +559,15 @@ class Partition:
         out[part.out_selection] = await source.getitem(part.source_selection)
         ```
 
-        A query part has no slab to request and raises `ValueError`, as do the
-        two degenerate boxes with no basic-selection spelling: an axis
-        restored by repetition (reached by gathering a collapsed constant with
-        duplicates) and an axis broadcast from one cell. `view.is_box` is
-        therefore necessary but not sufficient — catching `ValueError` is what
+        A query part has no slab to request and raises
+        [`NoBasicSelectionError`][zarr_indexing.errors.NoBasicSelectionError],
+        as do the two degenerate boxes with no basic-selection spelling: an
+        axis restored by repetition (reached by gathering a collapsed constant
+        with duplicates) and an axis broadcast from one cell. `view.is_box` is
+        therefore necessary but not sufficient — catching the error is what
         decides it — and a consumer mixing selection kinds falls back to
-        `view.result()` for the parts that refuse. A reversing view lowers to
+        `view.result()` for the parts that refuse. The dedicated subclass of
+        `ValueError` keeps that fallback from absorbing a genuine defect. A reversing view lowers to
         a negative-step slice and a fabricated axis to `None`, which a backend
         narrower than NumPy may not accept.
 

@@ -89,7 +89,8 @@ chunks. `projection.chunk_domain` locates that cell in the source, so it is
 what to fetch and a sound cache key; `base_coords` counts cells of whatever
 base the view partitions, so it keys a cache only alongside the grid that
 produced it. A query part (an `oindex`/`vindex` gather) has
-no slab spelling and raises `ValueError`, so mixed consumers fall back to
+no slab spelling and raises `NoBasicSelectionError` (a `ValueError`
+subclass), so mixed consumers fall back to
 `part.view.result()` for those parts. The
 [asyncio example](../examples/lazy_indexing_asyncio.md) drives all three
 loops — gather-per-part, decoded-chunk cache, and the query fallback — with
