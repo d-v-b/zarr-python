@@ -161,7 +161,6 @@ from zarr_indexing.chunk_resolution import (
     ChunkProjection,
     plan_chunks,
 )
-from zarr_indexing.domain import IndexDomain
 from zarr_indexing.grid import DimensionGrid, FixedDimension, dimension_grids_from_chunks
 from zarr_indexing.output_map import ArrayMap, ConstantMap, DimensionMap
 from zarr_indexing.reader import (
@@ -176,6 +175,8 @@ from zarr_indexing.transform import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
+
+    from zarr_indexing.domain import IndexDomain
 
     SelectFn = Callable[[Any, SelectionMode], "LazyArray"]
 
@@ -299,9 +300,28 @@ class _PartOwner:
     """Opaque identity shared only by one view and the parts it prepared."""
 
 
+def _overlaps(out: np.ndarray[Any, Any], array: Any) -> bool:
+    """Whether `out` and `array` can be writing and reading the same memory.
+
+    Only NumPy sources can be compared this way; anything else reaches its
+    data through its own machinery, where sharing memory with a result buffer
+    is not expressible.
+    """
+    if not isinstance(array, np.ndarray):
+        return False
+    # The cheap bounds test first: an exact answer can cost real work, and it
+    # is only needed once the two are known to occupy overlapping memory.
+    return bool(np.may_share_memory(out, array)) and bool(np.shares_memory(out, array))
+
+
 def _translated_domain(domain: IndexDomain, window: tuple[slice, ...]) -> IndexDomain:
-    """`domain`, expressed in the coordinates `window` was cut from."""
-    return IndexDomain(
+    """`domain`, expressed in the coordinates `window` was cut from.
+
+    Moving a region does not rename its axes, so `replace` carries everything
+    but the bounds — the labels among them — through unchanged.
+    """
+    return replace(
+        domain,
         inclusive_min=tuple(
             w.start + lo for w, lo in zip(window, domain.inclusive_min, strict=True)
         ),
@@ -1318,11 +1338,24 @@ class LazyArray:
         ----------
         out
             A writable `numpy.ndarray` of exactly `self.shape` and this view's
-            dtype. A view into a larger array qualifies, so a part's result
-            can land directly in its slot:
-            `part.view.result_into(final[part.out_selection])` for a
-            rectangular part. A `numpy.ma` masked buffer (what `result()`
-            would allocate for a masked source) also qualifies.
+            dtype, not overlapping the wrapped array. A view into a larger
+            array qualifies, so a part's result can land directly in its slot:
+
+            ```python
+            if all(isinstance(s, slice) for s in part.out_selection):
+                part.view.result_into(final[part.out_selection])
+            else:
+                final[part.out_selection] = part.view.result()
+            ```
+
+            The branch is the whole contract: `final[part.out_selection]` is a
+            writable view only while every selector is a slice, and NumPy hands
+            back a *copy* for a fancy `out_selection` — which this method would
+            dutifully fill and return, leaving `final` untouched. It cannot
+            tell the two apart; only the caller knows what `final` was.
+
+            A masked source requires a `numpy.ma` buffer — what `result()`
+            would allocate for it — since a plain one drops the mask.
         parts
             A reusable sequence previously returned by this exact view's
             `parts()` method, exactly as for `result`.
@@ -1337,7 +1370,8 @@ class LazyArray:
         TypeError
             If `out` is not a `numpy.ndarray`.
         ValueError
-            If `out` has the wrong shape or dtype or is read-only, or if
+            If `out` has the wrong shape or dtype, is read-only, is unmasked
+            for a masked source, or shares memory with the wrapped array; or if
             supplied parts were prepared by another view or do not tile this
             view exactly.
         AssertionError
@@ -1370,6 +1404,22 @@ class LazyArray:
             )
         if not out.flags.writeable:
             raise ValueError("out is read-only; result_into writes every cell of it")
+        if isinstance(self._array, np.ma.MaskedArray) and not isinstance(out, np.ma.MaskedArray):
+            # dtypes match, so nothing above rejects a plain buffer, and the
+            # reader would write the values under the mask into it as if they
+            # were data.
+            raise ValueError(  # noqa: TRY004 - an ndarray, just not one this view fits
+                "out must be a numpy.ma.MaskedArray for a masked source; a plain "
+                "ndarray cannot carry the mask, and the values beneath it are not data"
+            )
+        if _overlaps(out, self._array):
+            # Parts are read in walk order, so a destination overlapping the
+            # source is read after earlier parts have already overwritten the
+            # cells it covers — silently, and differently per partitioning.
+            raise ValueError(
+                "out shares memory with the wrapped array; reading a view into "
+                "the array it reads from would overwrite cells later parts read"
+            )
         prepared_parts = self._prepared_parts(parts)
         return self._read_into_buffer(out, prepared_parts)
 

@@ -2860,6 +2860,24 @@ def test_result_into_rejects_a_read_only_buffer() -> None:
         view.result_into(out)
 
 
+def test_result_into_rejects_an_unmasked_buffer_for_a_masked_source() -> None:
+    data = reference()
+    view = LazyArray.from_numpy(np.ma.masked_array(data, mask=data % 5 == 0))
+    with pytest.raises(ValueError, match="MaskedArray for a masked source"):
+        view.result_into(np.empty(view.shape, dtype=view.dtype))
+
+
+def test_result_into_rejects_a_buffer_that_overlaps_the_source() -> None:
+    """Reading into the source overwrites cells later parts still have to read."""
+    data = reference()
+    view = LazyArray.from_numpy(data).with_parts((3, 2, 3)).lazy[::-1]
+    with pytest.raises(ValueError, match="shares memory"):
+        view.result_into(data)
+    # A disjoint slice of the same buffer is refused for the same reason.
+    with pytest.raises(ValueError, match="shares memory"):
+        LazyArray.from_numpy(data).lazy[:1].result_into(data[1:2])
+
+
 def test_result_into_rejects_foreign_parts() -> None:
     view = LazyArray.from_numpy(reference()).with_parts((3, 2, 3))
     other = LazyArray.from_numpy(reference()).with_parts((3, 2, 3))
