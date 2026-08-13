@@ -395,6 +395,111 @@ class TestIndexTransformInverted:
             transform.inverted()
 
 
+def _pointwise_read(transform: IndexTransform, source: np.ndarray) -> np.ndarray:
+    """Read through `transform` one point at a time — the oracle."""
+    domain = transform.domain
+    if transform.input_rank == 0:
+        return np.asarray(source[transform.apply(())])
+    axes = [
+        np.arange(lo, hi) for lo, hi in zip(domain.inclusive_min, domain.exclusive_max, strict=True)
+    ]
+    if any(axis.size == 0 for axis in axes):
+        return np.empty(domain.shape, dtype=source.dtype)
+    mesh = np.meshgrid(*axes, indexing="ij")
+    points = np.stack([m.ravel() for m in mesh], axis=1)
+    coordinates = transform.apply_many(points)
+    return source[tuple(coordinates.T)].reshape(domain.shape)
+
+
+class TestAsBasicSelection:
+    @pytest.mark.parametrize(
+        "transform",
+        [
+            pytest.param(IndexTransform.from_shape((10,)), id="identity"),
+            pytest.param(IndexTransform.from_shape((10,))[2:8], id="slice"),
+            pytest.param(IndexTransform.from_shape((10,))[1:9:3], id="strided"),
+            pytest.param(IndexTransform.from_shape((6,))[::-1], id="reversed"),
+            pytest.param(IndexTransform.from_shape((10,))[::-3], id="reversed-strided"),
+            pytest.param(IndexTransform.from_shape((10,))[4:4], id="empty"),
+            pytest.param(IndexTransform.from_shape((5, 7))[3, 1:6:2], id="int-and-slice"),
+            pytest.param(IndexTransform.from_shape((5, 7))[2:5][3:5], id="composed-literal"),
+            pytest.param(IndexTransform.from_shape((5, 7))[3, 2], id="rank-zero"),
+            pytest.param(
+                # The single-coordinate gather collapses to a constant at
+                # construction, leaving a singleton domain axis no map
+                # references; the constant lowers to a length-1 slice.
+                IndexTransform.from_shape((5, 7)).oindex[slice(None), [2]],
+                id="collapsed-single-gather",
+            ),
+            pytest.param(
+                IndexTransform.from_shape((5, 7)).oindex[[3], [2]],
+                id="two-collapsed-gathers",
+            ),
+        ],
+    )
+    def test_selection_reproduces_the_transform(self, transform: IndexTransform) -> None:
+        """`source[selection]` has the domain's shape and its exact values."""
+        source = np.arange(35).reshape(5, 7) if transform.output_rank == 2 else np.arange(10)
+        selection = transform.as_basic_selection()
+        assert len(selection) == transform.output_rank
+        read = np.asarray(source[selection])
+        assert read.shape == transform.domain.shape
+        np.testing.assert_array_equal(read, _pointwise_read(transform, source))
+
+    def test_rejects_an_array_map(self) -> None:
+        transform = IndexTransform.from_shape((10,)).oindex[[3, 1, 1]]
+        with pytest.raises(ValueError, match="is an ArrayMap"):
+            transform.as_basic_selection()
+
+    def test_rejects_a_zero_stride(self) -> None:
+        transform = IndexTransform(
+            IndexDomain.from_shape((3,)), (DimensionMap(0, offset=2, stride=0),)
+        )
+        with pytest.raises(ValueError, match="stride 0"):
+            transform.as_basic_selection()
+
+    def test_rejects_a_transposed_dimension_order(self) -> None:
+        transform = IndexTransform(
+            IndexDomain.from_shape((2, 3)), (DimensionMap(1), DimensionMap(0))
+        )
+        with pytest.raises(ValueError, match="increasing order"):
+            transform.as_basic_selection()
+
+    def test_rejects_a_repeated_input_dimension(self) -> None:
+        transform = IndexTransform(
+            IndexDomain.from_shape((2,)), (DimensionMap(0), DimensionMap(0, offset=1))
+        )
+        with pytest.raises(ValueError, match="increasing order"):
+            transform.as_basic_selection()
+
+    def test_rejects_an_unreferenced_non_singleton_dimension(self) -> None:
+        """An axis restored by repetition — a duplicate gather of a constant."""
+        transform = IndexTransform.from_shape((5,)).oindex[[3]].oindex[np.array([0, 0])]
+        with pytest.raises(ValueError, match="only a singleton axis"):
+            transform.as_basic_selection()
+
+    def test_rejects_a_singleton_axis_with_no_selector_left(self) -> None:
+        transform = IndexTransform(IndexDomain.from_shape((2, 1)), (DimensionMap(0),))
+        with pytest.raises(ValueError, match="no selector is left"):
+            transform.as_basic_selection()
+
+    def test_rejects_a_newaxis(self) -> None:
+        """`None` inserts an axis basic int/slice selectors cannot produce."""
+        transform = IndexTransform.from_shape((5,))[None]
+        with pytest.raises(ValueError, match="increasing order"):
+            transform.as_basic_selection()
+
+    def test_rejects_a_negative_constant_coordinate(self) -> None:
+        transform = IndexTransform(IndexDomain.from_shape(()), (ConstantMap(-1),))
+        with pytest.raises(ValueError, match="count from the end"):
+            transform.as_basic_selection()
+
+    def test_rejects_a_negative_slice_coordinate(self) -> None:
+        transform = IndexTransform(IndexDomain.from_shape((2,)), (DimensionMap(0, offset=-3),))
+        with pytest.raises(ValueError, match="count from the end"):
+            transform.as_basic_selection()
+
+
 class TestIndexTransformBasicIndexing:
     def test_slice_identity(self) -> None:
         """slice(None) on identity transform is a no-op."""

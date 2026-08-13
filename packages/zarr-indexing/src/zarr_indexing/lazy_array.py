@@ -133,8 +133,10 @@ compute graph.
 Ownership
 ---------
 `result()` always allocates fresh system memory before reading through the
-selected reader. A `numpy.ma` source keeps its mask by receiving a masked
-output buffer; other source-specific array types do not survive materializing.
+selected reader. `result_into(out)` is the non-allocating form: the caller's
+buffer is validated against the view's shape and dtype, filled in place, and
+returned. A `numpy.ma` source keeps its mask by receiving a masked output
+buffer; other source-specific array types do not survive materializing.
 """
 
 from __future__ import annotations
@@ -446,9 +448,14 @@ class Partition:
         A `LazyArray` covering exactly the cells of the view that live in this
         box. Its transform directly addresses its raw wrapped `array`; only the
         projection's `chunk_transform` is chunk-local. Resolving the view reads
-        the box once through its selected reader. Named `view` rather than
-        `array` because `LazyArray.array` is the opposite thing — the raw
-        wrapped source — and the two sat next to each other meaning inverses.
+        the box once through its selected reader, handing it a `ReadContext`
+        that carries this partition's `projection` — the same context the
+        parent view's partitioned `result()` passes, so a reader keyed on
+        `chunk_coords` behaves identically on either path. A further `.lazy`
+        selection describes a different read and drops that pairing. Named
+        `view` rather than `array` because `LazyArray.array` is the opposite
+        thing — the raw wrapped source — and the two sat next to each other
+        meaning inverses.
     out_selection
         Where `view.result()` belongs in an array of the whole view's shape — a
         NumPy index tuple with one entry per dimension of the view, usable
@@ -488,6 +495,68 @@ class Partition:
     def is_complete(self) -> bool:
         """Whether the projection proves it covers the entire selected cell."""
         return self.projection.coverage == "full"
+
+    @property
+    def source_selection(self) -> tuple[int | slice, ...]:
+        """The basic selection on the raw wrapped array that reads this part.
+
+        Lowered from `view.transform` by
+        [`IndexTransform.as_basic_selection`][zarr_indexing.transform.IndexTransform.as_basic_selection],
+        so the coordinates are global to `view.array` and
+        `view.array[part.source_selection]` reads the same block
+        `view.result()` reads, in the same order. This is the request to hand
+        to a consumer-owned I/O layer whose vocabulary is a basic selection
+        rather than a transform — for one driving reads through an async
+        store, assembly is one line per part:
+
+        ```python
+        out[part.out_selection] = await source.getitem(part.source_selection)
+        ```
+
+        Defined for box-shaped parts (`view.is_box`); a query part has no
+        slab to request and raises `ValueError`, as does the one degenerate
+        box with no basic-selection spelling (an axis restored by repetition,
+        reached by gathering a collapsed constant with duplicates). A consumer
+        mixing selection kinds catches `ValueError` — or checks `view.is_box`
+        for the common case — and falls back to `view.result()`. A reversing
+        view lowers to a negative-step slice.
+
+        Examples
+        --------
+        >>> import numpy as np
+        >>> view = LazyArray.from_numpy(np.arange(12).reshape(3, 4)).with_parts((2, 2))
+        >>> [part.source_selection for part in view.lazy[1:, ::2].parts()]
+        [(slice(1, 2, 1), slice(0, 1, 2)), (slice(1, 2, 1), slice(2, 3, 2)), \
+(slice(2, 3, 1), slice(0, 1, 2)), (slice(2, 3, 1), slice(2, 3, 2))]
+        """
+        return self.view.transform.as_basic_selection()
+
+    @property
+    def chunk_local_selection(self) -> tuple[int | slice, ...]:
+        """The same read as `source_selection`, relative to the part's grid cell.
+
+        Lowered from `projection.chunk_transform`, so coordinate 0 per axis is
+        `projection.chunk_domain`'s origin. For a consumer that caches decoded
+        cells keyed on `base_coords`, this is the selection to apply to a
+        cached cell: `cell[part.chunk_local_selection]` yields the same values
+        as `view.array[part.source_selection]`, and both land at
+        `out_selection` in the request buffer.
+
+        Defined exactly when `source_selection` is: the two lower the same
+        maps, so a part that refuses one spelling refuses both.
+
+        Examples
+        --------
+        >>> import numpy as np
+        >>> view = LazyArray.from_numpy(np.arange(12).reshape(3, 4)).with_parts((2, 2))
+        >>> part = next(view.lazy[1:, :2].parts())
+        >>> (part.base_coords, part.source_selection, part.chunk_local_selection)
+        ((0, 0), (slice(1, 2, 1), slice(0, 2, 1)), (slice(1, 2, 1), slice(0, 2, 1)))
+        >>> part = next(view.lazy[2:, :2].parts())
+        >>> (part.base_coords, part.source_selection, part.chunk_local_selection)
+        ((1, 0), (slice(2, 3, 1), slice(0, 2, 1)), (slice(0, 1, 1), slice(0, 2, 1)))
+        """
+        return self.projection.chunk_transform.as_basic_selection()
 
 
 def _validate_prepared_parts(parts: Sequence[Partition], out_shape: tuple[int, ...]) -> None:
@@ -629,7 +698,15 @@ class LazyArray:
            [ 8, 10]])
     """
 
-    __slots__ = ("_array", "_part_owner", "_parts", "_reader", "_transform", "_window")
+    __slots__ = (
+        "_array",
+        "_part_owner",
+        "_parts",
+        "_projection",
+        "_reader",
+        "_transform",
+        "_window",
+    )
 
     def __init__(self, array: _WrappedArray) -> None:
         """Wrap `array` without reading it; parameters are documented on the class.
@@ -653,6 +730,7 @@ class LazyArray:
         self._transform = IndexTransform.from_shape(shape)
         self._parts = _discover_parts(array, shape)
         self._reader = basic_reader
+        self._projection: ChunkProjection | None = None
         self._part_owner = _PartOwner()
 
     @classmethod
@@ -672,8 +750,16 @@ class LazyArray:
         parts: tuple[DimensionGrid, ...] | None,
         window: tuple[slice, ...] | None,
         reader: Reader,
+        projection: ChunkProjection | None = None,
     ) -> LazyArray:
-        """Build a wrapper sharing `array` but carrying a new transform or partitioning."""
+        """Build a wrapper sharing `array` but carrying a new transform or partitioning.
+
+        `projection` is the paired partition plan when the wrapper is a
+        `Partition.view`; it rides along so an unpartitioned `result()` hands
+        the reader the same `ReadContext` the parent's partitioned read would.
+        A new selection describes a different read, so `_select` leaves it at
+        the default `None`.
+        """
         view = cls.__new__(cls)
         view._array = array
         # Views re-zero their coordinate system: the positional dialect means a
@@ -682,6 +768,7 @@ class LazyArray:
         view._parts = parts
         view._window = window
         view._reader = reader
+        view._projection = projection
         view._part_owner = _PartOwner()
         return view
 
@@ -752,6 +839,7 @@ class LazyArray:
             self._parts,
             self._window,
             reader,
+            self._projection,
         )
 
     # -- shape of the selection ---------------------------------------------
@@ -1009,7 +1097,9 @@ class LazyArray:
         return self._with_grids(None)
 
     def _with_grids(self, grids: tuple[DimensionGrid, ...] | None) -> LazyArray:
-        return LazyArray._derive(self._array, self._transform, grids, self._window, self._reader)
+        return LazyArray._derive(
+            self._array, self._transform, grids, self._window, self._reader, self._projection
+        )
 
     def parts(self) -> Iterator[Partition]:
         """Iterate the base partitioning, projected through this view.
@@ -1084,6 +1174,7 @@ class LazyArray:
                     None,
                     window,
                     self._reader,
+                    projection,
                 ),
                 out_selection=_partition_out_selection(projection.cell_transform),
                 _owner=self._part_owner,
@@ -1133,7 +1224,9 @@ class LazyArray:
         Every result starts as a fresh system-memory buffer. Each touched
         partition is read through the selected reader directly into its
         rectangular destination, or into an owned dense temporary before fancy
-        placement. Empty views allocate without reading the source.
+        placement. Empty views allocate without reading the source. To fill a
+        buffer the caller already owns instead, use
+        [`result_into`][zarr_indexing.lazy_array.LazyArray.result_into].
 
         Parameters
         ----------
@@ -1159,6 +1252,86 @@ class LazyArray:
             If this library's own partition walk fails to cover the view — a
             bug in zarr-indexing, never a consequence of the caller's input.
         """
+        prepared_parts = self._prepared_parts(parts)
+        return self._read_into_buffer(self._output_buffer(self.shape), prepared_parts)
+
+    def result_into(
+        self, out: np.ndarray[Any, Any], *, parts: Sequence[Partition] | None = None
+    ) -> Any:
+        """Materialize this view into a buffer the caller owns.
+
+        The non-allocating form of
+        [`result`][zarr_indexing.lazy_array.LazyArray.result]: `out` is
+        validated, filled in place, and returned, and no output buffer is
+        allocated here — a consumer assembling many views into one array, or
+        holding a pool of reusable tile buffers, decides where results live.
+        (A part whose placement is fancy still gathers through an owned dense
+        temporary before scattering, exactly as `result()` does.)
+
+        Every cell of `out` is overwritten exactly once. If a reader raises
+        midway, `out` is left partially written.
+
+        Parameters
+        ----------
+        out
+            A writable `numpy.ndarray` of exactly `self.shape` and this view's
+            dtype. A view into a larger array qualifies, so a part's result
+            can land directly in its slot:
+            `part.view.result_into(final[part.out_selection])` for a
+            rectangular part. A `numpy.ma` masked buffer (what `result()`
+            would allocate for a masked source) also qualifies.
+        parts
+            A reusable sequence previously returned by this exact view's
+            `parts()` method, exactly as for `result`.
+
+        Returns
+        -------
+        numpy.ndarray
+            The `out` object that was passed in, filled.
+
+        Raises
+        ------
+        TypeError
+            If `out` is not a `numpy.ndarray`.
+        ValueError
+            If `out` has the wrong shape or dtype or is read-only, or if
+            supplied parts were prepared by another view or do not tile this
+            view exactly.
+        AssertionError
+            If this library's own partition walk fails to cover the view — a
+            bug in zarr-indexing, never a consequence of the caller's input.
+
+        Examples
+        --------
+        >>> import numpy as np
+        >>> source = np.arange(12).reshape(3, 4)
+        >>> view = LazyArray.from_numpy(source).lazy[1:, ::2]
+        >>> out = np.empty(view.shape, dtype=view.dtype)
+        >>> returned = view.result_into(out)
+        >>> returned is out
+        True
+        >>> out
+        array([[ 4,  6],
+               [ 8, 10]])
+        """
+        out_shape = self.shape
+        if not isinstance(cast(object, out), np.ndarray):
+            raise TypeError(f"out must be a numpy.ndarray, got {type(out).__name__}")
+        if tuple(out.shape) != out_shape:
+            raise ValueError(
+                f"out has shape {tuple(out.shape)}, but this view has shape {out_shape}"
+            )
+        if out.dtype != np.dtype(self.dtype):
+            raise ValueError(
+                f"out has dtype {out.dtype}, but this view has dtype {np.dtype(self.dtype)}"
+            )
+        if not out.flags.writeable:
+            raise ValueError("out is read-only; result_into writes every cell of it")
+        prepared_parts = self._prepared_parts(parts)
+        return self._read_into_buffer(out, prepared_parts)
+
+    def _prepared_parts(self, parts: Sequence[Partition] | None) -> tuple[Partition, ...] | None:
+        """Validate a caller-supplied partition plan against this view."""
         prepared_parts = None if parts is None else tuple(parts)
         if prepared_parts is not None and any(
             # Module-private provenance deliberately crosses the two public
@@ -1168,16 +1341,24 @@ class LazyArray:
         ):
             raise ValueError("prepared parts do not belong to this view")
 
-        out_shape = self.shape
         if prepared_parts is not None:
-            _validate_prepared_parts(prepared_parts, out_shape)
-        out = self._output_buffer(out_shape)
+            _validate_prepared_parts(prepared_parts, self.shape)
+        return prepared_parts
+
+    def _read_into_buffer(self, out: Any, prepared_parts: tuple[Partition, ...] | None) -> Any:
+        """Read this view into `out`, part by part, and return `out`."""
+        out_shape = self.shape
         size = math.prod(out_shape)
         if size == 0:
             return out
 
         if prepared_parts is None and self._parts is None:
-            _invoke_reader(self._reader, self._array, ReadContext(self._transform), out)
+            # A partition view carries its paired projection, so resolving it
+            # alone hands the reader the same ReadContext the parent's
+            # partitioned read would.
+            _invoke_reader(
+                self._reader, self._array, ReadContext(self._transform, self._projection), out
+            )
             return out
 
         written = 0

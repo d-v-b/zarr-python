@@ -448,6 +448,154 @@ class IndexTransform:
             output=tuple(inverse_output[dimension] for dimension in range(self.input_rank)),
         )
 
+    def as_basic_selection(self) -> tuple[int | slice, ...]:
+        """Lower a box transform to the NumPy basic selection it describes.
+
+        Returns one selector per output dimension such that
+        `source[transform.as_basic_selection()]` under NumPy indexing
+        semantics reads exactly the cells this transform addresses, in domain
+        order: the result has shape `domain.shape` exactly, and its element at
+        position `p` holds the source value at
+        `apply(domain.inclusive_min + p)`.
+
+        A `DimensionMap` lowers to a `slice`. A `ConstantMap` usually lowers
+        to an `int`, which drops its axis exactly as the constant map carries
+        no input dimension — but a singleton domain axis that no output map
+        references (a single-coordinate fancy index collapses to a constant at
+        construction, leaving its axis behind: `oindex[:, [2]]`) is instead
+        produced by lowering a constant to a length-1 slice, so the result
+        keeps the domain's shape.
+
+        This is the boundary for consumers that plan reads here but perform
+        them through their own I/O layer — an async store, an HTTP range
+        request — whose request vocabulary is a basic selection rather than a
+        transform. A reversing map lowers to a negative-step slice, so a
+        backend restricted to ascending unit-step reads should inspect the
+        steps (or keep such selections out of its plans; compare
+        `UnitStepReader`).
+
+        Returns
+        -------
+        tuple of int or slice
+            One selector per output dimension.
+
+        Raises
+        ------
+        ValueError
+            If the transform cannot be expressed as a basic selection: an
+            output map is an `ArrayMap` (a query is a lookup table, not a
+            slab), a `DimensionMap` has stride 0 (a broadcast repeats one
+            source cell, which no slice spells), the selectors cannot produce
+            the domain's axes in increasing order and exactly once (basic
+            indexing never transposes, repeats, or fabricates axes), an
+            unreferenced domain axis has extent other than 1, or a selected
+            coordinate is negative (NumPy would count it from the end of the
+            source).
+
+        Examples
+        --------
+        >>> IndexTransform.from_shape((10, 20))[2:8, ::2].as_basic_selection()
+        (slice(2, 8, 1), slice(0, 19, 2))
+        >>> IndexTransform.from_shape((10, 20))[3, 4:6].as_basic_selection()
+        (3, slice(4, 6, 1))
+
+        The collapsed single-coordinate gather keeps its axis:
+
+        >>> IndexTransform.from_shape((10, 20)).oindex[slice(None), [2]].as_basic_selection()
+        (slice(0, 10, 1), slice(2, 3, 1))
+
+        A query has no basic-selection spelling:
+
+        >>> IndexTransform.from_shape((10,)).oindex[[3, 1, 1]].as_basic_selection()
+        Traceback (most recent call last):
+            ...
+        ValueError: cannot lower to a basic selection: output[0] is an ArrayMap; \
+a query selection is a lookup table, not a slab
+        """
+        for output_dimension, output_map in enumerate(self.output):
+            # Named before the axis bookkeeping below, which would otherwise
+            # blame a query's gathered axis for being unreferenced.
+            if isinstance(output_map, ArrayMap):
+                raise ValueError(  # noqa: TRY004 - valid map, no basic spelling
+                    f"cannot lower to a basic selection: output[{output_dimension}] "
+                    "is an ArrayMap; a query selection is a lookup table, not a slab"
+                )
+        referenced = {m.input_dimension for m in self.output if isinstance(m, DimensionMap)}
+        for axis, extent in enumerate(self.domain.shape):
+            if axis not in referenced and extent != 1:
+                raise ValueError(
+                    f"cannot lower to a basic selection: no output map references "
+                    f"input dimension {axis}, whose extent is {extent}; only a "
+                    "singleton axis can be produced by an integer-indexed output "
+                    "dimension"
+                )
+        selection: list[int | slice] = []
+        # The next domain axis a selector has to produce. Slices produce axes
+        # in selector order, so walking the outputs left to right must meet the
+        # domain axes in increasing order.
+        next_axis = 0
+        for output_dimension, output_map in enumerate(self.output):
+            if isinstance(output_map, ConstantMap):
+                if output_map.offset < 0:
+                    raise ValueError(
+                        f"cannot lower to a basic selection: output[{output_dimension}] "
+                        f"addresses coordinate {output_map.offset}, which NumPy would "
+                        "count from the end of the source"
+                    )
+                if next_axis < self.input_rank and next_axis not in referenced:
+                    # This constant stands in for the singleton axis: a
+                    # length-1 slice keeps the axis where an int would drop it.
+                    selection.append(slice(output_map.offset, output_map.offset + 1, 1))
+                    next_axis += 1
+                else:
+                    selection.append(output_map.offset)
+                continue
+            assert isinstance(output_map, DimensionMap)  # ArrayMap raised above
+            if output_map.stride == 0:
+                raise ValueError(
+                    f"cannot lower to a basic selection: output[{output_dimension}] "
+                    "has stride 0, which repeats one source cell along an axis; "
+                    "no slice spells a broadcast"
+                )
+            d = output_map.input_dimension
+            if d != next_axis:
+                raise ValueError(
+                    "cannot lower to a basic selection: the selectors must produce "
+                    f"the domain's axes in increasing order and exactly once, but "
+                    f"output[{output_dimension}] produces input dimension {d} where "
+                    f"input dimension {next_axis} is due; basic indexing never "
+                    "transposes, repeats, or fabricates axes"
+                )
+            next_axis = d + 1
+            lo = self.domain.inclusive_min[d]
+            hi = self.domain.exclusive_max[d]
+            if hi <= lo:
+                selection.append(slice(0, 0, 1))
+                continue
+            first = checked_affine(output_map.offset, output_map.stride, lo)
+            last = checked_affine(output_map.offset, output_map.stride, hi - 1)
+            if min(first, last) < 0:
+                raise ValueError(
+                    f"cannot lower to a basic selection: output[{output_dimension}] "
+                    f"addresses coordinate {min(first, last)}, which NumPy would "
+                    "count from the end of the source"
+                )
+            if output_map.stride > 0:
+                selection.append(slice(first, last + 1, output_map.stride))
+            else:
+                # Descending: the stop sits one step past the final coordinate,
+                # and a stop below 0 has no literal spelling — None walks to
+                # the front edge instead of wrapping.
+                stop = last + output_map.stride
+                selection.append(slice(first, stop if stop >= 0 else None, output_map.stride))
+        if next_axis != self.input_rank:
+            raise ValueError(
+                "cannot lower to a basic selection: no selector is left to produce "
+                f"input dimension {next_axis}, so a basic read cannot yield that "
+                "axis of the domain"
+            )
+        return tuple(selection)
+
     @property
     def selection_repr(self) -> str:
         """Compact domain string, e.g. `'{ [2, 8), [0, 10) }'`.

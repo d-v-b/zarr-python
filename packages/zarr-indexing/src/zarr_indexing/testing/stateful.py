@@ -57,6 +57,7 @@ from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, initialize, invariant, precondition, rule
 
 from zarr_indexing.lazy_array import LazyArray
+from zarr_indexing.output_map import ConstantMap
 from zarr_indexing.reader import Reader, basic_reader
 from zarr_indexing.testing.strategies import (
     basic_selections,
@@ -366,6 +367,62 @@ class ChainedIndexingStateMachine(RuleBasedStateMachine):
         np.testing.assert_array_equal(
             hits, np.ones(self.view.shape, dtype=np.int64), err_msg=str(self.chain)
         )
+
+    @invariant()
+    def box_parts_lower_to_basic_selections(self) -> None:
+        """The consumer-owned-I/O assembly, run literally.
+
+        [`Partition`][zarr_indexing.lazy_array.Partition] documents
+        `out[part.out_selection] = source[part.source_selection]` as the
+        assembly for a consumer fetching box parts through its own I/O layer,
+        and `cell[part.chunk_local_selection]` as the equivalent read from a
+        cached grid cell. Both selections are applied here under plain NumPy
+        semantics to the values the source holds and checked against the
+        model; a query part must refuse to lower instead of guessing a slab.
+
+        No reader runs in this invariant: it proves the lowered selections
+        alone carry the read, which is exactly what a consumer that plans here
+        but fetches elsewhere relies on.
+        """
+        data = np.asarray(type(self).data)
+        for part in self.view.parts():
+            try:
+                source_selection = part.source_selection
+            except ValueError:
+                # Refusal is the documented answer for a query part, and for
+                # the one box shape with no basic spelling: an axis restored
+                # by repetition, reached by gathering a collapsed constant
+                # with duplicates. Either way the properties must agree.
+                assert not part.view.is_box or any(
+                    isinstance(m, ConstantMap) for m in part.view.transform.output
+                ), f"a plain box part refused to lower: {self.chain}"
+                for attribute in ("source_selection", "chunk_local_selection"):
+                    lowered = True
+                    try:
+                        getattr(part, attribute)
+                    except ValueError:
+                        lowered = False
+                    assert not lowered, (
+                        f"{attribute} lowered a part whose paired selection "
+                        f"refused to: {self.chain}"
+                    )
+                continue
+            expected = self.model[part.out_selection]
+            slab = data[source_selection]
+            np.testing.assert_array_equal(slab, expected, err_msg=str(self.chain))
+            cell = data[
+                tuple(
+                    slice(lo, hi)
+                    for lo, hi in zip(
+                        part.projection.chunk_domain.inclusive_min,
+                        part.projection.chunk_domain.exclusive_max,
+                        strict=True,
+                    )
+                )
+            ]
+            np.testing.assert_array_equal(
+                cell[part.chunk_local_selection], expected, err_msg=str(self.chain)
+            )
 
 
 def _reader_set(view: LazyArray, declared: Sequence[Reader] | None) -> tuple[Reader, ...]:
