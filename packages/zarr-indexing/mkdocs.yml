@@ -38,6 +38,7 @@ nav:
   - Examples:
       - Lazy indexing a NumPy array: examples/lazy_indexing_numpy.md
       - Lazy indexing with Dask: examples/lazy_indexing_dask.md
+      - Lazy indexing with asyncio: examples/lazy_indexing_asyncio.md
       - System-memory chunk cache: examples/system_memory_chunk_cache.md
   - The ndsel wire format: ndsel.md
   - Design notes: design-notes.md
