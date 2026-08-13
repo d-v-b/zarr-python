@@ -1853,6 +1853,18 @@ wheels = [
 ]
 
 [[package]]
+name = "tifffile"
+version = "2026.7.31"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/21/62/083288b8d6b9ecb2968e7573e60aa0694089e960e203934bc217169acf64/tifffile-2026.7.31.tar.gz", hash = "sha256:79b1f4b1aba3ef3e6b6f1691a32abb62f5d7383faa52a12771c695232ba40bee", size = 442177, upload-time = "2026-08-01T02:28:32.523Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/da/ed/75bf4d6ae6fec7233ef466f27dffc99f91fde53a31e69f02640b418317ec/tifffile-2026.7.31-py3-none-any.whl", hash = "sha256:81adfa08012be1c478f99b83cda2f529eef8620cfbdf94fc41eef6f1d7b47dc5", size = 271576, upload-time = "2026-08-01T02:28:31.068Z" },
+]
+
+[[package]]
 name = "tornado"
 version = "6.5.8"
 source = { registry = "https://pypi.org/simple" }
@@ -2066,10 +2078,10 @@ provides-extras = ["cast-value-rs", "cli", "gpu", "optional", "remote"]
 dev = [
     { name = "astroid", specifier = "==4.1.2" },
     { name = "botocore" },
-    { name = "coverage", specifier = "==7.15.2" },
+    { name = "coverage", specifier = "==7.15.3" },
     { name = "fsspec", specifier = ">=2023.10.0" },
     { name = "griffe-inherited-docstrings", specifier = "==1.1.3" },
-    { name = "hypothesis", specifier = "==6.164.0" },
+    { name = "hypothesis", specifier = "==6.165.2" },
     { name = "markdown-exec", extras = ["ansi"], specifier = "==1.12.3" },
     { name = "mike", specifier = "==2.2.0" },
     { name = "mkdocs", specifier = "==1.6.1" },
@@ -2090,12 +2102,12 @@ dev = [
     { name = "pytest-cov", specifier = "==7.1.0" },
     { name = "pytest-xdist", specifier = "==3.8.0" },
     { name = "requests", specifier = "==2.34.2" },
-    { name = "ruff", specifier = "==0.16.0" },
+    { name = "ruff", specifier = "==0.16.1" },
     { name = "s3fs", specifier = ">=2023.10.0" },
     { name = "tomlkit", specifier = "==0.15.1" },
     { name = "towncrier", specifier = "==25.8.0" },
     { name = "universal-pathlib" },
-    { name = "uv", specifier = "==0.12.0" },
+    { name = "uv", specifier = "==0.12.2" },
 ]
 docs = [
     { name = "astroid", specifier = "==4.1.2" },
@@ -2109,16 +2121,16 @@ docs = [
     { name = "mkdocstrings-python", specifier = "==2.0.5" },
     { name = "numcodecs", extras = ["msgpack"] },
     { name = "pytest", specifier = "==9.1.1" },
-    { name = "ruff", specifier = "==0.16.0" },
+    { name = "ruff", specifier = "==0.16.1" },
     { name = "s3fs", specifier = ">=2023.10.0" },
     { name = "towncrier", specifier = "==25.8.0" },
 ]
 release = [{ name = "towncrier", specifier = "==25.8.0" }]
 remote-tests = [
     { name = "botocore" },
-    { name = "coverage", specifier = "==7.15.2" },
+    { name = "coverage", specifier = "==7.15.3" },
     { name = "fsspec", specifier = ">=2023.10.0" },
-    { name = "hypothesis", specifier = "==6.164.0" },
+    { name = "hypothesis", specifier = "==6.165.2" },
     { name = "moto", extras = ["s3", "server"], specifier = "==5.2.2" },
     { name = "numpydoc", specifier = "==1.10.0" },
     { name = "obstore", specifier = ">=0.5.1" },
@@ -2132,11 +2144,11 @@ remote-tests = [
     { name = "requests", specifier = "==2.34.2" },
     { name = "s3fs", specifier = ">=2023.10.0" },
     { name = "tomlkit", specifier = "==0.15.1" },
-    { name = "uv", specifier = "==0.12.0" },
+    { name = "uv", specifier = "==0.12.2" },
 ]
 test = [
-    { name = "coverage", specifier = "==7.15.2" },
-    { name = "hypothesis", specifier = "==6.164.0" },
+    { name = "coverage", specifier = "==7.15.3" },
+    { name = "hypothesis", specifier = "==6.165.2" },
     { name = "numpydoc", specifier = "==1.10.0" },
     { name = "pytest", specifier = "==9.1.1" },
     { name = "pytest-accept", specifier = "==0.3.0" },
@@ -2146,7 +2158,7 @@ test = [
     { name = "pytest-cov", specifier = "==7.1.0" },
     { name = "pytest-xdist", specifier = "==3.8.0" },
     { name = "tomlkit", specifier = "==0.15.1" },
-    { name = "uv", specifier = "==0.12.0" },
+    { name = "uv", specifier = "==0.12.2" },
 ]
 
 [[package]]
@@ -2170,6 +2182,7 @@ docs = [
 examples = [
     { name = "fsspec", extra = ["http"] },
     { name = "httpx" },
+    { name = "tifffile" },
 ]
 test = [
     { name = "httpx" },
@@ -2200,6 +2213,7 @@ docs = [
 examples = [
     { name = "fsspec", extras = ["http"] },
     { name = "httpx" },
+    { name = "tifffile", specifier = ">=2026.5.2" },
 ]
 test = [
     { name = "httpx" },

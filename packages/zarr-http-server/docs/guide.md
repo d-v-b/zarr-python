@@ -151,6 +151,45 @@ Both runners take any ASGI app, so the split is clean: what an app *serves*
 while `serve` / `serve_background` only decide how it runs (`host`, `port`,
 `shutdown_timeout`, `uvicorn_options`).
 
+## Serving data that is not stored as Zarr
+
+Nothing here assumes the bytes came from a Zarr file. Both apps take a
+`zarr.abc.store.Store`, so any library that presents its own format through
+that interface can be served as-is — no conversion step, and no second copy of
+the data.
+
+[`tifffile`](https://github.com/cgohlke/tifffile) is one such library. Its
+`imread(path, return_as="zarr")` returns a read-only `Store` whose keys are the
+`zarr.json` documents and chunks a Zarr client expects, with the TIFF's own
+tiles as the chunks:
+
+```python
+import tifffile
+
+from zarr_http_server import serve_background, store_app
+
+store = tifffile.imread("pyramid.ome.tif", return_as="zarr")
+server = serve_background(store_app(store))
+# -> zarr.open_group(server.url, mode="r") from anywhere that can reach it
+```
+
+Two things are worth knowing before pointing clients at one of these:
+
+- **Chunks are read, and decoded, on demand.** A request for a chunk turns
+  into a read of one TIFF tile, so the shape of the client's access pattern is
+  the shape of the file I/O. Only the requested tiles are touched.
+- **Compression is a property of the file, not of the response.** `tifffile`
+  decompresses each tile as it reads it and hands Zarr plain bytes — the served
+  metadata lists no codec beyond `bytes` — so a compressed TIFF still goes over
+  the wire uncompressed. Enable compression at the transport layer if that
+  matters.
+
+Such a store reports `read_only=True`, which is the strong guarantee described
+in [Read-only serving](#read-only-serving): the default method set already
+refuses writes, and asking for `READ_WRITE_HTTP_METHODS` on it raises
+`ValueError` rather than producing an app that could ever accept a `PUT`.
+`examples/serve_tiff.py` is a runnable version of this.
+
 ## Serving from a notebook
 
 A notebook needs a server that outlives the cell that started it, so the `with`
@@ -377,9 +416,9 @@ app = store_app(store, methods=READ_WRITE_HTTP_METHODS, max_body_size=None)
 
 ## Examples
 
-Both live in
+All three live in
 [`examples/`](https://github.com/zarr-developers/zarr-python/tree/main/packages/zarr-http-server/examples)
-and are executed by the test suite, so neither can drift from the code.
+and are executed by the test suite, so none of them can drift from the code.
 
 `serve.py` creates an in-memory Zarr array, serves it, and fetches the
 `zarr.json` metadata document and a raw chunk with `httpx`. It declares its own
@@ -389,5 +428,14 @@ dependencies inline, so uv installs them for you:
 uv run examples/serve.py
 ```
 
-`serve_notebook.ipynb` is the notebook equivalent, showing how to start a
-server in one cell and stop it in another.
+`serve_tiff.py` writes a pyramidal OME-TIFF, opens it as a Zarr store with
+`tifffile`, and serves that — see [Serving data that is not stored as
+Zarr](#serving-data-that-is-not-stored-as-zarr). It reads the result back both
+as raw HTTP responses and through a Zarr client:
+
+```bash
+uv run examples/serve_tiff.py
+```
+
+`serve_notebook.ipynb` is the notebook equivalent of `serve.py`, showing how to
+start a server in one cell and stop it in another.
