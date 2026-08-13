@@ -280,7 +280,7 @@ class ChainedIndexingStateMachine(RuleBasedStateMachine):
         uniform spellings do: a box wider than the extent is one box.
         """
         base = self.view.base_shape
-        return [
+        fitting = [
             boxes
             for boxes in type(self).partitionings
             if boxes is None
@@ -290,6 +290,10 @@ class ChainedIndexingStateMachine(RuleBasedStateMachine):
                 and all(sum(sizes) == extent for sizes, extent in zip(boxes, base, strict=True))
             )
         ]
+        # A subclass may declare nothing but per-axis sizes, none of which can
+        # fit a narrowed base. Leaving the view boxed as it already is says so,
+        # where drawing from nothing would raise from inside Hypothesis.
+        return fitting or [None]
 
     def _step(self, mode: SelectionMode, selection: tuple[Any, ...]) -> None:
         self.chain.append((mode, selection))
