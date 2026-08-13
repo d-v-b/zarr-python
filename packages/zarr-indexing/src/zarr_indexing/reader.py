@@ -495,10 +495,10 @@ def _push_slice_for_dimension_map(
     d = m.input_dimension
     lo = transform.domain.inclusive_min[d]
     hi = max(transform.domain.exclusive_max[d], lo)
-    if hi == lo:
+    endpoints = m.endpoints(lo, hi)
+    if endpoints is None:
         return slice(0, 0, 1), DimensionMap(input_dimension=d, offset=-lo, stride=1)
-    first = checked_affine(m.offset, m.stride, lo)
-    last = checked_affine(m.offset, m.stride, hi - 1)
+    first, last = endpoints
     if m.stride > 0:
         return (
             slice(first, last + 1, m.stride),
@@ -531,15 +531,15 @@ def _push_unit_slice_for_dimension_map(
     d = m.input_dimension
     lo = transform.domain.inclusive_min[d]
     hi = max(transform.domain.exclusive_max[d], lo)
-    if hi == lo:
+    endpoints = m.endpoints(lo, hi)
+    if endpoints is None:
         return slice(0, 0, 1), DimensionMap(input_dimension=d, offset=-lo, stride=1)
-    first = checked_affine(m.offset, m.stride, lo)
+    first, last = endpoints
     if m.stride == 0:
         return (
             slice(first, first + 1, 1),
             DimensionMap(input_dimension=d, offset=0, stride=0),
         )
-    last = checked_affine(m.offset, m.stride, hi - 1)
     origin = min(first, last)
     return (
         slice(origin, max(first, last) + 1, 1),

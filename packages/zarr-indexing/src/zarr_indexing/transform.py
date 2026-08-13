@@ -452,8 +452,8 @@ class IndexTransform:
         """Lower a box transform to the NumPy basic selection it describes.
 
         Returns one selector per output dimension, plus a `None` for each
-        domain axis no output map reads, such that
-        `source[transform.as_basic_selection()]` under NumPy indexing
+        domain axis no output map reads and no constant stands in for, such
+        that `source[transform.as_basic_selection()]` under NumPy indexing
         semantics reads exactly the cells this transform addresses, in domain
         order: the result has shape `domain.shape` exactly, and its element at
         position `p` holds the source value at
@@ -482,7 +482,8 @@ class IndexTransform:
         -------
         tuple of int or slice or None
             One selector per output dimension, interleaved with a `None` for
-            each domain axis no output map reads.
+            each domain axis that neither an output map reads nor a constant
+            stands in for.
 
         Raises
         ------
@@ -600,13 +601,13 @@ a query selection is a lookup table, not a slab
                     "transposes or repeats axes"
                 )
             next_axis = d + 1
-            lo = self.domain.inclusive_min[d]
-            hi = self.domain.exclusive_max[d]
-            if hi <= lo:
+            endpoints = output_map.endpoints(
+                self.domain.inclusive_min[d], self.domain.exclusive_max[d]
+            )
+            if endpoints is None:
                 selection.append(slice(0, 0, 1))
                 continue
-            first = checked_affine(output_map.offset, output_map.stride, lo)
-            last = checked_affine(output_map.offset, output_map.stride, hi - 1)
+            first, last = endpoints
             if min(first, last) < 0:
                 raise ValueError(
                     f"cannot lower to a basic selection: output[{output_dimension}] "
