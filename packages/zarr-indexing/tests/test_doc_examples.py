@@ -133,19 +133,24 @@ def test_documentation_example_executes(example: Path) -> None:
 
 
 def _imported_modules(script: Path) -> tuple[str, ...]:
-    """The top-level modules `script` imports, in source order.
+    """The modules `script` imports, dotted paths and all, in source order.
 
     Examples declare their own dependencies (they are PEP 723 scripts run
     outside this environment), and the suite is expected to run without the
     optional ones installed. Reading the imports keeps the skip rule tied to
     what a script actually needs rather than to what its name suggests.
+
+    Submodules are kept whole: a distribution can be installed while the
+    submodule an example needs is not importable — `dask` without
+    `dask.array`, whose extra dependencies are their own install — and only
+    the path the script actually imports answers that.
     """
     modules: dict[str, None] = {}
     for node in ast.walk(ast.parse(script.read_text())):
         if isinstance(node, ast.Import):
-            modules.update((alias.name.split(".")[0], None) for alias in node.names)
+            modules.update((alias.name, None) for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-            modules[node.module.split(".")[0]] = None
+            modules[node.module] = None
     return tuple(modules)
 
 
