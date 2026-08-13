@@ -467,12 +467,24 @@ class ChainedIndexingStateMachine(RuleBasedStateMachine):
         semantics to the values the source holds and checked against the
         model; a query part must refuse to lower instead of guessing a slab.
 
-        No reader runs in this invariant: it proves the lowered selections
-        alone carry the read, which is exactly what a consumer that plans here
-        but fetches elsewhere relies on.
+        Every part — query parts included — must also satisfy the
+        factorization law: `transform.decompose()` yields a cover and a
+        residual whose resolution against `data[cover]` reproduces the model,
+        the read a consumer performs when it fetches a bounding slab through
+        its own I/O layer and finishes the gather in memory.
+
+        Apart from resolving that residual, no reader runs in this invariant:
+        it proves the lowered selections alone carry the read, which is
+        exactly what a consumer that plans here but fetches elsewhere relies
+        on.
         """
         data = np.asarray(type(self).data)
         for part in self.view.parts():
+            expected_block = self.model[part.out_selection]
+            cover, residual = part.view.transform.decompose()
+            decomposed = np.empty(expected_block.shape, dtype=data.dtype)
+            basic_reader.read_into(data[cover], ReadContext(residual), decomposed)
+            np.testing.assert_array_equal(decomposed, expected_block, err_msg=str(self.chain))
             try:
                 source_selection = part.source_selection
             except NoBasicSelectionError:
@@ -498,9 +510,8 @@ class ChainedIndexingStateMachine(RuleBasedStateMachine):
                     f"refused to: {self.chain}"
                 )
                 continue
-            expected = self.model[part.out_selection]
             slab = data[source_selection]
-            np.testing.assert_array_equal(slab, expected, err_msg=str(self.chain))
+            np.testing.assert_array_equal(slab, expected_block, err_msg=str(self.chain))
             cell = data[
                 tuple(
                     slice(lo, hi)
@@ -512,7 +523,7 @@ class ChainedIndexingStateMachine(RuleBasedStateMachine):
                 )
             ]
             np.testing.assert_array_equal(
-                cell[part.chunk_local_selection], expected, err_msg=str(self.chain)
+                cell[part.chunk_local_selection], expected_block, err_msg=str(self.chain)
             )
 
 

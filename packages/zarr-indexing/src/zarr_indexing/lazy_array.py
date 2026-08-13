@@ -567,7 +567,11 @@ class Partition:
         therefore necessary but not sufficient — catching the error is what
         decides it — and a consumer mixing selection kinds falls back to
         `view.result()` for the parts that refuse. The dedicated subclass of
-        `ValueError` keeps that fallback from absorbing a genuine defect. A reversing view lowers to
+        `ValueError` keeps that fallback from absorbing a genuine defect. A
+        consumer that must stay on its own I/O path even for query parts can
+        instead fetch the cover half of
+        [`view.transform.decompose()`][zarr_indexing.transform.IndexTransform.decompose]
+        and finish the gather in memory. A reversing view lowers to
         a negative-step slice and a fabricated axis to `None`, which a backend
         narrower than NumPy may not accept.
 

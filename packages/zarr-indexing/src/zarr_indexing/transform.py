@@ -51,7 +51,7 @@ from zarr_indexing.output_map import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     import numpy.typing as npt
 
@@ -473,6 +473,10 @@ class IndexTransform:
         stand in for it is one nothing reads — a `None`/newaxis in the
         selection that made it — and lowers back to `None`.
 
+        [`decompose`][zarr_indexing.transform.IndexTransform.decompose] is
+        the total counterpart: every transform factors into a basic cover
+        plus an in-memory residual, so a refusal here is not a dead end.
+
         This is the boundary for consumers that plan reads here but perform
         them through their own I/O layer — an async store, an HTTP range
         request — whose request vocabulary is a basic selection rather than a
@@ -635,6 +639,105 @@ selection: output[0] is an ArrayMap; a query selection is a lookup table, not a 
             "every unreferenced one was proven a singleton above"
         )
         return tuple(selection)
+
+    def decompose(self) -> tuple[tuple[slice, ...], IndexTransform]:
+        """Factor this transform into a basic cover and an in-memory residual.
+
+        The total counterpart of
+        [`as_basic_selection`][zarr_indexing.transform.IndexTransform.as_basic_selection]:
+        where that method is defined only for reads that *are* a basic
+        selection, every transform factors as one basic read followed by an
+        in-memory rearrangement. Returns `(cover, residual)` such that
+        resolving `residual` against the block `source[cover]` reads exactly
+        the cells this transform addresses, at exactly its domain shape — so a
+        consumer whose I/O layer speaks basic selections can fetch the cover
+        through it and finish any gather, reversal, or broadcast in memory.
+
+        The cover is one ascending slice per output dimension: a
+        `DimensionMap` covers its arithmetic progression (a descending map is
+        read forwards and reversed by the residual), a `ConstantMap` covers
+        its single coordinate, and an `ArrayMap` covers the range from its
+        smallest to its largest coordinate — the price of a slab vocabulary is
+        over-reading a sparse gather's bounding interval. The residual keeps
+        this transform's domain and rewrites each output map to block-local
+        coordinates, so the factorization inverts by composition: the cover,
+        read as the diagonal transform it denotes, chained onto the residual,
+        reads cell for cell as `self` (the maps may spell offsets
+        differently; the reads are identical).
+
+        Returns
+        -------
+        tuple
+            `(cover, residual)`: a tuple of ascending slices to request from
+            the source, and the `IndexTransform` to resolve against the
+            returned block.
+
+        Raises
+        ------
+        NoBasicSelectionError
+            If an output coordinate is negative — NumPy would count it from
+            the end of the source, so no cover slice can spell it. This is
+            the one transform shape with no factorization; every other
+            transform, including queries and broadcasts, decomposes.
+
+        Examples
+        --------
+        A descending strided read: the cover walks forward, the residual
+        reverses.
+
+        >>> import numpy as np
+        >>> source = np.arange(10)
+        >>> cover, residual = IndexTransform.from_shape((10,))[::-3].decompose()
+        >>> cover
+        (slice(0, 10, 3),)
+        >>> block = source[cover]
+        >>> lo, hi = residual.domain.inclusive_min[0], residual.domain.exclusive_max[0]
+        >>> [int(block[residual.apply((p,))]) for p in range(lo, hi)]
+        [9, 6, 3, 0]
+
+        A query decomposes into its bounding interval and a block-local
+        lookup, where `as_basic_selection` refuses:
+
+        >>> cover, residual = IndexTransform.from_shape((10,)).oindex[[7, 2, 2]].decompose()
+        >>> cover
+        (slice(2, 8, 1),)
+        >>> block = source[cover]
+        >>> [int(block[residual.apply((p,))]) for p in range(3)]
+        [7, 2, 2]
+        """
+        return _decompose_basic(self)
+
+    def decompose_unit_step(self) -> tuple[tuple[slice, ...], IndexTransform]:
+        """Factor as `decompose` does, with a contiguous ascending cover.
+
+        The variant of
+        [`decompose`][zarr_indexing.transform.IndexTransform.decompose] for a
+        source that accepts nothing but `slice(start, stop, 1)` — compare
+        [`UnitStepReader`][zarr_indexing.reader.UnitStepReader], which reads
+        through exactly this factorization. Strides and reversals stay in the
+        residual, so the cover over-reads a strided selection by its stride
+        factor: the price of a unit-step request vocabulary.
+
+        Returns
+        -------
+        tuple
+            `(cover, residual)` exactly as `decompose` returns them, with
+            every cover slice contiguous and ascending.
+
+        Raises
+        ------
+        NoBasicSelectionError
+            If an output coordinate is negative, exactly as for `decompose`.
+
+        Examples
+        --------
+        >>> cover, residual = IndexTransform.from_shape((10,))[1:9:3].decompose_unit_step()
+        >>> cover
+        (slice(1, 8, 1),)
+        >>> residual.output
+        (DimensionMap(input_dimension=0, offset=0, stride=3),)
+        """
+        return _decompose_unit_step(self)
 
     @property
     def selection_repr(self) -> str:
@@ -1642,6 +1745,120 @@ def _reshape_to_axis(
     shape = [1] * ndim
     shape[axis] = flat.shape[0]
     return flat.reshape(shape)
+
+
+# --------------------------------------------------------------------------- #
+# Cover-and-residual decomposition
+# --------------------------------------------------------------------------- #
+
+
+def _push_slice_for_dimension_map(
+    m: DimensionMap, transform: IndexTransform
+) -> tuple[slice, DimensionMap]:
+    """The positive-step slice covering a `DimensionMap`, and its block-local map.
+
+    A negative step is read forwards and reversed by the residual: a source is
+    only ever asked for a slice that walks upwards, which is the one form every
+    array-like agrees on.
+    """
+    d = m.input_dimension
+    lo = transform.domain.inclusive_min[d]
+    hi = max(transform.domain.exclusive_max[d], lo)
+    endpoints = m.endpoints(lo, hi)
+    if endpoints is None:
+        return slice(0, 0, 1), DimensionMap(input_dimension=d, offset=-lo, stride=1)
+    first, last = endpoints
+    if m.stride > 0:
+        return (
+            slice(first, last + 1, m.stride),
+            DimensionMap(input_dimension=d, offset=-lo, stride=1),
+        )
+    if m.stride == 0:
+        return (
+            slice(first, first + 1, 1),
+            DimensionMap(input_dimension=d, offset=0, stride=0),
+        )
+    # Descending: the block holds the same coordinates in ascending order, so
+    # the residual walks it backwards from the last block position.
+    return (
+        slice(last, first + 1, -m.stride),
+        DimensionMap(input_dimension=d, offset=hi - 1, stride=-1),
+    )
+
+
+def _push_unit_slice_for_dimension_map(
+    m: DimensionMap, transform: IndexTransform
+) -> tuple[slice, DimensionMap]:
+    """The unit-step slice covering a `DimensionMap`, and its block-local map.
+
+    Strides and reversals stay in the residual: the source is only ever asked
+    for a contiguous ascending slice, and the original stride is replayed
+    against the in-memory block. The cover therefore over-reads a strided
+    selection by its stride factor, which is the price of a source that
+    accepts nothing but `slice(start, stop, 1)`.
+    """
+    d = m.input_dimension
+    lo = transform.domain.inclusive_min[d]
+    hi = max(transform.domain.exclusive_max[d], lo)
+    endpoints = m.endpoints(lo, hi)
+    if endpoints is None:
+        return slice(0, 0, 1), DimensionMap(input_dimension=d, offset=-lo, stride=1)
+    first, last = endpoints
+    if m.stride == 0:
+        return (
+            slice(first, first + 1, 1),
+            DimensionMap(input_dimension=d, offset=0, stride=0),
+        )
+    origin = min(first, last)
+    return (
+        slice(origin, max(first, last) + 1, 1),
+        DimensionMap(input_dimension=d, offset=m.offset - origin, stride=m.stride),
+    )
+
+
+def _decompose_basic(transform: IndexTransform) -> tuple[tuple[slice, ...], IndexTransform]:
+    return _decompose(transform, _push_slice_for_dimension_map)
+
+
+def _decompose_unit_step(transform: IndexTransform) -> tuple[tuple[slice, ...], IndexTransform]:
+    return _decompose(transform, _push_unit_slice_for_dimension_map)
+
+
+def _decompose(
+    transform: IndexTransform,
+    push_dimension_map: Callable[[DimensionMap, IndexTransform], tuple[slice, DimensionMap]],
+) -> tuple[tuple[slice, ...], IndexTransform]:
+    key: list[slice] = []
+    residual: list[OutputIndexMap] = []
+    for output_map in transform.output:
+        if isinstance(output_map, ConstantMap):
+            coordinate = checked_affine(output_map.offset, 0, 0)
+            key.append(slice(coordinate, coordinate + 1, 1))
+            residual.append(ConstantMap(offset=0))
+        elif isinstance(output_map, DimensionMap):
+            pushed, local = push_dimension_map(output_map, transform)
+            key.append(pushed)
+            residual.append(local)
+        else:
+            coordinates = checked_affine(
+                output_map.offset, output_map.stride, output_map.index_array
+            )
+            if coordinates.size == 0:
+                key.append(slice(0, 0, 1))
+                local_index = coordinates
+            else:
+                origin = int(coordinates.min())
+                key.append(slice(origin, int(coordinates.max()) + 1, 1))
+                local_index = checked_affine(-origin, 1, coordinates)
+            residual.append(ArrayMap(index_array=local_index))
+    for output_dimension, entry in enumerate(key):
+        if entry.start < 0:
+            raise NoBasicSelectionError(
+                f"cannot cover with a basic selection: output[{output_dimension}] "
+                f"addresses coordinate {entry.start}, which NumPy would count "
+                "from the end of the source"
+            )
+    return tuple(key), IndexTransform(domain=transform.domain, output=tuple(residual))
 
 
 class _OIndexHelper:

@@ -506,6 +506,76 @@ class TestAsBasicSelection:
             transform.as_basic_selection()
 
 
+class TestDecompose:
+    @pytest.mark.parametrize(
+        "transform",
+        [
+            pytest.param(IndexTransform.from_shape((10,)), id="identity"),
+            pytest.param(IndexTransform.from_shape((10,))[1:9:3], id="strided"),
+            pytest.param(IndexTransform.from_shape((6,))[::-1], id="reversed"),
+            pytest.param(IndexTransform.from_shape((10,))[4:4], id="empty"),
+            pytest.param(IndexTransform.from_shape((5, 7))[3, 1:6:2], id="int-and-slice"),
+            pytest.param(IndexTransform.from_shape((5, 7))[3, 2], id="rank-zero"),
+            pytest.param(IndexTransform.from_shape((10,)).oindex[[7, 2, 2]], id="query-gather"),
+            pytest.param(
+                IndexTransform.from_shape((5, 7)).oindex[slice(None), [2]],
+                id="collapsed-single-gather",
+            ),
+            pytest.param(
+                IndexTransform(
+                    IndexDomain.from_shape((3,)), (DimensionMap(0, offset=2, stride=0),)
+                ),
+                id="broadcast",
+            ),
+            pytest.param(
+                IndexTransform(IndexDomain.from_shape((2, 3)), (DimensionMap(1), DimensionMap(0))),
+                id="transposed",
+            ),
+            pytest.param(IndexTransform.from_shape((5,))[None], id="newaxis"),
+            pytest.param(
+                IndexTransform.from_shape((5,)).oindex[[3]].oindex[np.array([0, 0])],
+                id="axis-restored-by-repetition",
+            ),
+        ],
+    )
+    def test_cover_and_residual_reproduce_the_transform(self, transform: IndexTransform) -> None:
+        """The factorization law, checked both ways.
+
+        Value law: resolving the residual against `source[cover]` reads
+        exactly what the transform reads. Composition law: the cover, read as
+        the diagonal transform it denotes, chained onto the residual, is the
+        original transform — `decompose` is inverted by `compose`. Every
+        transform decomposes, including the shapes `as_basic_selection`
+        refuses.
+        """
+        source = np.arange(35).reshape(5, 7) if transform.output_rank == 2 else np.arange(10)
+        cover, residual = transform.decompose()
+        assert len(cover) == transform.output_rank
+        assert all(entry.step >= 1 for entry in cover)
+        block = np.asarray(source[cover])
+        np.testing.assert_array_equal(
+            _pointwise_read(residual, block), _pointwise_read(transform, source)
+        )
+        cover_transform = IndexTransform(
+            IndexDomain.from_shape(block.shape),
+            tuple(
+                DimensionMap(axis, offset=entry.start, stride=entry.step)
+                for axis, entry in enumerate(cover)
+            ),
+        )
+        composed = residual.compose(cover_transform)
+        assert composed.domain == transform.domain
+        np.testing.assert_array_equal(
+            _pointwise_read(composed, source), _pointwise_read(transform, source)
+        )
+
+    def test_rejects_a_negative_coordinate(self) -> None:
+        """The one shape with no cover: NumPy would wrap the coordinate."""
+        transform = IndexTransform(IndexDomain.from_shape((2,)), (DimensionMap(0, offset=-3),))
+        with pytest.raises(NoBasicSelectionError, match="count from the end"):
+            transform.decompose()
+
+
 class TestIndexTransformBasicIndexing:
     def test_slice_identity(self) -> None:
         """slice(None) on identity transform is a no-op."""

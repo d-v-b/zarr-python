@@ -91,7 +91,9 @@ base the view partitions, so it keys a cache only alongside the grid that
 produced it. A query part (an `oindex`/`vindex` gather) has
 no slab spelling and raises `NoBasicSelectionError` (a `ValueError`
 subclass), so mixed consumers fall back to
-`part.view.result()` for those parts. The
+`part.view.result()` for those parts — or stay on their own I/O path with
+`part.view.transform.decompose()`, which factors *any* transform into a basic
+cover to fetch plus a residual to resolve in memory. The
 [asyncio example](../examples/lazy_indexing_asyncio.md) drives all three
 loops — gather-per-part, decoded-chunk cache, and the query fallback — with
 `asyncio.gather` over `zarr.AsyncArray`.

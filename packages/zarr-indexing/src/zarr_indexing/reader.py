@@ -4,19 +4,14 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Final, Protocol
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
+from typing import Any, Final, Protocol
 
 import numpy as np
 
 from zarr_indexing._affine import checked_affine
 from zarr_indexing.chunk_resolution import ChunkProjection  # noqa: TC001 (runtime annotation)
-from zarr_indexing.output_map import ArrayMap, ConstantMap, DimensionMap, OutputIndexMap
-from zarr_indexing.transform import (
-    IndexTransform,
-)
+from zarr_indexing.output_map import ArrayMap, ConstantMap, DimensionMap
+from zarr_indexing.transform import IndexTransform  # noqa: TC001 (doctest runtime)
 
 __all__ = [
     "BasicReader",
@@ -126,7 +121,7 @@ class BasicReader:
     def read_into(self, source: Any, context: ReadContext, out: Any, /) -> None:
         """Read one transform through a positive-slice slab and residual lowering."""
         transform = context.transform
-        key, residual = _decompose_basic(transform)
+        key, residual = transform.decompose()
         block = np.asanyarray(source[key])
         out[...] = _lower(block, residual)
 
@@ -154,7 +149,7 @@ class NumPyReader:
     def read_into(self, source: Any, context: ReadContext, out: Any, /) -> None:
         """Read one transform through a narrowed slab into `out`."""
         transform = context.transform
-        key, residual = _decompose_basic(transform)
+        key, residual = transform.decompose()
         block = np.asanyarray(source[key])
         out[...] = _lower(block, residual)
 
@@ -196,7 +191,7 @@ class UnitStepReader:
     def read_into(self, source: Any, context: ReadContext, out: Any, /) -> None:
         """Read one transform through an ascending unit-step slab into `out`."""
         transform = context.transform
-        key, residual = _decompose_unit_step(transform)
+        key, residual = transform.decompose_unit_step()
         block = np.asanyarray(source[key])
         out[...] = _lower(block, residual)
 
@@ -481,105 +476,3 @@ def _lower_general(array: Any, transform: IndexTransform) -> Any:
     return _restore_domain_axis_order(
         result, list(broadcast_axes) + residual_axis_dims, transform.domain.shape
     )
-
-
-def _push_slice_for_dimension_map(
-    m: DimensionMap, transform: IndexTransform
-) -> tuple[slice, DimensionMap]:
-    """The positive-step slice covering a `DimensionMap`, and its block-local map.
-
-    A negative step is read forwards and reversed by the residual: a source is
-    only ever asked for a slice that walks upwards, which is the one form every
-    array-like agrees on.
-    """
-    d = m.input_dimension
-    lo = transform.domain.inclusive_min[d]
-    hi = max(transform.domain.exclusive_max[d], lo)
-    endpoints = m.endpoints(lo, hi)
-    if endpoints is None:
-        return slice(0, 0, 1), DimensionMap(input_dimension=d, offset=-lo, stride=1)
-    first, last = endpoints
-    if m.stride > 0:
-        return (
-            slice(first, last + 1, m.stride),
-            DimensionMap(input_dimension=d, offset=-lo, stride=1),
-        )
-    if m.stride == 0:
-        return (
-            slice(first, first + 1, 1),
-            DimensionMap(input_dimension=d, offset=0, stride=0),
-        )
-    # Descending: the block holds the same coordinates in ascending order, so
-    # the residual walks it backwards from the last block position.
-    return (
-        slice(last, first + 1, -m.stride),
-        DimensionMap(input_dimension=d, offset=hi - 1, stride=-1),
-    )
-
-
-def _push_unit_slice_for_dimension_map(
-    m: DimensionMap, transform: IndexTransform
-) -> tuple[slice, DimensionMap]:
-    """The unit-step slice covering a `DimensionMap`, and its block-local map.
-
-    Strides and reversals stay in the residual: the source is only ever asked
-    for a contiguous ascending slice, and the original stride is replayed
-    against the in-memory block. The cover therefore over-reads a strided
-    selection by its stride factor, which is the price of a source that
-    accepts nothing but `slice(start, stop, 1)`.
-    """
-    d = m.input_dimension
-    lo = transform.domain.inclusive_min[d]
-    hi = max(transform.domain.exclusive_max[d], lo)
-    endpoints = m.endpoints(lo, hi)
-    if endpoints is None:
-        return slice(0, 0, 1), DimensionMap(input_dimension=d, offset=-lo, stride=1)
-    first, last = endpoints
-    if m.stride == 0:
-        return (
-            slice(first, first + 1, 1),
-            DimensionMap(input_dimension=d, offset=0, stride=0),
-        )
-    origin = min(first, last)
-    return (
-        slice(origin, max(first, last) + 1, 1),
-        DimensionMap(input_dimension=d, offset=m.offset - origin, stride=m.stride),
-    )
-
-
-def _decompose_basic(transform: IndexTransform) -> tuple[tuple[slice, ...], IndexTransform]:
-    return _decompose(transform, _push_slice_for_dimension_map)
-
-
-def _decompose_unit_step(transform: IndexTransform) -> tuple[tuple[slice, ...], IndexTransform]:
-    return _decompose(transform, _push_unit_slice_for_dimension_map)
-
-
-def _decompose(
-    transform: IndexTransform,
-    push_dimension_map: Callable[[DimensionMap, IndexTransform], tuple[slice, DimensionMap]],
-) -> tuple[tuple[slice, ...], IndexTransform]:
-    key: list[slice] = []
-    residual: list[OutputIndexMap] = []
-    for output_map in transform.output:
-        if isinstance(output_map, ConstantMap):
-            coordinate = checked_affine(output_map.offset, 0, 0)
-            key.append(slice(coordinate, coordinate + 1, 1))
-            residual.append(ConstantMap(offset=0))
-        elif isinstance(output_map, DimensionMap):
-            pushed, local = push_dimension_map(output_map, transform)
-            key.append(pushed)
-            residual.append(local)
-        else:
-            coordinates = checked_affine(
-                output_map.offset, output_map.stride, output_map.index_array
-            )
-            if coordinates.size == 0:
-                key.append(slice(0, 0, 1))
-                local_index = coordinates
-            else:
-                origin = int(coordinates.min())
-                key.append(slice(origin, int(coordinates.max()) + 1, 1))
-                local_index = checked_affine(-origin, 1, coordinates)
-            residual.append(ArrayMap(index_array=local_index))
-    return tuple(key), IndexTransform(domain=transform.domain, output=tuple(residual))
