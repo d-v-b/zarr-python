@@ -61,6 +61,10 @@ examples = [
     # needs an HTTP-capable fsspec; `examples/serve.py` uses httpx.
     "fsspec[http]",
     "httpx",
+    # `examples/serve_tiff.py` serves a TIFF through tifffile's zarr store.
+    # 2026.5.2 is the first release whose store is a zarr format 3
+    # `zarr.abc.store.Store`, which is what makes it servable at all.
+    "tifffile>=2026.5.2",
 ]
 docs = [
     # Pins match the zarr-python docs environment in the repo-root

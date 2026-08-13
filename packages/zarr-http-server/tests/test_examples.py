@@ -16,9 +16,12 @@ import pytest
 EXAMPLES = pathlib.Path(__file__).resolve().parent.parent / "examples"
 NOTEBOOK = EXAMPLES / "serve_notebook.ipynb"
 SCRIPT = EXAMPLES / "serve.py"
+TIFF_SCRIPT = EXAMPLES / "serve_tiff.py"
 
 
-@pytest.mark.parametrize("path", [NOTEBOOK, SCRIPT], ids=["notebook", "script"])
+@pytest.mark.parametrize(
+    "path", [NOTEBOOK, SCRIPT, TIFF_SCRIPT], ids=["notebook", "script", "tiff_script"]
+)
 def test_example_exists(path: pathlib.Path) -> None:
     """Guards the paths above: a renamed or moved example would otherwise turn
     its execution test into a skip, or a no-op, that nobody notices."""
@@ -33,6 +36,22 @@ def test_serve_script_runs() -> None:
     is on main instead of the working tree.
     """
     runpy.run_path(str(SCRIPT), run_name="__main__")
+
+
+def test_serve_tiff_script_runs() -> None:
+    """Run examples/serve_tiff.py top to bottom.
+
+    `tifffile` exposing a TIFF as a `zarr.abc.store.Store` is what makes the
+    example work at all, and that is a recent addition on their side, so the
+    version floor is asserted here rather than left to fail obscurely inside
+    the script. Reading the served hierarchy back needs an HTTP-capable fsspec,
+    same as the `serve.py` round trip.
+    """
+    pytest.importorskip("tifffile", minversion="2026.5.2")
+    pytest.importorskip("fsspec")
+    pytest.importorskip("aiohttp")
+
+    runpy.run_path(str(TIFF_SCRIPT), run_name="__main__")
 
 
 def test_serve_notebook_executes() -> None:

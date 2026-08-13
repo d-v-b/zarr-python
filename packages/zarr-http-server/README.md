@@ -59,11 +59,19 @@ notebook, and Uvicorn configuration.
 
 ## Examples
 
-[`examples/`](examples/) holds a runnable script and a notebook, both executed
-by the test suite so neither can drift from the code:
+[`examples/`](examples/) holds runnable scripts and a notebook, all executed by
+the test suite so none of them can drift from the code:
 
 ```bash
 uv run examples/serve.py
+```
+
+`examples/serve_tiff.py` serves a TIFF file instead: `tifffile` presents it as
+a read-only Zarr store, which `store_app` can serve directly, so the TIFF stays
+the only copy of the data while clients see a normal Zarr hierarchy.
+
+```bash
+uv run examples/serve_tiff.py
 ```
 
 ## License
