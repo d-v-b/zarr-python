@@ -22,6 +22,7 @@ link anchors and nav-omitted pages.
 
 from __future__ import annotations
 
+import ast
 import re
 import runpy
 import subprocess
@@ -131,11 +132,28 @@ def test_documentation_example_executes(example: Path) -> None:
     runpy.run_path(str(example), run_name="__main__")
 
 
+def _imported_modules(script: Path) -> tuple[str, ...]:
+    """The top-level modules `script` imports, in source order.
+
+    Examples declare their own dependencies (they are PEP 723 scripts run
+    outside this environment), and the suite is expected to run without the
+    optional ones installed. Reading the imports keeps the skip rule tied to
+    what a script actually needs rather than to what its name suggests.
+    """
+    modules: dict[str, None] = {}
+    for node in ast.walk(ast.parse(script.read_text())):
+        if isinstance(node, ast.Import):
+            modules.update((alias.name.split(".")[0], None) for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            modules[node.module.split(".")[0]] = None
+    return tuple(modules)
+
+
 @pytest.mark.parametrize("script", CLI_EXAMPLES, ids=lambda path: path.stem)
 def test_cli_example_runs_as_a_subprocess(script: Path) -> None:
     """The CLI examples exit 0 when run the way their READMEs instruct."""
-    if "dask" in script.stem:
-        pytest.importorskip("dask.array")
+    for module in _imported_modules(script):
+        pytest.importorskip(module)
     completed = subprocess.run(
         [sys.executable, str(script)],
         capture_output=True,

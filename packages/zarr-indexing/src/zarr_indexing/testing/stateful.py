@@ -57,7 +57,7 @@ from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, initialize, invariant, precondition, rule
 
 from zarr_indexing.lazy_array import LazyArray
-from zarr_indexing.output_map import ConstantMap
+from zarr_indexing.output_map import DimensionMap
 from zarr_indexing.reader import Reader, basic_reader
 from zarr_indexing.testing.strategies import (
     basic_selections,
@@ -68,6 +68,7 @@ from zarr_indexing.testing.strategies import (
 
 if TYPE_CHECKING:
     from zarr_indexing.boundary import SelectionMode
+    from zarr_indexing.transform import IndexTransform
 
 __all__ = [
     "DEFAULT_DATA",
@@ -389,23 +390,27 @@ class ChainedIndexingStateMachine(RuleBasedStateMachine):
             try:
                 source_selection = part.source_selection
             except ValueError:
-                # Refusal is the documented answer for a query part, and for
-                # the one box shape with no basic spelling: an axis restored
-                # by repetition, reached by gathering a collapsed constant
-                # with duplicates. Either way the properties must agree.
-                assert not part.view.is_box or any(
-                    isinstance(m, ConstantMap) for m in part.view.transform.output
-                ), f"a plain box part refused to lower: {self.chain}"
-                for attribute in ("source_selection", "chunk_local_selection"):
-                    lowered = True
-                    try:
-                        getattr(part, attribute)
-                    except ValueError:
-                        lowered = False
-                    assert not lowered, (
-                        f"{attribute} lowered a part whose paired selection "
-                        f"refused to: {self.chain}"
-                    )
+                # Refusal is the documented answer for a query part and for
+                # the two degenerate boxes: an axis restored by repetition
+                # (gathering a collapsed constant with duplicates) and an axis
+                # broadcast from one cell. Every other box must lower — an
+                # integer-indexed one included, which is the shape a laxer
+                # check would quietly excuse.
+                assert not part.view.is_box or _is_degenerate_box(part.view.transform), (
+                    f"a plain box part refused to lower: {self.chain}"
+                )
+                # The paired spellings lower the same maps, so refusing one
+                # and answering the other would leave a consumer holding a
+                # cell selection that no source selection matches.
+                cell_lowered = True
+                try:
+                    _ = part.chunk_local_selection
+                except ValueError:
+                    cell_lowered = False
+                assert not cell_lowered, (
+                    f"chunk_local_selection lowered a part whose source_selection "
+                    f"refused to: {self.chain}"
+                )
                 continue
             expected = self.model[part.out_selection]
             slab = data[source_selection]
@@ -423,6 +428,20 @@ class ChainedIndexingStateMachine(RuleBasedStateMachine):
             np.testing.assert_array_equal(
                 cell[part.chunk_local_selection], expected, err_msg=str(self.chain)
             )
+
+
+def _is_degenerate_box(transform: IndexTransform) -> bool:
+    """Whether `transform` is one of the boxes with no basic-selection spelling.
+
+    Either an axis no output map reads but that a length-1 slice or a newaxis
+    cannot produce because its extent is not 1 — an axis restored by
+    repetition — or an axis broadcast from a single source cell by a stride-0
+    map. Both name more values than the cells they read, which no slab does.
+    """
+    referenced = {m.input_dimension for m in transform.output if isinstance(m, DimensionMap)}
+    return any(
+        axis not in referenced and extent != 1 for axis, extent in enumerate(transform.domain.shape)
+    ) or any(isinstance(m, DimensionMap) and m.stride == 0 for m in transform.output)
 
 
 def _reader_set(view: LazyArray, declared: Sequence[Reader] | None) -> tuple[Reader, ...]:
