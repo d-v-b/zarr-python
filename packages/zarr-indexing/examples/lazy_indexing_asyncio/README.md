@@ -11,9 +11,9 @@ The example shows how to:
   `part.source_selection` — a tuple of integers and slices in the wrapped
   array's own coordinates — and fetch all partitions concurrently, assembling
   each block with `out[part.out_selection] = await source.getitem(part.source_selection)`
-- Build a decoded-chunk cache keyed on `part.base_coords`: fetch each touched
-  grid cell (`projection.chunk_domain`) once, then serve every overlapping view
-  from the cache with `part.chunk_local_selection`
+- Build a decoded-chunk cache keyed on each touched grid cell's global origin:
+  fetch the cell (`projection.chunk_domain`) once, then serve every overlapping
+  view from the cache with `part.chunk_local_selection`
 - Fall back for query partitions (`oindex`/`vindex`/mask selections), whose
   gathers have no single-slab spelling: `source_selection` raises `ValueError`
   and the part resolves through its own `part.view.result()` instead

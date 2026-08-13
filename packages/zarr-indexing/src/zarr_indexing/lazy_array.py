@@ -147,7 +147,7 @@ import math
 import operator
 import uuid
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import numpy as np
@@ -161,6 +161,7 @@ from zarr_indexing.chunk_resolution import (
     ChunkProjection,
     plan_chunks,
 )
+from zarr_indexing.domain import IndexDomain
 from zarr_indexing.grid import DimensionGrid, FixedDimension, dimension_grids_from_chunks
 from zarr_indexing.output_map import ArrayMap, ConstantMap, DimensionMap
 from zarr_indexing.reader import (
@@ -296,6 +297,18 @@ def _is_identity_transform(transform: IndexTransform, shape: tuple[int, ...]) ->
 @dataclass(frozen=True, slots=True, eq=False)
 class _PartOwner:
     """Opaque identity shared only by one view and the parts it prepared."""
+
+
+def _translated_domain(domain: IndexDomain, window: tuple[slice, ...]) -> IndexDomain:
+    """`domain`, expressed in the coordinates `window` was cut from."""
+    return IndexDomain(
+        inclusive_min=tuple(
+            w.start + lo for w, lo in zip(window, domain.inclusive_min, strict=True)
+        ),
+        exclusive_max=tuple(
+            w.start + hi for w, hi in zip(window, domain.exclusive_max, strict=True)
+        ),
+    )
 
 
 def _partition_out_selection(
@@ -434,9 +447,18 @@ class Partition:
         domain, mapping each selected cell to chunk-local storage and request
         coordinates respectively. This is the authoritative placement model;
         `base_coords` and `is_complete` are conveniences derived from it.
+        `chunk_domain` locates the cell in the wrapped array's own global
+        coordinates, while `chunk_coords` names it in the grid the producing
+        view partitions — the two differ once a view partitions a window of
+        the source rather than the whole of it.
     base_coords
-        Which box of the base partitioning this is, one coordinate per dimension
-        of the wrapped array.
+        Which box of the base partitioning this is, one coordinate per
+        dimension of the wrapped array. A cell coordinate in the producing
+        view's grid, so it identifies a chunk of the source only for a view
+        that partitions the whole source (`base_shape` equals the source's
+        shape) with the source's own grid. A cache keyed on it must therefore
+        be keyed on that grid too, or on `projection.chunk_domain`, which is
+        global.
     box
         The box itself, in the global storage coordinates of the wrapped
         array: one `[inclusive_min, exclusive_max)` interval per dimension. It
@@ -448,11 +470,15 @@ class Partition:
         A `LazyArray` covering exactly the cells of the view that live in this
         box. Its transform directly addresses its raw wrapped `array`; only the
         projection's `chunk_transform` is chunk-local. Resolving the view reads
-        the box once through its selected reader, handing it a `ReadContext`
-        that carries this partition's `projection` — the same context the
-        parent view's partitioned `result()` passes, so a reader keyed on
-        `chunk_coords` behaves identically on either path. A further `.lazy`
-        selection describes a different read and drops that pairing. Named
+        the box once through its selected reader, handing it exactly the
+        `ReadContext` the parent view's partitioned `result()` passes, so a
+        reader keyed on `chunk_coords` behaves identically on either path.
+        That context carries this partition's `projection` when the parent
+        partitions the source itself; a part of a part partitions a window,
+        whose cell coordinates would name the wrong chunk of the source, so it
+        pairs with no projection and a projection-keyed reader refuses it
+        rather than reading the wrong cell. A further `.lazy` selection
+        describes a different read and drops the pairing too. Named
         `view` rather than `array` because `LazyArray.array` is the opposite
         thing — the raw wrapped source — and the two sat next to each other
         meaning inverses.
@@ -537,10 +563,13 @@ class Partition:
 
         Lowered from `projection.chunk_transform`, so coordinate 0 per axis is
         `projection.chunk_domain`'s origin. For a consumer that caches decoded
-        cells keyed on `base_coords`, this is the selection to apply to a
-        cached cell: `cell[part.chunk_local_selection]` yields the same values
-        as `view.array[part.source_selection]`, and both land at
-        `out_selection` in the request buffer.
+        cells, this is the selection to apply to a cached cell: with `cell`
+        holding `view.array[projection.chunk_domain]` — the domain is global,
+        so that read is the same whatever narrowed the view —
+        `cell[part.chunk_local_selection]` yields the same values as
+        `view.array[part.source_selection]`, and both land at `out_selection`
+        in the request buffer. `base_coords` keys such a cache only for a view
+        partitioning the whole source; see its own note.
 
         Defined exactly when `source_selection` is: the two lower the same
         maps, so a part that refuses one spelling refuses both.
@@ -1140,9 +1169,9 @@ class LazyArray:
         else:
             plan_transform = self._transform.translate(tuple(-item.start for item in self._window))
 
-        for projection in plan_chunks(plan_transform, grids):
-            base_coords = projection.chunk_coords
-            local = projection.chunk_transform
+        for planned in plan_chunks(plan_transform, grids):
+            base_coords = planned.chunk_coords
+            local = planned.chunk_transform
             origin = tuple(grid.chunk_offset(c) for grid, c in zip(grids, base_coords, strict=True))
             extent = tuple(grid.data_size(c) for grid, c in zip(grids, base_coords, strict=True))
             if origin == (0,) * rank and extent == base_shape:
@@ -1160,8 +1189,17 @@ class LazyArray:
             # `window`: a part covering the whole base carries no window (so
             # nothing is pre-materialized) but still sits somewhere concrete.
             if self._window is None:
+                projection = planned
                 global_origin = origin
             else:
+                # A windowed view partitions its window, so the walk names the
+                # cell in window coordinates. `chunk_domain` promises global
+                # storage coordinates, and `chunk_local_selection` is only the
+                # cell's own read if the cell it names is the one the source
+                # holds, so translate it back onto the source.
+                projection = replace(
+                    planned, chunk_domain=_translated_domain(planned.chunk_domain, self._window)
+                )
                 global_origin = tuple(
                     w.start + o for w, o in zip(self._window, origin, strict=True)
                 )
@@ -1174,7 +1212,12 @@ class LazyArray:
                     None,
                     window,
                     self._reader,
-                    projection,
+                    # `chunk_coords` addresses this view's own grid, which is
+                    # the source's own only when nothing narrowed the base.
+                    # Handing a reader that keys on it a cell coordinate of a
+                    # grid over a window would fetch the wrong chunk, so a
+                    # part of a part pairs with no projection at all.
+                    projection if self._window is None else None,
                 ),
                 out_selection=_partition_out_selection(projection.cell_transform),
                 _owner=self._part_owner,
@@ -1352,10 +1395,13 @@ class LazyArray:
         if size == 0:
             return out
 
-        if prepared_parts is None and self._parts is None:
-            # A partition view carries its paired projection, so resolving it
-            # alone hands the reader the same ReadContext the parent's
-            # partitioned read would.
+        if self._parts is None:
+            # An unpartitioned view's walk is the single part that is the view
+            # itself, so reading it directly is the same read — and the only
+            # one that keeps the projection this view was paired with. Going
+            # through the loop would hand the reader the walk's freshly
+            # synthesized whole-base projection instead, making a supplied
+            # `parts=` plan read differently from the plain call.
             _invoke_reader(
                 self._reader, self._array, ReadContext(self._transform, self._projection), out
             )
@@ -1376,7 +1422,12 @@ class LazyArray:
             _invoke_reader(
                 self._reader,
                 self._array,
-                ReadContext(part.view.transform, part.projection),
+                # The part view's own pairing, not `part.projection`: the two
+                # agree wherever the projection describes a read of the source
+                # itself, and taking it from the view is what makes resolving
+                # the part here and resolving it alone the same read by
+                # construction rather than by coincidence.
+                ReadContext(part.view.transform, part.view._projection),
                 destination,
             )
             if not direct:

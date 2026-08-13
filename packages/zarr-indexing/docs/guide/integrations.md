@@ -85,7 +85,10 @@ paired `out_selection` places whatever comes back:
 
 [`Partition.chunk_local_selection`][zarr_indexing.lazy_array.Partition] is the
 same read relative to the part's grid cell, for consumers caching decoded
-chunks keyed on `base_coords`. A query part (an `oindex`/`vindex` gather) has
+chunks. `projection.chunk_domain` locates that cell in the source, so it is
+what to fetch and a sound cache key; `base_coords` counts cells of whatever
+base the view partitions, so it keys a cache only alongside the grid that
+produced it. A query part (an `oindex`/`vindex` gather) has
 no slab spelling and raises `ValueError`, so mixed consumers fall back to
 `part.view.result()` for those parts. The
 [asyncio example](../examples/lazy_indexing_asyncio.md) drives all three

@@ -90,15 +90,24 @@ def test_parts_with_asyncio_gather(store: dict[str, Any], source: zarr.Array) ->
 
 
 def test_decoded_chunk_cache(store: dict[str, Any], source: zarr.Array) -> None:
-    """Key a decoded-chunk cache on `base_coords`; place with `chunk_local_selection`.
+    """Cache decoded cells; place each view's share with `chunk_local_selection`.
 
     A tile server reads many overlapping views of the same array. Fetching
     whole chunks once and slicing every view out of the cached cells turns
     N overlapping requests into one fetch per chunk. `projection.chunk_domain`
-    is the cell to fetch, `base_coords` is its cache key, and
-    `chunk_local_selection` is the view's read relative to the cell's origin.
+    is the cell to fetch, and `chunk_local_selection` is the view's read
+    relative to the cell's origin.
+
+    The cache is keyed on that domain's origin rather than on `base_coords`,
+    which counts cells of whatever base its view partitions: two views sharing
+    a source but not a grid — or a part re-partitioned into smaller boxes —
+    number their cells differently, while the origin names one region of the
+    source however it was reached.
     """
     cache: dict[tuple[int, ...], np.ndarray] = {}
+
+    def cell_key(part: Partition) -> tuple[int, ...]:
+        return part.projection.chunk_domain.inclusive_min
 
     def cell_selection(part: Partition) -> tuple[slice, ...]:
         domain = part.projection.chunk_domain
@@ -108,9 +117,7 @@ def test_decoded_chunk_cache(store: dict[str, Any], source: zarr.Array) -> None:
 
     async def fetch_missing(parts: tuple[Partition, ...], async_source: AsyncSource) -> None:
         missing = {
-            part.base_coords: cell_selection(part)
-            for part in parts
-            if part.base_coords not in cache
+            cell_key(part): cell_selection(part) for part in parts if cell_key(part) not in cache
         }
         cells = await asyncio.gather(
             *(async_source.getitem(selection) for selection in missing.values())
@@ -122,7 +129,7 @@ def test_decoded_chunk_cache(store: dict[str, Any], source: zarr.Array) -> None:
         await fetch_missing(parts, async_source)
         out = np.empty(view.shape, dtype=view.dtype)
         for part in parts:
-            out[part.out_selection] = cache[part.base_coords][part.chunk_local_selection]
+            out[part.out_selection] = cache[cell_key(part)][part.chunk_local_selection]
         return out
 
     async def scenario() -> tuple[np.ndarray, np.ndarray]:

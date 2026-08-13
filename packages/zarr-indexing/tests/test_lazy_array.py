@@ -2664,17 +2664,21 @@ def test_box_part_selections_carry_the_read() -> None:
 
 
 def test_part_of_part_selections_stay_global_and_cell_local() -> None:
-    """A nested part addresses the raw source; its cell stays window-relative."""
+    """A nested part's cell is named in the source's own coordinates.
+
+    A view partitioning a window plans over that window, but `chunk_domain`
+    describes the source, so the decoded-cell loop reads the same cell from
+    the raw array whether or not anything narrowed the view first.
+    """
     data = reference()
     view = LazyArray.from_numpy(data).with_parts((3, 2, 3)).lazy[1:6, 1:4, :]
     outer = next(view.parts())
     inner_view = outer.view.with_parts((2, 1, 2))
     expected = np.asarray(outer.view.result())
-    boxed = data[tuple(slice(lo, hi) for lo, hi in outer.box)]
     out = np.full(inner_view.shape, -1, dtype=inner_view.dtype)
     for part in inner_view.parts():
         slab = data[part.source_selection]
-        cell = boxed[
+        cell = data[
             tuple(
                 slice(lo, hi)
                 for lo, hi in zip(
@@ -2734,6 +2738,42 @@ def test_reader_and_partitioning_swaps_keep_a_part_views_projection() -> None:
     part = next(view.parts())
     part.view.with_reader(reader).result()
     part.view.with_reader(reader).unpartitioned().result()
+    assert [context.projection for context in reader.contexts] == [part.projection] * 2
+
+
+def test_a_part_of_a_part_pairs_with_no_projection() -> None:
+    """A window's cell coordinates would name the wrong chunk of the source.
+
+    A part view partitions its own box, so its parts' `chunk_coords` count
+    cells of that box. Handing those to a reader keyed on `chunk_coords`
+    alongside the raw source would fetch a different chunk than the one the
+    part reads, so the pairing stops at the first level and such a reader
+    refuses the read instead.
+    """
+    reader = RecordingReader()
+    view = LazyArray(np.arange(24).reshape(4, 6)).with_parts((2, 3))
+    outer = list(view.parts())[3]
+    assert outer.base_coords == (1, 1)
+    inner = next(outer.view.with_parts((1, 3)).parts())
+    # The cell it counts is its own box's first, not the source's.
+    assert inner.base_coords == (0, 0)
+    # ... while the domain that names the cell stays global, as does the read.
+    assert inner.projection.chunk_domain.inclusive_min == (2, 3)
+    assert inner.source_selection == (slice(2, 3, 1), slice(3, 6, 1))
+    inner.view.with_reader(reader).result()
+    assert reader.contexts[-1].projection is None
+
+
+def test_prepared_parts_read_through_the_same_context_as_the_plain_call() -> None:
+    """The `parts=` reuse path is an optimization, not a different read."""
+    reader = RecordingReader()
+    view = LazyArray(np.arange(8)).with_parts((4,))
+    part = list(view.parts())[1]
+    part_view = part.view.with_reader(reader)
+    np.testing.assert_array_equal(
+        np.asarray(part_view.result(parts=list(part_view.parts()))),
+        np.asarray(part_view.result()),
+    )
     assert [context.projection for context in reader.contexts] == [part.projection] * 2
 
 

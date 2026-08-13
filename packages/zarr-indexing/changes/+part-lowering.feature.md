@@ -12,8 +12,11 @@ async store, an HTTP range endpoint):
   async consumer's whole loop is
   `out[part.out_selection] = await source.getitem(part.source_selection)`.
 - `Partition.chunk_local_selection` is the same read relative to
-  `projection.chunk_domain`'s origin, for decoded-chunk caches keyed on
-  `base_coords`.
+  `projection.chunk_domain`'s origin, for decoded-chunk caches. The domain
+  names its cell in the source's own coordinates even for a view partitioning
+  a window of it, so the cached cell is the same read either way;
+  `base_coords` counts cells of the partitioned base, so it keys such a cache
+  only together with the grid that produced it.
 
 `ChainedIndexingStateMachine` gained an invariant that runs both documented
 assembly loops literally under plain NumPy semantics, with no reader involved.
