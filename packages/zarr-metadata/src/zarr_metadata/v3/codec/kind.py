@@ -10,11 +10,19 @@ entry by its `name`.
 
 Two classification surfaces with different contracts:
 
-- The `TypeIs` guards (`is_array_array_codec`, ...) are *spelling-strict*:
-  they answer `True` only for JSON shapes the codec's canonical type
-  permits, because `TypeIs` narrowing must be sound — a bare `"transpose"`
-  is not a `TransposeCodecObject`, so narrowing it to one would lie to the
-  type checker. Use the guards to narrow a value to a concrete codec type.
+- The `TypeIs` guards (`is_array_array_codec`, ...) are *shape-exact*:
+  they answer `True` exactly when the value is an instance of a canonical
+  codec type of that kind, judged by the type-level validators in
+  `zarr_metadata.v3._shape`. `TypeIs` narrowing is two-sided, so the
+  guards may be neither looser nor stricter than the types: a bare
+  `"transpose"` or a `{"name": "transpose"}` object missing its required
+  `configuration` answers `False` (narrowing to `TransposeCodecObject`
+  would lie in the positive branch), and any genuine instance answers
+  `True` (anything stricter would lie in the negative branch). Judgments
+  are at the canonical data level — JSON arrays as tuples, and
+  `int`-annotated fields meaning JSON integers, not booleans — so
+  normalize `json.loads` output (e.g. with a model-layer parser) before
+  narrowing.
 - `codec_kind_of_name` classifies by *name alone*, ignoring spelling. Use
   it for pipeline-ordering semantics, where a known codec in an invalid
   spelling must still rank as its kind: two spellings of the same pipeline
@@ -22,9 +30,8 @@ Two classification surfaces with different contracts:
   must not be mistaken for an unknown extension (which would suppress the
   exactly-one-`array->bytes` count).
 
-Neither surface validates. The guards do not re-check `configuration`
-contents, and `codec_kind_of_name` does not check spelling at all;
-spelling validity for known names is the job of the semantic rule layer
+Value judgments beyond the types — permutation contents, shard geometry,
+cross-field consistency — are the semantic rule layer's job
 (`zarr_metadata.builder`). Codecs this package has no types for
 (extension codecs from outside `zarr-extensions`) answer `False` to every
 guard and `None` from `codec_kind_of_name`: an unknown codec has unknown
@@ -39,6 +46,7 @@ from typing import Final, Literal
 from typing_extensions import TypeIs
 
 from zarr_metadata.v3._common import ZarrV3MetadataFieldJSON
+from zarr_metadata.v3._shape import is_valid_known_codec_name
 from zarr_metadata.v3.codec.blosc import BLOSC_CODEC_NAME, BloscCodecMetadata
 from zarr_metadata.v3.codec.bytes import BYTES_CODEC_NAME, BytesCodecMetadata
 from zarr_metadata.v3.codec.cast_value import CAST_VALUE_CODEC_NAME, CastValueCodecMetadata
@@ -84,44 +92,25 @@ BYTES_BYTES_CODEC_NAMES: Final = (
 KnownCodecMetadata = ArrayArrayCodecMetadata | ArrayBytesCodecMetadata | BytesBytesCodecMetadata
 """Permitted JSON shapes of every codec this package defines."""
 
-_ARRAY_ARRAY_BARE_NAMES: Final = frozenset({SCALE_OFFSET_CODEC_NAME})
-_ARRAY_BYTES_BARE_NAMES: Final = frozenset({BYTES_CODEC_NAME})
-_BYTES_BYTES_BARE_NAMES: Final = frozenset({CRC32C_CODEC_NAME})
-# The bare short-hand form is only part of a codec's canonical type when its
-# spec permits it (no required configuration keys). A bare name outside these
-# sets — e.g. the string "transpose" — is not valid metadata for that codec,
-# so the guards answer False for it rather than narrowing to an object type
-# the value does not have.
-
-
-def _classify(
-    codec: ZarrV3MetadataFieldJSON,
-    object_names: tuple[str, ...],
-    bare_names: frozenset[str],
-) -> bool:
-    if isinstance(codec, str):
-        return codec in bare_names
-    return codec["name"] in object_names
-
 
 def is_array_array_codec(codec: ZarrV3MetadataFieldJSON) -> TypeIs[ArrayArrayCodecMetadata]:
-    """Whether `codec` is a known `array -> array` codec (classified by name)."""
-    return _classify(codec, ARRAY_ARRAY_CODEC_NAMES, _ARRAY_ARRAY_BARE_NAMES)
+    """Whether `codec` is an instance of a known `array -> array` codec type."""
+    return is_valid_known_codec_name(codec) in ARRAY_ARRAY_CODEC_NAMES
 
 
 def is_array_bytes_codec(codec: ZarrV3MetadataFieldJSON) -> TypeIs[ArrayBytesCodecMetadata]:
-    """Whether `codec` is a known `array -> bytes` codec (classified by name)."""
-    return _classify(codec, ARRAY_BYTES_CODEC_NAMES, _ARRAY_BYTES_BARE_NAMES)
+    """Whether `codec` is an instance of a known `array -> bytes` codec type."""
+    return is_valid_known_codec_name(codec) in ARRAY_BYTES_CODEC_NAMES
 
 
 def is_bytes_bytes_codec(codec: ZarrV3MetadataFieldJSON) -> TypeIs[BytesBytesCodecMetadata]:
-    """Whether `codec` is a known `bytes -> bytes` codec (classified by name)."""
-    return _classify(codec, BYTES_BYTES_CODEC_NAMES, _BYTES_BYTES_BARE_NAMES)
+    """Whether `codec` is an instance of a known `bytes -> bytes` codec type."""
+    return is_valid_known_codec_name(codec) in BYTES_BYTES_CODEC_NAMES
 
 
 def is_known_codec(codec: ZarrV3MetadataFieldJSON) -> TypeIs[KnownCodecMetadata]:
-    """Whether `codec` is any codec this package defines (classified by name)."""
-    return is_array_array_codec(codec) or is_array_bytes_codec(codec) or is_bytes_bytes_codec(codec)
+    """Whether `codec` is an instance of any codec type this package defines."""
+    return is_valid_known_codec_name(codec) is not None
 
 
 CodecKind = Literal["array_array", "array_bytes", "bytes_bytes"]

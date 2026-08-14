@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
@@ -69,6 +69,43 @@ CASES: dict[str, tuple[ZarrV3MetadataFieldJSON, str | None]] = {
     # metadata, so no guard claims it.
     "transpose-bare-invalid": ("transpose", None),
     "blosc-bare-invalid": ("blosc", None),
+    # Object forms that are not instances of their codec's canonical type:
+    # `TypeIs` narrowing is two-sided, so a guard claiming any of these
+    # would lie to the type checker. The guards deep-check shape.
+    "transpose-missing-config": ({"name": "transpose"}, None),
+    "gzip-missing-config": ({"name": "gzip"}, None),
+    "gzip-empty-config": ({"name": "gzip", "configuration": {}}, None),
+    "gzip-bool-level": ({"name": "gzip", "configuration": {"level": True}}, None),
+    "zstd-missing-checksum": ({"name": "zstd", "configuration": {"level": 1}}, None),
+    "bytes-bad-endian": (
+        cast("ZarrV3MetadataFieldJSON", {"name": "bytes", "configuration": {"endian": "middle"}}),
+        None,
+    ),
+    "crc32c-nonempty-config": (
+        cast("ZarrV3MetadataFieldJSON", {"name": "crc32c", "configuration": {"x": 1}}),
+        None,
+    ),
+    "crc32c-extra-key": (
+        cast("ZarrV3MetadataFieldJSON", {"name": "crc32c", "bogus": 1}),
+        None,
+    ),
+    "crc32c-nonbool-must-understand": (
+        cast("ZarrV3MetadataFieldJSON", {"name": "crc32c", "must_understand": "yes"}),
+        None,
+    ),
+    # Judgments are at the canonical data level: JSON arrays are tuples.
+    "transpose-list-order": (
+        cast("ZarrV3MetadataFieldJSON", {"name": "transpose", "configuration": {"order": [0, 1]}}),
+        None,
+    ),
+    "no-name": (cast("ZarrV3MetadataFieldJSON", {}), None),
+    "non-string-name": (cast("ZarrV3MetadataFieldJSON", {"name": 3}), None),
+    # ...and valid instances of the optional-configuration codecs in every
+    # spelling their types permit.
+    "bytes-no-config": ({"name": "bytes"}, "ab"),
+    "scale_offset-no-config": ({"name": "scale_offset"}, "aa"),
+    "crc32c-empty-config": ({"name": "crc32c", "configuration": {}}, "bb"),
+    "crc32c-must-understand": ({"name": "crc32c", "must_understand": False}, "bb"),
 }
 
 

@@ -284,6 +284,35 @@ def test_error_known_codec_missing_configuration_object() -> None:
     assert problem.kind == "missing_key"
 
 
+def test_error_known_codec_bad_configuration_literal() -> None:
+    # Known-name configurations are held to their full canonical shapes,
+    # value types included — not just key presence.
+    with pytest.raises(MetadataValidationError) as info:
+        ZarrV3ArrayMetadataBuilder().evolve(
+            codecs=({"name": "bytes", "configuration": {"endian": "middle"}},)
+        )
+    (problem,) = info.value.problems
+    assert problem.loc == ("codecs", 0, "configuration", "endian")
+    assert problem.kind == "invalid_value"
+
+
+def test_error_known_codec_bad_configuration_value_type() -> None:
+    with pytest.raises(MetadataValidationError) as info:
+        ZarrV3ArrayMetadataBuilder().evolve(
+            codecs=("bytes", {"name": "gzip", "configuration": {"level": "high"}})
+        )
+    (problem,) = info.value.problems
+    assert problem.loc == ("codecs", 1, "configuration", "level")
+    assert problem.kind == "invalid_type"
+
+
+def test_error_known_codec_unexpected_configuration_key() -> None:
+    with pytest.raises(MetadataValidationError, match="unexpected key"):
+        ZarrV3ArrayMetadataBuilder().evolve(
+            codecs=("bytes", {"name": "gzip", "configuration": {"level": 1, "speed": "max"}})
+        )
+
+
 def test_error_bare_chunk_grid_spelling() -> None:
     with pytest.raises(MetadataValidationError, match="no bare short-hand form"):
         ZarrV3ArrayMetadataBuilder().evolve(chunk_grid="regular")
