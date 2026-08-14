@@ -156,3 +156,46 @@ def test_identifiers_with_partitions_a_point() -> None:
         name for provenance in Provenance for name in identifiers_with(CODECS, provenance)
     }
     assert by_provenance == set(point.identifiers)
+
+
+def test_squatted_names_are_judged_against_the_definition_they_squat() -> None:
+    # Zarr identifiers are registry-allocated. A private codec named
+    # `bytes` has left the compatibility contract, and saying so is the
+    # correct answer rather than a limitation, so nothing here defends
+    # against collisions.
+    from zarr_metadata.rules import validate_array_metadata_v3
+
+    document = {
+        "zarr_format": 3,
+        "node_type": "array",
+        "shape": (4, 4),
+        "data_type": "uint8",
+        "fill_value": 0,
+        "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": (2, 2)}},
+        "chunk_key_encoding": "default",
+        "codecs": ({"name": "bytes", "configuration": {"width": 7}},),
+    }
+    problems = validate_array_metadata_v3(document)
+    assert [(p.loc, p.kind) for p in problems] == [(("codecs", 0, "configuration"), "unknown_key")]
+
+
+def test_forging_the_family_sentinel_cannot_change_a_verdict() -> None:
+    # A literal "r<N>" data type mislabels its provenance and nothing
+    # else: the rules layer matches the family through the name pattern,
+    # not through the table key, so no validation verdict depends on the
+    # sentinel being unforgeable.
+    from zarr_metadata.rules import validate_array_metadata_v3
+
+    assert canonical_name(DATA_TYPE, RAW_BYTES_FAMILY) == RAW_BYTES_FAMILY
+    document = {
+        "zarr_format": 3,
+        "node_type": "array",
+        "shape": (4, 4),
+        "data_type": RAW_BYTES_FAMILY,
+        "fill_value": (1,),
+        "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": (2, 2)}},
+        "chunk_key_encoding": "default",
+        "codecs": ("bytes",),
+    }
+    # Unjudged as an unknown data type, exactly as any unmodelled name is.
+    assert validate_array_metadata_v3(document) == ()

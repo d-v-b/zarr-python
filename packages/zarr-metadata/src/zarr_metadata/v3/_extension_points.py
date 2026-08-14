@@ -26,6 +26,21 @@ Canonical names are lookup keys and nothing else. They are never emitted
 into metadata and never appear in a message shown to a user: a document
 saying `r12` deserves the error "expected 'r' followed by a positive
 multiple of 8", not "r<N> is not a valid data type".
+
+**Names are a shared namespace, and this package assumes that.** Zarr
+identifiers are registry-allocated, so a document using `bytes` for its
+own private codec is not a different-but-valid document — it is one that
+has left the compatibility contract, and no validation library can help
+it. This table therefore models the registry as authoritative and
+defends nothing against collisions: a squatted name is judged against
+the definition it squats, which is the correct answer rather than a
+limitation. The same assumption covers `RAW_BYTES_FAMILY`. A metadata
+document could contain the literal string `r<N>` as a data type name;
+that would mislabel its provenance as core, and nothing more, since the
+rules layer matches the family through `RAW_BYTES_NAME_PATTERN` rather
+than through this key. Do not add escaping or collision-detection here
+— it would buy a wrong answer for documents that are already wrong, at
+the cost of an unreadable table key.
 """
 
 from __future__ import annotations
