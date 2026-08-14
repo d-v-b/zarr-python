@@ -49,7 +49,9 @@ jobs:
       - name: Sync test dependency group
         run: uv sync --group test --python ${{ matrix.python-version }}
       - name: Run pytest
-        run: just test
+        # `py=` pins the interpreter in the recipe itself, so the matrix leg
+        # does not depend on the sync step above having shaped `.venv`.
+        run: just py=${{ matrix.python-version }} test
 
   ruff:
     name: ruff
