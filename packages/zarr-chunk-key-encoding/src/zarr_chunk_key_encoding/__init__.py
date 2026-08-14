@@ -1,0 +1,84 @@
+"""Chunk key encodings for Zarr version 3 arrays.
+
+A chunk key encoding maps the grid index of a chunk — a tuple of
+non-negative integers — to the string key under which that chunk is stored,
+and (where well-defined) back again. This package provides:
+
+- `ChunkKeyEncoding` — the abstract base class
+- `DefaultChunkKeyEncoding`, `V2ChunkKeyEncoding` — the two encodings
+  defined by the Zarr v3 core spec
+- a name-keyed registry (`register_chunk_key_encoding` and friends) with
+  entry-point discovery, modeled on the plugin registry of the `zarrs`
+  Rust implementation
+- `chunk_key_encoding_from_json` / `parse_chunk_key_encoding` — construct
+  encodings from JSON metadata or looser user input
+
+JSON shapes are typed by `zarr-metadata`; this package supplies the runtime
+behavior for those types.
+
+>>> from zarr_chunk_key_encoding import chunk_key_encoding_from_json
+>>> encoding = chunk_key_encoding_from_json(
+...     {"name": "default", "configuration": {"separator": "/"}}
+... )
+>>> encoding.encode((1, 23))
+'c/1/23'
+>>> encoding.decode("c/1/23")
+(1, 23)
+"""
+
+from importlib.metadata import version
+
+from zarr_chunk_key_encoding.abc import ChunkKeyEncoding, ChunkKeyEncodingJSON
+from zarr_chunk_key_encoding.default import DefaultChunkKeyEncoding
+from zarr_chunk_key_encoding.errors import (
+    ChunkKeyConfigurationError,
+    ChunkKeyDecodeError,
+    ChunkKeyEncodingError,
+    ChunkKeyRegistryError,
+    InvalidChunkCoordsError,
+    UnknownChunkKeyEncodingError,
+)
+from zarr_chunk_key_encoding.registry import (
+    ENTRY_POINT_GROUP,
+    ChunkKeyEncodingLike,
+    ChunkKeyEncodingParams,
+    chunk_key_encoding_from_json,
+    get_chunk_key_encoding_class,
+    parse_chunk_key_encoding,
+    register_chunk_key_encoding,
+    registered_chunk_key_encodings,
+    unregister_chunk_key_encoding,
+)
+from zarr_chunk_key_encoding.separator import SEPARATORS, Separator, parse_separator
+from zarr_chunk_key_encoding.v2 import V2ChunkKeyEncoding
+
+__version__ = version("zarr-chunk-key-encoding")
+
+__all__ = [
+    "ENTRY_POINT_GROUP",
+    "SEPARATORS",
+    "ChunkKeyConfigurationError",
+    "ChunkKeyDecodeError",
+    "ChunkKeyEncoding",
+    "ChunkKeyEncodingError",
+    "ChunkKeyEncodingJSON",
+    "ChunkKeyEncodingLike",
+    "ChunkKeyEncodingParams",
+    "ChunkKeyRegistryError",
+    "DefaultChunkKeyEncoding",
+    "InvalidChunkCoordsError",
+    "Separator",
+    "UnknownChunkKeyEncodingError",
+    "V2ChunkKeyEncoding",
+    "__version__",
+    "chunk_key_encoding_from_json",
+    "get_chunk_key_encoding_class",
+    "parse_chunk_key_encoding",
+    "parse_separator",
+    "register_chunk_key_encoding",
+    "registered_chunk_key_encodings",
+    "unregister_chunk_key_encoding",
+]
+
+register_chunk_key_encoding(DefaultChunkKeyEncoding)
+register_chunk_key_encoding(V2ChunkKeyEncoding)

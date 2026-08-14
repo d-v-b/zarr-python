@@ -1,0 +1,62 @@
+# Development verbs for the zarr-chunk-key-encoding package. Recipes run with
+# this directory as the working directory regardless of where `just` is
+# invoked.
+
+# List available recipes
+default:
+    @just --list
+
+# The sibling zarr-metadata package is layered in as an editable overlay so
+# the two packages can be developed in lockstep; the published package
+# depends on the released zarr-metadata distribution.
+# Run the test suite; extra args are passed to pytest
+test *args:
+    uv run --group test --with-editable ../zarr-metadata python -m pytest tests {{ args }}
+
+# Run the zarr parity tests against the repo-root environment, which
+# provides `zarr` (deliberately not a dependency of this package).
+test-parity *args:
+    uv run --project ../.. --group test --with-editable . --with-editable ../zarr-metadata python -m pytest tests/test_zarr_parity.py {{ args }}
+
+# Lint with the same invocation CI uses
+lint:
+    uvx ruff check .
+
+# CI runs pyright on python 3.11, the oldest supported interpreter.
+# Type-check the package sources
+typecheck:
+    uv run --python 3.11 --group test --with pyright --with-editable ../zarr-metadata pyright src
+
+# Run everything CI runs for this package
+check: lint typecheck test docs-check
+
+# Preview the changelog that the next release would generate
+changelog-draft:
+    uvx towncrier build --draft --version Unreleased
+
+# Build this package's documentation site, warnings as errors
+docs-check:
+    env DISABLE_MKDOCS_2_WARNING=true uv run --group docs --with-editable ../zarr-metadata mkdocs build --strict
+
+# With no argument, uses port 8000 if free, otherwise an ephemeral free port;
+# an explicitly requested port is used as-is so a conflict fails loudly.
+# Serve this package's documentation site
+docs-serve port="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    port="{{ port }}"
+    if [ -z "$port" ]; then
+        port=$(uv run --group docs python -c '
+    import socket
+    s = socket.socket()
+    try:
+        s.bind(("127.0.0.1", 8000))
+    except OSError:
+        s.close()
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+    print(s.getsockname()[1])
+    s.close()
+    ')
+    fi
+    exec env DISABLE_MKDOCS_2_WARNING=true uv run --group docs --with-editable ../zarr-metadata mkdocs serve -a "localhost:$port"
