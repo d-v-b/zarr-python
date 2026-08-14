@@ -12,8 +12,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Final
 
+from zarr_metadata.model._validation import GROUP_METADATA_STANDARD_KEYS_V3
 from zarr_metadata.rules._engine import Rule, as_string_mapping, prefixed, run_rules
+from zarr_metadata.rules._registry import document_rule, document_rules, register_document_type
 from zarr_metadata.rules._v3_array import ZARR_V3_ARRAY_RULES
+from zarr_metadata.v3.consolidated import ZARR_V3_CONSOLIDATED_METADATA_KEY
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -21,7 +24,22 @@ if TYPE_CHECKING:
     from zarr_metadata.model._validation import ValidationProblem
 
 
-def _check_consolidated_entries(document: Mapping[str, object]) -> tuple[ValidationProblem, ...]:
+ZARR_V3_GROUP = "zarr_v3_group"
+"""Document-type key under which this module's rules are registered."""
+
+# `consolidated_metadata` is not a declared member of the group TypedDict:
+# the spec grandfathers it as a convention that 'lacks the name member
+# required of extension objects'. It is declared here so the rule that
+# reads it passes the typo check without exempting unknown keys.
+register_document_type(
+    ZARR_V3_GROUP,
+    GROUP_METADATA_STANDARD_KEYS_V3,
+    extension_keys=frozenset({ZARR_V3_CONSOLIDATED_METADATA_KEY}),
+)
+
+
+@document_rule(ZARR_V3_GROUP, frozenset({"consolidated_metadata"}))
+def check_consolidated_entries(document: Mapping[str, object]) -> tuple[ValidationProblem, ...]:
     """Consolidated child documents must satisfy their own composition rules.
 
     Structural validity of the consolidated envelope and its entries is
@@ -48,12 +66,11 @@ def _check_consolidated_entries(document: Mapping[str, object]) -> tuple[Validat
     return tuple(problems)
 
 
-ZARR_V3_GROUP_RULES: Final[tuple[Rule, ...]] = (
-    Rule(frozenset({"consolidated_metadata"}), _check_consolidated_entries),
-)
+ZARR_V3_GROUP_RULES: Final[tuple[Rule, ...]] = document_rules(ZARR_V3_GROUP)
 """The composition rule set for v3 group metadata documents."""
 
 
 __all__ = [
+    "ZARR_V3_GROUP",
     "ZARR_V3_GROUP_RULES",
 ]

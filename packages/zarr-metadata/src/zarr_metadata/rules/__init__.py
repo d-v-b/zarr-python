@@ -65,17 +65,25 @@ from zarr_metadata.rules._documents import (
     validate_group_metadata_v2,
     validate_group_metadata_v3,
 )
-from zarr_metadata.rules._engine import Rule, applicable, run_rules
-from zarr_metadata.rules._v2_array import ZARR_V2_ARRAY_RULES
-from zarr_metadata.rules._v3_array import ZARR_V3_ARRAY_RULES
-from zarr_metadata.rules._v3_group import ZARR_V3_GROUP_RULES
+from zarr_metadata.rules._engine import Rule, RuleCheck, applicable, inapplicable, run_rules
+from zarr_metadata.rules._registry import EntityRule, entity_rules, registered_entities
+from zarr_metadata.rules._v2_array import ZARR_V2_ARRAY, ZARR_V2_ARRAY_RULES
+from zarr_metadata.rules._v3_array import ZARR_V3_ARRAY, ZARR_V3_ARRAY_RULES
+from zarr_metadata.rules._v3_group import ZARR_V3_GROUP, ZARR_V3_GROUP_RULES
 
 __all__ = [
+    "ZARR_V2_ARRAY",
     "ZARR_V2_ARRAY_RULES",
+    "ZARR_V3_ARRAY",
     "ZARR_V3_ARRAY_RULES",
+    "ZARR_V3_GROUP",
     "ZARR_V3_GROUP_RULES",
+    "EntityRule",
     "Rule",
+    "RuleCheck",
     "applicable",
+    "entity_rules",
+    "inapplicable",
     "is_array_metadata_v2",
     "is_array_metadata_v3",
     "is_group_metadata_v2",
@@ -84,6 +92,7 @@ __all__ = [
     "parse_array_metadata_v3",
     "parse_group_metadata_v2",
     "parse_group_metadata_v3",
+    "registered_entities",
     "run_rules",
     "validate_array_metadata_v2",
     "validate_array_metadata_v3",

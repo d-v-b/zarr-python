@@ -439,6 +439,11 @@ def validate_known_chunk_grid_metadata(value: object) -> tuple[ValidationProblem
     return _validate_known_entity(value, name, shape, "chunk grid")
 
 
+def modelled_entities() -> frozenset[str]:
+    """Every codec and chunk grid name this module has a shape validator for."""
+    return frozenset(_CODEC_SHAPES) | frozenset(_CHUNK_GRID_SHAPES)
+
+
 def blocking_problems(
     problems: Sequence[ValidationProblem],
 ) -> tuple[ValidationProblem, ...]:
@@ -474,6 +479,7 @@ __all__ = [
     "blocking_problems",
     "entity_name",
     "is_valid_known_codec_name",
+    "modelled_entities",
     "validate_known_chunk_grid_metadata",
     "validate_known_codec_metadata",
 ]

@@ -163,8 +163,8 @@ class ZarrV3ArrayMetadataBuilder:
             found = rule.check(self._inner)
             if len(found) == 0:
                 continue
-            earlier = rule.keys - changed
-            just_set = rule.keys & changed
+            earlier = rule.requires - changed
+            just_set = rule.requires & changed
             if len(earlier) != 0 and len(just_set) != 0:
                 hint = (
                     f" [{', '.join(sorted(just_set))} set in this call conflicts with "
