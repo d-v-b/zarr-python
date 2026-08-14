@@ -7,8 +7,8 @@ and a `parse_*` function that narrows or raises `MetadataValidationError`.
 
 Every `ValidationProblem` carries a machine-readable `kind` alongside its
 human-readable `message`, so consumers can dispatch on the failure mode
-(`missing_key`, `invalid_type`, `invalid_value`, `invalid_json`) without
-string-matching messages.
+(`missing_key`, `invalid_type`, `invalid_value`, `invalid_json`,
+`unknown_key`) without string-matching messages.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ from zarr_metadata.v3._common import ZarrV3MetadataFieldJSON
 from zarr_metadata.v3.array import ZarrV3ArrayMetadataJSON
 from zarr_metadata.v3.group import ZarrV3GroupMetadataJSON
 
-ProblemKind = Literal["missing_key", "invalid_type", "invalid_value", "invalid_json"]
+ProblemKind = Literal["missing_key", "invalid_type", "invalid_value", "invalid_json", "unknown_key"]
 """Machine-readable classification of a `ValidationProblem`.
 
 - `missing_key`: a required key (document key or store key) is absent.
@@ -37,6 +37,15 @@ ProblemKind = Literal["missing_key", "invalid_type", "invalid_value", "invalid_j
 - `invalid_value`: a value has an acceptable type but an invalid content
   (e.g. `zarr_format: 2` in a v3 document, `order: "Q"`).
 - `invalid_json`: bytes that do not decode as JSON.
+- `unknown_key`: a member this package does not model appears inside an
+  entity whose shape it does model (e.g. an extra key in a `blosc`
+  configuration). Distinguished from `invalid_value` because the Zarr v3
+  spec does not say whether a `configuration` is closed
+  (zarr-developers/zarr-specs#270 has been open since 2023), so this is
+  the package's strict reading rather than a definite violation: a
+  document carrying one is very likely fine, just written by something
+  that models more than we do. Callers that prefer tolerance can filter
+  this kind out; the package itself never lets it mask other findings.
 """
 
 

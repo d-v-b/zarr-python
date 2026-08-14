@@ -32,6 +32,7 @@ from zarr_metadata.rules._engine import (
     prefixed,
 )
 from zarr_metadata.v3._shape import (
+    blocking_problems,
     entity_name,
     validate_known_chunk_grid_metadata,
     validate_known_codec_metadata,
@@ -376,13 +377,17 @@ def _check_dimension_names_length(document: Mapping[str, object]) -> tuple[Valid
 
 
 def _valid_grid_configuration(grid: object) -> tuple[str, Mapping[str, object]] | None:
-    """`grid`'s (name, configuration) if it is a shape-valid known grid.
+    """`grid`'s (name, configuration) if its modelled fields are usable.
 
-    Declines (None) for unknown grids and for shape-invalid known grids —
-    the spelling rule owns the latter complaint.
+    Declines (None) for unknown grids and for known grids whose shape is
+    broken in a way that makes the fields uninterpretable — the spelling
+    rule owns that complaint. An `unknown_key` does not decline: a member
+    we do not model says nothing about the ones we do, and treating it as
+    fatal would let a cosmetic extra key silently suppress the geometry
+    checks below.
     """
     verdict = validate_known_chunk_grid_metadata(grid)
-    if verdict is None or len(verdict) != 0:
+    if verdict is None or len(blocking_problems(verdict)) != 0:
         return None
     mapping = as_string_mapping(grid)
     if mapping is None:
@@ -542,7 +547,7 @@ def _named_configurations(
         if entity_name(codec) != name:
             continue
         verdict = validate_known_codec_metadata(codec)
-        if verdict is None or len(verdict) != 0 or isinstance(codec, str):
+        if verdict is None or len(blocking_problems(verdict)) != 0 or isinstance(codec, str):
             continue
         mapping = as_string_mapping(codec)
         if mapping is None:

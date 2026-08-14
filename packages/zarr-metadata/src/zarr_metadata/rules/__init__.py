@@ -32,6 +32,23 @@ Extension openness: rules never reject what they cannot interpret.
 Unknown names — codecs, chunk grids, data types this package has no
 types for — pass untouched, while known names are held to their full
 canonical shapes so a misspelling cannot masquerade as an extension.
+
+**Unknown members of known entities** are the one place where openness is
+a judgment call rather than a reading. The v3 spec constrains a
+`configuration` only to "be an object" and never says whether it is
+closed; `must_understand` is defined over *metadata document fields*, so
+it cannot reach inside a configuration at all. Whether an extra member
+invalidates a document has been an open question since 2023
+(zarr-developers/zarr-specs#270, filed after a real interop break when
+jzarr emitted `blosc.configuration.numThreads` and zarr-python refused
+the array). This package takes the strict reading — matching most
+registered extension schemas and the zarrs, tensorstore, and zarr-java
+implementations — but softens its blast radius two ways: the problem
+carries its own `unknown_key` kind, so a caller can choose tolerance, and
+it never blocks the other rules about that entity, so a cosmetic extra
+key cannot hide a real geometry error. Documents carrying such members
+always round-trip byte-faithfully; the strict verdict is a judgment, not
+a licence to drop data.
 """
 
 from zarr_metadata.rules._documents import (

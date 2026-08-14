@@ -287,3 +287,77 @@ def test_error_group_parse_raises() -> None:
                 },
             }
         )
+
+
+# -- unknown configuration members --------------------------------------------
+#
+# The v3 spec does not say whether an extension's `configuration` is closed
+# (zarr-developers/zarr-specs#270, open since 2023). This package takes the
+# strict reading, matching most registered extension schemas and most other
+# implementations — but reports it as its own `unknown_key` kind, and never
+# lets it mask a real finding about the same entity.
+
+
+def test_unknown_configuration_member_has_its_own_kind() -> None:
+    doc = {
+        **BASE,
+        "codecs": ({"name": "bytes", "configuration": {"endian": "little", "hint": 1}},),
+    }
+    problems = validate_array_metadata_v3(doc)
+    assert [(p.loc, p.kind) for p in problems] == [(("codecs", 0, "configuration"), "unknown_key")]
+
+
+def test_unknown_member_does_not_mask_a_codec_rule() -> None:
+    # Regression: an unrecognized member used to make the whole entity
+    # uninterpretable, silently suppressing every other rule about it — so a
+    # cosmetic extra key hid a genuine permutation error.
+    doc = {
+        **BASE,
+        "codecs": ({"name": "transpose", "configuration": {"order": (5, 5), "hint": 1}}, "bytes"),
+    }
+    kinds = {(p.loc, p.kind) for p in validate_array_metadata_v3(doc)}
+    assert (("codecs", 0, "configuration"), "unknown_key") in kinds
+    assert (("codecs", 0, "configuration", "order"), "invalid_value") in kinds
+
+
+def test_unknown_member_does_not_mask_a_chunk_grid_rule() -> None:
+    doc = {
+        **BASE,
+        "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": (2,), "hint": 1}},
+    }
+    kinds = {(p.loc, p.kind) for p in validate_array_metadata_v3(doc)}
+    assert (("chunk_grid", "configuration"), "unknown_key") in kinds
+    assert (("chunk_grid", "configuration", "chunk_shape"), "invalid_value") in kinds
+
+
+def test_unknown_member_survives_a_round_trip() -> None:
+    # Whatever the strict validator says, the package must never silently
+    # drop a member it does not model: a writer that knows more than we do
+    # must get its bytes back. (zarr-python's own chunk-grid path is lossy
+    # here; this asserts we are not.)
+    import json
+
+    from zarr_metadata.model import ZarrV3ArrayMetadata
+
+    raw = {
+        **BASE,
+        "shape": [4, 4],
+        "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [2, 2]}},
+        "codecs": [
+            {
+                "name": "blosc",
+                "configuration": {
+                    "cname": "zstd",
+                    "clevel": 5,
+                    "shuffle": "shuffle",
+                    "blocksize": 0,
+                    "numThreads": 4,
+                },
+            },
+            "bytes",
+        ],
+    }
+    model = ZarrV3ArrayMetadata.from_json(json.loads(json.dumps(raw)))
+    emitted = model.to_json()
+    codec = emitted["codecs"][0]
+    assert codec["configuration"]["numThreads"] == 4

@@ -33,7 +33,7 @@ canonical types; only the per-field value checks are written out.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, cast
 
@@ -204,7 +204,7 @@ def _check_scalar_map(value: object, loc: tuple[str | int, ...]) -> tuple[Valida
     problems: list[ValidationProblem] = []
     for key in mapping:
         if not isinstance(key, str) or key not in _SCALAR_MAP_KEYS:
-            problems.extend(_problems((*loc,), f"unexpected key {key!r}", "invalid_value"))
+            problems.extend(_problems((*loc,), f"unexpected key {key!r}", "unknown_key"))
     for key in _SCALAR_MAP_KEYS:
         if key in mapping:
             problems.extend(_check_scalar_map_entries(mapping[key], (*loc, key)))
@@ -376,7 +376,7 @@ def _validate_known_entity(
     problems: list[ValidationProblem] = []
     for key in mapping:
         if not isinstance(key, str) or key not in shape.object_keys:
-            problems.extend(_problems((), f"unexpected key {key!r}", "invalid_value"))
+            problems.extend(_problems((), f"unexpected key {key!r}", "unknown_key"))
     if "must_understand" in mapping:
         problems.extend(_check_json_bool(mapping["must_understand"], ("must_understand",)))
     if "configuration" not in mapping:
@@ -396,9 +396,7 @@ def _validate_known_entity(
     config = cast("Mapping[object, object]", configuration)
     for key in config:
         if not isinstance(key, str) or key not in shape.config_keys:
-            problems.extend(
-                _problems(("configuration",), f"unexpected key {key!r}", "invalid_value")
-            )
+            problems.extend(_problems(("configuration",), f"unexpected key {key!r}", "unknown_key"))
     for key in sorted(shape.config_required - {k for k in config if isinstance(k, str)}):
         problems.extend(
             _problems(
@@ -441,6 +439,24 @@ def validate_known_chunk_grid_metadata(value: object) -> tuple[ValidationProblem
     return _validate_known_entity(value, name, shape, "chunk grid")
 
 
+def blocking_problems(
+    problems: Sequence[ValidationProblem],
+) -> tuple[ValidationProblem, ...]:
+    """The problems that prevent interpreting an entity's fields.
+
+    `unknown_key` problems do not: a member this package does not model
+    says nothing about the members it does. Rules use this so a single
+    unrecognized key cannot silently suppress every other judgment about
+    the same entity — the extra key is still reported, and the geometry
+    checks still run.
+
+    The `TypeIs` guards deliberately do *not* use this: narrowing must be
+    exact against the closed TypedDicts, and a value carrying an extra
+    member is not an instance of one.
+    """
+    return tuple(problem for problem in problems if problem.kind != "unknown_key")
+
+
 def is_valid_known_codec_name(value: object) -> str | None:
     """The codec name of `value` if it is a valid known codec, else None.
 
@@ -455,6 +471,7 @@ def is_valid_known_codec_name(value: object) -> str | None:
 
 
 __all__ = [
+    "blocking_problems",
     "entity_name",
     "is_valid_known_codec_name",
     "validate_known_chunk_grid_metadata",
