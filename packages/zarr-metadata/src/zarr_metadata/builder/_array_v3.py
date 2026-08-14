@@ -161,22 +161,22 @@ class ZarrV3ArrayMetadataBuilder:
         problems: list[ValidationProblem] = []
         for rule in applicable(ZARR_V3_ARRAY_RULES, self._inner.keys()):
             found = rule.check(self._inner)
-            if not found:
+            if len(found) == 0:
                 continue
             earlier = rule.keys - changed
             just_set = rule.keys & changed
-            if earlier and just_set:
+            if len(earlier) != 0 and len(just_set) != 0:
                 hint = (
                     f" [{', '.join(sorted(just_set))} set in this call conflicts with "
                     f"{', '.join(sorted(earlier))} set earlier; evolve() can change "
                     "both at once]"
                 )
-                found = [
+                found = tuple(
                     ValidationProblem(problem.loc, problem.message + hint, problem.kind)
                     for problem in found
-                ]
+                )
             problems.extend(found)
-        if problems:
+        if len(problems) != 0:
             raise MetadataValidationError(problems)
 
     # -- output -------------------------------------------------------------
@@ -190,14 +190,14 @@ class ZarrV3ArrayMetadataBuilder:
         every problem from both passes. The returned dict shares no
         mutable state with the builder.
         """
-        structural: list[ValidationProblem] = []
+        structural: tuple[ValidationProblem, ...] = ()
         parsed: ZarrV3ArrayMetadataJSON | None = None
         try:
             parsed = parse_array_metadata_v3(copy.deepcopy(dict(self._inner)))
         except MetadataValidationError as error:
             structural = error.problems
         semantic = run_rules(ZARR_V3_ARRAY_RULES, self._inner)
-        if structural or semantic:
+        if len(structural) != 0 or len(semantic) != 0:
             raise MetadataValidationError(structural + semantic)
         assert parsed is not None
         return parsed

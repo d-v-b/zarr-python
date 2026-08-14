@@ -226,7 +226,7 @@ class ZarrV3ConsolidatedMetadata:
     def from_json(cls, data: object) -> ZarrV3ConsolidatedMetadata:
         normalized = arrays_to_tuples(data)
         problems = validate_consolidated_metadata_v3(normalized)
-        if problems:
+        if len(problems) != 0:
             raise MetadataValidationError(problems)
         env = cast("Mapping[str, object]", normalized)
         entries: dict[str, ZarrV3ArrayMetadata | ZarrV3GroupMetadata] = {}
@@ -416,7 +416,7 @@ class ZarrV2ConsolidatedMetadata:
                         )
                         for problem in validate_json(value)
                     )
-        if problems:
+        if len(problems) != 0:
             raise MetadataValidationError(problems)
         entries_tupled = cast(
             "dict[str, JSONValue]",

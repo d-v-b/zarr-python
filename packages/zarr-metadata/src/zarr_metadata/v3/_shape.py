@@ -98,7 +98,7 @@ if TYPE_CHECKING:
 
     from zarr_metadata.model._validation import ProblemKind
 
-    _FieldChecker = Callable[[object, tuple[str | int, ...]], list[ValidationProblem]]
+    _FieldChecker = Callable[[object, tuple[str | int, ...]], tuple[ValidationProblem, ...]]
 
 
 def entity_name(value: object) -> str | None:
@@ -118,69 +118,73 @@ def entity_name(value: object) -> str | None:
 
 def _problems(
     loc: tuple[str | int, ...], message: str, kind: ProblemKind = "invalid_type"
-) -> list[ValidationProblem]:
-    return [ValidationProblem(loc, message, kind)]
+) -> tuple[ValidationProblem, ...]:
+    return (ValidationProblem(loc, message, kind),)
 
 
-def _check_json_int(value: object, loc: tuple[str | int, ...]) -> list[ValidationProblem]:
+def _check_json_int(value: object, loc: tuple[str | int, ...]) -> tuple[ValidationProblem, ...]:
     if isinstance(value, bool) or not isinstance(value, int):
         return _problems(loc, f"expected an integer, got {value!r}")
-    return []
+    return ()
 
 
-def _check_json_bool(value: object, loc: tuple[str | int, ...]) -> list[ValidationProblem]:
+def _check_json_bool(value: object, loc: tuple[str | int, ...]) -> tuple[ValidationProblem, ...]:
     if not isinstance(value, bool):
         return _problems(loc, f"expected a boolean, got {value!r}")
-    return []
+    return ()
 
 
 def _literal(allowed: tuple[str, ...]) -> _FieldChecker:
-    def check(value: object, loc: tuple[str | int, ...]) -> list[ValidationProblem]:
+    def check(value: object, loc: tuple[str | int, ...]) -> tuple[ValidationProblem, ...]:
         if value not in allowed:
             return _problems(loc, f"expected one of {allowed!r}, got {value!r}", "invalid_value")
-        return []
+        return ()
 
     return check
 
 
-def _check_int_tuple(value: object, loc: tuple[str | int, ...]) -> list[ValidationProblem]:
+def _check_int_tuple(value: object, loc: tuple[str | int, ...]) -> tuple[ValidationProblem, ...]:
     if not isinstance(value, tuple):
         return _problems(loc, f"expected an array (tuple) of integers, got {value!r}")
     items = cast("tuple[object, ...]", value)
-    return [
+    return tuple(
         problem
         for index, item in enumerate(items)
         for problem in _check_json_int(item, (*loc, index))
-    ]
+    )
 
 
-def _check_json_value(value: object, loc: tuple[str | int, ...]) -> list[ValidationProblem]:
+def _check_json_value(value: object, loc: tuple[str | int, ...]) -> tuple[ValidationProblem, ...]:
     if not is_json(value):
         return _problems(loc, "expected a JSON value")
-    return []
+    return ()
 
 
-def _check_metadata_field(value: object, loc: tuple[str | int, ...]) -> list[ValidationProblem]:
+def _check_metadata_field(
+    value: object, loc: tuple[str | int, ...]
+) -> tuple[ValidationProblem, ...]:
     if not is_metadata_field_v3(value):
         return _problems(loc, "expected a metadata field (bare name or name/configuration object)")
-    return []
+    return ()
 
 
-def _check_field_tuple(value: object, loc: tuple[str | int, ...]) -> list[ValidationProblem]:
+def _check_field_tuple(value: object, loc: tuple[str | int, ...]) -> tuple[ValidationProblem, ...]:
     if not isinstance(value, tuple):
         return _problems(loc, f"expected an array (tuple) of metadata fields, got {value!r}")
     items = cast("tuple[object, ...]", value)
-    return [
+    return tuple(
         problem
         for index, item in enumerate(items)
         for problem in _check_metadata_field(item, (*loc, index))
-    ]
+    )
 
 
 _SCALAR_MAP_KEYS: Final = frozenset(ScalarMap.__annotations__)
 
 
-def _check_scalar_map_entries(value: object, loc: tuple[str | int, ...]) -> list[ValidationProblem]:
+def _check_scalar_map_entries(
+    value: object, loc: tuple[str | int, ...]
+) -> tuple[ValidationProblem, ...]:
     if not isinstance(value, tuple):
         return _problems(loc, f"expected an array (tuple) of [old, new] pairs, got {value!r}")
     problems: list[ValidationProblem] = []
@@ -190,10 +194,10 @@ def _check_scalar_map_entries(value: object, loc: tuple[str | int, ...]) -> list
             continue
         for position, scalar in enumerate(cast("tuple[object, ...]", item)):
             problems.extend(_check_json_value(scalar, (*loc, index, position)))
-    return problems
+    return tuple(problems)
 
 
-def _check_scalar_map(value: object, loc: tuple[str | int, ...]) -> list[ValidationProblem]:
+def _check_scalar_map(value: object, loc: tuple[str | int, ...]) -> tuple[ValidationProblem, ...]:
     if not isinstance(value, Mapping):
         return _problems(loc, f"expected an object, got {value!r}")
     mapping = cast("Mapping[object, object]", value)
@@ -204,14 +208,14 @@ def _check_scalar_map(value: object, loc: tuple[str | int, ...]) -> list[Validat
     for key in _SCALAR_MAP_KEYS:
         if key in mapping:
             problems.extend(_check_scalar_map_entries(mapping[key], (*loc, key)))
-    return problems
+    return tuple(problems)
 
 
 def _check_rectilinear_dim_spec(
     value: object, loc: tuple[str | int, ...]
-) -> list[ValidationProblem]:
+) -> tuple[ValidationProblem, ...]:
     if not isinstance(value, bool) and isinstance(value, int):
-        return []
+        return ()
     if not isinstance(value, tuple):
         return _problems(
             loc,
@@ -231,19 +235,19 @@ def _check_rectilinear_dim_spec(
         problems.extend(
             _problems((*loc, index), f"expected an integer or a [value, count] pair, got {item!r}")
         )
-    return problems
+    return tuple(problems)
 
 
 def _check_rectilinear_dim_specs(
     value: object, loc: tuple[str | int, ...]
-) -> list[ValidationProblem]:
+) -> tuple[ValidationProblem, ...]:
     if not isinstance(value, tuple):
         return _problems(loc, f"expected an array (tuple) of dimension specs, got {value!r}")
-    return [
+    return tuple(
         problem
         for index, item in enumerate(cast("tuple[object, ...]", value))
         for problem in _check_rectilinear_dim_spec(item, (*loc, index))
-    ]
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -351,7 +355,7 @@ _CHUNK_GRID_SHAPES: Final[Mapping[str, _EntityShape]] = {
 
 def _validate_known_entity(
     value: object, name: str, shape: _EntityShape, entity: str
-) -> list[ValidationProblem]:
+) -> tuple[ValidationProblem, ...]:
     """Every reason `value` is not an instance of `name`'s canonical type.
 
     Locations are relative to the entry itself (`("configuration", key)`
@@ -359,7 +363,7 @@ def _validate_known_entity(
     """
     if isinstance(value, str):
         if not shape.configuration_required:
-            return []
+            return ()
         return _problems(
             (),
             f"{entity} {name!r} requires a configuration and has no bare short-hand "
@@ -384,11 +388,11 @@ def _validate_known_entity(
                     "missing_key",
                 )
             )
-        return problems
+        return tuple(problems)
     configuration = mapping["configuration"]
     if not isinstance(configuration, Mapping):
         problems.extend(_problems(("configuration",), f"expected an object, got {configuration!r}"))
-        return problems
+        return tuple(problems)
     config = cast("Mapping[object, object]", configuration)
     for key in config:
         if not isinstance(key, str) or key not in shape.config_keys:
@@ -406,10 +410,10 @@ def _validate_known_entity(
     for key, checker in shape.config_checkers.items():
         if key in config:
             problems.extend(checker(config[key], ("configuration", key)))
-    return problems
+    return tuple(problems)
 
 
-def validate_known_codec_metadata(value: object) -> list[ValidationProblem] | None:
+def validate_known_codec_metadata(value: object) -> tuple[ValidationProblem, ...] | None:
     """Shape problems for a known-name codec entry, or None if not judged.
 
     None means the entry has no interpretable name or its name is not a
@@ -426,7 +430,7 @@ def validate_known_codec_metadata(value: object) -> list[ValidationProblem] | No
     return _validate_known_entity(value, name, shape, "codec")
 
 
-def validate_known_chunk_grid_metadata(value: object) -> list[ValidationProblem] | None:
+def validate_known_chunk_grid_metadata(value: object) -> tuple[ValidationProblem, ...] | None:
     """Shape problems for a known-name chunk grid entry, or None if not judged."""
     name = entity_name(value)
     if name is None:

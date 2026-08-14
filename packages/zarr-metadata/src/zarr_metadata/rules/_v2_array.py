@@ -18,19 +18,19 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
 
-def _check_chunks_match_shape(document: Mapping[str, object]) -> list[ValidationProblem]:
+def _check_chunks_match_shape(document: Mapping[str, object]) -> tuple[ValidationProblem, ...]:
     """`chunks` must have one entry per dimension of `shape`."""
     shape = as_sequence(document["shape"])
     chunks = as_sequence(document["chunks"])
     if shape is None or chunks is None or len(shape) == len(chunks):
-        return []
-    return [
+        return ()
+    return (
         ValidationProblem(
             ("chunks",),
             "expected the same number of dimensions as shape",
             "invalid_value",
-        )
-    ]
+        ),
+    )
 
 
 ZARR_V2_ARRAY_RULES: Final[tuple[Rule, ...]] = (

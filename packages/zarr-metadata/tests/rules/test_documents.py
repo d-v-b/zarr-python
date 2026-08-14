@@ -69,7 +69,7 @@ CASES: dict[str, tuple[Any, Any, Any, dict[str, Any]]] = {
 @pytest.mark.parametrize(("validate", "parse", "check", "doc"), CASES.values(), ids=list(CASES))
 def test_valid_documents(validate: Any, parse: Any, check: Any, doc: dict[str, Any]) -> None:
     parsed = parse(doc)
-    assert validate(parsed) == []
+    assert validate(parsed) == ()
     assert check(parsed) is True
     assert parsed["shape"] == tuple(doc["shape"])
 

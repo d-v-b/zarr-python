@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from zarr_metadata.model._validation import ValidationProblem
 
 
-def _check_consolidated_entries(document: Mapping[str, object]) -> list[ValidationProblem]:
+def _check_consolidated_entries(document: Mapping[str, object]) -> tuple[ValidationProblem, ...]:
     """Consolidated child documents must satisfy their own composition rules.
 
     Structural validity of the consolidated envelope and its entries is
@@ -30,10 +30,10 @@ def _check_consolidated_entries(document: Mapping[str, object]) -> list[Validati
     """
     consolidated = as_string_mapping(document["consolidated_metadata"])
     if consolidated is None:
-        return []
+        return ()
     metadata = as_string_mapping(consolidated.get("metadata"))
     if metadata is None:
-        return []
+        return ()
     problems: list[ValidationProblem] = []
     for path, entry in metadata.items():
         node = as_string_mapping(entry)
@@ -45,7 +45,7 @@ def _check_consolidated_entries(document: Mapping[str, object]) -> list[Validati
             problems.extend(prefixed(loc, run_rules(ZARR_V3_ARRAY_RULES, node)))
         elif node_type == "group":
             problems.extend(prefixed(loc, run_rules(ZARR_V3_GROUP_RULES, node)))
-    return problems
+    return tuple(problems)
 
 
 ZARR_V3_GROUP_RULES: Final[tuple[Rule, ...]] = (

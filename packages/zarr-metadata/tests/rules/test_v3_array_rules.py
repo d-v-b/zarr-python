@@ -83,7 +83,7 @@ VALID_CASES: dict[str, dict[str, Any]] = {
 
 @pytest.mark.parametrize("doc", VALID_CASES.values(), ids=list(VALID_CASES))
 def test_valid_documents(doc: dict[str, Any]) -> None:
-    assert validate_array_metadata_v3(doc) == []
+    assert validate_array_metadata_v3(doc) == ()
 
 
 def _sole_problem(doc: dict[str, Any]) -> tuple[tuple[str | int, ...], str]:

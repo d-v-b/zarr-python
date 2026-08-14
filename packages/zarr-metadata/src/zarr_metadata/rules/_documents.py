@@ -51,7 +51,7 @@ if TYPE_CHECKING:
     from zarr_metadata.v3.group import ZarrV3GroupMetadataJSON
 
 
-def validate_array_metadata_v3(value: object) -> list[ValidationProblem]:
+def validate_array_metadata_v3(value: object) -> tuple[ValidationProblem, ...]:
     """Every reason `value` is not a valid v3 array document.
 
     Structural problems (from the model layer) and composition problems
@@ -65,7 +65,7 @@ def validate_array_metadata_v3(value: object) -> list[ValidationProblem]:
     if isinstance(normalized, Mapping):
         document = cast("Mapping[str, object]", normalized)
         problems = problems + run_rules(ZARR_V3_ARRAY_RULES, document)
-    return problems
+    return tuple(problems)
 
 
 def is_array_metadata_v3(value: object) -> bool:
@@ -74,7 +74,7 @@ def is_array_metadata_v3(value: object) -> bool:
     Deliberately not a `TypeIs` guard — see the module docstring. Use
     `zarr_metadata.model.is_array_metadata_v3` to narrow.
     """
-    return not validate_array_metadata_v3(value)
+    return len(validate_array_metadata_v3(value)) == 0
 
 
 def parse_array_metadata_v3(value: object) -> ZarrV3ArrayMetadataJSON:
@@ -86,12 +86,12 @@ def parse_array_metadata_v3(value: object) -> ZarrV3ArrayMetadataJSON:
     """
     normalized = arrays_to_tuples(value)
     problems = validate_array_metadata_v3(normalized)
-    if problems:
+    if len(problems) != 0:
         raise MetadataValidationError(problems)
     return cast("ZarrV3ArrayMetadataJSON", normalized)
 
 
-def validate_array_metadata_v2(value: object) -> list[ValidationProblem]:
+def validate_array_metadata_v2(value: object) -> tuple[ValidationProblem, ...]:
     """Every reason `value` is not a valid v2 array document (merged form).
 
     JSON arrays are normalized to tuples before judgment, as in
@@ -102,7 +102,7 @@ def validate_array_metadata_v2(value: object) -> list[ValidationProblem]:
     if isinstance(normalized, Mapping):
         document = cast("Mapping[str, object]", normalized)
         problems = problems + run_rules(ZARR_V2_ARRAY_RULES, document)
-    return problems
+    return tuple(problems)
 
 
 def is_array_metadata_v2(value: object) -> bool:
@@ -110,7 +110,7 @@ def is_array_metadata_v2(value: object) -> bool:
 
     Deliberately not a `TypeIs` guard — see the module docstring.
     """
-    return not validate_array_metadata_v2(value)
+    return len(validate_array_metadata_v2(value)) == 0
 
 
 def parse_array_metadata_v2(value: object) -> ZarrV2ArrayMetadataJSON:
@@ -122,12 +122,12 @@ def parse_array_metadata_v2(value: object) -> ZarrV2ArrayMetadataJSON:
     """
     normalized = arrays_to_tuples(value)
     problems = validate_array_metadata_v2(normalized)
-    if problems:
+    if len(problems) != 0:
         raise MetadataValidationError(problems)
     return cast("ZarrV2ArrayMetadataJSON", normalized)
 
 
-def validate_group_metadata_v3(value: object) -> list[ValidationProblem]:
+def validate_group_metadata_v3(value: object) -> tuple[ValidationProblem, ...]:
     """Every reason `value` is not a valid v3 group document.
 
     Composition rules recurse into inline consolidated metadata, so a
@@ -139,7 +139,7 @@ def validate_group_metadata_v3(value: object) -> list[ValidationProblem]:
     if isinstance(normalized, Mapping):
         document = cast("Mapping[str, object]", normalized)
         problems = problems + run_rules(ZARR_V3_GROUP_RULES, document)
-    return problems
+    return tuple(problems)
 
 
 def is_group_metadata_v3(value: object) -> bool:
@@ -147,19 +147,19 @@ def is_group_metadata_v3(value: object) -> bool:
 
     Deliberately not a `TypeIs` guard — see the module docstring.
     """
-    return not validate_group_metadata_v3(value)
+    return len(validate_group_metadata_v3(value)) == 0
 
 
 def parse_group_metadata_v3(value: object) -> ZarrV3GroupMetadataJSON:
     """Return `value` as a valid `ZarrV3GroupMetadataJSON`, or raise."""
     normalized = arrays_to_tuples(value)
     problems = validate_group_metadata_v3(normalized)
-    if problems:
+    if len(problems) != 0:
         raise MetadataValidationError(problems)
     return cast("ZarrV3GroupMetadataJSON", normalized)
 
 
-def validate_group_metadata_v2(value: object) -> list[ValidationProblem]:
+def validate_group_metadata_v2(value: object) -> tuple[ValidationProblem, ...]:
     """Every reason `value` is not a valid v2 group document (merged form).
 
     v2 group documents carry no composition constraints today, so this is
@@ -170,14 +170,14 @@ def validate_group_metadata_v2(value: object) -> list[ValidationProblem]:
 
 def is_group_metadata_v2(value: object) -> bool:
     """Whether `value` is a valid v2 group document (merged form)."""
-    return not validate_group_metadata_v2(value)
+    return len(validate_group_metadata_v2(value)) == 0
 
 
 def parse_group_metadata_v2(value: object) -> ZarrV2GroupMetadataJSON:
     """Return `value` as a valid `ZarrV2GroupMetadataJSON`, or raise."""
     normalized = arrays_to_tuples(value)
     problems = validate_group_metadata_v2(normalized)
-    if problems:
+    if len(problems) != 0:
         raise MetadataValidationError(problems)
     return cast("ZarrV2GroupMetadataJSON", normalized)
 

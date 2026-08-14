@@ -33,7 +33,7 @@ TypedDict cannot ship without one.
 from __future__ import annotations
 
 import copy
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Final, cast
 
 from typing_extensions import Unpack
@@ -107,12 +107,12 @@ def _normalized(document: Mapping[str, object]) -> dict[str, object]:
     return cast("dict[str, object]", arrays_to_tuples(copy.deepcopy(dict(document))))
 
 
-def _raise_if_problems(problems: list[ValidationProblem]) -> None:
-    if problems:
+def _raise_if_problems(problems: Sequence[ValidationProblem]) -> None:
+    if len(problems) != 0:
         raise MetadataValidationError(problems)
 
 
-def _reject_attributes(document: Mapping[str, object]) -> list[ValidationProblem]:
+def _reject_attributes(document: Mapping[str, object]) -> tuple[ValidationProblem, ...]:
     """Problems for an `attributes` key in a strict on-disk v2 document.
 
     The strict `.zarray` / `.zgroup` shapes exclude `attributes` (it lives
@@ -122,15 +122,15 @@ def _reject_attributes(document: Mapping[str, object]) -> list[ValidationProblem
     the key and the returned value would not be the type it claims.
     """
     if "attributes" not in document:
-        return []
-    return [
+        return ()
+    return (
         ValidationProblem(
             ("attributes",),
             "'attributes' is not part of the on-disk document (it belongs to the "
             "sibling .zattrs file); use the merged-form factory instead",
             "invalid_value",
-        )
-    ]
+        ),
+    )
 
 
 def create_zarr_v3_array_metadata_json(
@@ -154,8 +154,8 @@ def create_zarr_v3_array_metadata_json(
     try:
         parsed = parse_array_metadata_v3(normalized)
     except MetadataValidationError as error:
-        problems += error.problems
-    problems += run_rules(ZARR_V3_ARRAY_RULES, normalized)
+        problems.extend(error.problems)
+    problems.extend(run_rules(ZARR_V3_ARRAY_RULES, normalized))
     _raise_if_problems(problems)
     assert parsed is not None
     return parsed
@@ -181,8 +181,8 @@ def create_zarr_v3_group_metadata_json(
     try:
         parsed = parse_group_metadata_v3(normalized)
     except MetadataValidationError as error:
-        problems += error.problems
-    problems += run_rules(ZARR_V3_GROUP_RULES, normalized)
+        problems.extend(error.problems)
+    problems.extend(run_rules(ZARR_V3_GROUP_RULES, normalized))
     _raise_if_problems(problems)
     assert parsed is not None
     return parsed
@@ -215,8 +215,8 @@ def create_zarr_v2_array_metadata_json(
     try:
         parsed = parse_array_metadata_v2(normalized)
     except MetadataValidationError as error:
-        problems += error.problems
-    problems += run_rules(ZARR_V2_ARRAY_RULES, normalized)
+        problems.extend(error.problems)
+    problems.extend(run_rules(ZARR_V2_ARRAY_RULES, normalized))
     _raise_if_problems(problems)
     assert parsed is not None
     return parsed
@@ -235,7 +235,7 @@ def create_zarr_v2_group_metadata_json(
     try:
         parsed = parse_group_metadata_v2(_normalized(kwargs))
     except MetadataValidationError as error:
-        problems += error.problems
+        problems.extend(error.problems)
     _raise_if_problems(problems)
     assert parsed is not None
     return parsed
@@ -250,13 +250,13 @@ def create_zarr_v2_z_array_json(**kwargs: Unpack[ZarrV2ZArrayJSON]) -> ZarrV2ZAr
     static exclusion cannot see (`**`-splatted mappings, untyped code).
     """
     normalized = _normalized(kwargs)
-    problems: list[ValidationProblem] = _reject_attributes(normalized)
+    problems: list[ValidationProblem] = list(_reject_attributes(normalized))
     parsed: ZarrV2ArrayMetadataJSON | None = None
     try:
         parsed = parse_array_metadata_v2(normalized)
     except MetadataValidationError as error:
-        problems += error.problems
-    problems += run_rules(ZARR_V2_ARRAY_RULES, normalized)
+        problems.extend(error.problems)
+    problems.extend(run_rules(ZARR_V2_ARRAY_RULES, normalized))
     _raise_if_problems(problems)
     assert parsed is not None
     return cast("ZarrV2ZArrayJSON", parsed)
@@ -271,12 +271,12 @@ def create_zarr_v2_z_group_json(**kwargs: Unpack[ZarrV2ZGroupJSON]) -> ZarrV2ZGr
     static exclusion cannot see (`**`-splatted mappings, untyped code).
     """
     normalized = _normalized(kwargs)
-    problems: list[ValidationProblem] = _reject_attributes(normalized)
+    problems: list[ValidationProblem] = list(_reject_attributes(normalized))
     parsed: ZarrV2GroupMetadataJSON | None = None
     try:
         parsed = parse_group_metadata_v2(normalized)
     except MetadataValidationError as error:
-        problems += error.problems
+        problems.extend(error.problems)
     _raise_if_problems(problems)
     assert parsed is not None
     return cast("ZarrV2ZGroupJSON", parsed)
@@ -284,7 +284,7 @@ def create_zarr_v2_z_group_json(**kwargs: Unpack[ZarrV2ZGroupJSON]) -> ZarrV2ZGr
 
 def _validate_v2_consolidated_envelope(
     document: Mapping[str, object],
-) -> list[ValidationProblem]:
+) -> tuple[ValidationProblem, ...]:
     """Every reason `document` is not a `.zmetadata` envelope.
 
     Checks the envelope only: both keys present, an integer format marker,
@@ -331,7 +331,7 @@ def _validate_v2_consolidated_envelope(
                         ValidationProblem(("metadata", key, *found.loc), found.message, found.kind)
                         for found in validate_json(cast("object", entry))
                     )
-    return problems
+    return tuple(problems)
 
 
 def create_zarr_v2_consolidated_metadata_json(

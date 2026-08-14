@@ -36,7 +36,7 @@ class Rule:
     """
 
     keys: frozenset[str]
-    check: Callable[[Mapping[str, object]], list[ValidationProblem]]
+    check: Callable[[Mapping[str, object]], tuple[ValidationProblem, ...]]
 
 
 def applicable(rules: Sequence[Rule], present: AbstractSet[str]) -> Iterator[Rule]:
@@ -44,12 +44,14 @@ def applicable(rules: Sequence[Rule], present: AbstractSet[str]) -> Iterator[Rul
     return (rule for rule in rules if rule.keys <= present)
 
 
-def run_rules(rules: Sequence[Rule], document: Mapping[str, object]) -> list[ValidationProblem]:
+def run_rules(
+    rules: Sequence[Rule], document: Mapping[str, object]
+) -> tuple[ValidationProblem, ...]:
     """Run every dependency-complete rule over `document`, collecting all problems."""
     problems: list[ValidationProblem] = []
     for rule in applicable(rules, document.keys()):
         problems.extend(rule.check(document))
-    return problems
+    return tuple(problems)
 
 
 def as_string_mapping(value: object) -> Mapping[str, object] | None:
@@ -70,12 +72,12 @@ def as_sequence(value: object) -> Sequence[object] | None:
 
 
 def prefixed(
-    loc: tuple[str | int, ...], problems: list[ValidationProblem]
-) -> list[ValidationProblem]:
-    return [
+    loc: tuple[str | int, ...], problems: Sequence[ValidationProblem]
+) -> tuple[ValidationProblem, ...]:
+    return tuple(
         ValidationProblem((*loc, *problem.loc), problem.message, problem.kind)
         for problem in problems
-    ]
+    )
 
 
 __all__ = [
