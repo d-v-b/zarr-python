@@ -62,6 +62,7 @@ class EntityRule:
 _DOCUMENT_RULES: Final[dict[str, list[Rule]]] = defaultdict(list)
 _ENTITY_RULES: Final[dict[tuple[str, str], list[EntityRule]]] = defaultdict(list)
 _DOCUMENT_KEYS: Final[dict[str, frozenset[str]]] = {}
+_DISPATCHED_FIELDS: Final[set[str]] = set()
 
 
 def register_document_type(
@@ -162,6 +163,17 @@ def entity_rules(field: ExtensionPointField, entity: str) -> tuple[EntityRule, .
     return tuple(_ENTITY_RULES[field, canonical_name(field, entity)])
 
 
+def dispatched_fields() -> frozenset[str]:
+    """Extension points that have a dispatcher, so their rules can run.
+
+    An entity rule registered at a field with no dispatcher is accepted and
+    then never fires — the silent-pass failure this module exists to
+    prevent. Checking coverage at registration would depend on import
+    order, so `tests/rules/test_registry.py` asserts it instead.
+    """
+    return frozenset(_DISPATCHED_FIELDS)
+
+
 def registered_entities() -> frozenset[tuple[str, str]]:
     """Every `(field, canonical name)` that has at least one registered rule."""
     return frozenset(_ENTITY_RULES)
@@ -224,6 +236,7 @@ def dispatch_field(
     def check(document: Mapping[str, object]) -> tuple[ValidationProblem, ...]:
         return run_entity_rules(field, document[field], document, (field,))
 
+    _DISPATCHED_FIELDS.add(field)
     check.__name__ = f"_dispatch_{field}_entity_rules"
     return check
 
@@ -243,6 +256,7 @@ def dispatch_field_sequence(
             problems.extend(run_entity_rules(field, entry, document, (field, index)))
         return tuple(problems)
 
+    _DISPATCHED_FIELDS.add(field)
     check.__name__ = f"_dispatch_{field}_entity_rules"
     return check
 
@@ -250,6 +264,7 @@ def dispatch_field_sequence(
 __all__ = [
     "EntityCheck",
     "EntityRule",
+    "dispatched_fields",
     "document_rule",
     "document_rules",
     "entity_rule",

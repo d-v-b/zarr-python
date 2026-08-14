@@ -25,10 +25,15 @@ type in its negative branch.
 
 Unknown names are not judged (extension openness): the `validate_known_*`
 functions answer `None` for entities this package has no types for, no
-problems for a valid known entity, and problems otherwise. Key sets are
-derived from the TypedDicts' `__annotations__` / `__required_keys__`
-rather than restated by hand, so the registry cannot drift from the
-canonical types; only the per-field value checks are written out.
+problems for a valid known entity, and problems otherwise.
+
+Key sets are derived from the TypedDicts' `__annotations__` /
+`__required_keys__` rather than restated by hand, so those entries cannot
+drift from the canonical types; only the per-field value checks are
+written out. The exception is `_BARE_DATA_TYPE_NAMES`: the core scalar
+data types have no TypedDict to derive from — their whole metadata is a
+name — so that list is hand-written, and `tests/test_registry_drift.py`
+ties it to the modules that define those names.
 """
 
 from __future__ import annotations
@@ -236,6 +241,34 @@ def _check_field_tuple(value: object, loc: tuple[str | int, ...]) -> tuple[Valid
 _STRUCT_FIELD_KEYS: Final = frozenset(StructField.__annotations__)
 
 
+def _check_data_type_field(
+    value: object, loc: tuple[str | int, ...]
+) -> tuple[ValidationProblem, ...]:
+    """A nested `data_type` position: structural shape plus its known shape.
+
+    `cast_value`'s target type and a struct field's type are data types
+    like any other, so they get the judgment a top-level `data_type` gets.
+    Without this the same value is accepted in one position and rejected
+    in another — a bare `"numpy.datetime64"` is invalid at the top level
+    (its configuration is required) and was silently fine inside a struct.
+    Recurses naturally: a struct of structs is judged all the way down.
+    """
+    problems = _check_metadata_field(value, loc)
+    if len(problems) != 0:
+        return problems
+    found = validate_known_entity_metadata(DATA_TYPE, value)
+    return () if found is None else _prefixed_at(loc, found)
+
+
+def _prefixed_at(
+    loc: tuple[str | int, ...], problems: tuple[ValidationProblem, ...]
+) -> tuple[ValidationProblem, ...]:
+    return tuple(
+        ValidationProblem((*loc, *problem.loc), problem.message, problem.kind)
+        for problem in problems
+    )
+
+
 def _check_struct_fields(
     value: object, loc: tuple[str | int, ...]
 ) -> tuple[ValidationProblem, ...]:
@@ -256,7 +289,7 @@ def _check_struct_fields(
         if "name" in field and not isinstance(field["name"], str):
             problems.extend(_problems((*item_loc, "name"), "expected a string"))
         if "data_type" in field:
-            problems.extend(_check_metadata_field(field["data_type"], (*item_loc, "data_type")))
+            problems.extend(_check_data_type_field(field["data_type"], (*item_loc, "data_type")))
     return tuple(problems)
 
 
@@ -340,7 +373,6 @@ class _EntityShape:
     config_keys: frozenset[str]
     config_required: frozenset[str]
     config_checkers: Mapping[str, _FieldChecker]
-    object_permitted: bool = True
 
 
 def _shape(
@@ -367,8 +399,23 @@ def _shape(
 
 
 def _bare_shape() -> _EntityShape:
-    """Shape of an entity whose canonical metadata is only its bare name."""
-    return _EntityShape(frozenset(), False, frozenset(), frozenset(), {}, False)
+    """Shape of an entity that takes no configuration.
+
+    Both spellings are valid: the spec makes `{"name": ...}` the base form
+    and permits the bare short-hand when no configuration is required. The
+    object form is therefore accepted with an absent or empty
+    `configuration`, and any member inside one is an unknown key.
+
+    Keyword arguments deliberately: this is a six-field record whose flags
+    are easy to transpose positionally.
+    """
+    return _EntityShape(
+        object_keys=frozenset({"name", "configuration", "must_understand"}),
+        configuration_required=False,
+        config_keys=frozenset(),
+        config_required=frozenset(),
+        config_checkers={},
+    )
 
 
 _CODEC_SHAPES: Final[Mapping[str, _EntityShape]] = {
@@ -390,7 +437,7 @@ _CODEC_SHAPES: Final[Mapping[str, _EntityShape]] = {
         CastValueCodecObject,
         CastValueCodecConfiguration,
         {
-            "data_type": _check_metadata_field,
+            "data_type": _check_data_type_field,
             "rounding": _literal(CAST_ROUNDING_MODE),
             "out_of_range": _literal(CAST_OUT_OF_RANGE_MODE),
             "scalar_map": _check_scalar_map,
@@ -503,12 +550,6 @@ def _validate_known_entity(
             (),
             f"{entity} {name!r} requires a configuration and has no bare short-hand "
             f"form; use {{'name': {name!r}, 'configuration': {{...}}}}",
-            "invalid_value",
-        )
-    if not shape.object_permitted:
-        return _problems(
-            (),
-            f"{entity} {name!r} permits only the bare-name form",
             "invalid_value",
         )
     if not isinstance(value, Mapping):

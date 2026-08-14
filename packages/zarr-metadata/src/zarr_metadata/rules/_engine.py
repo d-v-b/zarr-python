@@ -2,8 +2,37 @@
 
 A `Rule` runs when every key in `requires` is present. The same rule set
 therefore supports complete documents and partial builders without
-imposing field order. Required-key checks remain in structural
-validation because absence is not an error in a partial document.
+imposing field order.
+
+Prior art
+---------
+The gate is conventional, which is the point. Ecto's
+`Ecto.Changeset.validate_change/3` invokes a validator "only if a change
+for the given field exists", so one changeset serves both full inserts
+and partial updates. Clojure spec's two-phase `s/keys` separates
+required-key presence from key/value conformance precisely because "we
+routinely deal with optional and partial data". Valibot's `partialCheck`
+takes the paths a cross-field rule reads and runs it "whenever the
+selected part of the data is valid". Presence-conditional rules-as-data
+are JSON Schema's `dependentSchemas` / `dependentRequired` applicators.
+
+- https://hexdocs.pm/ecto/Ecto.Changeset.html
+- https://clojure.org/about/spec
+- https://valibot.dev/api/partialCheck/
+- https://www.learnjsonschema.com/2020-12/applicator/dependentschemas/
+
+Two consequences follow from gating rather than ordering.
+
+**Order-free by construction.** No topological sort, so mutually
+dependent rules are expressible — unlike Yup, whose equivalent `deps`
+orders rules and therefore rejects cycles outright.
+
+**Absence is deliberately inexpressible.** A rule cannot ask whether a
+field is missing: that is negation-as-failure, sound only under a
+closed-world assumption, and a partially built document is an open world
+where the key may still arrive. Required-key checks therefore stay in
+structural validation — the same stratification Ecto
+(`validate_required`), spec (`:req`), and JSON Schema (`required`) apply.
 
 Rules may receive structurally invalid values. A rule that cannot safely
 interpret its inputs leaves the problem to structural validation.

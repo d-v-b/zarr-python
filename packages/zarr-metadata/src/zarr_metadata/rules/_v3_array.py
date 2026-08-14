@@ -38,7 +38,9 @@ from zarr_metadata.rules._registry import (
     register_document_type,
 )
 from zarr_metadata.v3._extension_points import (
+    CHUNK_GRID,
     CHUNK_KEY_ENCODING,
+    CODECS,
     DATA_TYPE,
     ExtensionPointField,
 )
@@ -237,20 +239,27 @@ _fill_matches_dtype = document_rule(ZARR_V3_ARRAY, frozenset({"data_type", "fill
 
 
 def _known_entity_shape(
-    field: ExtensionPointField, extension_point: ExtensionPointField
+    field: ExtensionPointField,
 ) -> Callable[[Mapping[str, object]], tuple[ValidationProblem, ...]]:
+    """A check that judges `document[field]` against `field`'s known shapes.
+
+    One parameter, not two: the document field and the extension point are
+    the same thing, and taking them separately invited passing a codec
+    under the chunk-grid point.
+    """
+
     def check(document: Mapping[str, object]) -> tuple[ValidationProblem, ...]:
-        found = validate_known_entity_metadata(extension_point, document[field])
+        found = validate_known_entity_metadata(field, document[field])
         return () if found is None else prefixed((field,), found)
 
     return check
 
 
 _data_type_shape = document_rule(ZARR_V3_ARRAY, frozenset({"data_type"}))(
-    _known_entity_shape("data_type", DATA_TYPE)
+    _known_entity_shape(DATA_TYPE)
 )
 _chunk_key_encoding_shape = document_rule(ZARR_V3_ARRAY, frozenset({"chunk_key_encoding"}))(
-    _known_entity_shape("chunk_key_encoding", CHUNK_KEY_ENCODING)
+    _known_entity_shape(CHUNK_KEY_ENCODING)
 )
 
 
@@ -299,12 +308,22 @@ def check_dimension_names_length(document: Mapping[str, object]) -> tuple[Valida
 
 
 # Generic dispatchers: every rule an entity registers for itself runs here,
-# so a new codec or chunk grid needs no edit to this module.
+# so a new codec, chunk grid, data type, or chunk key encoding needs no edit
+# to this module. There must be one per extension point that has shapes:
+# without it, `entity_rule` accepts a registration whose rule can never run,
+# which is the silent-pass failure the registry exists to prevent.
+# `test_registry.py` asserts that coverage.
 _dispatch_chunk_grid = document_rule(ZARR_V3_ARRAY, frozenset({"chunk_grid"}))(
-    dispatch_field("chunk_grid")
+    dispatch_field(CHUNK_GRID)
+)
+_dispatch_data_type = document_rule(ZARR_V3_ARRAY, frozenset({"data_type"}))(
+    dispatch_field(DATA_TYPE)
+)
+_dispatch_chunk_key_encoding = document_rule(ZARR_V3_ARRAY, frozenset({"chunk_key_encoding"}))(
+    dispatch_field(CHUNK_KEY_ENCODING)
 )
 _dispatch_codecs = document_rule(ZARR_V3_ARRAY, frozenset({"codecs"}))(
-    dispatch_field_sequence("codecs")
+    dispatch_field_sequence(CODECS)
 )
 
 

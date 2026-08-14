@@ -22,6 +22,7 @@ from zarr_metadata.rules import (
     inapplicable,
 )
 from zarr_metadata.rules._registry import (
+    dispatched_fields,
     document_rule,
     entity_rule,
     register_document_type,
@@ -75,7 +76,6 @@ _RULE_FREE = frozenset(
         (DATA_TYPE, "string"),
         (DATA_TYPE, "numpy.datetime64"),
         (DATA_TYPE, "numpy.timedelta64"),
-        (DATA_TYPE, "struct"),
     }
 )
 
@@ -84,6 +84,20 @@ def test_every_shape_modelled_entity_is_accounted_for() -> None:
     # Every shape-modelled entity either
     # carries rules or is recorded as deliberately rule-free.
     assert modelled_entities() == registered_entities() | _RULE_FREE
+
+
+def test_every_shape_modelled_field_has_a_dispatcher() -> None:
+    # Regression: shapes existed for four extension points but dispatchers
+    # for only two, so `entity_rule` accepted registrations at `data_type`
+    # and `chunk_key_encoding` whose rules then silently never ran — the
+    # exact silent-pass failure the registry exists to prevent. A rule can
+    # only fire at a field something dispatches.
+    shape_modelled = {field for field, _ in modelled_entities()}
+    assert shape_modelled <= dispatched_fields()
+
+
+def test_every_field_with_rules_has_a_dispatcher() -> None:
+    assert {field for field, _ in registered_entities()} <= dispatched_fields()
 
 
 def test_rule_free_entities_really_have_no_rules() -> None:
