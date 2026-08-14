@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -19,7 +19,19 @@ from zarr_metadata.rules import (
     validate_array_metadata_v3,
 )
 
-V3_ARRAY: dict[str, Any] = {
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
+
+    from zarr_metadata import ZarrV2ArrayMetadataJSON, ZarrV3ArrayMetadataJSON
+    from zarr_metadata.model import ValidationProblem
+
+    # The trios are uniform in their inputs (any object) and differ only in
+    # the document type they hand back, which these tests never depend on.
+    Validator = Callable[[object], tuple[ValidationProblem, ...]]
+    Parser = Callable[[object], Mapping[str, object]]
+    Check = Callable[[object], bool]
+
+V3_ARRAY: ZarrV3ArrayMetadataJSON = {
     "zarr_format": 3,
     "node_type": "array",
     "shape": (4, 4),
@@ -30,7 +42,7 @@ V3_ARRAY: dict[str, Any] = {
     "codecs": ("bytes",),
 }
 
-V2_ARRAY: dict[str, Any] = {
+V2_ARRAY: ZarrV2ArrayMetadataJSON = {
     "zarr_format": 2,
     "shape": (4,),
     "chunks": (2,),
@@ -41,10 +53,10 @@ V2_ARRAY: dict[str, Any] = {
     "filters": None,
 }
 
-# (validator, parser, checker, document) — every entry must validate
-# cleanly through the combined trio; list-spelled arrays check that parse
+# (validate, parse, is_, document) — every entry must validate cleanly
+# through the combined trio; list-spelled arrays check that parse
 # normalizes. Error paths get their own tests below.
-CASES: dict[str, tuple[Any, Any, Any, dict[str, Any]]] = {
+CASES: dict[str, tuple[Validator, Parser, Check, Mapping[str, object]]] = {
     "v3-array": (
         validate_array_metadata_v3,
         parse_array_metadata_v3,
@@ -67,11 +79,15 @@ CASES: dict[str, tuple[Any, Any, Any, dict[str, Any]]] = {
 
 
 @pytest.mark.parametrize(("validate", "parse", "check", "doc"), CASES.values(), ids=list(CASES))
-def test_valid_documents(validate: Any, parse: Any, check: Any, doc: dict[str, Any]) -> None:
+def test_valid_documents(
+    validate: Validator, parse: Parser, check: Check, doc: Mapping[str, object]
+) -> None:
     parsed = parse(doc)
     assert validate(parsed) == ()
     assert check(parsed) is True
-    assert parsed["shape"] == tuple(doc["shape"])
+    shape = doc["shape"]
+    assert isinstance(shape, (list, tuple))
+    assert parsed["shape"] == tuple(shape)
 
 
 def test_error_v3_combined_report() -> None:

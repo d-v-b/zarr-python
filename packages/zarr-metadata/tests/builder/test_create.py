@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import pytest
 import typing_extensions
@@ -24,9 +24,13 @@ from zarr_metadata.builder._create import (
 from zarr_metadata.model import MetadataValidationError
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
-V3_ARRAY: dict[str, Any] = {
+    # Factories differ in the document type they return; these tests only
+    # ever compare the result as a mapping.
+    Factory = Callable[..., Mapping[str, object]]
+
+V3_ARRAY: dict[str, object] = {
     "zarr_format": 3,
     "node_type": "array",
     "shape": (4, 4),
@@ -37,7 +41,7 @@ V3_ARRAY: dict[str, Any] = {
     "codecs": ("bytes",),
 }
 
-V2_ZARRAY: dict[str, Any] = {
+V2_ZARRAY: dict[str, object] = {
     "zarr_format": 2,
     "shape": (4,),
     "chunks": (2,),
@@ -51,7 +55,7 @@ V2_ZARRAY: dict[str, Any] = {
 # (factory, kwargs, expected result). Every entry must succeed; error paths
 # get their own tests below. List-spelled arrays in the input check tuple
 # normalization against the tuple-spelled expectation.
-CASES: dict[str, tuple[Callable[..., Any], dict[str, Any], dict[str, Any]]] = {
+CASES: dict[str, tuple[Factory, dict[str, object], dict[str, object]]] = {
     "v3-array": (create_zarr_v3_array_metadata_json, V3_ARRAY, V3_ARRAY),
     "v3-array-normalizes-lists": (
         create_zarr_v3_array_metadata_json,
@@ -94,14 +98,12 @@ CASES: dict[str, tuple[Callable[..., Any], dict[str, Any], dict[str, Any]]] = {
 
 
 @pytest.mark.parametrize(("factory", "kwargs", "expected"), CASES.values(), ids=list(CASES))
-def test_create(
-    factory: Callable[..., Any], kwargs: dict[str, Any], expected: dict[str, Any]
-) -> None:
+def test_create(factory: Factory, kwargs: dict[str, object], expected: dict[str, object]) -> None:
     assert factory(**kwargs) == expected
 
 
 def test_output_shares_no_state_with_arguments() -> None:
-    grid: dict[str, Any] = {"name": "regular", "configuration": {"chunk_shape": (2, 2)}}
+    grid: dict[str, object] = {"name": "regular", "configuration": {"chunk_shape": (2, 2)}}
     document = create_zarr_v3_array_metadata_json(**{**V3_ARRAY, "chunk_grid": grid})
     grid["configuration"]["chunk_shape"] = (9, 9)  # caller mutates after the fact
     assert document["chunk_grid"]["configuration"]["chunk_shape"] == (2, 2)
@@ -192,7 +194,7 @@ def test_error_v2_z_array_attributes_via_splat() -> None:
 
 
 def test_error_v2_z_group_attributes_via_splat() -> None:
-    splatted: dict[str, Any] = {"zarr_format": 2, "attributes": {"unit": "m"}}
+    splatted: dict[str, object] = {"zarr_format": 2, "attributes": {"unit": "m"}}
     with pytest.raises(MetadataValidationError, match=".zattrs"):
         create_zarr_v2_z_group_json(**splatted)
 

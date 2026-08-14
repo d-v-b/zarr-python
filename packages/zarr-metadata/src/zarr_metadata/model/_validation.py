@@ -17,7 +17,7 @@ import json
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Final, Literal, NoReturn, cast
+from typing import Final, Literal, NoReturn, cast
 
 from typing_extensions import TypeIs
 
@@ -812,8 +812,12 @@ def _reject_json_constant(constant: str) -> NoReturn:
     raise ValueError(f"non-standard JSON constant {constant!r}")
 
 
-def load_store_json(mapping: Mapping[str, bytes], key: str) -> Any:
+def load_store_json(mapping: Mapping[str, bytes], key: str) -> object:
     """Decode the JSON document stored at `key` in `mapping`.
+
+    Returns `object`, not `Any`: what a store holds is unknown until a
+    validator says otherwise, and `Any` would let unchecked values flow
+    into typed positions silently. Narrow the result with a `parse_*`.
 
     Every ingestion failure surfaces as `MetadataValidationError`: a missing
     store key is a `missing_key` problem and undecodable bytes are an

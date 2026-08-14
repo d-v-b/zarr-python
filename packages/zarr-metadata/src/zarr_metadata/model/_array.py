@@ -468,7 +468,7 @@ class ZarrV2ArrayMetadata:
 
     @classmethod
     def from_key_value(cls, mapping: Mapping[str, bytes]) -> ZarrV2ArrayMetadata:
-        zarray_raw = cast("object", load_store_json(mapping, ZARR_V2_ARRAY_METADATA_STORE_KEY))
+        zarray_raw = load_store_json(mapping, ZARR_V2_ARRAY_METADATA_STORE_KEY)
         if not isinstance(zarray_raw, Mapping):
             return cls.from_json(zarray_raw)
         zarray = cast("Mapping[str, object]", zarray_raw)
@@ -483,7 +483,7 @@ class ZarrV2ArrayMetadata:
                 ]
             )
         if ZARR_V2_ATTRIBUTES_STORE_KEY in mapping:
-            zattrs = cast("object", load_store_json(mapping, ZARR_V2_ATTRIBUTES_STORE_KEY))
+            zattrs = load_store_json(mapping, ZARR_V2_ATTRIBUTES_STORE_KEY)
             return cls.from_json({**zarray, "attributes": zattrs})
         return cls.from_json(zarray)
 

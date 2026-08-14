@@ -4,14 +4,19 @@ sharding pipelines/geometry, and consolidated-entry recursion."""
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING
 
 import pytest
 
 from zarr_metadata.model import MetadataValidationError
 from zarr_metadata.rules import validate_array_metadata_v3, validate_group_metadata_v3
 
-BASE: dict[str, Any] = {
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from zarr_metadata import ZarrV3ArrayMetadataJSON
+
+BASE: ZarrV3ArrayMetadataJSON = {
     "zarr_format": 3,
     "node_type": "array",
     "shape": (4, 4),
@@ -23,8 +28,9 @@ BASE: dict[str, Any] = {
 }
 
 
-def _shard(**overrides: Any) -> dict[str, Any]:
-    configuration: dict[str, Any] = {
+def _shard(**overrides: object) -> Mapping[str, object]:
+    """A sharding codec entry; overrides may be deliberately malformed."""
+    configuration: dict[str, object] = {
         "chunk_shape": (2, 2),
         "codecs": ("bytes",),
         "index_codecs": ("bytes", "crc32c"),
@@ -35,7 +41,7 @@ def _shard(**overrides: Any) -> dict[str, Any]:
 
 # Documents that must be fully valid: the rules judge geometry and values
 # without rejecting legitimate spellings of the same constructs.
-VALID_CASES: dict[str, dict[str, Any]] = {
+VALID_CASES: dict[str, Mapping[str, object]] = {
     "regular": BASE,
     "rectilinear-explicit-sums": {
         **BASE,
@@ -82,11 +88,11 @@ VALID_CASES: dict[str, dict[str, Any]] = {
 
 
 @pytest.mark.parametrize("doc", VALID_CASES.values(), ids=list(VALID_CASES))
-def test_valid_documents(doc: dict[str, Any]) -> None:
+def test_valid_documents(doc: Mapping[str, object]) -> None:
     assert validate_array_metadata_v3(doc) == ()
 
 
-def _sole_problem(doc: dict[str, Any]) -> tuple[tuple[str | int, ...], str]:
+def _sole_problem(doc: Mapping[str, object]) -> tuple[tuple[str | int, ...], str]:
     problems = validate_array_metadata_v3(doc)
     assert len(problems) == 1, [p.message for p in problems]
     return problems[0].loc, problems[0].message
@@ -193,7 +199,7 @@ def test_error_sharding_not_divisible() -> None:
 
 
 def test_error_nested_sharding_not_divisible() -> None:
-    inner = {
+    inner: Mapping[str, object] = {
         "name": "sharding_indexed",
         "configuration": {"chunk_shape": (2, 3), "codecs": ("bytes",), "index_codecs": ("bytes",)},
     }
@@ -218,7 +224,7 @@ def test_error_sharding_inner_chunk_extent_zero() -> None:
 
 
 def test_error_consolidated_child_violates_array_rules() -> None:
-    doc = {
+    doc: Mapping[str, object] = {
         "zarr_format": 3,
         "node_type": "group",
         "consolidated_metadata": {
@@ -234,7 +240,7 @@ def test_error_consolidated_child_violates_array_rules() -> None:
 
 
 def test_error_consolidated_nested_group_recursion() -> None:
-    child_group = {
+    child_group: Mapping[str, object] = {
         "zarr_format": 3,
         "node_type": "group",
         "consolidated_metadata": {
@@ -243,7 +249,7 @@ def test_error_consolidated_nested_group_recursion() -> None:
             "metadata": {"b": {**BASE, "fill_value": 300}},
         },
     }
-    doc = {
+    doc: Mapping[str, object] = {
         "zarr_format": 3,
         "node_type": "group",
         "consolidated_metadata": {

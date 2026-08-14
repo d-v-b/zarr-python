@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 # A structurally- and semantically-valid document, assembled below in
 # different evolve() orders.
-COMPLETE: dict[str, Any] = {
+COMPLETE: dict[str, object] = {
     "zarr_format": 3,
     "node_type": "array",
     "shape": (4, 4),
@@ -26,13 +26,13 @@ COMPLETE: dict[str, Any] = {
 }
 
 
-def _steps(*chunks: dict[str, Any]) -> tuple[dict[str, Any], ...]:
+def _steps(*chunks: dict[str, object]) -> tuple[dict[str, object], ...]:
     return chunks
 
 
 # (evolve-call payloads applied in order, expected build() output). Every
 # entry must build successfully; error paths get their own tests below.
-CASES: dict[str, tuple[Sequence[dict[str, Any]], dict[str, Any]]] = {
+CASES: dict[str, tuple[Sequence[dict[str, object]], dict[str, object]]] = {
     "one-call": (_steps(COMPLETE), COMPLETE),
     "field-at-a-time": (_steps(*({k: v} for k, v in COMPLETE.items())), COMPLETE),
     "fill-before-dtype": (
@@ -131,7 +131,7 @@ CASES: dict[str, tuple[Sequence[dict[str, Any]], dict[str, Any]]] = {
 
 
 @pytest.mark.parametrize(("steps", "expected"), CASES.values(), ids=list(CASES))
-def test_build(steps: Sequence[dict[str, Any]], expected: dict[str, Any]) -> None:
+def test_build(steps: Sequence[dict[str, object]], expected: dict[str, object]) -> None:
     builder = ZarrV3ArrayMetadataBuilder()
     for step in steps:
         builder = builder.evolve(**step)
@@ -170,7 +170,7 @@ def test_without_unsets() -> None:
 
 
 def test_immutability() -> None:
-    source: dict[str, Any] = dict(COMPLETE)
+    source: dict[str, object] = dict(COMPLETE)
     builder = ZarrV3ArrayMetadataBuilder(source)
     source["shape"] = (9,)  # the builder copied on ingest
     evolved = builder.evolve(shape=(8, 8))
