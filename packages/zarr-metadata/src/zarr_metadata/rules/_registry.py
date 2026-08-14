@@ -41,7 +41,12 @@ from zarr_metadata.v3._extension_points import (
     canonical_name,
     identifier_of,
 )
-from zarr_metadata.v3._shape import blocking_problems, entity_name, modelled_entities
+from zarr_metadata.v3._shape import (
+    blocking_problems,
+    entity_name,
+    modelled_entities,
+    validate_known_entity_metadata,
+)
 
 if TYPE_CHECKING:
     from zarr_metadata.model._validation import ValidationProblem
@@ -149,7 +154,8 @@ def entity_rule(
 
     def decorate(check: EntityCheck) -> EntityRule:
         _validate_requires(document_type, requires, f"entity rule {check.__name__!r}")
-        if entity not in modelled_entities():
+        canonical_entity = canonical_name(field, entity)
+        if (field, canonical_entity) not in modelled_entities():
             msg = (
                 f"entity rule {check.__name__!r} targets {entity!r}, which has no shape "
                 f"validator in zarr_metadata.v3._shape; such a rule could never fire"
@@ -162,7 +168,7 @@ def entity_rule(
             )
             raise ValueError(msg)
         rule = EntityRule(field=field, entity=entity, requires=requires, check=check)
-        _ENTITY_RULES[field, canonical_name(field, entity)].append(rule)
+        _ENTITY_RULES[field, canonical_entity].append(rule)
         return rule
 
     return decorate
@@ -205,7 +211,7 @@ def run_entity_rules(
         return ()
     # Entity rules read configuration members by name, so they may only run
     # once the shape validator vouches those members exist and are typed.
-    configuration = entity_configuration(value)
+    configuration = entity_configuration(field, value)
     if configuration is None:
         return ()
     problems: list[ValidationProblem] = []
@@ -216,21 +222,14 @@ def run_entity_rules(
     return tuple(problems)
 
 
-def entity_configuration(value: object) -> Mapping[str, object] | None:
+def entity_configuration(field: ExtensionPointField, value: object) -> Mapping[str, object] | None:
     """`value`'s configuration if its modelled fields are usable, else None.
 
     Shared by the dispatchers and by rules that reach across entities
     (sharding's nested pipelines). `unknown_key` problems do not make an
     entity unusable; anything else does.
     """
-    from zarr_metadata.v3._shape import (
-        validate_known_chunk_grid_metadata,
-        validate_known_codec_metadata,
-    )
-
-    verdict = validate_known_codec_metadata(value)
-    if verdict is None:
-        verdict = validate_known_chunk_grid_metadata(value)
+    verdict = validate_known_entity_metadata(field, value)
     if verdict is None or len(blocking_problems(verdict)) != 0:
         return None
     mapping = as_string_mapping(value)

@@ -59,8 +59,7 @@ _RULE_FREE = frozenset(
 def test_every_shape_modelled_entity_is_accounted_for() -> None:
     # Shape validators exist for codecs and chunk grids; every one either
     # carries rules or is recorded as deliberately rule-free.
-    named = {entity for _, entity in registered_entities() | _RULE_FREE}
-    assert modelled_entities() == named
+    assert modelled_entities() == registered_entities() | _RULE_FREE
 
 
 def test_rule_free_entities_really_have_no_rules() -> None:
@@ -116,6 +115,17 @@ def test_error_entity_rule_for_an_unmodelled_entity() -> None:
 
         @entity_rule(ZARR_V3_ARRAY, CHUNK_GRID, "hilbert")
         def _unmodelled(configuration: object, document: object) -> tuple[()]:  # pragma: no cover
+            return ()
+
+
+def test_error_entity_rule_for_name_modelled_only_at_another_extension_point() -> None:
+    # `bytes` has a codec shape, but no data-type shape. Name-only lookup
+    # would accept this registration and later interpret data-type metadata
+    # using the codec schema.
+    with pytest.raises(ValueError, match="no shape validator"):
+
+        @entity_rule(ZARR_V3_ARRAY, DATA_TYPE, "bytes")
+        def _wrong_extension_point(configuration: object, document: object) -> tuple[()]:
             return ()
 
 

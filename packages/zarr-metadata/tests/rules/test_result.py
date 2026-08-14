@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, get_args, get_type_hints
 
 import pytest
 
 from zarr_metadata.rules import (
     Invalid,
     Valid,
+    ValidationResult,
     check_array_metadata_v2,
     check_array_metadata_v3,
     check_group_metadata_v2,
@@ -75,6 +76,20 @@ def test_error_invalid_carries_every_problem() -> None:
     assert result.problems == validate_array_metadata_v3(
         {**V3_ARRAY, "node_type": "grid", "fill_value": 300}
     )
+
+
+def test_error_invalid_cannot_have_an_empty_report() -> None:
+    with pytest.raises(ValueError, match="at least one"):
+        Invalid(())
+
+
+def test_public_result_type_is_runtime_subscriptable() -> None:
+    assert get_args(ValidationResult[int]) == (Valid[int], Invalid)
+
+
+def test_public_check_annotations_resolve_at_runtime() -> None:
+    hints = get_type_hints(check_array_metadata_v3)
+    assert get_args(hints["return"])[1] is Invalid
 
 
 def test_discriminant_narrows_both_ways() -> None:

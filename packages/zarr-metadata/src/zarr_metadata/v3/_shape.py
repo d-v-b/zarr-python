@@ -42,6 +42,12 @@ from zarr_metadata.model._validation import (
     is_json,
     is_metadata_field_v3,
 )
+from zarr_metadata.v3._extension_points import (
+    CHUNK_GRID,
+    CODECS,
+    ExtensionPointField,
+    canonical_name,
+)
 from zarr_metadata.v3.chunk_grid.rectilinear import (
     RECTILINEAR_CHUNK_GRID_NAME,
     RectilinearChunkGridConfiguration,
@@ -439,9 +445,28 @@ def validate_known_chunk_grid_metadata(value: object) -> tuple[ValidationProblem
     return _validate_known_entity(value, name, shape, "chunk grid")
 
 
-def modelled_entities() -> frozenset[str]:
-    """Every codec and chunk grid name this module has a shape validator for."""
-    return frozenset(_CODEC_SHAPES) | frozenset(_CHUNK_GRID_SHAPES)
+_ENTITY_SHAPES: Final[Mapping[ExtensionPointField, Mapping[str, _EntityShape]]] = {
+    CODECS: _CODEC_SHAPES,
+    CHUNK_GRID: _CHUNK_GRID_SHAPES,
+}
+
+
+def validate_known_entity_metadata(
+    field: ExtensionPointField, value: object
+) -> tuple[ValidationProblem, ...] | None:
+    """Shape problems for an entity known at `field`, or None if not judged."""
+    name = entity_name(value)
+    if name is None:
+        return None
+    shape = _ENTITY_SHAPES.get(field, {}).get(canonical_name(field, name))
+    if shape is None:
+        return None
+    return _validate_known_entity(value, name, shape, field.replace("_", " ").rstrip("s"))
+
+
+def modelled_entities() -> frozenset[tuple[ExtensionPointField, str]]:
+    """Every `(extension point, name)` with a shape validator."""
+    return frozenset((field, name) for field, shapes in _ENTITY_SHAPES.items() for name in shapes)
 
 
 def blocking_problems(
@@ -482,4 +507,5 @@ __all__ = [
     "modelled_entities",
     "validate_known_chunk_grid_metadata",
     "validate_known_codec_metadata",
+    "validate_known_entity_metadata",
 ]

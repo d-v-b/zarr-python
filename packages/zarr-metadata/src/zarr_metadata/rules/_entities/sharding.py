@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, cast
 from zarr_metadata.model._validation import ValidationProblem
 from zarr_metadata.rules._pipeline import pipeline_order_problems, shape_problems
 from zarr_metadata.rules._registry import entity_configuration, entity_rule, run_entity_rules
-from zarr_metadata.v3._extension_points import CODECS
+from zarr_metadata.v3._extension_points import CHUNK_GRID, CODECS
 from zarr_metadata.v3.chunk_grid.regular import REGULAR_CHUNK_GRID_NAME
 from zarr_metadata.v3.codec.sharding_indexed import SHARDING_INDEXED_CODEC_NAME
 
@@ -129,7 +129,7 @@ def _enclosing_chunk_shape(document: Mapping[str, object]) -> tuple[int, ...] | 
     grid = document.get("chunk_grid")
     if entity_name(grid) != REGULAR_CHUNK_GRID_NAME:
         return None
-    configuration = entity_configuration(grid)
+    configuration = entity_configuration(CHUNK_GRID, grid)
     if configuration is None:
         return None
     extents = configuration.get("chunk_shape")

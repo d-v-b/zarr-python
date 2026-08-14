@@ -31,22 +31,19 @@ invalid input should abort.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Generic, Literal, TypeAlias, TypeVar, cast
+from typing import Generic, Literal, TypeAlias, TypeVar, cast
 
-from zarr_metadata.model._validation import arrays_to_tuples
+from zarr_metadata.model._validation import ValidationProblem, arrays_to_tuples
 from zarr_metadata.rules._documents import (
     validate_array_metadata_v2,
     validate_array_metadata_v3,
     validate_group_metadata_v2,
     validate_group_metadata_v3,
 )
-
-if TYPE_CHECKING:
-    from zarr_metadata.model._validation import ValidationProblem
-    from zarr_metadata.v2.array import ZarrV2ArrayMetadataJSON
-    from zarr_metadata.v2.group import ZarrV2GroupMetadataJSON
-    from zarr_metadata.v3.array import ZarrV3ArrayMetadataJSON
-    from zarr_metadata.v3.group import ZarrV3GroupMetadataJSON
+from zarr_metadata.v2.array import ZarrV2ArrayMetadataJSON  # noqa: TC001
+from zarr_metadata.v2.group import ZarrV2GroupMetadataJSON  # noqa: TC001
+from zarr_metadata.v3.array import ZarrV3ArrayMetadataJSON  # noqa: TC001
+from zarr_metadata.v3.group import ZarrV3GroupMetadataJSON  # noqa: TC001
 
 DocumentT = TypeVar("DocumentT")
 
@@ -69,8 +66,13 @@ class Invalid:
     problems: tuple[ValidationProblem, ...]
     valid: Literal[False] = False
 
+    def __post_init__(self) -> None:
+        if len(self.problems) == 0:
+            msg = "Invalid requires at least one validation problem"
+            raise ValueError(msg)
 
-ValidationResult: TypeAlias = "Valid[DocumentT] | Invalid"
+
+ValidationResult: TypeAlias = Valid[DocumentT] | Invalid
 """Either a validated document or the problems that disqualified it."""
 
 
