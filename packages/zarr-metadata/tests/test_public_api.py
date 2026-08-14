@@ -288,6 +288,7 @@ _STANDALONE_VOCAB = frozenset(
         "HexFloat64",
         "JSONValue",
         "EntityRule",
+        "Invalid",
         "MetadataValidationError",
         "NumpyDatetime64",
         "NumpyTimeUnit",
@@ -301,7 +302,9 @@ _STANDALONE_VOCAB = frozenset(
         "ShardingIndexLocation",
         "Struct",
         "StructField",
+        "Valid",
         "ValidationProblem",
+        "ValidationResult",
     }
 )
 
