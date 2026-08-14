@@ -1,42 +1,9 @@
-"""
-Codec kind classification.
+"""Classify Zarr v3 codecs by pipeline kind.
 
-The Zarr v3 spec sorts codecs into three kinds by their position in a
-pipeline: zero or more `array -> array` codecs, followed by exactly one
-`array -> bytes` codec, followed by zero or more `bytes -> bytes` codecs.
-This module provides one branded union per kind over the concrete codec
-types this package defines, plus `TypeIs` guards that classify a codec
-entry by its `name`.
-
-Two classification surfaces with different contracts:
-
-- The `TypeIs` guards (`is_array_array_codec`, ...) are *shape-exact*:
-  they answer `True` exactly when the value is an instance of a canonical
-  codec type of that kind, judged by the type-level validators in
-  `zarr_metadata.v3._shape`. `TypeIs` narrowing is two-sided, so the
-  guards may be neither looser nor stricter than the types: a bare
-  `"transpose"` or a `{"name": "transpose"}` object missing its required
-  `configuration` answers `False` (narrowing to `TransposeCodecObject`
-  would lie in the positive branch), and any genuine instance answers
-  `True` (anything stricter would lie in the negative branch). Judgments
-  are at the canonical data level — JSON arrays as tuples, and
-  `int`-annotated fields meaning JSON integers, not booleans — so
-  normalize `json.loads` output (e.g. with a model-layer parser) before
-  narrowing.
-- `codec_kind_of_name` classifies by *name alone*, ignoring spelling. Use
-  it for pipeline-ordering semantics, where a known codec in an invalid
-  spelling must still rank as its kind: two spellings of the same pipeline
-  must never get different ordering verdicts, and a misspelled known codec
-  must not be mistaken for an unknown extension (which would suppress the
-  exactly-one-`array->bytes` count).
-
-Value judgments beyond the types — permutation contents, shard geometry,
-cross-field consistency — are the semantic rule layer's job
-(`zarr_metadata.builder`). Codecs this package has no types for
-(extension codecs from outside `zarr-extensions`) answer `False` to every
-guard and `None` from `codec_kind_of_name`: an unknown codec has unknown
-kind. Callers enforcing pipeline structure should treat "unclassifiable"
-as its own case, not as any particular kind.
+The `TypeIs` guards are shape-exact against canonical codec TypedDicts;
+normalize JSON arrays to tuples before using them. `codec_kind_of_name`
+classifies a known name without validating its object shape, which is
+useful for pipeline ordering. Unknown names return no kind.
 
 See https://zarr-specs.readthedocs.io/en/latest/v3/codecs/index.html
 """

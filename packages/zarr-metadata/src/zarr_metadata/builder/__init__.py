@@ -1,30 +1,12 @@
 """Validated construction of Zarr metadata documents.
 
-The construction layer is a consumer of the package's other two layers:
-the model layer checks structure, `zarr_metadata.rules` judges
-composition, and the surfaces here apply both while a document is being
-put together.
+`create_*` factories provide typed one-shot construction for every
+document TypedDict. They normalize and validate at runtime.
+`ZarrV3ArrayMetadataBuilder` supports incremental v3 array construction,
+running applicable composition rules after each update and checking
+completeness at `build()`.
 
-Two construction surfaces over the plain JSON shapes defined in
-`zarr_metadata.v2` / `zarr_metadata.v3`:
-
-- **`create_*` factories** — one per public document TypedDict, taking
-  `**kwargs: Unpack[<TypedDict>]`. One-shot construction: at
-  literal-keyword call sites, required keys and value types are enforced
-  statically; the runtime pass normalizes, checks structure, and runs
-  the composition rules, raising one `MetadataValidationError` with
-  every problem. Prefer these when all fields are known at a single call
-  site — which is the common case. For validating documents you *read*
-  rather than construct, use the trios in `zarr_metadata.rules`.
-- **`ZarrV3ArrayMetadataBuilder`** — incremental accumulation for staged
-  assembly across program points. Composition rules fire eagerly as
-  fields land, whenever their dependencies are all present, so field
-  order is unconstrained, problems surface at the `evolve` call that
-  completes them, and a cross-call conflict names both fields involved.
-  Completeness can only be checked at `build()` time, at runtime — the
-  price of accumulating through a partial type. Incremental building is
-  currently implemented for v3 arrays only, the document type with the
-  richest cross-field coupling.
+Use `zarr_metadata.rules` to validate documents read from storage.
 """
 
 from zarr_metadata.builder._array_v3 import ZarrV3ArrayMetadataBuilder

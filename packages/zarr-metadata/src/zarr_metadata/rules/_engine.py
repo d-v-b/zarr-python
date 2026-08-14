@@ -1,54 +1,12 @@
-"""The rule engine: rules as data, gated on the fields they read.
+"""Rules gated by the document fields they read.
 
-A `Rule` declares the document keys its check reads (`requires`) and
-fires only when all of them are present. That gate is what lets one rule
-set serve two consumers with different completeness guarantees: a
-complete document (where the gate is trivially satisfied) gets every
-rule, and a partially-assembled one gets exactly the rules its
-accumulated fields can support. Field order stays unconstrained, and
-coupled fields are checked as soon as all of them exist.
+A `Rule` runs when every key in `requires` is present. The same rule set
+therefore supports complete documents and partial builders without
+imposing field order. Required-key checks remain in structural
+validation because absence is not an error in a partial document.
 
-Prior art
----------
-The gate is not novel, which is the point. It is Ecto's
-`Ecto.Changeset.validate_change/3`, which invokes a validator "only if a
-change for the given field exists" and returns "a list of errors (with
-an empty list meaning no errors)", so one changeset function serves both
-full inserts and partial updates; Clojure spec's two-phase `s/keys`,
-which separates required-key presence from key/value conformance
-precisely because "we routinely deal with optional and partial data";
-and Valibot's `partialCheck`, which takes the list of paths a cross-field
-rule reads and runs it "whenever the selected part of the data is valid".
-Presence-conditional rules-as-data are JSON Schema's `dependentSchemas` /
-`dependentRequired` applicators. Collecting every problem under a `loc`
-path follows spec's `explain-data` and pydantic.
-
-- https://hexdocs.pm/ecto/Ecto.Changeset.html
-- https://clojure.org/about/spec
-- https://valibot.dev/api/partialCheck/
-- https://www.learnjsonschema.com/2020-12/applicator/dependentschemas/
-
-Two consequences of the gate worth naming:
-
-**Order-free by construction.** Because `requires` gates rather than
-orders, rules need no topological sort and mutually-dependent rules are
-expressible. Yup, which uses its equivalent `deps` to *order* rules,
-must topologically sort them and therefore rejects cyclic dependencies
-outright.
-
-**Absence is deliberately inexpressible.** A rule cannot ask whether a
-field is *missing*: that is negation-as-failure, sound only under a
-closed-world assumption, and a partially-built document is an open world
-where the key may still arrive. Required-key checks therefore belong to
-the structural layer, which runs on complete documents — the same
-stratification Ecto (`validate_required`), spec (`:req`), and JSON Schema
-(`required`) all apply.
-
-Checks read their document as `Mapping[str, object]` and verify every
-shape they touch before interpreting it: rules may run over documents
-that have not passed structural validation, so a check finding a
-structurally-unexpected value declines (returns no problems) and leaves
-the complaint to the structural validator.
+Rules may receive structurally invalid values. A rule that cannot safely
+interpret its inputs leaves the problem to structural validation.
 """
 
 from __future__ import annotations

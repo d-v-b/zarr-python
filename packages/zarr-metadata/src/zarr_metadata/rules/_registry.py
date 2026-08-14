@@ -1,31 +1,9 @@
-"""Registration of rules, by document type and by entity.
+"""Register rules by document type and extension entity.
 
-Two problems this module exists to prevent.
-
-**Defining a rule and forgetting to register it.** A rule that is never
-run is indistinguishable from one that always passes, and hand-written
-registration tuples make that a one-line omission. Here registration *is*
-the definition: `@document_rule` and `@entity_rule` add the rule to their
-registry as a side effect of defining the function, so there is no
-separate list to keep in sync.
-
-**A rule whose declared dependencies are wrong.** A `requires` naming a
-key that no such document has can never fire — the same silent-pass
-failure, arrived at by typo. Both decorators check `requires` against the
-document type's known keys at import time and raise immediately, which
-is Ecto's `ensure_field_exists!` (raising `ArgumentError` for a field
-absent from the schema) and Valibot's compile-time `ValidPaths`. Ajv's
-strict mode exists for the same reason: JSON Schema's "ignore unknown
-keywords" rule is a documented source of silently-inert schemas.
-
-**Entity rules** additionally solve an ownership problem. A rule about
-the `regular` chunk grid's geometry is *about that grid*, not about array
-documents in general; keeping it in the array-rules module means adding a
-third grid edits a module that has nothing to do with it. An entity rule
-is registered under the entity's `name`, and a single generic dispatcher
-per document field looks up whatever is registered for the name it finds.
-Adding a chunk grid or codec therefore means adding a module, never
-editing this one or the document-rule modules.
+`@document_rule` and `@entity_rule` register checks where they are
+defined. Both reject dependencies absent from the document type. Entity
+rules are keyed by `(field, canonical_name)` and require a corresponding
+shape validator.
 """
 
 from __future__ import annotations
@@ -63,7 +41,7 @@ dispatcher re-bases them onto the entity's position in the document.
 
 @dataclass(frozen=True, slots=True)
 class EntityRule:
-    """One composition check about a single named codec or chunk grid.
+    """One composition check for a named extension entity.
 
     Identified by `(field, entity)`, never by name alone: names are
     unique only within an extension point, and `bytes` is both a core

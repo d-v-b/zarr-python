@@ -1,46 +1,14 @@
-"""The v3 extension points, and what this package knows about each.
+"""Known identifiers and policies for Zarr v3 extension points.
 
-Zarr v3 defines a handful of *extension points* — document fields whose
-value names a codec, data type, chunk grid, or chunk key encoding. Names
-are unique only within a point, not across them: `bytes` is both a core
-codec and a registered extension data type. Everything here is therefore
-keyed by `(field, name)`, mirroring the zarr-extensions registry, whose
-directories are the extension points.
+Entries are keyed by `(field, name)` because names may occur at multiple
+extension points. Each entry records provenance and a specification URL;
+each point records cardinality and `must_understand: false` policy.
 
-Each point records, per identifier, where it was standardized and where
-its definition lives; and, per point, two policies the spec sets on the
-point as a whole: whether `must_understand: false` is permitted there,
-and whether the field holds one entity or a sequence of them.
-
-**Name canonicalization.** Identifiers are keyed by their *canonical*
-name, which is the name itself for everything except the parameterized
-raw-bytes data type family: `r8`, `r16`, `r24` all canonicalize to
-`RAW_BYTES_FAMILY`. Canonicalization is by grammar *shape*, not by
-validity — `r12` and `r0` canonicalize into the family too, even though
-neither is a legal member. That is deliberate: a malformed member of a
-family this package models is a misspelling to report, not an unknown
-third-party extension to wave through, and gating canonicalization on
-validity would let the misspelling escape judgment entirely.
-
-Canonical names are lookup keys and nothing else. They are never emitted
-into metadata and never appear in a message shown to a user: a document
-saying `r12` deserves the error "expected 'r' followed by a positive
-multiple of 8", not "r<N> is not a valid data type".
-
-**Names are a shared namespace, and this package assumes that.** Zarr
-identifiers are registry-allocated, so a document using `bytes` for its
-own private codec is not a different-but-valid document — it is one that
-has left the compatibility contract, and no validation library can help
-it. This table therefore models the registry as authoritative and
-defends nothing against collisions: a squatted name is judged against
-the definition it squats, which is the correct answer rather than a
-limitation. The same assumption covers `RAW_BYTES_FAMILY`. A metadata
-document could contain the literal string `r<N>` as a data type name;
-that would mislabel its provenance as core, and nothing more, since the
-rules layer matches the family through `RAW_BYTES_NAME_PATTERN` rather
-than through this key. Do not add escaping or collision-detection here
-— it would buy a wrong answer for documents that are already wrong, at
-the cost of an unreadable table key.
+`canonical_name` is identity except for raw-byte data types: every
+`r<N>` spelling, valid or not, maps to `RAW_BYTES_FAMILY`. Canonical names
+are lookup keys and are never emitted. Registry-allocated names are
+authoritative; private entities that reuse them are judged as the
+registered entity.
 """
 
 from __future__ import annotations

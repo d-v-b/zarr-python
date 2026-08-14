@@ -31,23 +31,15 @@ if TYPE_CHECKING:
 
 
 def _normalized(inner: ZarrV3ArrayMetadataJSONPartial) -> ZarrV3ArrayMetadataJSONPartial:
-    """A deep copy of `inner` with JSON arrays materialized as tuples.
-
-    Normalizing at ingestion (rather than deep-copying accessors' return
-    values alone) is what makes the no-shared-mutable-state contract hold
-    for runtime callers the type checker never saw: a list smuggled in as
-    `shape` becomes a tuple here, so no property can hand out a reference
-    whose mutation would corrupt the builder behind the eager rules' back.
-    """
+    """Copy `inner` and convert JSON arrays to tuples."""
     return cast("ZarrV3ArrayMetadataJSONPartial", arrays_to_tuples(copy.deepcopy(inner)))
 
 
 class ZarrV3ArrayMetadataBuilder:
     """Immutable accumulator for a v3 array metadata document.
 
-    Holds a (possibly incomplete) `ZarrV3ArrayMetadataJSONPartial` — the
-    same plain-JSON shapes the document itself uses, never wrapper objects
-    — and hands out evolved copies:
+    Holds a possibly incomplete `ZarrV3ArrayMetadataJSONPartial` and
+    returns evolved copies:
 
         doc = (
             ZarrV3ArrayMetadataBuilder()
@@ -61,37 +53,14 @@ class ZarrV3ArrayMetadataBuilder:
             .build()
         )
 
-    `evolve` is the only setter for standard fields; it is typed via
-    `Unpack[ZarrV3ArrayMetadataJSONPartial]`, so at literal-keyword call
-    sites wrong value types are rejected statically, and checkers without
-    PEP 728 support reject unknown keyword names too (PEP 728 checkers
-    accept them as extension items; `**`-splatted calls bypass both).
-    Extension fields go through `evolve_extension`, which also enforces
-    the no-shadowing rule at runtime. Keys are removed — not set to a
-    sentinel — with `without`; an absent key means UNSET, while a stored
-    `None` means JSON `null`, and the two never convert into one another.
+    `evolve` types standard fields; PEP 728 checkers also accept extension
+    fields. `evolve_extension` works across checkers and rejects standard
+    names. `without` removes keys. Properties return `UNSET` for absent
+    fields, distinct from JSON `null`.
 
-    After every change the semantic rules whose dependencies are all
-    present fire over the merged state (all of them, not just rules
-    touching the changed fields — a rule that passed under an old value
-    must be re-judged under the new one), raising
-    `MetadataValidationError` with every problem found. Fields may be set
-    in any order; coupled fields are checked as soon as all of them exist,
-    and a conflict between two fields is escaped by evolving both at once.
-
-    `build` validates structurally and semantically and returns the plain
-    `ZarrV3ArrayMetadataJSON` dict; `to_partial_json` returns whatever is
-    accumulated so far under an honest partial type. There is no
-    `build_unchecked`.
-
-    Instances never share mutable state: input mappings are deep-copied in
-    with JSON arrays materialized as tuples at every depth, and every
-    accessor and serializer deep-copies out. The tuple normalization also
-    makes equality spelling-insensitive: two builders holding the same
-    document compare equal whether their arrays arrived as lists (e.g.
-    straight from `json.loads`) or as tuples. Reading a field via its
-    property answers `UNSET` (PEP 661 sentinel; test with `is UNSET`)
-    when the key is absent.
+    Applicable composition rules run after every change. `build` adds
+    structural validation and returns a complete document. Inputs and
+    outputs are copied, and JSON arrays normalize to tuples.
     """
 
     __slots__ = ("_inner",)
@@ -104,7 +73,7 @@ class ZarrV3ArrayMetadataBuilder:
     # -- evolution ----------------------------------------------------------
 
     def evolve(self, **kwargs: Unpack[ZarrV3ArrayMetadataJSONPartial]) -> Self:
-        """A new builder with the given standard fields replaced.
+        """A new builder with the given fields replaced.
 
         Each given field fully replaces its previous value. Raises
         `MetadataValidationError` if the merged state violates any
@@ -117,9 +86,7 @@ class ZarrV3ArrayMetadataBuilder:
 
         Extension fields are the document keys outside the standard v3
         array metadata keys; `name` must not collide with a standard key.
-        This is a separate method (rather than extra `evolve` kwargs)
-        because type checkers without PEP 728 support reject unknown
-        keyword names statically.
+        This method supports extension names on checkers without PEP 728.
         """
         if name in ARRAY_METADATA_STANDARD_KEYS_V3:
             raise MetadataValidationError(

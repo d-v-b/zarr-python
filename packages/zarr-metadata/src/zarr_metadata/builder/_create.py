@@ -1,33 +1,13 @@
-"""One-shot factories for Zarr metadata documents.
+"""One-shot factories for metadata document TypedDicts.
 
-Package rule: **every public document TypedDict gets a `create_*` factory**
-whose signature is `**kwargs: Unpack[<TypedDict>]`. At a literal-keyword
-call site, unpacking the *total* TypedDict makes a missing required key and
-a wrong value type static errors. That guarantee is call-site-shaped, not
-absolute: a `**`-splatted mapping bypasses required-key coverage in both
-pyright and mypy, and for the open v3 documents a PEP 728 checker accepts
-unknown keyword names as extension items while a non-PEP 728 checker
-rejects them. The runtime pass exists for exactly the callers the static
-story cannot see: each factory deep-copies its inputs, materializes JSON
-arrays as tuples, and (where the package defines them) runs the structural
-validator and the semantic rules, raising one `MetadataValidationError`
-carrying every problem found.
+Each factory copies and normalizes its input, then applies structural and
+composition validation. Invalid input raises one
+`MetadataValidationError`. V3 array and group factories accept extension
+fields through `extensions=` for compatibility with type checkers that do
+not support PEP 728.
 
-The rule is deliberately scoped to *document* TypedDicts. Entity TypedDicts
-(`BloscCodecObject`, `RegularChunkGridConfiguration`, ...) do not get
-factories: TypedDict constructor syntax (`BloscCodecObject(name=..., ...)`)
-already enforces their shape statically, no semantic rules apply to an
-entity in isolation, and a do-nothing factory would falsely suggest that
-factory-built entities are validated while literal-built ones are not.
-
-The v3 array and group documents are open (PEP 728 `extra_items`), but
-type checkers without PEP 728 support reject unknown keyword names
-statically — so those factories take an `extensions=` mapping for
-extension fields, mirroring `ZarrV3ArrayMetadataBuilder.evolve_extension`.
-
-`DOCUMENT_FACTORIES` maps each document TypedDict name to its factory and
-is the source of truth the drift test checks against, so a new document
-TypedDict cannot ship without one.
+`DOCUMENT_FACTORIES` maps every public document TypedDict to its factory;
+a drift test keeps the mapping complete.
 """
 
 from __future__ import annotations

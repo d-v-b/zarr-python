@@ -5,8 +5,8 @@ contract each — `model` checks structure element by element,
 `rules` judges composition across the document, and `builder` constructs
 while applying both.
 
-- **Rule sets**: `ZARR_V3_ARRAY_RULES` grows to twelve rules — fill
-  value vs. data type, codec pipeline kind ordering, known-name shapes,
+- **Rule sets**: `ZARR_V3_ARRAY_RULES` covers fill value vs. data type,
+  codec pipeline kind ordering, known-name shapes,
   dimension-name counts, chunk-grid values (positive extents) and
   geometry (regular rank; rectilinear rank and per-dimension chunk-size
   sums, RLE pairs included), transpose orders (self-permutation at any

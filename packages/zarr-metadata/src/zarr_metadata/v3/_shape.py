@@ -24,8 +24,8 @@ guard built on a stricter-than-the-type check would wrongly exclude the
 type in its negative branch.
 
 Unknown names are not judged (extension openness): the `validate_known_*`
-functions answer `None` for entities this package has no types for, an
-empty list for a valid known entity, and problems otherwise. Key sets are
+functions answer `None` for entities this package has no types for, no
+problems for a valid known entity, and problems otherwise. Key sets are
 derived from the TypedDicts' `__annotations__` / `__required_keys__`
 rather than restated by hand, so the registry cannot drift from the
 canonical types; only the per-field value checks are written out.

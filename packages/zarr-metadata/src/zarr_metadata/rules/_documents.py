@@ -1,20 +1,9 @@
-"""Whole-document validation: structure plus composition, one entry point.
+"""Whole-document structural and composition validation.
 
-These trios mirror the model layer's `validate_*` / `is_*` / `parse_*`
-grammar and carry the same names, scoped by module: the model layer's
-functions judge *structure* only, while the functions here run the
-structural validator **and** the composition rules and report every
-problem from both passes together. They are the front door for readers —
-"is this loaded `zarr.json` a document I should act on?" — the same
-combined judgment the `create_*` factories apply at construction time.
-
-One deliberate difference from the model grammar: the `is_*` functions
-here return plain `bool`, not `TypeIs`. The TypedDicts encode structure,
-so only the structural layer can narrow honestly; a composition-aware
-guard is stricter than the type, and a `TypeIs` built on it would wrongly
-exclude the type in its negative branch (a document with `fill_value`
-300 for `uint8` *is* a `ZarrV3ArrayMetadataJSON` — it is just not a
-valid one). Use the model layer's `is_*` to narrow, and these to judge.
+These `validate_*`, `is_*`, and `parse_*` functions mirror the model API
+but apply both validation layers. The `is_*` functions return `bool`, not
+`TypeIs`: composition validity is stricter than TypedDict membership.
+Use `zarr_metadata.model.is_*` for type narrowing.
 """
 
 from __future__ import annotations

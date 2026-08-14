@@ -1,31 +1,9 @@
-"""A tagged union carrying either a validated document or its problems.
+"""Tagged validation results.
 
-`validate_*` answers "what is wrong", `parse_*` answers "give me the
-document or raise". Neither lets a caller hold both outcomes in one
-value and let the type checker enforce that they looked: `validate_*`
-returns a collection whose emptiness the checker cannot connect to the
-document's validity, and `parse_*` moves the failure into control flow.
-
-`check_*` closes that gap. It returns `Valid[T] | Invalid`, and because
-the two arms differ in a `Literal[bool]` discriminant, narrowing on
-`result.valid` gives the checker `result.document` in one branch and
-`result.problems` in the other — reading the wrong one is a static
-error, not a runtime `None`.
-
-    result = check_array_metadata_v3(loaded)
-    if result.valid:
-        store(result.document)      # typed ZarrV3ArrayMetadataJSON
-    else:
-        report(result.problems)     # non-empty tuple of problems
-
-This is offered *alongside* the trios rather than replacing them. The
-trios mirror the model layer's grammar name-for-name, which is worth
-keeping: a reader who knows `zarr_metadata.model.validate_array_metadata_v3`
-should not have to learn a second shape to get the composition-aware
-judgment. Prefer `check_*` when the document is the point and the
-problems are the exception; prefer `validate_*` when collecting problems
-across many documents; prefer `parse_*` at a trust boundary where
-invalid input should abort.
+`check_*` returns `Valid[T] | Invalid`. Testing the literal `valid`
+field narrows to either the normalized document or a nonempty problem
+tuple. Use `validate_*` to collect problems and `parse_*` to raise on
+invalid input.
 """
 
 from __future__ import annotations
