@@ -61,11 +61,13 @@ class ZarrV3ArrayMetadataBuilder:
             .build()
         )
 
-    `evolve` is the only setter for standard fields; it is fully typed via
-    `Unpack[ZarrV3ArrayMetadataJSONPartial]`, so unknown keys and wrong
-    value types are rejected statically. Extension fields go through
-    `evolve_extension` (type checkers without PEP 728 support cannot pass
-    them through `evolve`'s kwargs). Keys are removed — not set to a
+    `evolve` is the only setter for standard fields; it is typed via
+    `Unpack[ZarrV3ArrayMetadataJSONPartial]`, so at literal-keyword call
+    sites wrong value types are rejected statically, and checkers without
+    PEP 728 support reject unknown keyword names too (PEP 728 checkers
+    accept them as extension items; `**`-splatted calls bypass both).
+    Extension fields go through `evolve_extension`, which also enforces
+    the no-shadowing rule at runtime. Keys are removed — not set to a
     sentinel — with `without`; an absent key means UNSET, while a stored
     `None` means JSON `null`, and the two never convert into one another.
 

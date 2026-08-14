@@ -81,6 +81,7 @@ from zarr_metadata.v3.data_type.bytes import base64_bytes
 from zarr_metadata.v3.data_type.float16 import hex_float16
 from zarr_metadata.v3.data_type.float32 import hex_float32
 from zarr_metadata.v3.data_type.float64 import hex_float64
+from zarr_metadata.v3.data_type.raw import raw_bytes_dtype_name
 
 if TYPE_CHECKING:
     from zarr_metadata.v3.codec.kind import CodecKind
@@ -239,12 +240,12 @@ def _check_fill_for_dtype(dtype_name: str, value: object) -> str | None:
         if isinstance(value, Mapping):
             return None
         return f"expected an object of per-field fill values, got {value!r}"
-    raw = _RAW_BYTES_NAME_RE.fullmatch(dtype_name)
-    if raw is not None:
-        bits = int(raw.group(1))
-        if bits > 0 and bits % 8 == 0:
-            return _check_byte_sequence(value, bits // 8)
-        return None  # malformed r<N> name: a data_type problem, not a fill_value one
+    if _RAW_BYTES_NAME_RE.fullmatch(dtype_name) is not None:
+        try:
+            raw_bytes_dtype_name(dtype_name)
+        except ValueError:
+            return None  # malformed r<N> name: _check_data_type_spelling reports it
+        return _check_byte_sequence(value, int(dtype_name[1:]) // 8)
     return None  # unknown data type: its fill values are not ours to judge
 
 
@@ -257,6 +258,26 @@ def _dtype_name(data_type: object) -> str | None:
         if isinstance(name, str):
             return name
     return None  # structurally invalid; the structural validator reports it
+
+
+def _check_data_type_spelling(document: Mapping[str, object]) -> list[ValidationProblem]:
+    """Misspellings of data type families this package defines.
+
+    An `r<N>` name whose bit count is not a positive multiple of 8 is a
+    misspelling of the known raw-bytes family, not an unknown extension:
+    treating it as unknown would let the misspelling masquerade as an
+    extension and escape judgment entirely (the same anti-masquerade
+    reasoning as the codec spelling checks). Genuinely unknown names pass
+    untouched.
+    """
+    name = _dtype_name(document["data_type"])
+    if name is None or _RAW_BYTES_NAME_RE.fullmatch(name) is None:
+        return []
+    try:
+        raw_bytes_dtype_name(name)
+    except ValueError as error:
+        return [ValidationProblem(("data_type",), str(error), "invalid_value")]
+    return []
 
 
 def _check_fill_matches_dtype(document: Mapping[str, object]) -> list[ValidationProblem]:
@@ -549,7 +570,7 @@ def _check_regular_grid_dimensions(document: Mapping[str, object]) -> list[Valid
     """
     shape = _as_sequence(document["shape"])
     grid = _as_string_mapping(document["chunk_grid"])
-    if shape is None or grid is None or grid.get("name") != "regular":
+    if shape is None or grid is None or grid.get("name") != REGULAR_CHUNK_GRID_NAME:
         return []
     configuration = _as_string_mapping(grid.get("configuration"))
     if configuration is None:
@@ -567,6 +588,7 @@ def _check_regular_grid_dimensions(document: Mapping[str, object]) -> list[Valid
 
 
 ZARR_V3_ARRAY_RULES: Final[tuple[Rule, ...]] = (
+    Rule(frozenset({"data_type"}), _check_data_type_spelling),
     Rule(frozenset({"data_type", "fill_value"}), _check_fill_matches_dtype),
     Rule(frozenset({"codecs"}), _check_codec_pipeline_order),
     Rule(frozenset({"codecs"}), _check_codec_spellings),

@@ -175,3 +175,31 @@ def test_error_v3_consolidated_invalid() -> None:
 def test_error_v2_array_structural() -> None:
     with pytest.raises(MetadataValidationError):
         create_zarr_v2_array_metadata_json(**{**V2_ZARRAY, "order": "K"})  # type: ignore[typeddict-item]
+
+
+def test_error_v3_array_malformed_raw_dtype() -> None:
+    # r<N> names outside the family grammar are misspellings of a known
+    # family, not unknown extensions, and must not escape judgment.
+    with pytest.raises(MetadataValidationError, match="positive multiple of 8"):
+        create_zarr_v3_array_metadata_json(**{**V3_ARRAY, "data_type": "r12", "fill_value": (1,)})
+
+
+def test_error_v2_z_array_attributes_via_splat() -> None:
+    # The signature excludes `attributes` statically, but a splatted call
+    # bypasses that; the runtime backstop must hold the strict shape.
+    with pytest.raises(MetadataValidationError, match=".zattrs"):
+        create_zarr_v2_z_array_json(**{**V2_ZARRAY, "attributes": {"unit": "m"}})
+
+
+def test_error_v2_z_group_attributes_via_splat() -> None:
+    splatted: dict[str, Any] = {"zarr_format": 2, "attributes": {"unit": "m"}}
+    with pytest.raises(MetadataValidationError, match=".zattrs"):
+        create_zarr_v2_z_group_json(**splatted)
+
+
+def test_error_v2_consolidated_envelope() -> None:
+    with pytest.raises(MetadataValidationError, match="expected a mapping"):
+        create_zarr_v2_consolidated_metadata_json(
+            zarr_consolidated_format=1,
+            metadata="not a mapping",  # type: ignore[typeddict-item]
+        )

@@ -1,13 +1,17 @@
 """One-shot factories for Zarr metadata documents.
 
 Package rule: **every public document TypedDict gets a `create_*` factory**
-whose signature is `**kwargs: Unpack[<TypedDict>]`. Unpacking the *total*
-TypedDict makes a missing required key a static error at the call site —
-strictly stronger than any runtime completeness check — while wrong value
-types and unknown keys are already static errors. At runtime each factory
-deep-copies its inputs, materializes JSON arrays as tuples, and (where the
-package defines them) runs the structural validator and the semantic rules,
-raising one `MetadataValidationError` carrying every problem found.
+whose signature is `**kwargs: Unpack[<TypedDict>]`. At a literal-keyword
+call site, unpacking the *total* TypedDict makes a missing required key and
+a wrong value type static errors. That guarantee is call-site-shaped, not
+absolute: a `**`-splatted mapping bypasses required-key coverage in both
+pyright and mypy, and for the open v3 documents a PEP 728 checker accepts
+unknown keyword names as extension items while a non-PEP 728 checker
+rejects them. The runtime pass exists for exactly the callers the static
+story cannot see: each factory deep-copies its inputs, materializes JSON
+arrays as tuples, and (where the package defines them) runs the structural
+validator and the semantic rules, raising one `MetadataValidationError`
+carrying every problem found.
 
 The rule is deliberately scoped to *document* TypedDicts. Entity TypedDicts
 (`BloscCodecObject`, `RegularChunkGridConfiguration`, ...) do not get
@@ -29,6 +33,7 @@ TypedDict cannot ship without one.
 from __future__ import annotations
 
 import copy
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Final, cast
 
 from typing_extensions import Unpack
@@ -45,10 +50,11 @@ from zarr_metadata.model._validation import (
     parse_group_metadata_v2,
     parse_group_metadata_v3,
     validate_consolidated_metadata_v3,
+    validate_json,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable
     from collections.abc import Set as AbstractSet
 
     from zarr_metadata.v2.array import ZarrV2ArrayMetadataJSON, ZarrV2ZArrayJSON
@@ -99,6 +105,27 @@ def _normalized(document: Mapping[str, object]) -> dict[str, object]:
 def _raise_if_problems(problems: list[ValidationProblem]) -> None:
     if problems:
         raise MetadataValidationError(problems)
+
+
+def _reject_attributes(document: Mapping[str, object]) -> list[ValidationProblem]:
+    """Problems for an `attributes` key in a strict on-disk v2 document.
+
+    The strict `.zarray` / `.zgroup` shapes exclude `attributes` (it lives
+    in the sibling `.zattrs` file). The signature enforces that statically
+    at keyword call sites; this is the runtime backstop for `**`-splatted
+    and untyped callers, without which the merged-form parser would accept
+    the key and the returned value would not be the type it claims.
+    """
+    if "attributes" not in document:
+        return []
+    return [
+        ValidationProblem(
+            ("attributes",),
+            "'attributes' is not part of the on-disk document (it belongs to the "
+            "sibling .zattrs file); use the merged-form factory instead",
+            "invalid_value",
+        )
+    ]
 
 
 def create_zarr_v3_array_metadata_json(
@@ -208,14 +235,16 @@ def create_zarr_v2_group_metadata_json(
 def create_zarr_v2_z_array_json(**kwargs: Unpack[ZarrV2ZArrayJSON]) -> ZarrV2ZArrayJSON:
     """A validated on-disk `.zarray` document (strict form, no `attributes`).
 
-    Structurally checked with the merged-form parser: the strict shape is
-    the merged shape minus `attributes`, which the signature already
-    excludes statically.
+    Structurally checked with the merged-form parser plus a runtime
+    rejection of `attributes`: the strict shape is the merged shape minus
+    `attributes`, and the runtime check holds for callers the signature's
+    static exclusion cannot see (`**`-splatted mappings, untyped code).
     """
+    normalized = _normalized(kwargs)
+    problems: list[ValidationProblem] = _reject_attributes(normalized)
     parsed: ZarrV2ArrayMetadataJSON | None = None
-    problems: list[ValidationProblem] = []
     try:
-        parsed = parse_array_metadata_v2(_normalized(kwargs))
+        parsed = parse_array_metadata_v2(normalized)
     except MetadataValidationError as error:
         problems += error.problems
     _raise_if_problems(problems)
@@ -226,14 +255,16 @@ def create_zarr_v2_z_array_json(**kwargs: Unpack[ZarrV2ZArrayJSON]) -> ZarrV2ZAr
 def create_zarr_v2_z_group_json(**kwargs: Unpack[ZarrV2ZGroupJSON]) -> ZarrV2ZGroupJSON:
     """A validated on-disk `.zgroup` document (strict form, no `attributes`).
 
-    Structurally checked with the merged-form parser: the strict shape is
-    the merged shape minus `attributes`, which the signature already
-    excludes statically.
+    Structurally checked with the merged-form parser plus a runtime
+    rejection of `attributes`: the strict shape is the merged shape minus
+    `attributes`, and the runtime check holds for callers the signature's
+    static exclusion cannot see (`**`-splatted mappings, untyped code).
     """
+    normalized = _normalized(kwargs)
+    problems: list[ValidationProblem] = _reject_attributes(normalized)
     parsed: ZarrV2GroupMetadataJSON | None = None
-    problems: list[ValidationProblem] = []
     try:
-        parsed = parse_group_metadata_v2(_normalized(kwargs))
+        parsed = parse_group_metadata_v2(normalized)
     except MetadataValidationError as error:
         problems += error.problems
     _raise_if_problems(problems)
@@ -241,18 +272,73 @@ def create_zarr_v2_z_group_json(**kwargs: Unpack[ZarrV2ZGroupJSON]) -> ZarrV2ZGr
     return cast("ZarrV2ZGroupJSON", parsed)
 
 
+def _validate_v2_consolidated_envelope(
+    document: Mapping[str, object],
+) -> list[ValidationProblem]:
+    """Every reason `document` is not a `.zmetadata` envelope.
+
+    Checks the envelope only: both keys present, an integer format marker,
+    and `metadata` a string-keyed mapping of JSON objects. The nested
+    per-path documents are typed but deliberately not deep-validated —
+    which file shape each value must have is keyed on its path suffix, a
+    store-layout concern; validate entries individually with the model
+    layer when reading untrusted data.
+    """
+    problems: list[ValidationProblem] = []
+    fmt = document.get("zarr_consolidated_format")
+    if "zarr_consolidated_format" not in document:
+        problems.append(
+            ValidationProblem(("zarr_consolidated_format",), "missing key", "missing_key")
+        )
+    elif isinstance(fmt, bool) or not isinstance(fmt, int):
+        problems.append(
+            ValidationProblem(
+                ("zarr_consolidated_format",), f"expected an integer, got {fmt!r}", "invalid_type"
+            )
+        )
+    if "metadata" not in document:
+        problems.append(ValidationProblem(("metadata",), "missing key", "missing_key"))
+    else:
+        entries = document["metadata"]
+        if not isinstance(entries, Mapping):
+            problems.append(ValidationProblem(("metadata",), "expected a mapping", "invalid_type"))
+        else:
+            for key, entry in cast("Mapping[object, object]", entries).items():
+                if not isinstance(key, str):
+                    problems.append(
+                        ValidationProblem(
+                            ("metadata",), f"expected string keys, got {key!r}", "invalid_type"
+                        )
+                    )
+                elif not isinstance(entry, Mapping):
+                    problems.append(
+                        ValidationProblem(
+                            ("metadata", key), "expected a JSON object", "invalid_type"
+                        )
+                    )
+                else:
+                    problems.extend(
+                        ValidationProblem(("metadata", key, *found.loc), found.message, found.kind)
+                        for found in validate_json(cast("object", entry))
+                    )
+    return problems
+
+
 def create_zarr_v2_consolidated_metadata_json(
     **kwargs: Unpack[ZarrV2ConsolidatedMetadataJSON],
 ) -> ZarrV2ConsolidatedMetadataJSON:
-    """A `.zmetadata` consolidated metadata document.
+    """A validated `.zmetadata` consolidated metadata document.
 
-    The package defines no structural validator or semantic rules for the
-    v2 consolidated envelope, so the runtime pass is normalization only;
-    the signature enforces the envelope shape statically. The nested
-    per-path documents are typed but not re-validated here — validate them
-    individually with the model layer when reading untrusted data.
+    The runtime pass checks the envelope — key presence, an integer
+    format marker, `metadata` as a string-keyed mapping of JSON objects —
+    for the callers the signature's static enforcement cannot see
+    (`**`-splatted mappings, untyped code). The nested per-path documents
+    are typed but not deep-validated here; validate them individually
+    with the model layer when reading untrusted data.
     """
-    return cast("ZarrV2ConsolidatedMetadataJSON", _normalized(kwargs))
+    normalized = _normalized(kwargs)
+    _raise_if_problems(_validate_v2_consolidated_envelope(normalized))
+    return cast("ZarrV2ConsolidatedMetadataJSON", normalized)
 
 
 DOCUMENT_FACTORIES: Final[Mapping[str, Callable[..., Mapping[str, object]]]] = {
