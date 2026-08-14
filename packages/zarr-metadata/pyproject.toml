@@ -129,7 +129,7 @@ checks = [
 # class attributes (microsoft/pyright#11115), which zarr_metadata.model._sentinel
 # relies on. Use the same pin locally; unpin when the fix lands.
 [tool.pyright]
-include = ["src"]
+include = ["src", "examples"]
 enableExperimentalFeatures = true
 typeCheckingMode = "strict"
 pythonVersion = "3.11"

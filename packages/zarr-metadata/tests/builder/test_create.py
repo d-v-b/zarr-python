@@ -174,6 +174,17 @@ def test_error_v3_consolidated_invalid() -> None:
         )
 
 
+def test_error_v3_consolidated_child_violates_composition_rules() -> None:
+    child = {**V3_ARRAY, "fill_value": 300}
+    with pytest.raises(MetadataValidationError) as exc_info:
+        create_zarr_v3_consolidated_metadata_json(
+            kind="inline", must_understand=False, metadata={"a": child}
+        )
+    assert [(problem.loc, problem.kind) for problem in exc_info.value.problems] == [
+        (("metadata", "a", "fill_value"), "invalid_value")
+    ]
+
+
 def test_error_v2_array_structural() -> None:
     with pytest.raises(MetadataValidationError):
         create_zarr_v2_array_metadata_json(**{**V2_ZARRAY, "order": "K"})  # type: ignore[typeddict-item]
@@ -205,3 +216,14 @@ def test_error_v2_consolidated_envelope() -> None:
             zarr_consolidated_format=1,
             metadata="not a mapping",  # type: ignore[typeddict-item]
         )
+
+
+def test_error_v2_consolidated_format_is_not_one() -> None:
+    with pytest.raises(MetadataValidationError) as exc_info:
+        create_zarr_v2_consolidated_metadata_json(
+            zarr_consolidated_format=2,
+            metadata={},
+        )
+    assert [(problem.loc, problem.kind) for problem in exc_info.value.problems] == [
+        (("zarr_consolidated_format",), "invalid_value")
+    ]

@@ -57,6 +57,7 @@ from zarr_metadata.rules import (
     ZARR_V3_GROUP_RULES,
     run_rules,
 )
+from zarr_metadata.rules._v3_group import consolidated_entries_problems
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -197,7 +198,9 @@ def create_zarr_v3_consolidated_metadata_json(
     `consolidated_metadata` key, not a store document of its own.
     """
     normalized = _normalized(kwargs)
-    _raise_if_problems(validate_consolidated_metadata_v3(normalized))
+    _raise_if_problems(
+        validate_consolidated_metadata_v3(normalized) + consolidated_entries_problems(normalized)
+    )
     return cast("ZarrV3ConsolidatedMetadataJSON", normalized)
 
 
@@ -304,6 +307,14 @@ def _validate_v2_consolidated_envelope(
         problems.append(
             ValidationProblem(
                 ("zarr_consolidated_format",), f"expected an integer, got {fmt!r}", "invalid_type"
+            )
+        )
+    elif fmt != 1:
+        problems.append(
+            ValidationProblem(
+                ("zarr_consolidated_format",),
+                f"expected consolidated format 1, got {fmt!r}",
+                "invalid_value",
             )
         )
     if "metadata" not in document:

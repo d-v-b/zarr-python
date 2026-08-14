@@ -307,6 +307,31 @@ def test_unknown_configuration_member_has_its_own_kind() -> None:
     assert [(p.loc, p.kind) for p in problems] == [(("codecs", 0, "configuration"), "unknown_key")]
 
 
+def test_error_known_data_type_has_invalid_configuration() -> None:
+    doc = {
+        **BASE,
+        "data_type": {
+            "name": "numpy.datetime64",
+            "configuration": {"unit": "banana", "scale_factor": 1},
+        },
+    }
+    problems = validate_array_metadata_v3(doc)
+    assert [(p.loc, p.kind) for p in problems] == [
+        (("data_type", "configuration", "unit"), "invalid_value")
+    ]
+
+
+def test_error_known_chunk_key_encoding_has_invalid_configuration() -> None:
+    doc = {
+        **BASE,
+        "chunk_key_encoding": {"name": "default", "configuration": {"separator": "!"}},
+    }
+    problems = validate_array_metadata_v3(doc)
+    assert [(p.loc, p.kind) for p in problems] == [
+        (("chunk_key_encoding", "configuration", "separator"), "invalid_value")
+    ]
+
+
 def test_unknown_member_does_not_mask_a_codec_rule() -> None:
     # Regression: an unrecognized member used to make the whole entity
     # uninterpretable, silently suppressing every other rule about it — so a

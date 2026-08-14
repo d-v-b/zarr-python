@@ -1,7 +1,7 @@
 """
 Type-level shape validation for known metadata-field entities.
 
-One validator per codec and chunk grid this package defines, exact with
+One validator per extension-point entity this package defines, exact with
 respect to the entity's declared TypedDicts: a value yields no problems
 exactly when it is an instance of the canonical metadata type. Exactness
 matters because the `TypeIs` guards in `zarr_metadata.v3.codec.kind`
@@ -44,7 +44,10 @@ from zarr_metadata.model._validation import (
 )
 from zarr_metadata.v3._extension_points import (
     CHUNK_GRID,
+    CHUNK_KEY_ENCODING,
     CODECS,
+    DATA_TYPE,
+    RAW_BYTES_FAMILY,
     ExtensionPointField,
     canonical_name,
 )
@@ -57,6 +60,18 @@ from zarr_metadata.v3.chunk_grid.regular import (
     REGULAR_CHUNK_GRID_NAME,
     RegularChunkGridConfiguration,
     RegularChunkGridObject,
+)
+from zarr_metadata.v3.chunk_key_encoding.default import (
+    DEFAULT_CHUNK_KEY_ENCODING_NAME,
+    DEFAULT_CHUNK_KEY_ENCODING_SEPARATOR,
+    DefaultChunkKeyEncodingConfiguration,
+    DefaultChunkKeyEncodingObject,
+)
+from zarr_metadata.v3.chunk_key_encoding.v2 import (
+    V2_CHUNK_KEY_ENCODING_NAME,
+    V2_CHUNK_KEY_ENCODING_SEPARATOR,
+    V2ChunkKeyEncodingConfiguration,
+    V2ChunkKeyEncodingObject,
 )
 from zarr_metadata.v3.codec.blosc import (
     BLOSC_CNAME,
@@ -98,6 +113,39 @@ from zarr_metadata.v3.codec.transpose import (
     TransposeCodecObject,
 )
 from zarr_metadata.v3.codec.zstd import ZSTD_CODEC_NAME, ZstdCodecConfiguration, ZstdCodecObject
+from zarr_metadata.v3.data_type.bool import BOOL_DATA_TYPE_NAME
+from zarr_metadata.v3.data_type.bytes import BYTES_DATA_TYPE_NAME
+from zarr_metadata.v3.data_type.complex64 import COMPLEX64_DATA_TYPE_NAME
+from zarr_metadata.v3.data_type.complex128 import COMPLEX128_DATA_TYPE_NAME
+from zarr_metadata.v3.data_type.float16 import FLOAT16_DATA_TYPE_NAME
+from zarr_metadata.v3.data_type.float32 import FLOAT32_DATA_TYPE_NAME
+from zarr_metadata.v3.data_type.float64 import FLOAT64_DATA_TYPE_NAME
+from zarr_metadata.v3.data_type.int8 import INT8_DATA_TYPE_NAME
+from zarr_metadata.v3.data_type.int16 import INT16_DATA_TYPE_NAME
+from zarr_metadata.v3.data_type.int32 import INT32_DATA_TYPE_NAME
+from zarr_metadata.v3.data_type.int64 import INT64_DATA_TYPE_NAME
+from zarr_metadata.v3.data_type.numpy_datetime64 import (
+    NUMPY_DATETIME64_DATA_TYPE_NAME,
+    NumpyDatetime64,
+    NumpyDatetime64Configuration,
+)
+from zarr_metadata.v3.data_type.numpy_timedelta64 import (
+    NUMPY_TIME_UNIT,
+    NUMPY_TIMEDELTA64_DATA_TYPE_NAME,
+    NumpyTimedelta64,
+    NumpyTimedelta64Configuration,
+)
+from zarr_metadata.v3.data_type.string import STRING_DATA_TYPE_NAME
+from zarr_metadata.v3.data_type.struct import (
+    STRUCT_DATA_TYPE_NAME,
+    Struct,
+    StructConfiguration,
+    StructField,
+)
+from zarr_metadata.v3.data_type.uint8 import UINT8_DATA_TYPE_NAME
+from zarr_metadata.v3.data_type.uint16 import UINT16_DATA_TYPE_NAME
+from zarr_metadata.v3.data_type.uint32 import UINT32_DATA_TYPE_NAME
+from zarr_metadata.v3.data_type.uint64 import UINT64_DATA_TYPE_NAME
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -185,6 +233,33 @@ def _check_field_tuple(value: object, loc: tuple[str | int, ...]) -> tuple[Valid
     )
 
 
+_STRUCT_FIELD_KEYS: Final = frozenset(StructField.__annotations__)
+
+
+def _check_struct_fields(
+    value: object, loc: tuple[str | int, ...]
+) -> tuple[ValidationProblem, ...]:
+    if not isinstance(value, tuple):
+        return _problems(loc, f"expected an array (tuple) of struct fields, got {value!r}")
+    problems: list[ValidationProblem] = []
+    for index, item in enumerate(cast("tuple[object, ...]", value)):
+        item_loc = (*loc, index)
+        if not isinstance(item, Mapping):
+            problems.extend(_problems(item_loc, f"expected an object, got {item!r}"))
+            continue
+        field = cast("Mapping[object, object]", item)
+        for key in field:
+            if not isinstance(key, str) or key not in _STRUCT_FIELD_KEYS:
+                problems.extend(_problems(item_loc, f"unexpected key {key!r}", "unknown_key"))
+        for key in sorted(_STRUCT_FIELD_KEYS - field.keys()):
+            problems.extend(_problems((*item_loc, key), "missing required key", "missing_key"))
+        if "name" in field and not isinstance(field["name"], str):
+            problems.extend(_problems((*item_loc, "name"), "expected a string"))
+        if "data_type" in field:
+            problems.extend(_check_metadata_field(field["data_type"], (*item_loc, "data_type")))
+    return tuple(problems)
+
+
 _SCALAR_MAP_KEYS: Final = frozenset(ScalarMap.__annotations__)
 
 
@@ -265,6 +340,7 @@ class _EntityShape:
     config_keys: frozenset[str]
     config_required: frozenset[str]
     config_checkers: Mapping[str, _FieldChecker]
+    object_permitted: bool = True
 
 
 def _shape(
@@ -288,6 +364,11 @@ def _shape(
         ),
         config_checkers=dict(checkers),
     )
+
+
+def _bare_shape() -> _EntityShape:
+    """Shape of an entity whose canonical metadata is only its bare name."""
+    return _EntityShape(frozenset(), False, frozenset(), frozenset(), {}, False)
 
 
 _CODEC_SHAPES: Final[Mapping[str, _EntityShape]] = {
@@ -358,6 +439,54 @@ _CHUNK_GRID_SHAPES: Final[Mapping[str, _EntityShape]] = {
     ),
 }
 
+_CHUNK_KEY_ENCODING_SHAPES: Final[Mapping[str, _EntityShape]] = {
+    DEFAULT_CHUNK_KEY_ENCODING_NAME: _shape(
+        DefaultChunkKeyEncodingObject,
+        DefaultChunkKeyEncodingConfiguration,
+        {"separator": _literal(DEFAULT_CHUNK_KEY_ENCODING_SEPARATOR)},
+    ),
+    V2_CHUNK_KEY_ENCODING_NAME: _shape(
+        V2ChunkKeyEncodingObject,
+        V2ChunkKeyEncodingConfiguration,
+        {"separator": _literal(V2_CHUNK_KEY_ENCODING_SEPARATOR)},
+    ),
+}
+
+_BARE_DATA_TYPE_NAMES: Final = (
+    BOOL_DATA_TYPE_NAME,
+    INT8_DATA_TYPE_NAME,
+    INT16_DATA_TYPE_NAME,
+    INT32_DATA_TYPE_NAME,
+    INT64_DATA_TYPE_NAME,
+    UINT8_DATA_TYPE_NAME,
+    UINT16_DATA_TYPE_NAME,
+    UINT32_DATA_TYPE_NAME,
+    UINT64_DATA_TYPE_NAME,
+    FLOAT16_DATA_TYPE_NAME,
+    FLOAT32_DATA_TYPE_NAME,
+    FLOAT64_DATA_TYPE_NAME,
+    COMPLEX64_DATA_TYPE_NAME,
+    COMPLEX128_DATA_TYPE_NAME,
+    RAW_BYTES_FAMILY,
+    BYTES_DATA_TYPE_NAME,
+    STRING_DATA_TYPE_NAME,
+)
+
+_DATA_TYPE_SHAPES: Final[Mapping[str, _EntityShape]] = {
+    **{name: _bare_shape() for name in _BARE_DATA_TYPE_NAMES},
+    NUMPY_DATETIME64_DATA_TYPE_NAME: _shape(
+        NumpyDatetime64,
+        NumpyDatetime64Configuration,
+        {"unit": _literal(NUMPY_TIME_UNIT), "scale_factor": _check_json_int},
+    ),
+    NUMPY_TIMEDELTA64_DATA_TYPE_NAME: _shape(
+        NumpyTimedelta64,
+        NumpyTimedelta64Configuration,
+        {"unit": _literal(NUMPY_TIME_UNIT), "scale_factor": _check_json_int},
+    ),
+    STRUCT_DATA_TYPE_NAME: _shape(Struct, StructConfiguration, {"fields": _check_struct_fields}),
+}
+
 
 def _validate_known_entity(
     value: object, name: str, shape: _EntityShape, entity: str
@@ -374,6 +503,12 @@ def _validate_known_entity(
             (),
             f"{entity} {name!r} requires a configuration and has no bare short-hand "
             f"form; use {{'name': {name!r}, 'configuration': {{...}}}}",
+            "invalid_value",
+        )
+    if not shape.object_permitted:
+        return _problems(
+            (),
+            f"{entity} {name!r} permits only the bare-name form",
             "invalid_value",
         )
     if not isinstance(value, Mapping):
@@ -446,8 +581,10 @@ def validate_known_chunk_grid_metadata(value: object) -> tuple[ValidationProblem
 
 
 _ENTITY_SHAPES: Final[Mapping[ExtensionPointField, Mapping[str, _EntityShape]]] = {
+    DATA_TYPE: _DATA_TYPE_SHAPES,
     CODECS: _CODEC_SHAPES,
     CHUNK_GRID: _CHUNK_GRID_SHAPES,
+    CHUNK_KEY_ENCODING: _CHUNK_KEY_ENCODING_SHAPES,
 }
 
 

@@ -46,7 +46,16 @@ def check_consolidated_entries(document: Mapping[str, object]) -> tuple[Validati
     the model layer's job; entries that are not interpretable as node
     documents decline in its favor.
     """
-    consolidated = as_string_mapping(document["consolidated_metadata"])
+    return consolidated_entries_problems(
+        document["consolidated_metadata"], ("consolidated_metadata",)
+    )
+
+
+def consolidated_entries_problems(
+    value: object, loc: tuple[str | int, ...] = ()
+) -> tuple[ValidationProblem, ...]:
+    """Composition problems in an inline consolidated envelope's children."""
+    consolidated = as_string_mapping(value)
     if consolidated is None:
         return ()
     metadata = as_string_mapping(consolidated.get("metadata"))
@@ -57,12 +66,12 @@ def check_consolidated_entries(document: Mapping[str, object]) -> tuple[Validati
         node = as_string_mapping(entry)
         if node is None:
             continue
-        loc = ("consolidated_metadata", "metadata", path)
+        entry_loc = (*loc, "metadata", path)
         node_type = node.get("node_type")
         if node_type == "array":
-            problems.extend(prefixed(loc, run_rules(ZARR_V3_ARRAY_RULES, node)))
+            problems.extend(prefixed(entry_loc, run_rules(ZARR_V3_ARRAY_RULES, node)))
         elif node_type == "group":
-            problems.extend(prefixed(loc, run_rules(ZARR_V3_GROUP_RULES, node)))
+            problems.extend(prefixed(entry_loc, run_rules(ZARR_V3_GROUP_RULES, node)))
     return tuple(problems)
 
 

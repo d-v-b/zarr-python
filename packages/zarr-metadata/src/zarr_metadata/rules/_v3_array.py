@@ -37,7 +37,15 @@ from zarr_metadata.rules._registry import (
     document_rules,
     register_document_type,
 )
-from zarr_metadata.v3._shape import validate_known_chunk_grid_metadata
+from zarr_metadata.v3._extension_points import (
+    CHUNK_KEY_ENCODING,
+    DATA_TYPE,
+    ExtensionPointField,
+)
+from zarr_metadata.v3._shape import (
+    validate_known_chunk_grid_metadata,
+    validate_known_entity_metadata,
+)
 from zarr_metadata.v3.data_type.bytes import base64_bytes
 from zarr_metadata.v3.data_type.float16 import hex_float16
 from zarr_metadata.v3.data_type.float32 import hex_float32
@@ -225,6 +233,24 @@ _data_type_spelling = document_rule(ZARR_V3_ARRAY, frozenset({"data_type"}))(
 )
 _fill_matches_dtype = document_rule(ZARR_V3_ARRAY, frozenset({"data_type", "fill_value"}))(
     _check_fill_matches_dtype
+)
+
+
+def _known_entity_shape(
+    field: ExtensionPointField, extension_point: ExtensionPointField
+) -> Callable[[Mapping[str, object]], tuple[ValidationProblem, ...]]:
+    def check(document: Mapping[str, object]) -> tuple[ValidationProblem, ...]:
+        found = validate_known_entity_metadata(extension_point, document[field])
+        return () if found is None else prefixed((field,), found)
+
+    return check
+
+
+_data_type_shape = document_rule(ZARR_V3_ARRAY, frozenset({"data_type"}))(
+    _known_entity_shape("data_type", DATA_TYPE)
+)
+_chunk_key_encoding_shape = document_rule(ZARR_V3_ARRAY, frozenset({"chunk_key_encoding"}))(
+    _known_entity_shape("chunk_key_encoding", CHUNK_KEY_ENCODING)
 )
 
 

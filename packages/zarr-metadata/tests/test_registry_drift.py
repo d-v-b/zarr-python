@@ -11,14 +11,18 @@ import importlib
 import pkgutil
 
 import zarr_metadata.v3.chunk_grid
+import zarr_metadata.v3.chunk_key_encoding
 import zarr_metadata.v3.codec
 import zarr_metadata.v3.data_type
 from zarr_metadata.rules._v3_array import (
     _check_fill_for_dtype,  # pyright: ignore[reportPrivateUsage]
 )
+from zarr_metadata.v3._extension_points import RAW_BYTES_FAMILY
 from zarr_metadata.v3._shape import (  # pyright: ignore[reportPrivateUsage]
     _CHUNK_GRID_SHAPES,
+    _CHUNK_KEY_ENCODING_SHAPES,
     _CODEC_SHAPES,
+    _DATA_TYPE_SHAPES,
 )
 from zarr_metadata.v3.codec.kind import codec_kind_of_name
 
@@ -54,6 +58,18 @@ def test_every_chunk_grid_module_has_a_shape_validator() -> None:
     grid_names = _module_constants(zarr_metadata.v3.chunk_grid, "_CHUNK_GRID_NAME")
     assert grid_names, "constant scan found nothing — the naming convention moved?"
     assert grid_names == set(_CHUNK_GRID_SHAPES)
+
+
+def test_every_chunk_key_encoding_module_has_a_shape_validator() -> None:
+    names = _module_constants(zarr_metadata.v3.chunk_key_encoding, "_CHUNK_KEY_ENCODING_NAME")
+    assert names, "constant scan found nothing — the naming convention moved?"
+    assert names == set(_CHUNK_KEY_ENCODING_SHAPES)
+
+
+def test_every_data_type_module_has_a_shape_validator() -> None:
+    names = _module_constants(zarr_metadata.v3.data_type, "_DATA_TYPE_NAME")
+    assert names, "constant scan found nothing — the naming convention moved?"
+    assert names | {RAW_BYTES_FAMILY} == set(_DATA_TYPE_SHAPES)
 
 
 def test_every_data_type_has_a_fill_value_branch() -> None:

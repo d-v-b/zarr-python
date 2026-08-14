@@ -30,9 +30,11 @@ from zarr_metadata.rules._registry import (
 from zarr_metadata.rules._v3_array import ZARR_V3_ARRAY
 from zarr_metadata.v3._extension_points import (
     CHUNK_GRID,
+    CHUNK_KEY_ENCODING,
     CODECS,
     DATA_TYPE,
     EXTENSION_POINTS,
+    RAW_BYTES_FAMILY,
     Provenance,
     identifiers_with,
 )
@@ -52,12 +54,34 @@ _RULE_FREE = frozenset(
         (CODECS, "gzip"),
         (CODECS, "scale_offset"),
         (CODECS, "zstd"),
+        (CHUNK_KEY_ENCODING, "default"),
+        (CHUNK_KEY_ENCODING, "v2"),
+        (DATA_TYPE, "bool"),
+        (DATA_TYPE, "int8"),
+        (DATA_TYPE, "int16"),
+        (DATA_TYPE, "int32"),
+        (DATA_TYPE, "int64"),
+        (DATA_TYPE, "uint8"),
+        (DATA_TYPE, "uint16"),
+        (DATA_TYPE, "uint32"),
+        (DATA_TYPE, "uint64"),
+        (DATA_TYPE, "float16"),
+        (DATA_TYPE, "float32"),
+        (DATA_TYPE, "float64"),
+        (DATA_TYPE, "complex64"),
+        (DATA_TYPE, "complex128"),
+        (DATA_TYPE, RAW_BYTES_FAMILY),
+        (DATA_TYPE, "bytes"),
+        (DATA_TYPE, "string"),
+        (DATA_TYPE, "numpy.datetime64"),
+        (DATA_TYPE, "numpy.timedelta64"),
+        (DATA_TYPE, "struct"),
     }
 )
 
 
 def test_every_shape_modelled_entity_is_accounted_for() -> None:
-    # Shape validators exist for codecs and chunk grids; every one either
+    # Every shape-modelled entity either
     # carries rules or is recorded as deliberately rule-free.
     assert modelled_entities() == registered_entities() | _RULE_FREE
 
@@ -119,12 +143,12 @@ def test_error_entity_rule_for_an_unmodelled_entity() -> None:
 
 
 def test_error_entity_rule_for_name_modelled_only_at_another_extension_point() -> None:
-    # `bytes` has a codec shape, but no data-type shape. Name-only lookup
-    # would accept this registration and later interpret data-type metadata
-    # using the codec schema.
+    # `regular` has a chunk-grid shape, but no codec shape. Name-only lookup
+    # would accept this registration and later interpret codec metadata using
+    # the chunk-grid schema.
     with pytest.raises(ValueError, match="no shape validator"):
 
-        @entity_rule(ZARR_V3_ARRAY, DATA_TYPE, "bytes")
+        @entity_rule(ZARR_V3_ARRAY, CODECS, "regular")
         def _wrong_extension_point(configuration: object, document: object) -> tuple[()]:
             return ()
 
