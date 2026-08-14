@@ -51,10 +51,12 @@ jobs:
       - name: Sync test dependency group
         run: uv sync --project ../.. --group test --python ${{ matrix.python-version }}
       - name: Run pytest
-        # Suites and invocation live in packages/zarr-indexing/justfile.
-        run: just test
+        # Suites and invocation live in packages/zarr-indexing/justfile. `py=`
+        # pins the interpreter in the recipe itself, so the matrix leg does not
+        # depend on the sync step above having shaped the environment.
+        run: just py=${{ matrix.python-version }} test
       - name: Run pytest (tensorstore parity)
-        run: just test-tensorstore
+        run: just py=${{ matrix.python-version }} test-tensorstore
 
   ruff:
     name: ruff

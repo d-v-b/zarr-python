@@ -1,6 +1,25 @@
 # Development verbs for the zarr-indexing package. Recipes run with this
 # directory as the working directory regardless of where `just` is invoked.
 
+# The python versions `test-all` covers. Mirrors the `Programming Language ::
+# Python` classifiers in pyproject.toml and the matrix in
+# .github/workflows/zarr-indexing.yml; update the three together.
+python_versions := "3.12 3.13 3.14"
+
+# Interpreter for the test recipes. Empty means "whatever the project
+# environment already holds"; set it to reproduce one CI leg, e.g.
+# `just py=3.12 test`.
+py := ""
+
+# `uv run --python` does not merely select an interpreter: it deletes and
+# rebuilds a project environment whose interpreter does not match. Since these
+# recipes run against the repo-root project, an unguarded pin would clobber the
+# root `.venv` — the main zarr development environment. A pinned version gets
+# its own directory instead; relative paths resolve against the project root,
+# so those land beside the root `.venv` rather than in this package.
+uv_run := "uv run --project ../.." + if py == "" { "" } else { " --python " + py }
+uv_env := if py == "" { "" } else { "env UV_PROJECT_ENVIRONMENT=.venv-" + py + " " }
+
 # List available recipes
 default:
     @just --list
@@ -13,7 +32,7 @@ default:
 # invocation CI uses.
 # Run the test suite; extra args are passed to pytest
 test *args:
-    uv run --project ../.. --group test --with-editable . python -m pytest tests src/zarr_indexing {{ args }}
+    {{ uv_env }}{{ uv_run }} --group test --with-editable . python -m pytest tests src/zarr_indexing {{ args }}
 
 # TensorStore is the oracle for the parity suites, which skip without it. It
 # ships binary wheels only, so it rides in as a run-time overlay rather than
@@ -21,7 +40,18 @@ test *args:
 # gate the CI job that calls this on the matrix version.
 # Run the tensorstore parity suites; extra args are passed to pytest
 test-tensorstore *args:
-    uv run --project ../.. --group test --with-editable . --with 'tensorstore>=0.1.84' python -m pytest tests/test_ndsel_tensorstore.py tests/test_tensorstore_parity.py {{ args }}
+    {{ uv_env }}{{ uv_run }} --group test --with-editable . --with 'tensorstore>=0.1.84' python -m pytest tests/test_ndsel_tensorstore.py tests/test_tensorstore_parity.py {{ args }}
+
+# The tensorstore parity suites are not looped here — they pull a large wheel
+# per version; run `just py=3.13 test-tensorstore` for a specific one.
+# Run the test suite on every supported python
+test-all *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for v in {{ python_versions }}; do
+        echo "=== python $v ==="
+        just py="$v" test {{ args }}
+    done
 
 # Lint with the same invocation CI uses. Ruff is pinned to the repo-wide
 # version (see pyproject.toml [dependency-groups] docs); bump together.
