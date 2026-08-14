@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, cast
 from zarr_metadata.model._validation import ValidationProblem
 from zarr_metadata.rules._pipeline import pipeline_order_problems, shape_problems
 from zarr_metadata.rules._registry import entity_configuration, entity_rule, run_entity_rules
+from zarr_metadata.v3._extension_points import CODECS
 from zarr_metadata.v3.chunk_grid.regular import REGULAR_CHUNK_GRID_NAME
 from zarr_metadata.v3.codec.sharding_indexed import SHARDING_INDEXED_CODEC_NAME
 
@@ -28,7 +29,7 @@ if TYPE_CHECKING:
 _ARRAY_V3 = "zarr_v3_array"
 
 
-@entity_rule(_ARRAY_V3, SHARDING_INDEXED_CODEC_NAME)
+@entity_rule(_ARRAY_V3, CODECS, SHARDING_INDEXED_CODEC_NAME)
 def inner_chunk_extents_are_positive(
     configuration: Mapping[str, object], document: Mapping[str, object]
 ) -> tuple[ValidationProblem, ...]:
@@ -44,7 +45,7 @@ def inner_chunk_extents_are_positive(
     )
 
 
-@entity_rule(_ARRAY_V3, SHARDING_INDEXED_CODEC_NAME)
+@entity_rule(_ARRAY_V3, CODECS, SHARDING_INDEXED_CODEC_NAME)
 def inner_pipelines_are_pipelines(
     configuration: Mapping[str, object], document: Mapping[str, object]
 ) -> tuple[ValidationProblem, ...]:
@@ -75,11 +76,11 @@ def inner_pipelines_are_pipelines(
         problems.extend(pipeline_order_problems(sequence, (key,)))
         problems.extend(shape_problems(sequence, (key,)))
         for index, entry in enumerate(sequence):
-            problems.extend(run_entity_rules(entry, inner_document, (key, index)))
+            problems.extend(run_entity_rules(CODECS, entry, inner_document, (key, index)))
     return tuple(problems)
 
 
-@entity_rule(_ARRAY_V3, SHARDING_INDEXED_CODEC_NAME, requires=frozenset({"chunk_grid"}))
+@entity_rule(_ARRAY_V3, CODECS, SHARDING_INDEXED_CODEC_NAME, requires=frozenset({"chunk_grid"}))
 def inner_chunks_tile_the_enclosing_chunk(
     configuration: Mapping[str, object], document: Mapping[str, object]
 ) -> tuple[ValidationProblem, ...]:

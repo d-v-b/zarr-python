@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, cast
 
 from zarr_metadata.model._validation import ValidationProblem
 from zarr_metadata.rules._registry import entity_rule
+from zarr_metadata.v3._extension_points import CODECS
 from zarr_metadata.v3.codec.transpose import TRANSPOSE_CODEC_NAME
 
 if TYPE_CHECKING:
@@ -14,7 +15,7 @@ if TYPE_CHECKING:
 _ARRAY_V3 = "zarr_v3_array"
 
 
-@entity_rule(_ARRAY_V3, TRANSPOSE_CODEC_NAME)
+@entity_rule(_ARRAY_V3, CODECS, TRANSPOSE_CODEC_NAME)
 def order_is_a_permutation(
     configuration: Mapping[str, object], document: Mapping[str, object]
 ) -> tuple[ValidationProblem, ...]:
@@ -36,7 +37,7 @@ def order_is_a_permutation(
     )
 
 
-@entity_rule(_ARRAY_V3, TRANSPOSE_CODEC_NAME, requires=frozenset({"shape"}))
+@entity_rule(_ARRAY_V3, CODECS, TRANSPOSE_CODEC_NAME, requires=frozenset({"shape"}))
 def order_matches_rank(
     configuration: Mapping[str, object], document: Mapping[str, object]
 ) -> tuple[ValidationProblem, ...]:

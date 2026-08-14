@@ -21,7 +21,6 @@ the shape and the ordering checks.
 
 from __future__ import annotations
 
-import re
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Final, cast
 
@@ -43,7 +42,7 @@ from zarr_metadata.v3.data_type.bytes import base64_bytes
 from zarr_metadata.v3.data_type.float16 import hex_float16
 from zarr_metadata.v3.data_type.float32 import hex_float32
 from zarr_metadata.v3.data_type.float64 import hex_float64
-from zarr_metadata.v3.data_type.raw import raw_bytes_dtype_name
+from zarr_metadata.v3.data_type.raw import RAW_BYTES_NAME_PATTERN, raw_bytes_dtype_name
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -74,8 +73,6 @@ _COMPLEX_COMPONENT_TYPES: Final[dict[str, str]] = {
     "complex64": "float32",
     "complex128": "float64",
 }
-
-_RAW_BYTES_NAME_RE: Final = re.compile(r"^r(\d+)$")
 
 _FLOAT_SPECIALS: Final = frozenset({"NaN", "Infinity", "-Infinity"})
 
@@ -158,7 +155,7 @@ def _check_fill_for_dtype(dtype_name: str, value: object) -> str | None:
         if isinstance(value, Mapping):
             return None
         return f"expected an object of per-field fill values, got {value!r}"
-    if _RAW_BYTES_NAME_RE.fullmatch(dtype_name) is not None:
+    if RAW_BYTES_NAME_PATTERN.fullmatch(dtype_name) is not None:
         try:
             raw_bytes_dtype_name(dtype_name)
         except ValueError:
@@ -189,7 +186,7 @@ def _check_data_type_spelling(document: Mapping[str, object]) -> tuple[Validatio
     untouched.
     """
     name = _dtype_name(document["data_type"])
-    if name is None or _RAW_BYTES_NAME_RE.fullmatch(name) is None:
+    if name is None or RAW_BYTES_NAME_PATTERN.fullmatch(name) is None:
         return ()
     try:
         raw_bytes_dtype_name(name)

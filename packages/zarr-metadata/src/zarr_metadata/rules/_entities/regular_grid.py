@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, cast
 
 from zarr_metadata.model._validation import ValidationProblem
 from zarr_metadata.rules._registry import entity_rule
+from zarr_metadata.v3._extension_points import CHUNK_GRID
 from zarr_metadata.v3.chunk_grid.regular import REGULAR_CHUNK_GRID_NAME
 
 if TYPE_CHECKING:
@@ -14,7 +15,7 @@ if TYPE_CHECKING:
 _ARRAY_V3 = "zarr_v3_array"
 
 
-@entity_rule(_ARRAY_V3, REGULAR_CHUNK_GRID_NAME)
+@entity_rule(_ARRAY_V3, CHUNK_GRID, REGULAR_CHUNK_GRID_NAME)
 def chunk_extents_are_positive(
     configuration: Mapping[str, object], document: Mapping[str, object]
 ) -> tuple[ValidationProblem, ...]:
@@ -36,7 +37,7 @@ def chunk_extents_are_positive(
     )
 
 
-@entity_rule(_ARRAY_V3, REGULAR_CHUNK_GRID_NAME, requires=frozenset({"shape"}))
+@entity_rule(_ARRAY_V3, CHUNK_GRID, REGULAR_CHUNK_GRID_NAME, requires=frozenset({"shape"}))
 def chunks_every_dimension(
     configuration: Mapping[str, object], document: Mapping[str, object]
 ) -> tuple[ValidationProblem, ...]:

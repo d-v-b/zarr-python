@@ -36,6 +36,11 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, cast
 
 from zarr_metadata.rules._engine import Rule, as_string_mapping, prefixed
+from zarr_metadata.v3._extension_points import (
+    ExtensionPointField,
+    canonical_name,
+    identifier_of,
+)
 from zarr_metadata.v3._shape import blocking_problems, entity_name, modelled_entities
 
 if TYPE_CHECKING:
@@ -55,18 +60,24 @@ dispatcher re-bases them onto the entity's position in the document.
 class EntityRule:
     """One composition check about a single named codec or chunk grid.
 
+    Identified by `(field, entity)`, never by name alone: names are
+    unique only within an extension point, and `bytes` is both a core
+    codec and a registered extension data type. Keying by name would
+    make a rule written for one fire on the other.
+
     `requires` are *document* keys the check reads beyond the entity
     itself (e.g. `shape`), gating the rule exactly as `Rule.requires`
     does.
     """
 
+    field: str
     entity: str
     requires: frozenset[str]
     check: EntityCheck
 
 
 _DOCUMENT_RULES: Final[dict[str, list[Rule]]] = defaultdict(list)
-_ENTITY_RULES: Final[dict[str, list[EntityRule]]] = defaultdict(list)
+_ENTITY_RULES: Final[dict[tuple[str, str], list[EntityRule]]] = defaultdict(list)
 _DOCUMENT_KEYS: Final[dict[str, frozenset[str]]] = {}
 
 
@@ -122,7 +133,10 @@ def document_rule(
 
 
 def entity_rule(
-    document_type: str, entity: str, requires: frozenset[str] = frozenset()
+    document_type: str,
+    field: ExtensionPointField,
+    entity: str,
+    requires: frozenset[str] = frozenset(),
 ) -> Callable[[EntityCheck], EntityRule]:
     """Register a rule about one named entity within `document_type`.
 
@@ -141,8 +155,14 @@ def entity_rule(
                 f"validator in zarr_metadata.v3._shape; such a rule could never fire"
             )
             raise ValueError(msg)
-        rule = EntityRule(entity=entity, requires=requires, check=check)
-        _ENTITY_RULES[entity].append(rule)
+        if identifier_of(field, entity) is None:
+            msg = (
+                f"entity rule {check.__name__!r} targets {entity!r} at extension point "
+                f"{field!r}, where this package models no such identifier"
+            )
+            raise ValueError(msg)
+        rule = EntityRule(field=field, entity=entity, requires=requires, check=check)
+        _ENTITY_RULES[field, canonical_name(field, entity)].append(rule)
         return rule
 
     return decorate
@@ -153,18 +173,21 @@ def document_rules(document_type: str) -> tuple[Rule, ...]:
     return tuple(_DOCUMENT_RULES[document_type])
 
 
-def entity_rules(entity: str) -> tuple[EntityRule, ...]:
-    """Every rule registered for the entity named `entity`."""
-    return tuple(_ENTITY_RULES[entity])
+def entity_rules(field: ExtensionPointField, entity: str) -> tuple[EntityRule, ...]:
+    """Every rule registered for `entity` at `field`."""
+    return tuple(_ENTITY_RULES[field, canonical_name(field, entity)])
 
 
-def registered_entities() -> frozenset[str]:
-    """Every entity name that has at least one registered rule."""
+def registered_entities() -> frozenset[tuple[str, str]]:
+    """Every `(field, canonical name)` that has at least one registered rule."""
     return frozenset(_ENTITY_RULES)
 
 
 def run_entity_rules(
-    value: object, document: Mapping[str, object], loc: tuple[str | int, ...]
+    field: ExtensionPointField,
+    value: object,
+    document: Mapping[str, object],
+    loc: tuple[str | int, ...],
 ) -> tuple[ValidationProblem, ...]:
     """Run the rules registered for whatever entity `value` names.
 
@@ -177,7 +200,7 @@ def run_entity_rules(
     name = entity_name(value)
     if name is None:
         return ()
-    rules = _ENTITY_RULES.get(name)
+    rules = _ENTITY_RULES.get((field, canonical_name(field, name)))
     if rules is None or len(rules) == 0:
         return ()
     # Entity rules read configuration members by name, so they may only run
@@ -217,19 +240,19 @@ def entity_configuration(value: object) -> Mapping[str, object] | None:
 
 
 def dispatch_field(
-    field: str, requires: frozenset[str] = frozenset()
+    field: ExtensionPointField,
 ) -> Callable[[Mapping[str, object]], tuple[ValidationProblem, ...]]:
     """A check that runs entity rules for the entity in `document[field]`."""
 
     def check(document: Mapping[str, object]) -> tuple[ValidationProblem, ...]:
-        return run_entity_rules(document[field], document, (field,))
+        return run_entity_rules(field, document[field], document, (field,))
 
     check.__name__ = f"_dispatch_{field}_entity_rules"
     return check
 
 
 def dispatch_field_sequence(
-    field: str,
+    field: ExtensionPointField,
 ) -> Callable[[Mapping[str, object]], tuple[ValidationProblem, ...]]:
     """A check that runs entity rules for every entity in `document[field]`."""
 
@@ -240,7 +263,7 @@ def dispatch_field_sequence(
         sequence = cast("tuple[object, ...]", entries)
         problems: list[ValidationProblem] = []
         for index, entry in enumerate(sequence):
-            problems.extend(run_entity_rules(entry, document, (field, index)))
+            problems.extend(run_entity_rules(field, entry, document, (field, index)))
         return tuple(problems)
 
     check.__name__ = f"_dispatch_{field}_entity_rules"
