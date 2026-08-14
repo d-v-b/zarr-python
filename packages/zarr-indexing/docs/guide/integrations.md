@@ -70,6 +70,35 @@ view = LazyArray(source).with_reader(unit_step_reader)
 A strided selection then over-reads its cover by the stride factor, which the
 partitioning above bounds by one part.
 
+### Consumer-owned I/O: parts as backend requests
+
+Both regimes above still read *through* the wrapper. A consumer with its own
+I/O layer — an async store, an HTTP endpoint, a connection pool — can instead
+use the wrapper purely as a planner: every box-shaped part lowers to a
+backend-native basic selection with
+[`Partition.source_selection`][zarr_indexing.lazy_array.Partition], and its
+paired `out_selection` places whatever comes back:
+
+```python
+--8<-- "snippets/integrations.py:consumer-owned-io"
+```
+
+[`Partition.chunk_local_selection`][zarr_indexing.lazy_array.Partition] is the
+same read relative to the part's grid cell, for consumers caching decoded
+chunks. `projection.chunk_domain` locates that cell in the source, so it is
+what to fetch and a sound cache key; `base_coords` counts cells of whatever
+base the view partitions, so it keys a cache only alongside the grid that
+produced it. A query part (an `oindex`/`vindex` gather) has no slab spelling
+and raises `NoBasicSelectionError` (a `ValueError` subclass), so the AsyncArray
+adapter stays on its own I/O path with `part.view.transform.decompose()`. That
+factors the transform into an ascending basic cover to fetch plus a residual
+to resolve in memory. The same path handles NumPy's newaxis and negative-step
+slices, which Zarr's narrower basic-selection dialect rejects even though
+`source_selection` can spell them. The
+[asyncio example](../examples/lazy_indexing_asyncio.md) drives all three
+loops — gather-per-part, decoded-chunk cache, and the query fallback — with
+`asyncio.gather` over `zarr.AsyncArray`.
+
 ## napari-like consumer
 
 This is a **napari-like consumer**, not a napari integration. It models the

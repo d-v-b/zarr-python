@@ -37,7 +37,11 @@ from zarr_indexing._affine import checked_affine
 from zarr_indexing._selector import as_scalar_index, require_index
 from zarr_indexing.boundary import validate_advanced_selection
 from zarr_indexing.domain import IndexDomain
-from zarr_indexing.errors import BoundsCheckError, VindexInvalidSelectionError
+from zarr_indexing.errors import (
+    BoundsCheckError,
+    NoBasicSelectionError,
+    VindexInvalidSelectionError,
+)
 from zarr_indexing.output_map import (
     ArrayMap,
     ConstantMap,
@@ -47,11 +51,27 @@ from zarr_indexing.output_map import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     import numpy.typing as npt
 
     from zarr_indexing.json import IndexTransformJSON
+
+
+type BasicSelection = tuple[int | slice | None, ...]
+"""A selection in NumPy's basic-indexing dialect: one selector per axis.
+
+The request vocabulary of `source[selection]` under NumPy basic indexing.
+It is deliberately wider than `zarr.AsyncArray.getitem`'s selection type:
+Zarr rejects `None` and negative-step slices, so an integration with that
+backend must normalize those two forms before making the request.
+Denotationally this is a product of arithmetic progressions: an `int` reads one
+coordinate and drops its axis, a `slice` reads an arithmetic progression, and
+`None` fabricates an axis no source axis backs. Produced by
+[`IndexTransform.as_basic_selection`][zarr_indexing.transform.IndexTransform.as_basic_selection]
+and the `Partition` lowering properties; which cells a value denotes is
+relative to the array it is applied to.
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -447,6 +467,293 @@ class IndexTransform:
             domain=IndexDomain(tuple(inverse_min), tuple(inverse_max)),
             output=tuple(inverse_output[dimension] for dimension in range(self.input_rank)),
         )
+
+    def as_basic_selection(self) -> BasicSelection:
+        """Lower a box transform to the NumPy basic selection it describes.
+
+        Returns one selector per output dimension, plus a `None` for each
+        domain axis no output map reads and no constant stands in for, such
+        that `source[transform.as_basic_selection()]` under NumPy indexing
+        semantics reads exactly the cells this transform addresses, in domain
+        order: the result has shape `domain.shape` exactly, and its element at
+        position `p` holds the source value at
+        `apply(domain.inclusive_min + p)`.
+
+        A `DimensionMap` lowers to a `slice`. A `ConstantMap` usually lowers
+        to an `int`, which drops its axis exactly as the constant map carries
+        no input dimension — but a singleton domain axis that no output map
+        references (a single-coordinate fancy index collapses to a constant at
+        construction, leaving its axis behind: `oindex[:, [2]]`) is instead
+        produced by lowering a constant to a length-1 slice, so the result
+        keeps the domain's shape. An unreferenced axis with no constant to
+        stand in for it is one nothing reads — a `None`/newaxis in the
+        selection that made it — and lowers back to `None`.
+
+        [`decompose`][zarr_indexing.transform.IndexTransform.decompose] is
+        the total counterpart: every transform factors into a basic cover
+        plus an in-memory residual, so a refusal here is not a dead end.
+
+        This is the boundary for consumers that plan reads here but perform
+        them through their own I/O layer — an async store, an HTTP range
+        request — whose request vocabulary is a basic selection rather than a
+        transform. Such a backend may accept less than NumPy does: a reversing
+        map lowers to a negative-step slice and a fabricated axis to `None`,
+        neither of which Zarr's own basic selections take, so a consumer whose
+        backend is stricter should inspect the lowered selectors (or keep such
+        views out of its plans; compare `UnitStepReader`).
+
+        Returns
+        -------
+        tuple of int or slice or None
+            One selector per output dimension, interleaved with a `None` for
+            each domain axis that neither an output map reads nor a constant
+            stands in for.
+
+        Raises
+        ------
+        NoBasicSelectionError
+            If the transform cannot be expressed as a basic selection: an
+            output map is an `ArrayMap` (a query is a lookup table, not a
+            slab), a `DimensionMap` has stride 0 (a broadcast repeats one
+            source cell, which no slice spells), the selectors cannot produce
+            the domain's axes in increasing order and exactly once (basic
+            indexing never transposes or repeats axes), an unreferenced domain
+            axis has extent other than 1 (an axis restored by repetition,
+            where a newaxis would give extent 1), or a selected coordinate is
+            negative (NumPy would count it from the end of the source).
+
+        Examples
+        --------
+        >>> IndexTransform.from_shape((10, 20))[2:8, ::2].as_basic_selection()
+        (slice(2, 8, 1), slice(0, 19, 2))
+        >>> IndexTransform.from_shape((10, 20))[3, 4:6].as_basic_selection()
+        (3, slice(4, 6, 1))
+
+        The collapsed single-coordinate gather keeps its axis:
+
+        >>> IndexTransform.from_shape((10, 20)).oindex[slice(None), [2]].as_basic_selection()
+        (slice(0, 10, 1), slice(2, 3, 1))
+
+        An axis the selection fabricated lowers back to the newaxis that made it:
+
+        >>> IndexTransform.from_shape((10, 20))[:, None].as_basic_selection()
+        (slice(0, 10, 1), None, slice(0, 20, 1))
+
+        unless a constant is due where the axis is, in which case that
+        constant keeps it and no newaxis is needed:
+
+        >>> IndexTransform.from_shape((10, 20))[None, 3].as_basic_selection()
+        (slice(3, 4, 1), slice(0, 20, 1))
+
+        A query has no basic-selection spelling:
+
+        >>> IndexTransform.from_shape((10,)).oindex[[3, 1, 1]].as_basic_selection()
+        Traceback (most recent call last):
+            ...
+        zarr_indexing.errors.NoBasicSelectionError: cannot lower to a basic \
+selection: output[0] is an ArrayMap; a query selection is a lookup table, not a slab
+        """
+        for output_dimension, output_map in enumerate(self.output):
+            # Named before the axis bookkeeping below, which would otherwise
+            # blame a query's gathered axis for being unreferenced.
+            if isinstance(output_map, ArrayMap):
+                raise NoBasicSelectionError(
+                    f"cannot lower to a basic selection: output[{output_dimension}] "
+                    "is an ArrayMap; a query selection is a lookup table, not a slab"
+                )
+        referenced = {m.input_dimension for m in self.output if isinstance(m, DimensionMap)}
+        for axis, extent in enumerate(self.domain.shape):
+            if axis not in referenced and extent != 1:
+                raise NoBasicSelectionError(
+                    f"cannot lower to a basic selection: no output map references "
+                    f"input dimension {axis}, whose extent is {extent}; only a "
+                    "singleton axis can be produced without reading a source axis, "
+                    "by an integer-indexed output dimension or a newaxis"
+                )
+        selection: list[int | slice | None] = []
+        # The next domain axis a selector has to produce. Slices produce axes
+        # in selector order, so walking the outputs left to right must meet the
+        # domain axes in increasing order.
+        next_axis = 0
+
+        def fabricate_axes_before(axis: int) -> None:
+            """Spell every unreferenced axis due before `axis` as a newaxis.
+
+            An axis no output map reads is one NumPy inserts rather than
+            reads, which is what `None` does. The extent check above already
+            proved each is a singleton, and a constant standing in for one is
+            preferred to this — a length-1 slice reads the coordinate the
+            constant names, where a newaxis would need the constant's own
+            selector to survive as well.
+            """
+            nonlocal next_axis
+            while next_axis < axis and next_axis not in referenced:
+                selection.append(None)
+                next_axis += 1
+
+        for output_dimension, output_map in enumerate(self.output):
+            if isinstance(output_map, ConstantMap):
+                if output_map.offset < 0:
+                    raise NoBasicSelectionError(
+                        f"cannot lower to a basic selection: output[{output_dimension}] "
+                        f"addresses coordinate {output_map.offset}, which NumPy would "
+                        "count from the end of the source"
+                    )
+                if next_axis < self.input_rank and next_axis not in referenced:
+                    # This constant stands in for the singleton axis: a
+                    # length-1 slice keeps the axis where an int would drop it.
+                    selection.append(slice(output_map.offset, output_map.offset + 1, 1))
+                    next_axis += 1
+                else:
+                    selection.append(output_map.offset)
+                continue
+            assert isinstance(output_map, DimensionMap)  # ArrayMap raised above
+            if output_map.stride == 0:
+                raise NoBasicSelectionError(
+                    f"cannot lower to a basic selection: output[{output_dimension}] "
+                    "has stride 0, which repeats one source cell along an axis; "
+                    "no slice spells a broadcast"
+                )
+            d = output_map.input_dimension
+            fabricate_axes_before(d)
+            if d != next_axis:
+                raise NoBasicSelectionError(
+                    "cannot lower to a basic selection: the selectors must produce "
+                    f"the domain's axes in increasing order and exactly once, but "
+                    f"output[{output_dimension}] produces input dimension {d} where "
+                    f"input dimension {next_axis} is due; basic indexing never "
+                    "transposes or repeats axes"
+                )
+            next_axis = d + 1
+            endpoints = output_map.endpoints(
+                self.domain.inclusive_min[d], self.domain.exclusive_max[d]
+            )
+            if endpoints is None:
+                selection.append(slice(0, 0, 1))
+                continue
+            first, last = endpoints
+            if min(first, last) < 0:
+                raise NoBasicSelectionError(
+                    f"cannot lower to a basic selection: output[{output_dimension}] "
+                    f"addresses coordinate {min(first, last)}, which NumPy would "
+                    "count from the end of the source"
+                )
+            if output_map.stride > 0:
+                selection.append(slice(first, last + 1, output_map.stride))
+            else:
+                # Descending: the stop sits one step past the final coordinate,
+                # and a stop below 0 has no literal spelling — None walks to
+                # the front edge instead of wrapping.
+                stop = last + output_map.stride
+                selection.append(slice(first, stop if stop >= 0 else None, output_map.stride))
+        # Trailing axes no output map reads sit past the last selector, where
+        # the same newaxis spelling puts them at the end of the result.
+        fabricate_axes_before(self.input_rank)
+        assert next_axis == self.input_rank, (
+            f"input dimension {next_axis} of {self.input_rank} went unproduced; "
+            "every referenced axis is produced by the map that references it, and "
+            "every unreferenced one was proven a singleton above"
+        )
+        return tuple(selection)
+
+    def decompose(self) -> tuple[tuple[slice, ...], IndexTransform]:
+        """Factor this transform into a basic cover and an in-memory residual.
+
+        The total counterpart of
+        [`as_basic_selection`][zarr_indexing.transform.IndexTransform.as_basic_selection]:
+        where that method is defined only for reads that *are* a basic
+        selection, every transform factors as one basic read followed by an
+        in-memory rearrangement. Returns `(cover, residual)` such that
+        resolving `residual` against the block `source[cover]` reads exactly
+        the cells this transform addresses, at exactly its domain shape — so a
+        consumer whose I/O layer speaks basic selections can fetch the cover
+        through it and finish any gather, reversal, or broadcast in memory.
+
+        The cover is one ascending slice per output dimension: a
+        `DimensionMap` covers its arithmetic progression (a descending map is
+        read forwards and reversed by the residual), a `ConstantMap` covers
+        its single coordinate, and an `ArrayMap` covers the range from its
+        smallest to its largest coordinate — the price of a slab vocabulary is
+        over-reading a sparse gather's bounding interval. The residual keeps
+        this transform's domain and rewrites each output map to block-local
+        coordinates, so the factorization inverts by composition: the cover,
+        read as the diagonal transform it denotes, chained onto the residual,
+        reads cell for cell as `self` (the maps may spell offsets
+        differently; the reads are identical).
+
+        Returns
+        -------
+        tuple
+            `(cover, residual)`: a tuple of ascending slices to request from
+            the source, and the `IndexTransform` to resolve against the
+            returned block.
+
+        Raises
+        ------
+        NoBasicSelectionError
+            If an output coordinate is negative — NumPy would count it from
+            the end of the source, so no cover slice can spell it. This is
+            the one transform shape with no factorization; every other
+            transform, including queries and broadcasts, decomposes.
+
+        Examples
+        --------
+        A descending strided read: the cover walks forward, the residual
+        reverses.
+
+        >>> import numpy as np
+        >>> source = np.arange(10)
+        >>> cover, residual = IndexTransform.from_shape((10,))[::-3].decompose()
+        >>> cover
+        (slice(0, 10, 3),)
+        >>> block = source[cover]
+        >>> lo, hi = residual.domain.inclusive_min[0], residual.domain.exclusive_max[0]
+        >>> [int(block[residual.apply((p,))]) for p in range(lo, hi)]
+        [9, 6, 3, 0]
+
+        A query decomposes into its bounding interval and a block-local
+        lookup, where `as_basic_selection` refuses:
+
+        >>> cover, residual = IndexTransform.from_shape((10,)).oindex[[7, 2, 2]].decompose()
+        >>> cover
+        (slice(2, 8, 1),)
+        >>> block = source[cover]
+        >>> [int(block[residual.apply((p,))]) for p in range(3)]
+        [7, 2, 2]
+        """
+        return _decompose_basic(self)
+
+    def decompose_unit_step(self) -> tuple[tuple[slice, ...], IndexTransform]:
+        """Factor as `decompose` does, with a contiguous ascending cover.
+
+        The variant of
+        [`decompose`][zarr_indexing.transform.IndexTransform.decompose] for a
+        source that accepts nothing but `slice(start, stop, 1)` — compare
+        [`UnitStepReader`][zarr_indexing.reader.UnitStepReader], which reads
+        through exactly this factorization. Strides and reversals stay in the
+        residual, so the cover over-reads a strided selection by its stride
+        factor: the price of a unit-step request vocabulary.
+
+        Returns
+        -------
+        tuple
+            `(cover, residual)` exactly as `decompose` returns them, with
+            every cover slice contiguous and ascending.
+
+        Raises
+        ------
+        NoBasicSelectionError
+            If an output coordinate is negative, exactly as for `decompose`.
+
+        Examples
+        --------
+        >>> cover, residual = IndexTransform.from_shape((10,))[1:9:3].decompose_unit_step()
+        >>> cover
+        (slice(1, 8, 1),)
+        >>> residual.output
+        (DimensionMap(input_dimension=0, offset=0, stride=3),)
+        """
+        return _decompose_unit_step(self)
 
     @property
     def selection_repr(self) -> str:
@@ -1201,7 +1508,7 @@ def _intersect_general(
     return (result, out_indices.astype(np.intp))
 
 
-def _normalize_basic_selection(selection: Any, ndim: int) -> tuple[int | slice | None, ...]:
+def _normalize_basic_selection(selection: Any, ndim: int) -> BasicSelection:
     """Normalize a selection to a tuple of int, slice, or None (newaxis),
     expanding ellipsis and padding with slice(None) as needed.
     """
@@ -1261,7 +1568,7 @@ def _positional_slice(pos: int, size: int, step: int) -> slice:
 
 def _reindex_array(
     m: ArrayMap,
-    normalized: tuple[int | slice | None, ...],
+    normalized: BasicSelection,
     domain: IndexDomain,
 ) -> np.ndarray[Any, np.dtype[np.intp]]:
     """Apply basic indexing operations to an ArrayMap's index_array.
@@ -1454,6 +1761,120 @@ def _reshape_to_axis(
     shape = [1] * ndim
     shape[axis] = flat.shape[0]
     return flat.reshape(shape)
+
+
+# --------------------------------------------------------------------------- #
+# Cover-and-residual decomposition
+# --------------------------------------------------------------------------- #
+
+
+def _push_slice_for_dimension_map(
+    m: DimensionMap, transform: IndexTransform
+) -> tuple[slice, DimensionMap]:
+    """The positive-step slice covering a `DimensionMap`, and its block-local map.
+
+    A negative step is read forwards and reversed by the residual: a source is
+    only ever asked for a slice that walks upwards, which is the one form every
+    array-like agrees on.
+    """
+    d = m.input_dimension
+    lo = transform.domain.inclusive_min[d]
+    hi = max(transform.domain.exclusive_max[d], lo)
+    endpoints = m.endpoints(lo, hi)
+    if endpoints is None:
+        return slice(0, 0, 1), DimensionMap(input_dimension=d, offset=-lo, stride=1)
+    first, last = endpoints
+    if m.stride > 0:
+        return (
+            slice(first, last + 1, m.stride),
+            DimensionMap(input_dimension=d, offset=-lo, stride=1),
+        )
+    if m.stride == 0:
+        return (
+            slice(first, first + 1, 1),
+            DimensionMap(input_dimension=d, offset=0, stride=0),
+        )
+    # Descending: the block holds the same coordinates in ascending order, so
+    # the residual walks it backwards from the last block position.
+    return (
+        slice(last, first + 1, -m.stride),
+        DimensionMap(input_dimension=d, offset=hi - 1, stride=-1),
+    )
+
+
+def _push_unit_slice_for_dimension_map(
+    m: DimensionMap, transform: IndexTransform
+) -> tuple[slice, DimensionMap]:
+    """The unit-step slice covering a `DimensionMap`, and its block-local map.
+
+    Strides and reversals stay in the residual: the source is only ever asked
+    for a contiguous ascending slice, and the original stride is replayed
+    against the in-memory block. The cover therefore over-reads a strided
+    selection by its stride factor, which is the price of a source that
+    accepts nothing but `slice(start, stop, 1)`.
+    """
+    d = m.input_dimension
+    lo = transform.domain.inclusive_min[d]
+    hi = max(transform.domain.exclusive_max[d], lo)
+    endpoints = m.endpoints(lo, hi)
+    if endpoints is None:
+        return slice(0, 0, 1), DimensionMap(input_dimension=d, offset=-lo, stride=1)
+    first, last = endpoints
+    if m.stride == 0:
+        return (
+            slice(first, first + 1, 1),
+            DimensionMap(input_dimension=d, offset=0, stride=0),
+        )
+    origin = min(first, last)
+    return (
+        slice(origin, max(first, last) + 1, 1),
+        DimensionMap(input_dimension=d, offset=m.offset - origin, stride=m.stride),
+    )
+
+
+def _decompose_basic(transform: IndexTransform) -> tuple[tuple[slice, ...], IndexTransform]:
+    return _decompose(transform, _push_slice_for_dimension_map)
+
+
+def _decompose_unit_step(transform: IndexTransform) -> tuple[tuple[slice, ...], IndexTransform]:
+    return _decompose(transform, _push_unit_slice_for_dimension_map)
+
+
+def _decompose(
+    transform: IndexTransform,
+    push_dimension_map: Callable[[DimensionMap, IndexTransform], tuple[slice, DimensionMap]],
+) -> tuple[tuple[slice, ...], IndexTransform]:
+    key: list[slice] = []
+    residual: list[OutputIndexMap] = []
+    for output_map in transform.output:
+        if isinstance(output_map, ConstantMap):
+            coordinate = checked_affine(output_map.offset, 0, 0)
+            key.append(slice(coordinate, coordinate + 1, 1))
+            residual.append(ConstantMap(offset=0))
+        elif isinstance(output_map, DimensionMap):
+            pushed, local = push_dimension_map(output_map, transform)
+            key.append(pushed)
+            residual.append(local)
+        else:
+            coordinates = checked_affine(
+                output_map.offset, output_map.stride, output_map.index_array
+            )
+            if coordinates.size == 0:
+                key.append(slice(0, 0, 1))
+                local_index = coordinates
+            else:
+                origin = int(coordinates.min())
+                key.append(slice(origin, int(coordinates.max()) + 1, 1))
+                local_index = checked_affine(-origin, 1, coordinates)
+            residual.append(ArrayMap(index_array=local_index))
+    for output_dimension, entry in enumerate(key):
+        if entry.start < 0:
+            raise NoBasicSelectionError(
+                f"cannot cover with a basic selection: output[{output_dimension}] "
+                f"addresses coordinate {entry.start}, which NumPy would count "
+                "from the end of the source"
+            )
+    return tuple(key), IndexTransform(domain=transform.domain, output=tuple(residual))
 
 
 class _OIndexHelper:

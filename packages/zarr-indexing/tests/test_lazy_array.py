@@ -30,6 +30,7 @@ from zarr_indexing import (
     FixedDimension,
     IndexTransform,
     LazyArray,
+    NoBasicSelectionError,
     ReadContext,
     VaryingDimension,
     dimension_grids_from_chunks,
@@ -2616,3 +2617,313 @@ def test_fancy_composition_over_an_empty_axis() -> None:
     scalar = composed.lazy.vindex[..., np.array(1)]
     assert scalar.shape == (2, 0)
     assert np.asarray(scalar.result()).shape == (2, 0)
+
+
+# ---------------------------------------------------------------------------
+# Backend-native selection lowering
+# ---------------------------------------------------------------------------
+
+
+def test_box_part_selections_carry_the_read() -> None:
+    """The lowered selections agree with the documented assemblies.
+
+    `out[part.out_selection] = data[part.source_selection]` reproduces the
+    view — the loop a consumer runs when it plans here but fetches through its
+    own I/O layer — and `chunk_local_selection` reads the same values from the
+    part's grid cell, the loop a decoded-chunk cache runs.
+    """
+    data = reference()
+    view = LazyArray.from_numpy(data).with_parts((3, 2, 3))
+    cases = (
+        view,
+        view.lazy[1:6, ::2, 1:],
+        view.lazy[::-1, 2, 1::2],
+        # The single-coordinate gather collapses to a constant and keeps its
+        # axis through a length-1 slice.
+        view.lazy.oindex[:, [2], :],
+        view.lazy[5, 1, 2],
+        view.unpartitioned().lazy[2:6, :, ::2],
+    )
+    for case in cases:
+        expected = np.asarray(case.result())
+        out = np.full(case.shape, -1, dtype=case.dtype)
+        for part in case.parts():
+            slab = data[part.source_selection]
+            cell = data[
+                tuple(
+                    slice(lo, hi)
+                    for lo, hi in zip(
+                        part.projection.chunk_domain.inclusive_min,
+                        part.projection.chunk_domain.exclusive_max,
+                        strict=True,
+                    )
+                )
+            ]
+            np.testing.assert_array_equal(cell[part.chunk_local_selection], slab)
+            out[part.out_selection] = slab
+        np.testing.assert_array_equal(out, expected)
+
+
+def test_part_of_part_selections_stay_global_and_cell_local() -> None:
+    """A nested part's cell is named in the source's own coordinates.
+
+    A view partitioning a window plans over that window, but `chunk_domain`
+    describes the source, so the decoded-cell loop reads the same cell from
+    the raw array whether or not anything narrowed the view first.
+    """
+    data = reference()
+    view = LazyArray.from_numpy(data).with_parts((3, 2, 3)).lazy[1:6, 1:4, :]
+    outer = next(view.parts())
+    inner_view = outer.view.with_parts((2, 1, 2))
+    expected = np.asarray(outer.view.result())
+    out = np.full(inner_view.shape, -1, dtype=inner_view.dtype)
+    for part in inner_view.parts():
+        slab = data[part.source_selection]
+        cell = data[
+            tuple(
+                slice(lo, hi)
+                for lo, hi in zip(
+                    part.projection.chunk_domain.inclusive_min,
+                    part.projection.chunk_domain.exclusive_max,
+                    strict=True,
+                )
+            )
+        ]
+        np.testing.assert_array_equal(cell[part.chunk_local_selection], slab)
+        out[part.out_selection] = slab
+    np.testing.assert_array_equal(out, expected)
+
+
+def test_parts_of_a_newaxis_view_lower_like_any_other_box() -> None:
+    """A view can fabricate axes, so its parts have to lower with them."""
+    data = reference()
+    view = LazyArray.from_numpy(data).with_parts((3, 2, 3)).lazy[None, 1:6, :, None, ::2]
+    out = np.full(view.shape, -1, dtype=view.dtype)
+    for part in view.parts():
+        out[part.out_selection] = data[part.source_selection]
+    np.testing.assert_array_equal(out, np.asarray(view.result()))
+    np.testing.assert_array_equal(out, data[None, 1:6, :, None, ::2])
+
+
+def test_query_part_selections_refuse_to_lower() -> None:
+    """A query part has no slab; both spellings must say so, not guess."""
+    view = LazyArray.from_numpy(reference()).with_parts((3, 2, 3)).lazy.oindex[[6, 1, 1], :, :]
+    part = next(view.parts())
+    assert not part.view.is_box
+    with pytest.raises(NoBasicSelectionError, match="ArrayMap"):
+        _ = part.source_selection
+    with pytest.raises(NoBasicSelectionError, match="ArrayMap"):
+        _ = part.chunk_local_selection
+
+
+# ---------------------------------------------------------------------------
+# Part views carry their projection
+# ---------------------------------------------------------------------------
+
+
+def test_a_part_view_resolved_alone_carries_its_projection() -> None:
+    """`part.view.result()` hands the reader the same context the parent does.
+
+    A custom reader keyed on `projection.chunk_coords` (a decoded-chunk cache)
+    must behave identically whether the consumer calls `view.result()` or
+    resolves each part's view itself.
+    """
+    reader = RecordingReader()
+    view = LazyArray(np.arange(8)).with_reader(reader).with_parts((4,))
+    parts = list(view.parts())
+    for part in parts:
+        np.testing.assert_array_equal(
+            np.asarray(part.view.result()), np.arange(8)[part.source_selection]
+        )
+    assert [context.projection for context in reader.contexts] == [
+        part.projection for part in parts
+    ]
+    # The context transform stays source-global even though the projection's
+    # chunk_transform is chunk-local.
+    assert reader.contexts[1].transform.apply((0,)) == (4,)
+
+
+def test_reader_and_partitioning_swaps_keep_a_part_views_projection() -> None:
+    """`with_reader` and `unpartitioned` return the same view, pairing intact."""
+    reader = RecordingReader()
+    view = LazyArray(np.arange(8)).with_parts((4,))
+    part = next(view.parts())
+    part.view.with_reader(reader).result()
+    part.view.with_reader(reader).unpartitioned().result()
+    assert [context.projection for context in reader.contexts] == [part.projection] * 2
+
+
+def test_a_part_of_a_part_pairs_with_no_projection() -> None:
+    """A window's cell coordinates would name the wrong chunk of the source.
+
+    A part view partitions its own box, so its parts' `chunk_coords` count
+    cells of that box. Handing those to a reader keyed on `chunk_coords`
+    alongside the raw source would fetch a different chunk than the one the
+    part reads, so the pairing stops at the first level and such a reader
+    refuses the read instead.
+    """
+    reader = RecordingReader()
+    view = LazyArray(np.arange(24).reshape(4, 6)).with_parts((2, 3))
+    outer = list(view.parts())[3]
+    assert outer.base_coords == (1, 1)
+    inner = next(outer.view.with_parts((1, 3)).parts())
+    # The cell it counts is its own box's first, not the source's.
+    assert inner.base_coords == (0, 0)
+    # ... while the domain that names the cell stays global, as does the read.
+    assert inner.projection.chunk_domain.inclusive_min == (2, 3)
+    assert inner.source_selection == (slice(2, 3, 1), slice(3, 6, 1))
+    inner.view.with_reader(reader).result()
+    assert reader.contexts[-1].projection is None
+
+
+def test_prepared_parts_read_through_the_same_context_as_the_plain_call() -> None:
+    """The `parts=` reuse path is an optimization, not a different read."""
+    reader = RecordingReader()
+    view = LazyArray(np.arange(8)).with_parts((4,))
+    part = list(view.parts())[1]
+    part_view = part.view.with_reader(reader)
+    np.testing.assert_array_equal(
+        np.asarray(part_view.result(parts=list(part_view.parts()))),
+        np.asarray(part_view.result()),
+    )
+    assert [context.projection for context in reader.contexts] == [part.projection] * 2
+
+
+def test_a_new_selection_on_a_part_view_drops_the_projection() -> None:
+    """A further selection describes a different read, so the pairing ends."""
+    reader = RecordingReader()
+    view = LazyArray(np.arange(8)).with_reader(reader).with_parts((4,))
+    part = next(view.parts())
+    part.view.lazy[1:3].result()
+    assert reader.contexts[-1].projection is None
+
+
+# ---------------------------------------------------------------------------
+# result_into
+# ---------------------------------------------------------------------------
+
+
+def test_result_into_fills_the_callers_buffer() -> None:
+    """`result_into` fills and returns `out` for the shapes `result` covers."""
+    data = reference()
+    for view in (
+        LazyArray.from_numpy(data).with_parts((3, 2, 3)).lazy[1:6, ::2, :],
+        # Fancy placement scatters through owned temporaries into `out`.
+        LazyArray.from_numpy(data).lazy.oindex[[6, 1, 1], :, :],
+        LazyArray.from_numpy(data).lazy[5, 1, 2],
+        # An empty view returns `out` untouched without reading.
+        LazyArray.from_numpy(data).lazy[1:1],
+    ):
+        expected = np.asarray(view.result())
+        out = np.full(view.shape, -1, dtype=view.dtype)
+        returned = view.result_into(out)
+        assert returned is out
+        np.testing.assert_array_equal(out, expected)
+
+    # A view into a larger array is a valid destination, so a part's result
+    # can land directly in its final slot.
+    view = LazyArray.from_numpy(data).with_parts((3, 2, 3)).lazy[1:6, 1:4, :]
+    final = np.full((10, *view.shape[1:]), -1, dtype=view.dtype)
+    assert view.result_into(final[2:7]) is not final
+    np.testing.assert_array_equal(final[2:7], np.asarray(view.result()))
+    assert np.all(final[:2] == -1)
+    assert np.all(final[7:] == -1)
+
+    # Prepared parts are honored exactly as in `result`.
+    view = LazyArray.from_numpy(data).with_parts((3, 2, 3))
+    parts = tuple(view.parts())
+    out = np.empty(view.shape, dtype=view.dtype)
+    assert view.result_into(out, parts=parts) is out
+    np.testing.assert_array_equal(out, data)
+
+    # A masked buffer — what result() would allocate for a masked source —
+    # keeps the source's mask.
+    masked_source = np.ma.masked_array(data, mask=data % 5 == 0)
+    masked_view = LazyArray.from_numpy(masked_source)
+    out_masked = np.ma.masked_all(masked_view.shape, dtype=masked_view.dtype)
+    masked_view.result_into(out_masked)
+    np.testing.assert_array_equal(np.ma.getmaskarray(out_masked), masked_source.mask)
+    np.testing.assert_array_equal(out_masked.compressed(), masked_source.compressed())
+
+    # Non-contiguous layouts with distinct cells remain valid destinations.
+    view = LazyArray.from_numpy(data).lazy[1:6, 1:4, :]
+    strided_outputs = (
+        np.empty(view.shape, dtype=view.dtype)[::-1],
+        np.empty(view.shape[::-1], dtype=view.dtype).transpose(2, 1, 0),
+    )
+    for strided_out in strided_outputs:
+        assert view.result_into(strided_out) is strided_out
+        np.testing.assert_array_equal(strided_out, np.asarray(view.result()))
+
+
+def test_result_into_rejects_a_non_array() -> None:
+    view = LazyArray.from_numpy(reference())
+    with pytest.raises(TypeError, match="must be a numpy.ndarray"):
+        view.result_into(cast("Any", [[0]]))
+
+
+def test_result_into_rejects_the_wrong_shape() -> None:
+    view = LazyArray.from_numpy(reference())
+    with pytest.raises(ValueError, match="has shape"):
+        view.result_into(np.empty((1, 2, 3), dtype=view.dtype))
+
+
+def test_result_into_rejects_the_wrong_dtype() -> None:
+    view = LazyArray.from_numpy(reference())
+    with pytest.raises(ValueError, match="has dtype"):
+        view.result_into(np.empty(view.shape, dtype=np.float32))
+
+
+def test_result_into_rejects_a_read_only_buffer() -> None:
+    view = LazyArray.from_numpy(reference())
+    out = np.empty(view.shape, dtype=view.dtype)
+    out.flags.writeable = False
+    with pytest.raises(ValueError, match="read-only"):
+        view.result_into(out)
+
+
+def test_result_into_rejects_a_zero_stride_buffer() -> None:
+    view = LazyArray.from_numpy(np.arange(4))
+    storage = np.empty(1, dtype=view.dtype)
+    out = np.lib.stride_tricks.as_strided(storage, shape=view.shape, strides=(0,), writeable=True)
+    with pytest.raises(ValueError, match="overlapping elements"):
+        view.result_into(out)
+
+
+def test_result_into_rejects_a_nonzero_stride_overlapping_buffer() -> None:
+    view = LazyArray.from_numpy(np.arange(4).reshape(2, 2))
+    storage = np.empty(3, dtype=view.dtype)
+    out = np.lib.stride_tricks.as_strided(
+        storage,
+        shape=view.shape,
+        strides=(view.dtype.itemsize, view.dtype.itemsize),
+        writeable=True,
+    )
+    with pytest.raises(ValueError, match="overlapping elements"):
+        view.result_into(out)
+
+
+def test_result_into_rejects_an_unmasked_buffer_for_a_masked_source() -> None:
+    data = reference()
+    view = LazyArray.from_numpy(np.ma.masked_array(data, mask=data % 5 == 0))
+    with pytest.raises(ValueError, match="MaskedArray for a masked source"):
+        view.result_into(np.empty(view.shape, dtype=view.dtype))
+
+
+def test_result_into_rejects_a_buffer_that_overlaps_the_source() -> None:
+    """Reading into the source overwrites cells later parts still have to read."""
+    data = reference()
+    view = LazyArray.from_numpy(data).with_parts((3, 2, 3)).lazy[::-1]
+    with pytest.raises(ValueError, match="shares memory"):
+        view.result_into(data)
+    # A disjoint slice of the same buffer is refused for the same reason.
+    with pytest.raises(ValueError, match="shares memory"):
+        LazyArray.from_numpy(data).lazy[:1].result_into(data[1:2])
+
+
+def test_result_into_rejects_foreign_parts() -> None:
+    view = LazyArray.from_numpy(reference()).with_parts((3, 2, 3))
+    other = LazyArray.from_numpy(reference()).with_parts((3, 2, 3))
+    out = np.empty(view.shape, dtype=view.dtype)
+    with pytest.raises(ValueError, match="do not belong"):
+        view.result_into(out, parts=tuple(other.parts()))

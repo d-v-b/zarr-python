@@ -131,6 +131,7 @@ filterwarnings = [
 include = [
     "src",
     "docs/snippets",
+    "examples/lazy_indexing_asyncio",
     "tests/test_doc_examples.py",
 ]
 enableExperimentalFeatures = true
