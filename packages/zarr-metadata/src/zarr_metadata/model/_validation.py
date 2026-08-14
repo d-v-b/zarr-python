@@ -542,16 +542,8 @@ def validate_array_metadata_v3(value: object) -> list[ValidationProblem]:
                     ("dimension_names",), "expected items of str or None", "invalid_type"
                 )
             )
-        elif _is_int_sequence(doc.get("shape")) and len(cast("Sequence[object]", names)) != len(
-            cast("Sequence[int]", doc["shape"])
-        ):
-            problems.append(
-                ValidationProblem(
-                    ("dimension_names",),
-                    "expected one name per dimension of shape",
-                    "invalid_value",
-                )
-            )
+        # Whether the names count matches shape's dimensionality is a
+        # composition judgment, owned by zarr_metadata.rules.
     return problems
 
 
@@ -589,26 +581,10 @@ def validate_array_metadata_v2(value: object) -> list[ValidationProblem]:
         _unexpected_keys(ARRAY_METADATA_STANDARD_KEYS_V2, cast("Mapping[object, object]", value))
     )
     problems.extend(_check_literal(doc, "zarr_format", 2))
-    shape_problems = _validate_dim_sequence(doc, "shape")
-    chunks_problems = _validate_dim_sequence(doc, "chunks")
-    problems.extend(shape_problems)
-    problems.extend(chunks_problems)
-    if (
-        not shape_problems
-        and not chunks_problems
-        and _is_int_sequence(doc.get("shape"))
-        and _is_int_sequence(doc.get("chunks"))
-    ):
-        shape = cast("Sequence[int]", doc["shape"])
-        chunks = cast("Sequence[int]", doc["chunks"])
-        if len(shape) != len(chunks):
-            problems.append(
-                ValidationProblem(
-                    ("chunks",),
-                    "expected the same number of dimensions as shape",
-                    "invalid_value",
-                )
-            )
+    problems.extend(_validate_dim_sequence(doc, "shape"))
+    problems.extend(_validate_dim_sequence(doc, "chunks"))
+    # Whether chunks matches shape's dimensionality is a composition
+    # judgment, owned by zarr_metadata.rules.
     if "dtype" in doc and not _is_dtype_v2(doc["dtype"]):
         problems.append(
             ValidationProblem(

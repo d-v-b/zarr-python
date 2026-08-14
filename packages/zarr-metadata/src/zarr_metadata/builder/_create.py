@@ -38,7 +38,6 @@ from typing import TYPE_CHECKING, Final, cast
 
 from typing_extensions import Unpack
 
-from zarr_metadata.builder._rules import ZARR_V3_ARRAY_RULES, run_rules
 from zarr_metadata.model._validation import (
     ARRAY_METADATA_STANDARD_KEYS_V3,
     GROUP_METADATA_STANDARD_KEYS_V3,
@@ -52,6 +51,7 @@ from zarr_metadata.model._validation import (
     validate_consolidated_metadata_v3,
     validate_json,
 )
+from zarr_metadata.rules import ZARR_V2_ARRAY_RULES, ZARR_V3_ARRAY_RULES, run_rules
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -202,12 +202,14 @@ def create_zarr_v2_array_metadata_json(
     Models `.zarray` plus the sibling `.zattrs` folded in as `attributes`.
     For the strict on-disk `.zarray` shape use `create_zarr_v2_z_array_json`.
     """
+    normalized = _normalized(kwargs)
     parsed: ZarrV2ArrayMetadataJSON | None = None
     problems: list[ValidationProblem] = []
     try:
-        parsed = parse_array_metadata_v2(_normalized(kwargs))
+        parsed = parse_array_metadata_v2(normalized)
     except MetadataValidationError as error:
         problems += error.problems
+    problems += run_rules(ZARR_V2_ARRAY_RULES, normalized)
     _raise_if_problems(problems)
     assert parsed is not None
     return parsed
@@ -247,6 +249,7 @@ def create_zarr_v2_z_array_json(**kwargs: Unpack[ZarrV2ZArrayJSON]) -> ZarrV2ZAr
         parsed = parse_array_metadata_v2(normalized)
     except MetadataValidationError as error:
         problems += error.problems
+    problems += run_rules(ZARR_V2_ARRAY_RULES, normalized)
     _raise_if_problems(problems)
     assert parsed is not None
     return cast("ZarrV2ZArrayJSON", parsed)

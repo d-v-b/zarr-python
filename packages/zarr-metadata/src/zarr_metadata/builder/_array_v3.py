@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Literal, Self, cast
 
 from typing_extensions import Unpack
 
-from zarr_metadata.builder._rules import ZARR_V3_ARRAY_RULES, applicable, run_rules
 from zarr_metadata.model._sentinel import UNSET
 from zarr_metadata.model._validation import (
     ARRAY_METADATA_STANDARD_KEYS_V3,
@@ -16,6 +15,7 @@ from zarr_metadata.model._validation import (
     arrays_to_tuples,
     parse_array_metadata_v3,
 )
+from zarr_metadata.rules import ZARR_V3_ARRAY_RULES, applicable, run_rules
 
 if TYPE_CHECKING:
     from collections.abc import Mapping

@@ -336,8 +336,8 @@ def test_spelling_verdicts_agree_across_model_normalization() -> None:
     # names, and bare "gzip" used to classify as an unknown extension —
     # so a document the builder rejected round-tripped through the model
     # into one the rules accepted. Both spellings must now be rejected.
-    from zarr_metadata.builder._rules import ZARR_V3_ARRAY_RULES, run_rules
     from zarr_metadata.model import ZarrV3ArrayMetadata
+    from zarr_metadata.rules import ZARR_V3_ARRAY_RULES, run_rules
 
     doc = {
         **COMPLETE,

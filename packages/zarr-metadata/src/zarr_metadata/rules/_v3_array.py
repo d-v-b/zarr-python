@@ -1,46 +1,36 @@
-"""Semantic validation rules for v3 array metadata documents.
+"""Composition rules for v3 array metadata documents.
 
 The model layer's validators check JSON *structure* and never interpret
-extension points. The rules here are the complementary *semantic* layer:
-cross-field consistency checks (fill value vs. data type, codec pipeline
-kind ordering, dimension counts) that only make sense once the structure
-is trusted.
-
-Rules are data, keyed by the document keys they depend on. A rule fires
-only when every key it needs is present, so field ordering during
-incremental construction is unconstrained: setting `fill_value` before
-`data_type` is legal, and the pair is checked as soon as both exist.
-Running the same rule list over a complete document (where dependency
-completeness is trivially true) gives parsed metadata identical checking
-to incrementally-built metadata.
-
-Checks read their document as `Mapping[str, object]` and verify every
-shape they touch before interpreting it: rules may run over partial
-documents that have not passed structural validation, so a check finding
-a structurally-unexpected value simply declines (returns no problems) and
-leaves the complaint to the structural validator.
+extension points. The rules here are the complementary *composition*
+layer: cross-field consistency checks (fill value vs. data type, codec
+pipeline kind ordering, dimension counts) that only make sense once the
+structure is trusted.
 
 Extension openness: rules never reject what they cannot interpret. An
 unknown data type name accepts any fill value here (its own validator is
 whoever understands it), an unknown codec has unknown kind, and unknown
 configuration contents pass through untouched. Openness is for genuinely
 unknown names only, though: a codec or chunk-grid name this package
-defines is held to its canonical spellings (bare form only where the
-concrete type permits it, required configuration keys present), and a
-known codec ranks as its pipeline kind in every spelling — otherwise a
-misspelled known name would masquerade as an unknown extension and
-silently escape both the spelling and the ordering checks.
+defines is held to its full canonical shape (via
+`zarr_metadata.v3._shape`), and a known codec ranks as its pipeline kind
+in every spelling — otherwise a misspelled known name would masquerade
+as an unknown extension and silently escape both the shape and the
+ordering checks.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Iterator, Mapping, Sequence
-from collections.abc import Set as AbstractSet
-from dataclasses import dataclass
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Final, cast
 
 from zarr_metadata.model._validation import ValidationProblem
+from zarr_metadata.rules._engine import (
+    Rule,
+    as_sequence,
+    as_string_mapping,
+    prefixed,
+)
 from zarr_metadata.v3._shape import (
     entity_name,
     validate_known_chunk_grid_metadata,
@@ -55,51 +45,9 @@ from zarr_metadata.v3.data_type.float64 import hex_float64
 from zarr_metadata.v3.data_type.raw import raw_bytes_dtype_name
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from zarr_metadata.v3.codec.kind import CodecKind
-
-
-@dataclass(frozen=True, slots=True)
-class Rule:
-    """One semantic check over a (possibly partial) metadata document.
-
-    `keys` are the document keys the check reads; the rule fires only when
-    all of them are present. `check` receives the whole document (so
-    coupled fields are examined together) and returns every problem it
-    finds, empty when the rule passes.
-    """
-
-    keys: frozenset[str]
-    check: Callable[[Mapping[str, object]], list[ValidationProblem]]
-
-
-def applicable(rules: Sequence[Rule], present: AbstractSet[str]) -> Iterator[Rule]:
-    """The subset of `rules` whose dependencies are all present."""
-    return (rule for rule in rules if rule.keys <= present)
-
-
-def run_rules(rules: Sequence[Rule], document: Mapping[str, object]) -> list[ValidationProblem]:
-    """Run every dependency-complete rule over `document`, collecting all problems."""
-    problems: list[ValidationProblem] = []
-    for rule in applicable(rules, document.keys()):
-        problems.extend(rule.check(document))
-    return problems
-
-
-def _as_string_mapping(value: object) -> Mapping[str, object] | None:
-    """`value` as a string-keyed mapping, or None if it is not one."""
-    if not isinstance(value, Mapping):
-        return None
-    mapping = cast("Mapping[object, object]", value)
-    if any(not isinstance(key, str) for key in mapping):
-        return None
-    return cast("Mapping[str, object]", mapping)
-
-
-def _as_sequence(value: object) -> Sequence[object] | None:
-    """`value` as a JSON-array-shaped sequence, or None if it is not one."""
-    if isinstance(value, (list, tuple)):
-        return cast("Sequence[object]", value)
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -156,7 +104,7 @@ def _check_float_fill(value: object, dtype_name: str) -> str | None:
 
 
 def _check_byte_sequence(value: object, expected_len: int | None) -> str | None:
-    items = _as_sequence(value)
+    items = as_sequence(value)
     if items is None:
         return f"expected an array of byte values, got {value!r}"
     if expected_len is not None and len(items) != expected_len:
@@ -185,7 +133,7 @@ def _check_fill_for_dtype(dtype_name: str, value: object) -> str | None:
         return _check_float_fill(value, dtype_name)
     if dtype_name in _COMPLEX_COMPONENT_TYPES:
         component = _COMPLEX_COMPONENT_TYPES[dtype_name]
-        pair = _as_sequence(value)
+        pair = as_sequence(value)
         if pair is None or len(pair) != 2:
             return f"expected a [real, imag] pair, got {value!r}"
         for part in pair:
@@ -223,7 +171,7 @@ def _check_fill_for_dtype(dtype_name: str, value: object) -> str | None:
 def _dtype_name(data_type: object) -> str | None:
     if isinstance(data_type, str):
         return data_type
-    mapping = _as_string_mapping(data_type)
+    mapping = as_string_mapping(data_type)
     if mapping is not None:
         name = mapping.get("name")
         if isinstance(name, str):
@@ -293,7 +241,7 @@ def _codec_kind(codec: object) -> CodecKind | None:
 def _codec_label(codec: object) -> str:
     if isinstance(codec, str):
         return repr(codec)
-    mapping = _as_string_mapping(codec)
+    mapping = as_string_mapping(codec)
     if mapping is not None:
         return repr(mapping.get("name"))
     return repr(codec)
@@ -309,7 +257,7 @@ def _check_codec_pipeline_order(document: Mapping[str, object]) -> list[Validati
     be the pipeline's `array->bytes` stage), so that check only fires when
     every codec is classified.
     """
-    entries = _as_sequence(document["codecs"])
+    entries = as_sequence(document["codecs"])
     if entries is None:
         return []
     problems: list[ValidationProblem] = []
@@ -357,15 +305,6 @@ def _check_codec_pipeline_order(document: Mapping[str, object]) -> list[Validati
 # ---------------------------------------------------------------------------
 
 
-def _prefixed(
-    loc: tuple[str | int, ...], problems: list[ValidationProblem]
-) -> list[ValidationProblem]:
-    return [
-        ValidationProblem((*loc, *problem.loc), problem.message, problem.kind)
-        for problem in problems
-    ]
-
-
 def _check_codec_spellings(document: Mapping[str, object]) -> list[ValidationProblem]:
     """Shape problems for every known-name codec entry.
 
@@ -375,14 +314,14 @@ def _check_codec_spellings(document: Mapping[str, object]) -> list[ValidationPro
     untouched (extension openness), and entries without an interpretable
     name decline in favor of the structural validator.
     """
-    entries = _as_sequence(document["codecs"])
+    entries = as_sequence(document["codecs"])
     if entries is None:
         return []
     problems: list[ValidationProblem] = []
     for index, codec in enumerate(entries):
         found = validate_known_codec_metadata(codec)
         if found:
-            problems.extend(_prefixed(("codecs", index), found))
+            problems.extend(prefixed(("codecs", index), found))
     return problems
 
 
@@ -390,7 +329,7 @@ def _check_chunk_grid_spelling(document: Mapping[str, object]) -> list[Validatio
     found = validate_known_chunk_grid_metadata(document["chunk_grid"])
     if not found:
         return []
-    return _prefixed(("chunk_grid",), found)
+    return prefixed(("chunk_grid",), found)
 
 
 # ---------------------------------------------------------------------------
@@ -399,8 +338,8 @@ def _check_chunk_grid_spelling(document: Mapping[str, object]) -> list[Validatio
 
 
 def _check_dimension_names_length(document: Mapping[str, object]) -> list[ValidationProblem]:
-    shape = _as_sequence(document["shape"])
-    names = _as_sequence(document["dimension_names"])
+    shape = as_sequence(document["shape"])
+    names = as_sequence(document["dimension_names"])
     if shape is None or names is None:
         return []
     if len(names) == len(shape):
@@ -421,14 +360,14 @@ def _check_regular_grid_dimensions(document: Mapping[str, object]) -> list[Valid
     `regular` with a `chunk_shape` array in its configuration. Other grids
     are extension points and pass through.
     """
-    shape = _as_sequence(document["shape"])
-    grid = _as_string_mapping(document["chunk_grid"])
+    shape = as_sequence(document["shape"])
+    grid = as_string_mapping(document["chunk_grid"])
     if shape is None or grid is None or grid.get("name") != REGULAR_CHUNK_GRID_NAME:
         return []
-    configuration = _as_string_mapping(grid.get("configuration"))
+    configuration = as_string_mapping(grid.get("configuration"))
     if configuration is None:
         return []
-    chunk_shape = _as_sequence(configuration.get("chunk_shape"))
+    chunk_shape = as_sequence(configuration.get("chunk_shape"))
     if chunk_shape is None or len(chunk_shape) == len(shape):
         return []
     return [
@@ -454,7 +393,4 @@ ZARR_V3_ARRAY_RULES: Final[tuple[Rule, ...]] = (
 
 __all__ = [
     "ZARR_V3_ARRAY_RULES",
-    "Rule",
-    "applicable",
-    "run_rules",
 ]
