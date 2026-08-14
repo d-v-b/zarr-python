@@ -51,7 +51,12 @@ from zarr_metadata.model._validation import (
     validate_consolidated_metadata_v3,
     validate_json,
 )
-from zarr_metadata.rules import ZARR_V2_ARRAY_RULES, ZARR_V3_ARRAY_RULES, run_rules
+from zarr_metadata.rules import (
+    ZARR_V2_ARRAY_RULES,
+    ZARR_V3_ARRAY_RULES,
+    ZARR_V3_GROUP_RULES,
+    run_rules,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -164,8 +169,9 @@ def create_zarr_v3_group_metadata_json(
     """A validated v3 group metadata document (the `zarr.json` content for a group).
 
     Extension fields go in `extensions`; names that shadow standard keys
-    are rejected. No semantic rules apply to group documents today, so the
-    runtime pass is structural only.
+    are rejected. The composition rules recurse into inline consolidated
+    metadata, so an embedded child document invalid under its own rules
+    is reported here, at its path.
     """
     document, problems = _merged_with_extensions(
         kwargs, extensions, GROUP_METADATA_STANDARD_KEYS_V3
@@ -176,6 +182,7 @@ def create_zarr_v3_group_metadata_json(
         parsed = parse_group_metadata_v3(normalized)
     except MetadataValidationError as error:
         problems += error.problems
+    problems += run_rules(ZARR_V3_GROUP_RULES, normalized)
     _raise_if_problems(problems)
     assert parsed is not None
     return parsed

@@ -32,25 +32,38 @@ from zarr_metadata.model._validation import (
 from zarr_metadata.model._validation import (
     validate_array_metadata_v3 as _validate_structure_v3,
 )
+from zarr_metadata.model._validation import (
+    validate_group_metadata_v2 as _validate_group_structure_v2,
+)
+from zarr_metadata.model._validation import (
+    validate_group_metadata_v3 as _validate_group_structure_v3,
+)
 from zarr_metadata.rules._engine import run_rules
 from zarr_metadata.rules._v2_array import ZARR_V2_ARRAY_RULES
 from zarr_metadata.rules._v3_array import ZARR_V3_ARRAY_RULES
+from zarr_metadata.rules._v3_group import ZARR_V3_GROUP_RULES
 
 if TYPE_CHECKING:
     from zarr_metadata.model._validation import ValidationProblem
     from zarr_metadata.v2.array import ZarrV2ArrayMetadataJSON
+    from zarr_metadata.v2.group import ZarrV2GroupMetadataJSON
     from zarr_metadata.v3.array import ZarrV3ArrayMetadataJSON
+    from zarr_metadata.v3.group import ZarrV3GroupMetadataJSON
 
 
 def validate_array_metadata_v3(value: object) -> list[ValidationProblem]:
     """Every reason `value` is not a valid v3 array document.
 
     Structural problems (from the model layer) and composition problems
-    (from `ZARR_V3_ARRAY_RULES`) are reported together.
+    (from `ZARR_V3_ARRAY_RULES`) are reported together. JSON arrays are
+    normalized to tuples before judgment, so list-spelled documents
+    (e.g. fresh `json.loads` output) are judged at the canonical data
+    level rather than rejected for their spelling.
     """
-    problems = _validate_structure_v3(value)
-    if isinstance(value, Mapping):
-        document = cast("Mapping[str, object]", value)
+    normalized = arrays_to_tuples(value)
+    problems = _validate_structure_v3(normalized)
+    if isinstance(normalized, Mapping):
+        document = cast("Mapping[str, object]", normalized)
         problems = problems + run_rules(ZARR_V3_ARRAY_RULES, document)
     return problems
 
@@ -79,10 +92,15 @@ def parse_array_metadata_v3(value: object) -> ZarrV3ArrayMetadataJSON:
 
 
 def validate_array_metadata_v2(value: object) -> list[ValidationProblem]:
-    """Every reason `value` is not a valid v2 array document (merged form)."""
-    problems = _validate_structure_v2(value)
-    if isinstance(value, Mapping):
-        document = cast("Mapping[str, object]", value)
+    """Every reason `value` is not a valid v2 array document (merged form).
+
+    JSON arrays are normalized to tuples before judgment, as in
+    `validate_array_metadata_v3`.
+    """
+    normalized = arrays_to_tuples(value)
+    problems = _validate_structure_v2(normalized)
+    if isinstance(normalized, Mapping):
+        document = cast("Mapping[str, object]", normalized)
         problems = problems + run_rules(ZARR_V2_ARRAY_RULES, document)
     return problems
 
@@ -109,11 +127,72 @@ def parse_array_metadata_v2(value: object) -> ZarrV2ArrayMetadataJSON:
     return cast("ZarrV2ArrayMetadataJSON", normalized)
 
 
+def validate_group_metadata_v3(value: object) -> list[ValidationProblem]:
+    """Every reason `value` is not a valid v3 group document.
+
+    Composition rules recurse into inline consolidated metadata, so a
+    consolidated child document invalid under its own rules is reported
+    here, at its path.
+    """
+    normalized = arrays_to_tuples(value)
+    problems = _validate_group_structure_v3(normalized)
+    if isinstance(normalized, Mapping):
+        document = cast("Mapping[str, object]", normalized)
+        problems = problems + run_rules(ZARR_V3_GROUP_RULES, document)
+    return problems
+
+
+def is_group_metadata_v3(value: object) -> bool:
+    """Whether `value` is a structurally and compositionally valid v3 group doc.
+
+    Deliberately not a `TypeIs` guard — see the module docstring.
+    """
+    return not validate_group_metadata_v3(value)
+
+
+def parse_group_metadata_v3(value: object) -> ZarrV3GroupMetadataJSON:
+    """Return `value` as a valid `ZarrV3GroupMetadataJSON`, or raise."""
+    normalized = arrays_to_tuples(value)
+    problems = validate_group_metadata_v3(normalized)
+    if problems:
+        raise MetadataValidationError(problems)
+    return cast("ZarrV3GroupMetadataJSON", normalized)
+
+
+def validate_group_metadata_v2(value: object) -> list[ValidationProblem]:
+    """Every reason `value` is not a valid v2 group document (merged form).
+
+    v2 group documents carry no composition constraints today, so this is
+    the structural judgment, offered here for a uniform read-side API.
+    """
+    return _validate_group_structure_v2(arrays_to_tuples(value))
+
+
+def is_group_metadata_v2(value: object) -> bool:
+    """Whether `value` is a valid v2 group document (merged form)."""
+    return not validate_group_metadata_v2(value)
+
+
+def parse_group_metadata_v2(value: object) -> ZarrV2GroupMetadataJSON:
+    """Return `value` as a valid `ZarrV2GroupMetadataJSON`, or raise."""
+    normalized = arrays_to_tuples(value)
+    problems = validate_group_metadata_v2(normalized)
+    if problems:
+        raise MetadataValidationError(problems)
+    return cast("ZarrV2GroupMetadataJSON", normalized)
+
+
 __all__ = [
     "is_array_metadata_v2",
     "is_array_metadata_v3",
+    "is_group_metadata_v2",
+    "is_group_metadata_v3",
     "parse_array_metadata_v2",
     "parse_array_metadata_v3",
+    "parse_group_metadata_v2",
+    "parse_group_metadata_v3",
     "validate_array_metadata_v2",
     "validate_array_metadata_v3",
+    "validate_group_metadata_v2",
+    "validate_group_metadata_v3",
 ]

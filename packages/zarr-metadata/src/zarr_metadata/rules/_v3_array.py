@@ -36,8 +36,11 @@ from zarr_metadata.v3._shape import (
     validate_known_chunk_grid_metadata,
     validate_known_codec_metadata,
 )
+from zarr_metadata.v3.chunk_grid.rectilinear import RECTILINEAR_CHUNK_GRID_NAME
 from zarr_metadata.v3.chunk_grid.regular import REGULAR_CHUNK_GRID_NAME
 from zarr_metadata.v3.codec.kind import codec_kind_of_name
+from zarr_metadata.v3.codec.sharding_indexed import SHARDING_INDEXED_CODEC_NAME
+from zarr_metadata.v3.codec.transpose import TRANSPOSE_CODEC_NAME
 from zarr_metadata.v3.data_type.bytes import base64_bytes
 from zarr_metadata.v3.data_type.float16 import hex_float16
 from zarr_metadata.v3.data_type.float32 import hex_float32
@@ -45,7 +48,7 @@ from zarr_metadata.v3.data_type.float64 import hex_float64
 from zarr_metadata.v3.data_type.raw import raw_bytes_dtype_name
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator, Sequence
 
     from zarr_metadata.v3.codec.kind import CodecKind
 
@@ -247,7 +250,9 @@ def _codec_label(codec: object) -> str:
     return repr(codec)
 
 
-def _check_codec_pipeline_order(document: Mapping[str, object]) -> list[ValidationProblem]:
+def _pipeline_order_problems(
+    entries: Sequence[object], loc: tuple[str | int, ...]
+) -> list[ValidationProblem]:
     """The spec pipeline shape: `array->array`* `array->bytes` `bytes->bytes`*.
 
     Codecs are classified by name across every spelling (see
@@ -257,9 +262,6 @@ def _check_codec_pipeline_order(document: Mapping[str, object]) -> list[Validati
     be the pipeline's `array->bytes` stage), so that check only fires when
     every codec is classified.
     """
-    entries = as_sequence(document["codecs"])
-    if entries is None:
-        return []
     problems: list[ValidationProblem] = []
     kinds = [_codec_kind(codec) for codec in entries]
     max_rank_seen = -1
@@ -271,7 +273,7 @@ def _check_codec_pipeline_order(document: Mapping[str, object]) -> list[Validati
         if rank < max_rank_seen:
             problems.append(
                 ValidationProblem(
-                    ("codecs", index),
+                    (*loc, index),
                     f"{kind.replace('_', '->')} codec {_codec_label(codec)} may not "
                     "follow a later-stage codec in the pipeline",
                     "invalid_value",
@@ -283,7 +285,7 @@ def _check_codec_pipeline_order(document: Mapping[str, object]) -> list[Validati
             if array_bytes_count > 1:
                 problems.append(
                     ValidationProblem(
-                        ("codecs", index),
+                        (*loc, index),
                         f"extra array->bytes codec {_codec_label(codec)}: a pipeline "
                         "has exactly one",
                         "invalid_value",
@@ -292,7 +294,7 @@ def _check_codec_pipeline_order(document: Mapping[str, object]) -> list[Validati
     if array_bytes_count == 0 and all(kind is not None for kind in kinds):
         problems.append(
             ValidationProblem(
-                ("codecs",),
+                loc,
                 "codec pipeline has no array->bytes codec",
                 "invalid_value",
             )
@@ -300,13 +302,22 @@ def _check_codec_pipeline_order(document: Mapping[str, object]) -> list[Validati
     return problems
 
 
+def _check_codec_pipeline_order(document: Mapping[str, object]) -> list[ValidationProblem]:
+    entries = as_sequence(document["codecs"])
+    if entries is None:
+        return []
+    return _pipeline_order_problems(entries, ("codecs",))
+
+
 # ---------------------------------------------------------------------------
 # known-name spellings
 # ---------------------------------------------------------------------------
 
 
-def _check_codec_spellings(document: Mapping[str, object]) -> list[ValidationProblem]:
-    """Shape problems for every known-name codec entry.
+def _spelling_problems(
+    entries: Sequence[object], loc: tuple[str | int, ...]
+) -> list[ValidationProblem]:
+    """Shape problems for every known-name codec entry in `entries`.
 
     Delegates to the type-level validators in `zarr_metadata.v3._shape`,
     so known names are held to their full canonical shapes — spelling
@@ -314,15 +325,19 @@ def _check_codec_spellings(document: Mapping[str, object]) -> list[ValidationPro
     untouched (extension openness), and entries without an interpretable
     name decline in favor of the structural validator.
     """
-    entries = as_sequence(document["codecs"])
-    if entries is None:
-        return []
     problems: list[ValidationProblem] = []
     for index, codec in enumerate(entries):
         found = validate_known_codec_metadata(codec)
         if found:
-            problems.extend(prefixed(("codecs", index), found))
+            problems.extend(prefixed((*loc, index), found))
     return problems
+
+
+def _check_codec_spellings(document: Mapping[str, object]) -> list[ValidationProblem]:
+    entries = as_sequence(document["codecs"])
+    if entries is None:
+        return []
+    return _spelling_problems(entries, ("codecs",))
 
 
 def _check_chunk_grid_spelling(document: Mapping[str, object]) -> list[ValidationProblem]:
@@ -353,30 +368,333 @@ def _check_dimension_names_length(document: Mapping[str, object]) -> list[Valida
     ]
 
 
-def _check_regular_grid_dimensions(document: Mapping[str, object]) -> list[ValidationProblem]:
-    """`regular` chunk grids must chunk every array dimension.
+# ---------------------------------------------------------------------------
+# chunk grid geometry and values
+# ---------------------------------------------------------------------------
 
-    Only fires for a grid this package can interpret: an object named
-    `regular` with a `chunk_shape` array in its configuration. Other grids
-    are extension points and pass through.
+
+def _valid_grid_configuration(grid: object) -> tuple[str, Mapping[str, object]] | None:
+    """`grid`'s (name, configuration) if it is a shape-valid known grid.
+
+    Declines (None) for unknown grids and for shape-invalid known grids —
+    the spelling rule owns the latter complaint.
+    """
+    verdict = validate_known_chunk_grid_metadata(grid)
+    if verdict is None or verdict:
+        return None
+    mapping = as_string_mapping(grid)
+    if mapping is None:
+        return None
+    name = mapping.get("name")
+    configuration = as_string_mapping(mapping.get("configuration"))
+    if not isinstance(name, str) or configuration is None:
+        return None
+    return name, configuration
+
+
+def _expanded_dim_extent(spec: Sequence[object]) -> int | None:
+    """The total extent an explicit rectilinear dim spec covers, or None.
+
+    Entries are chunk sizes or `[size, count]` run-length pairs. Answers
+    None when any entry is non-positive (the values rule owns that
+    complaint, and a sum over bad entries would be noise).
+    """
+    total = 0
+    for item in spec:
+        if _is_int(item) and cast(int, item) >= 1:
+            total += cast(int, item)
+        elif isinstance(item, tuple):
+            size, count = cast("tuple[object, object]", item)
+            if not (_is_int(size) and _is_int(count)):
+                return None
+            if cast(int, size) < 1 or cast(int, count) < 1:
+                return None
+            total += cast(int, size) * cast(int, count)
+        else:
+            return None
+    return total
+
+
+def _check_chunk_grid_values(document: Mapping[str, object]) -> list[ValidationProblem]:
+    """Chunk extents must be positive, in both known grids.
+
+    The shape validators enforce the value *types* (integers, RLE pairs);
+    positivity is a value judgment and lives here.
+    """
+    valid = _valid_grid_configuration(document["chunk_grid"])
+    if valid is None:
+        return []
+    name, configuration = valid
+    problems: list[ValidationProblem] = []
+    if name == REGULAR_CHUNK_GRID_NAME:
+        chunk_shape = cast("tuple[int, ...]", configuration["chunk_shape"])
+        loc = ("chunk_grid", "configuration", "chunk_shape")
+        problems.extend(
+            ValidationProblem(
+                (*loc, position), f"expected a positive chunk extent, got {extent}", "invalid_value"
+            )
+            for position, extent in enumerate(chunk_shape)
+            if extent < 1
+        )
+    elif name == RECTILINEAR_CHUNK_GRID_NAME:
+        chunk_shapes = cast("tuple[object, ...]", configuration["chunk_shapes"])
+        for dim, spec in enumerate(chunk_shapes):
+            loc = ("chunk_grid", "configuration", "chunk_shapes", dim)
+            if _is_int(spec):
+                if cast(int, spec) < 1:
+                    problems.append(
+                        ValidationProblem(
+                            loc, f"expected a positive chunk extent, got {spec}", "invalid_value"
+                        )
+                    )
+                continue
+            for position, item in enumerate(cast("tuple[object, ...]", spec)):
+                if _is_int(item) and cast(int, item) < 1:
+                    problems.append(
+                        ValidationProblem(
+                            (*loc, position),
+                            f"expected a positive chunk extent, got {item}",
+                            "invalid_value",
+                        )
+                    )
+                elif isinstance(item, tuple):
+                    size, count = cast("tuple[int, int]", item)
+                    if size < 1 or count < 1:
+                        problems.append(
+                            ValidationProblem(
+                                (*loc, position),
+                                f"expected a positive [size, count] pair, got {item!r}",
+                                "invalid_value",
+                            )
+                        )
+    return problems
+
+
+def _check_chunk_grid_geometry(document: Mapping[str, object]) -> list[ValidationProblem]:
+    """Known chunk grids must agree with `shape` on dimensionality.
+
+    `regular` grids must chunk every array dimension; `rectilinear` grids
+    additionally pin each explicitly-listed dimension's chunk sizes to sum
+    to that dimension's extent (bare-integer dim specs are uniform
+    shorthand and impose no sum constraint). Unknown grids pass through.
     """
     shape = as_sequence(document["shape"])
-    grid = as_string_mapping(document["chunk_grid"])
-    if shape is None or grid is None or grid.get("name") != REGULAR_CHUNK_GRID_NAME:
+    valid = _valid_grid_configuration(document["chunk_grid"])
+    if shape is None or valid is None:
         return []
-    configuration = as_string_mapping(grid.get("configuration"))
-    if configuration is None:
+    name, configuration = valid
+    if name == REGULAR_CHUNK_GRID_NAME:
+        chunk_shape = cast("tuple[int, ...]", configuration["chunk_shape"])
+        if len(chunk_shape) == len(shape):
+            return []
+        return [
+            ValidationProblem(
+                ("chunk_grid", "configuration", "chunk_shape"),
+                f"chunk_shape has {len(chunk_shape)} entries but shape has {len(shape)} dimensions",
+                "invalid_value",
+            )
+        ]
+    if name == RECTILINEAR_CHUNK_GRID_NAME:
+        chunk_shapes = cast("tuple[object, ...]", configuration["chunk_shapes"])
+        if len(chunk_shapes) != len(shape):
+            return [
+                ValidationProblem(
+                    ("chunk_grid", "configuration", "chunk_shapes"),
+                    f"chunk_shapes has {len(chunk_shapes)} entries but shape has "
+                    f"{len(shape)} dimensions",
+                    "invalid_value",
+                )
+            ]
+        problems: list[ValidationProblem] = []
+        for dim, (spec, extent) in enumerate(zip(chunk_shapes, shape, strict=True)):
+            if not _is_int(extent) or _is_int(spec) or not isinstance(spec, tuple):
+                continue
+            total = _expanded_dim_extent(cast("tuple[object, ...]", spec))
+            if total is not None and total != extent:
+                problems.append(
+                    ValidationProblem(
+                        ("chunk_grid", "configuration", "chunk_shapes", dim),
+                        f"chunk sizes sum to {total} but shape[{dim}] is {extent}",
+                        "invalid_value",
+                    )
+                )
+        return problems
+    return []
+
+
+# ---------------------------------------------------------------------------
+# codec configurations against the rest of the document
+# ---------------------------------------------------------------------------
+
+
+def _named_configurations(
+    entries: Sequence[object], name: str
+) -> Iterator[tuple[int, Mapping[str, object]]]:
+    """(index, configuration) for each shape-valid codec named `name`.
+
+    Shape-invalid entries decline — the spelling rule owns their
+    complaints, and value judgments over a malformed configuration would
+    be noise on top of them.
+    """
+    for index, codec in enumerate(entries):
+        if entity_name(codec) != name:
+            continue
+        verdict = validate_known_codec_metadata(codec)
+        if verdict is None or verdict or isinstance(codec, str):
+            continue
+        mapping = as_string_mapping(codec)
+        if mapping is None:
+            continue
+        configuration = as_string_mapping(mapping.get("configuration"))
+        if configuration is not None:
+            yield index, configuration
+
+
+def _transpose_order_problems(
+    entries: Sequence[object], loc: tuple[str | int, ...]
+) -> list[ValidationProblem]:
+    problems: list[ValidationProblem] = []
+    for index, configuration in _named_configurations(entries, TRANSPOSE_CODEC_NAME):
+        order = cast("tuple[int, ...]", configuration["order"])
+        if sorted(order) != list(range(len(order))):
+            problems.append(
+                ValidationProblem(
+                    (*loc, index, "configuration", "order"),
+                    f"expected a permutation of 0..{len(order) - 1}, got {order!r}",
+                    "invalid_value",
+                )
+            )
+    return problems
+
+
+def _check_transpose_orders(document: Mapping[str, object]) -> list[ValidationProblem]:
+    """A transpose `order` must be a permutation of its own indices."""
+    entries = as_sequence(document["codecs"])
+    if entries is None:
         return []
-    chunk_shape = as_sequence(configuration.get("chunk_shape"))
-    if chunk_shape is None or len(chunk_shape) == len(shape):
+    return _transpose_order_problems(entries, ("codecs",))
+
+
+def _check_transpose_rank(document: Mapping[str, object]) -> list[ValidationProblem]:
+    """A top-level transpose `order` must have one entry per dimension of shape."""
+    shape = as_sequence(document["shape"])
+    entries = as_sequence(document["codecs"])
+    if shape is None or entries is None:
         return []
-    return [
-        ValidationProblem(
-            ("chunk_grid", "configuration", "chunk_shape"),
-            f"chunk_shape has {len(chunk_shape)} entries but shape has {len(shape)} dimensions",
-            "invalid_value",
+    problems: list[ValidationProblem] = []
+    for index, configuration in _named_configurations(entries, TRANSPOSE_CODEC_NAME):
+        order = cast("tuple[int, ...]", configuration["order"])
+        if len(order) != len(shape):
+            problems.append(
+                ValidationProblem(
+                    ("codecs", index, "configuration", "order"),
+                    f"order has {len(order)} entries but shape has {len(shape)} dimensions",
+                    "invalid_value",
+                )
+            )
+    return problems
+
+
+# ---------------------------------------------------------------------------
+# sharding: inner pipelines and geometry
+# ---------------------------------------------------------------------------
+
+
+def _inner_pipeline_problems(
+    entries: Sequence[object], loc: tuple[str | int, ...]
+) -> list[ValidationProblem]:
+    """Pipeline judgments inside shape-valid sharding codecs, recursively.
+
+    A sharding codec's `codecs` and `index_codecs` are pipelines like any
+    other: the same kind-ordering, known-shape, and transpose-permutation
+    checks that judge the top-level pipeline judge them, at every nesting
+    depth. Inner chunk extents must also be positive.
+    """
+    problems: list[ValidationProblem] = []
+    for index, configuration in _named_configurations(entries, SHARDING_INDEXED_CODEC_NAME):
+        chunk_shape = cast("tuple[int, ...]", configuration["chunk_shape"])
+        problems.extend(
+            ValidationProblem(
+                (*loc, index, "configuration", "chunk_shape", position),
+                f"expected a positive chunk extent, got {extent}",
+                "invalid_value",
+            )
+            for position, extent in enumerate(chunk_shape)
+            if extent < 1
         )
-    ]
+        for key in ("codecs", "index_codecs"):
+            inner = cast("tuple[object, ...]", configuration[key])
+            inner_loc = (*loc, index, "configuration", key)
+            problems.extend(_pipeline_order_problems(inner, inner_loc))
+            problems.extend(_spelling_problems(inner, inner_loc))
+            problems.extend(_transpose_order_problems(inner, inner_loc))
+            problems.extend(_inner_pipeline_problems(inner, inner_loc))
+    return problems
+
+
+def _check_sharding_pipelines(document: Mapping[str, object]) -> list[ValidationProblem]:
+    entries = as_sequence(document["codecs"])
+    if entries is None:
+        return []
+    return _inner_pipeline_problems(entries, ("codecs",))
+
+
+def _sharding_geometry_problems(
+    entries: Sequence[object], outer: Sequence[int], loc: tuple[str | int, ...]
+) -> list[ValidationProblem]:
+    problems: list[ValidationProblem] = []
+    for index, configuration in _named_configurations(entries, SHARDING_INDEXED_CODEC_NAME):
+        inner = cast("tuple[int, ...]", configuration["chunk_shape"])
+        codec_loc = (*loc, index, "configuration", "chunk_shape")
+        if len(inner) != len(outer):
+            problems.append(
+                ValidationProblem(
+                    codec_loc,
+                    f"chunk_shape has {len(inner)} entries but the enclosing chunk has "
+                    f"{len(outer)} dimensions",
+                    "invalid_value",
+                )
+            )
+            continue
+        for position, (outer_extent, inner_extent) in enumerate(zip(outer, inner, strict=True)):
+            if inner_extent >= 1 and outer_extent % inner_extent != 0:
+                problems.append(
+                    ValidationProblem(
+                        (*codec_loc, position),
+                        f"inner chunk extent {inner_extent} does not evenly divide the "
+                        f"enclosing chunk extent {outer_extent}",
+                        "invalid_value",
+                    )
+                )
+        problems.extend(
+            _sharding_geometry_problems(
+                cast("tuple[object, ...]", configuration["codecs"]),
+                inner,
+                (*loc, index, "configuration", "codecs"),
+            )
+        )
+    return problems
+
+
+def _check_sharding_geometry(document: Mapping[str, object]) -> list[ValidationProblem]:
+    """Sharding inner chunks must tile the enclosing chunk, at every depth.
+
+    Fires when the chunk grid is a shape-valid `regular` grid with
+    positive extents; the inner `chunk_shape` must rank-match and evenly
+    divide the enclosing chunk shape, recursively through nested sharding
+    (each level's `chunk_shape` encloses the next).
+    """
+    entries = as_sequence(document["codecs"])
+    valid = _valid_grid_configuration(document["chunk_grid"])
+    if entries is None or valid is None:
+        return []
+    name, configuration = valid
+    if name != REGULAR_CHUNK_GRID_NAME:
+        return []
+    chunk_shape = cast("tuple[int, ...]", configuration["chunk_shape"])
+    if any(extent < 1 for extent in chunk_shape):
+        return []  # the values rule owns that complaint
+    return _sharding_geometry_problems(entries, chunk_shape, ("codecs",))
 
 
 ZARR_V3_ARRAY_RULES: Final[tuple[Rule, ...]] = (
@@ -384,11 +702,16 @@ ZARR_V3_ARRAY_RULES: Final[tuple[Rule, ...]] = (
     Rule(frozenset({"data_type", "fill_value"}), _check_fill_matches_dtype),
     Rule(frozenset({"codecs"}), _check_codec_pipeline_order),
     Rule(frozenset({"codecs"}), _check_codec_spellings),
+    Rule(frozenset({"codecs"}), _check_transpose_orders),
+    Rule(frozenset({"codecs"}), _check_sharding_pipelines),
     Rule(frozenset({"chunk_grid"}), _check_chunk_grid_spelling),
+    Rule(frozenset({"chunk_grid"}), _check_chunk_grid_values),
     Rule(frozenset({"shape", "dimension_names"}), _check_dimension_names_length),
-    Rule(frozenset({"shape", "chunk_grid"}), _check_regular_grid_dimensions),
+    Rule(frozenset({"shape", "chunk_grid"}), _check_chunk_grid_geometry),
+    Rule(frozenset({"shape", "codecs"}), _check_transpose_rank),
+    Rule(frozenset({"chunk_grid", "codecs"}), _check_sharding_geometry),
 )
-"""The semantic rule set for v3 array metadata documents."""
+"""The composition rule set for v3 array metadata documents."""
 
 
 __all__ = [
