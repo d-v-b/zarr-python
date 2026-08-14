@@ -4,14 +4,17 @@ Tests for the dual-store cache implementation.
 
 import asyncio
 import time
+from typing import Any
 
 import pytest
 
 from zarr.abc.store import RangeByteRequest, Store, SuffixByteRequest
-from zarr.core.buffer.core import default_buffer_prototype
+from zarr.core.buffer.core import Buffer, default_buffer_prototype
 from zarr.core.buffer.cpu import Buffer as CPUBuffer
 from zarr.experimental.cache_store import CacheStore
 from zarr.storage import MemoryStore
+from zarr.storage._wrapper import WrapperStore
+from zarr.testing.store import StoreTests
 
 
 class TestCacheStore:
@@ -1036,6 +1039,322 @@ class TestCacheStore:
         # Key is gone from source
         result = await cached_store.get("key", proto)
         assert result is None
+
+
+class _GatedCacheStore(WrapperStore[Store]):
+    """Cache backend whose first mutating call blocks until it is released.
+
+    Gives the tests a deterministic interleaving point *inside* a backing-store
+    mutation, which is where the tracking state and the backing store can be
+    observed out of step if they are not mutated under one lock.
+    """
+
+    def __init__(self, store: Store) -> None:
+        super().__init__(store)
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.armed = False
+
+    async def _gate(self) -> None:
+        if self.armed:
+            self.armed = False
+            self.entered.set()
+            await self.release.wait()
+
+    async def delete(self, key: str) -> None:
+        await self._gate()
+        await self._store.delete(key)
+
+    async def clear(self) -> None:
+        # Gate *after* the wipe: the orphan window is between the backing store
+        # emptying and the tracking reset, not before.
+        await self._store.clear()
+        await self._gate()
+
+
+class TestCacheStoreWriteCoherence:
+    """Writes through the cache must never leave a stale or orphaned entry.
+
+    Each of these pins a bug that `CacheStore` had: a write path that bypassed
+    the cache entirely, or a backing-store mutation that was not published in
+    the same locked section as its tracking mutation.
+    """
+
+    @staticmethod
+    def _counted_size(cached_store: CacheStore) -> int:
+        """The size the tracking entries actually add up to."""
+        return sum(cached_store._state.key_sizes.values())
+
+    @pytest.fixture
+    def cached_store(self) -> CacheStore:
+        return CacheStore(MemoryStore(), cache_store=MemoryStore())
+
+    @pytest.mark.parametrize(
+        ("operation", "expected"),
+        [
+            ("set", b"NEW"),
+            ("set_if_not_exists", b"NEW"),
+            ("_set_many", b"NEW"),
+            ("delete", None),
+            ("delete_dir", None),
+            ("clear", None),
+        ],
+    )
+    async def test_write_operations_invalidate_the_cache(
+        self, cached_store: CacheStore, operation: str, expected: bytes | None
+    ) -> None:
+        """After any write through the cache, a read must agree with the source.
+
+        `set_if_not_exists`, `_set_many`, `delete_dir` and `clear` were not
+        overridden, so `WrapperStore` forwarded them straight to the source and
+        the cache went on serving the superseded value indefinitely.
+        """
+        proto = default_buffer_prototype()
+        key = "pfx/key"
+        await cached_store.set(key, CPUBuffer.from_bytes(b"OLD"))
+        assert (await cached_store.get(key, proto)).to_bytes() == b"OLD"  # type: ignore[union-attr]
+
+        new = CPUBuffer.from_bytes(b"NEW")
+        if operation == "set":
+            await cached_store.set(key, new)
+        elif operation == "set_if_not_exists":
+            # The key exists at the source, so this is a no-op there; it must
+            # still not leave a cached value the source disagrees with.
+            await cached_store._store.delete(key)
+            await cached_store.set_if_not_exists(key, new)
+        elif operation == "_set_many":
+            await cached_store._set_many([(key, new)])
+        elif operation == "delete":
+            await cached_store.delete(key)
+        elif operation == "delete_dir":
+            await cached_store.delete_dir("pfx")
+        else:
+            await cached_store.clear()
+
+        source = await cached_store._store.get(key, proto)
+        assert (source.to_bytes() if source is not None else None) == expected
+        served = await cached_store.get(key, proto)
+        assert (served.to_bytes() if served is not None else None) == expected
+
+    async def test_overwriting_an_array_does_not_serve_the_old_one(self) -> None:
+        """`overwrite=True` goes through `delete_dir`; the old array must not survive it."""
+        import numpy as np
+
+        import zarr
+
+        cached_store = CacheStore(MemoryStore(), cache_store=MemoryStore())
+        arr = zarr.create_array(cached_store, name="a", shape=(4,), chunks=(4,), dtype="i4")
+        arr[:] = np.array([1, 2, 3, 4], dtype="i4")
+        np.testing.assert_array_equal(zarr.open_array(cached_store, path="a")[:], [1, 2, 3, 4])
+
+        zarr.create_array(
+            cached_store, name="a", shape=(4,), chunks=(4,), dtype="i4", overwrite=True
+        )
+        # Fresh array, so every chunk is the fill value — both through the cache
+        # and at the source.
+        np.testing.assert_array_equal(zarr.open_array(cached_store, path="a")[:], [0, 0, 0, 0])
+        np.testing.assert_array_equal(
+            zarr.open_array(cached_store._store, path="a")[:], [0, 0, 0, 0]
+        )
+
+    async def test_size_accounting_is_exact_across_operations(
+        self, cached_store: CacheStore
+    ) -> None:
+        """`current_size` must always equal the tracked entries' sizes.
+
+        `delete` used to drop the tracking entries without reclaiming their
+        bytes, so every delete permanently inflated `current_size` and ate into
+        the `max_size` budget.
+        """
+        proto = default_buffer_prototype()
+        await cached_store.set("a", CPUBuffer.from_bytes(b"x" * 100))
+        assert cached_store._state.current_size == self._counted_size(cached_store) == 100
+
+        await cached_store.set("a", CPUBuffer.from_bytes(b"x" * 40))  # overwrite
+        assert cached_store._state.current_size == self._counted_size(cached_store) == 40
+
+        await cached_store.set("b", CPUBuffer.from_bytes(b"y" * 10))
+        await cached_store.delete("a")
+        assert cached_store._state.current_size == self._counted_size(cached_store) == 10
+
+        await cached_store.get("missing", proto)  # miss on an absent key
+        await cached_store.clear()
+        assert cached_store._state.current_size == self._counted_size(cached_store) == 0
+
+    @pytest.mark.parametrize("populate_via", ["set", "read"])
+    async def test_oversized_value_leaves_no_orphan(self, populate_via: str) -> None:
+        """A value too large to track must not be left in the backing cache.
+
+        It would be uncounted against `max_size` and never eviction-eligible,
+        yet still served as a hit — a permanent, unbounded leak.
+        """
+        proto = default_buffer_prototype()
+        source = MemoryStore()
+        backing = MemoryStore()
+        cached_store = CacheStore(source, cache_store=backing, max_size=10)
+        value = CPUBuffer.from_bytes(b"z" * 50)
+
+        if populate_via == "set":
+            await cached_store.set("k", value)
+        else:
+            await source.set("k", value)
+            assert (await cached_store.get("k", proto)).to_bytes() == b"z" * 50  # type: ignore[union-attr]
+
+        assert await backing.get("k", proto) is None, "orphan left in the backing cache"
+        assert "k" not in cached_store._state.key_sizes
+        assert cached_store._state.current_size == 0
+        # The value is still readable — it just comes from the source every time.
+        assert (await cached_store.get("k", proto)).to_bytes() == b"z" * 50  # type: ignore[union-attr]
+
+    async def test_delete_racing_a_set_keeps_the_cache_consistent(self) -> None:
+        """A `set` landing inside `delete`'s backing-store call must not be clobbered.
+
+        `delete` used to drop its tracking and then delete from the backing
+        store outside the lock, so a concurrent `set` could be published in that
+        window and have its backing value deleted underneath it — leaving a
+        tracking entry that claimed bytes the backing store did not hold.
+        """
+        proto = default_buffer_prototype()
+        backing = _GatedCacheStore(MemoryStore())
+        cached_store = CacheStore(MemoryStore(), cache_store=backing)
+        await cached_store.set("k", CPUBuffer.from_bytes(b"AAAA"))
+
+        backing.armed = True
+        deleting = asyncio.create_task(cached_store.delete("k"))
+        await backing.entered.wait()  # inside the backing delete, tracking already dropped
+        setting = asyncio.create_task(cached_store.set("k", CPUBuffer.from_bytes(b"BBBBBBBB")))
+        await asyncio.sleep(0)
+        backing.release.set()
+        await asyncio.gather(deleting, setting)
+
+        assert cached_store._state.current_size == self._counted_size(cached_store)
+        tracked = "k" in cached_store._state.key_sizes
+        assert (await backing.get("k", proto) is not None) == tracked, (
+            "tracking and backing store disagree"
+        )
+        source = await cached_store._store.get("k", proto)
+        served = await cached_store.get("k", proto)
+        assert (served.to_bytes() if served else None) == (source.to_bytes() if source else None), (
+            "cache disagrees with the source"
+        )
+
+    async def test_clear_cache_racing_a_set_leaves_no_orphan(self) -> None:
+        """A `set` landing inside `clear_cache`'s backing wipe must not be orphaned.
+
+        `clear_cache` used to wipe the backing store before taking the lock, so
+        a `set` published in that window kept its backing value while its
+        tracking entry was wiped by the reset that followed — an untracked
+        entry served as a hit forever.
+        """
+        backing = _GatedCacheStore(MemoryStore())
+        cached_store = CacheStore(MemoryStore(), cache_store=backing)
+        await cached_store.set("k", CPUBuffer.from_bytes(b"AAAA"))
+
+        backing.armed = True
+        clearing = asyncio.create_task(cached_store.clear_cache())
+        await backing.entered.wait()
+        setting = asyncio.create_task(cached_store.set("k", CPUBuffer.from_bytes(b"BBBBBBBB")))
+        await asyncio.sleep(0)
+        backing.release.set()
+        await asyncio.gather(clearing, setting)
+
+        assert cached_store._state.current_size == self._counted_size(cached_store)
+        for cached_key in [k async for k in backing.list()]:
+            assert cached_key in cached_store._state.key_sizes, (
+                f"untracked value for {cached_key} left in the backing cache"
+            )
+
+    async def test_open_constructs_a_cache_store(self) -> None:
+        """`CacheStore.open` must build a `CacheStore`, not raise.
+
+        The inherited `WrapperStore.open` builds the *wrapped* store from a
+        `store_cls` argument, so it cannot supply `cache_store`.
+        """
+        cached_store = await CacheStore.open(MemoryStore(), cache_store=MemoryStore())
+        assert isinstance(cached_store, CacheStore)
+        await cached_store.set("k", CPUBuffer.from_bytes(b"v"))
+        assert (await cached_store.get("k", default_buffer_prototype())).to_bytes() == b"v"  # type: ignore[union-attr]
+
+
+class TestCacheStoreConformance(StoreTests[CacheStore, CPUBuffer]):
+    """Run `CacheStore` through the shared `Store` conformance suite.
+
+    `CacheStore` is a `Store` that users hand to `zarr.open`, so it owes the
+    same contract as every other store. The write paths this module fixes were
+    exactly the ones the shared suite exercises and nothing else did.
+    """
+
+    store_cls = CacheStore
+    buffer_cls = CPUBuffer
+
+    @pytest.fixture
+    def store_kwargs(self) -> dict[str, Any]:
+        return {"store": MemoryStore(), "cache_store": MemoryStore()}
+
+    async def get(self, store: CacheStore, key: str) -> Buffer:
+        # Read the source store, not the cache: the harness asks "what did the
+        # store actually persist?", which is a question about the source.
+        return await store._store.get(key, prototype=default_buffer_prototype())  # type: ignore[return-value]
+
+    async def set(self, store: CacheStore, key: str, value: Buffer) -> None:
+        await store._store.set(key, value)
+
+    def test_store_repr(self, store: CacheStore) -> None:
+        assert "CacheStore" in repr(store)
+
+    def test_store_supports_writes(self, store: CacheStore) -> None:
+        assert store.supports_writes
+
+    def test_store_supports_listing(self, store: CacheStore) -> None:
+        assert store.supports_listing
+
+    @pytest.mark.skip(
+        reason="CacheStore deliberately opts out of sync IO (_supports_sync_io is False), "
+        "but the inherited WrapperStore sync methods still satisfy the protocol "
+        "structurally, so the harness does not skip this itself."
+    )
+    async def test_delete_sync_visible_to_async_get(self, store: CacheStore) -> None: ...
+
+    # The four tests below are skipped because of pre-existing gaps in
+    # CacheStore's construction API, not because of anything this module
+    # changes. They are left visible rather than dropped so the gaps are
+    # recorded somewhere other than a review comment.
+
+    @pytest.mark.skip(
+        reason="CacheStore.__init__ takes no read_only kwarg; it derives read_only from the "
+        "wrapped source store. Use CacheStore.with_read_only instead (covered by "
+        "TestCacheStore::test_with_read_only_round_trip)."
+    )
+    async def test_store_open_read_only(
+        self, open_kwargs: dict[str, Any], read_only: bool
+    ) -> None: ...
+
+    @pytest.mark.skip(reason="See test_store_open_read_only: no read_only constructor kwarg.")
+    async def test_read_only_store_raises(self, open_kwargs: dict[str, Any]) -> None: ...
+
+    @pytest.mark.skip(reason="See test_store_open_read_only: no read_only constructor kwarg.")
+    async def test_with_read_only_store(self, open_kwargs: dict[str, Any]) -> None: ...
+
+    @pytest.mark.skip(
+        reason="CacheStore._with_store raises by design: a copy wrapping a different source "
+        "store would share this store's cache, so the cached keys would collide. That makes "
+        "the __enter__/__exit__ protocol unsupported."
+    )
+    def test_store_context_manager(self, open_kwargs: dict[str, Any]) -> None: ...
+
+
+async def test_cache_store_requires_listing_support() -> None:
+    """A cache store that cannot list cannot back `delete_dir`/`clear`.
+
+    Rejecting it up front beats failing later, mid-write, with a
+    `NotImplementedError` from the backing store.
+    """
+
+    no_listing = MemoryStore()
+    no_listing.supports_listing = False
+
+    with pytest.raises(ValueError, match="does not support listing"):
+        CacheStore(MemoryStore(), cache_store=no_listing)
 
 
 def test_cache_store_opts_out_of_sync_io() -> None:
