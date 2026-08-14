@@ -2845,6 +2845,16 @@ def test_result_into_fills_the_callers_buffer() -> None:
     np.testing.assert_array_equal(np.ma.getmaskarray(out_masked), masked_source.mask)
     np.testing.assert_array_equal(out_masked.compressed(), masked_source.compressed())
 
+    # Non-contiguous layouts with distinct cells remain valid destinations.
+    view = LazyArray.from_numpy(data).lazy[1:6, 1:4, :]
+    strided_outputs = (
+        np.empty(view.shape, dtype=view.dtype)[::-1],
+        np.empty(view.shape[::-1], dtype=view.dtype).transpose(2, 1, 0),
+    )
+    for strided_out in strided_outputs:
+        assert view.result_into(strided_out) is strided_out
+        np.testing.assert_array_equal(strided_out, np.asarray(view.result()))
+
 
 def test_result_into_rejects_a_non_array() -> None:
     view = LazyArray.from_numpy(reference())
@@ -2869,6 +2879,27 @@ def test_result_into_rejects_a_read_only_buffer() -> None:
     out = np.empty(view.shape, dtype=view.dtype)
     out.flags.writeable = False
     with pytest.raises(ValueError, match="read-only"):
+        view.result_into(out)
+
+
+def test_result_into_rejects_a_zero_stride_buffer() -> None:
+    view = LazyArray.from_numpy(np.arange(4))
+    storage = np.empty(1, dtype=view.dtype)
+    out = np.lib.stride_tricks.as_strided(storage, shape=view.shape, strides=(0,), writeable=True)
+    with pytest.raises(ValueError, match="overlapping elements"):
+        view.result_into(out)
+
+
+def test_result_into_rejects_a_nonzero_stride_overlapping_buffer() -> None:
+    view = LazyArray.from_numpy(np.arange(4).reshape(2, 2))
+    storage = np.empty(3, dtype=view.dtype)
+    out = np.lib.stride_tricks.as_strided(
+        storage,
+        shape=view.shape,
+        strides=(view.dtype.itemsize, view.dtype.itemsize),
+        writeable=True,
+    )
+    with pytest.raises(ValueError, match="overlapping elements"):
         view.result_into(out)
 
 

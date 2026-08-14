@@ -315,6 +315,33 @@ def _overlaps(out: np.ndarray[Any, Any], array: Any) -> bool:
     return bool(np.may_share_memory(out, array)) and bool(np.shares_memory(out, array))
 
 
+def _has_internal_overlap(out: np.ndarray[Any, Any]) -> bool:
+    """Whether distinct logical cells of ``out`` may share storage.
+
+    NumPy exposes exact overlap checks between two arrays, but not within one
+    strided array. Prove the common layouts disjoint by walking axes from the
+    smallest absolute stride outward: each next axis must begin beyond the
+    complete byte span reachable through the axes already seen. Standard
+    slices, reversals, and transposes satisfy this proof. Ambiguous exotic
+    layouts are rejected along with layouts that definitely overlap; accepting
+    one would make ``result_into`` silently return a buffer whose logical cells
+    cannot hold distinct result values.
+    """
+    if out.size <= 1 or out.dtype.itemsize == 0:
+        return False
+    byte_span = out.dtype.itemsize
+    axes = sorted(
+        (abs(stride), extent)
+        for extent, stride in zip(out.shape, out.strides, strict=True)
+        if extent > 1
+    )
+    for stride, extent in axes:
+        if stride < byte_span:
+            return True
+        byte_span += (extent - 1) * stride
+    return False
+
+
 def _translated_domain(domain: IndexDomain, window: tuple[slice, ...]) -> IndexDomain:
     """`domain`, expressed in the coordinates `window` was cut from.
 
@@ -553,8 +580,8 @@ class Partition:
         `view.array[part.source_selection]` reads the same block
         `view.result()` reads, in the same order. This is the request to hand
         to a consumer-owned I/O layer whose vocabulary is a basic selection
-        rather than a transform — for one driving reads through an async
-        store, assembly is one line per part:
+        rather than a transform. When that backend accepts NumPy's complete
+        basic-selection dialect, assembly is one line per part:
 
         ```python
         out[part.out_selection] = await source.getitem(part.source_selection)
@@ -1347,8 +1374,9 @@ class LazyArray:
         ----------
         out
             A writable `numpy.ndarray` of exactly `self.shape` and this view's
-            dtype, not overlapping the wrapped array. A view into a larger
-            array qualifies, so a part's result can land directly in its slot:
+            dtype, with distinct storage for its logical cells and not
+            overlapping the wrapped array. A view into a larger array
+            qualifies, so a part's result can land directly in its slot:
 
             ```python
             if all(isinstance(s, slice) for s in part.out_selection):
@@ -1379,10 +1407,11 @@ class LazyArray:
         TypeError
             If `out` is not a `numpy.ndarray`.
         ValueError
-            If `out` has the wrong shape or dtype, is read-only, is unmasked
-            for a masked source, or shares memory with the wrapped array; or if
-            supplied parts were prepared by another view or do not tile this
-            view exactly.
+            If `out` has the wrong shape or dtype, is read-only, has an
+            internally overlapping memory layout, is unmasked for a masked
+            source, or shares memory with the wrapped array; or if supplied
+            parts were prepared by another view or do not tile this view
+            exactly.
         AssertionError
             If this library's own partition walk fails to cover the view — a
             bug in zarr-indexing, never a consequence of the caller's input.
@@ -1413,6 +1442,11 @@ class LazyArray:
             )
         if not out.flags.writeable:
             raise ValueError("out is read-only; result_into writes every cell of it")
+        if _has_internal_overlap(out):
+            raise ValueError(
+                "out has overlapping elements; distinct cells of this view need "
+                "distinct destination storage"
+            )
         if isinstance(self._array, np.ma.MaskedArray) and not isinstance(out, np.ma.MaskedArray):
             # dtypes match, so nothing above rejects a plain buffer, and the
             # reader would write the values under the mask into it as if they
