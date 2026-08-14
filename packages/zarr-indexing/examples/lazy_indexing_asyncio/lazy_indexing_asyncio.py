@@ -15,25 +15,69 @@ Demonstrate driving zarr_indexing.LazyArray's partition plan with asyncio
 
 import asyncio
 import sys
-from typing import Any, Protocol
+from typing import Any, cast
 
 import numpy as np
 import pytest
 import zarr
 import zarr.api.asynchronous
+from zarr.core.indexing import BasicSelection as ZarrBasicSelection
 
-from zarr_indexing import BasicSelection, LazyArray, NoBasicSelectionError, Partition
+from zarr_indexing import (
+    BasicSelection,
+    LazyArray,
+    NoBasicSelectionError,
+    Partition,
+    ReadContext,
+    numpy_reader,
+)
 
 
-class AsyncSource(Protocol):
-    """The surface the async loop needs: one awaitable basic-selection read.
+class _NoSynchronousRead:
+    """A test reader proving the async adapter performs every source read."""
 
-    `zarr.AsyncArray` satisfies it; so does anything else that can serve a
-    tuple of integers and ascending slices — an HTTP tile endpoint, an fsspec
-    wrapper, a database. The planner never sees this object.
+    def read_into(
+        self,
+        _source: Any,
+        _context: ReadContext,
+        _out: np.ndarray[Any, Any],
+        /,
+    ) -> None:
+        raise AssertionError("the AsyncArray integration performed a synchronous read")
+
+
+def _as_zarr_selection(selection: BasicSelection) -> ZarrBasicSelection | None:
+    """Narrow a NumPy basic selection to the dialect AsyncArray accepts.
+
+    Zarr accepts integers and positive-step slices, but not NumPy's ``None``
+    newaxis or negative-step slices. Returning ``None`` selects the cover and
+    residual path below; no backend exception is used for feature detection.
     """
+    if any(
+        item is None or (isinstance(item, slice) and item.step is not None and item.step < 1)
+        for item in selection
+    ):
+        return None
+    return cast("ZarrBasicSelection", selection)
 
-    async def getitem(self, selection: BasicSelection) -> Any: ...
+
+async def _read_part(part: Partition, source: zarr.AsyncArray[Any]) -> np.ndarray[Any, Any]:
+    """Fetch one part through AsyncArray, normalizing its narrower dialect."""
+    try:
+        direct = _as_zarr_selection(part.source_selection)
+    except NoBasicSelectionError:
+        direct = None
+    if direct is not None:
+        return np.asanyarray(await source.getitem(direct))
+
+    # A cover contains one ascending slice per source axis, which is always a
+    # Zarr basic selection. The residual restores a newaxis or reversal and
+    # performs any query gather against the fetched NumPy block.
+    cover, residual = part.view.transform.decompose()
+    block = np.asanyarray(await source.getitem(cover))
+    out = np.empty(part.view.shape, dtype=part.view.dtype)
+    numpy_reader.read_into(block, ReadContext(residual), out)
+    return out
 
 
 @pytest.fixture
@@ -43,32 +87,32 @@ def store() -> dict[str, Any]:
 
 
 @pytest.fixture
-def source(store: dict[str, Any]) -> zarr.Array:
+def source(store: dict[str, Any]) -> zarr.Array[Any]:
     """A chunked Zarr array, created synchronously and shared with the async side."""
     array = zarr.create_array(store=store, shape=(40, 30), chunks=(10, 10), dtype="i4")
     array[:] = np.arange(40 * 30).reshape(40, 30)
     return array
 
 
-async def read_through(view: LazyArray, source: AsyncSource) -> np.ndarray:
+async def read_through(view: LazyArray, source: zarr.AsyncArray[Any]) -> np.ndarray[Any, Any]:
     """Materialize `view` by fetching every partition concurrently.
 
-    The wrapper plans; the async source fetches. Each box partition lowers to
-    the basic selection `part.source_selection`, is fetched through the
-    caller's own I/O layer, and lands at `part.out_selection` — no reader, no
-    thread pool, and no scheduler inside zarr-indexing.
+    The wrapper plans; the async source fetches. Compatible box partitions use
+    `part.source_selection` directly. Other partitions fetch an ascending
+    cover and apply the residual NumPy selection in memory. Every block lands
+    at `part.out_selection` — no thread pool or scheduler inside zarr-indexing.
     """
     parts = tuple(view.parts())
-    blocks = await asyncio.gather(*(source.getitem(part.source_selection) for part in parts))
+    blocks = await asyncio.gather(*(_read_part(part, source) for part in parts))
     out = np.empty(view.shape, dtype=view.dtype)
     for part, block in zip(parts, blocks, strict=True):
         out[part.out_selection] = block
     return out
 
 
-def test_parts_with_asyncio_gather(store: dict[str, Any], source: zarr.Array) -> None:
+def test_parts_with_asyncio_gather(store: dict[str, Any], source: zarr.Array[Any]) -> None:
     """Fetch a view's partitions concurrently through zarr.AsyncArray."""
-    view = LazyArray(source).lazy[5:35, 3:27]
+    view = LazyArray(cast(Any, source)).lazy[5:35, 3:27]
 
     async def scenario() -> np.ndarray:
         async_source = await zarr.api.asynchronous.open_array(store=store)
@@ -80,7 +124,7 @@ def test_parts_with_asyncio_gather(store: dict[str, Any], source: zarr.Array) ->
 
     # Strided and integer selections lower the same way; a scalar axis lowers
     # to an integer and drops, exactly as it does in the output placement.
-    decimated = LazyArray(source).lazy[::4, 7]
+    decimated = LazyArray(cast(Any, source)).lazy[::4, 7]
 
     async def decimated_scenario() -> np.ndarray:
         async_source = await zarr.api.asynchronous.open_array(store=store)
@@ -89,7 +133,29 @@ def test_parts_with_asyncio_gather(store: dict[str, Any], source: zarr.Array) ->
     assert np.array_equal(asyncio.run(decimated_scenario()), source[::4, 7])
 
 
-def test_decoded_chunk_cache(store: dict[str, Any], source: zarr.Array) -> None:
+def test_asyncarray_dialect_is_normalized(store: dict[str, Any], source: zarr.Array[Any]) -> None:
+    """New axes and reversals take the cover-and-residual path through Zarr."""
+    data = np.asarray(source[:])
+    planner = LazyArray(cast(Any, source)).with_reader(_NoSynchronousRead())
+    views_and_expected = (
+        (planner.lazy[None, 5:35, 3:27], data[None, 5:35, 3:27]),
+        (planner.lazy[35:4:-3, ::-2], data[35:4:-3, ::-2]),
+        (planner.lazy[5:10, :, None], data[5:10, :, None]),
+    )
+
+    async def scenario() -> tuple[np.ndarray[Any, Any], ...]:
+        async_source = await zarr.api.asynchronous.open_array(store=store)
+        return tuple(
+            await asyncio.gather(
+                *(read_through(view, async_source) for view, _expected in views_and_expected)
+            )
+        )
+
+    for result, (_view, expected) in zip(asyncio.run(scenario()), views_and_expected, strict=True):
+        np.testing.assert_array_equal(result, expected)
+
+
+def test_decoded_chunk_cache(store: dict[str, Any], source: zarr.Array[Any]) -> None:
     """Cache decoded cells; place each view's share with `chunk_local_selection`.
 
     A tile server reads many overlapping views of the same array. Fetching
@@ -115,16 +181,22 @@ def test_decoded_chunk_cache(store: dict[str, Any], source: zarr.Array) -> None:
             slice(lo, hi) for lo, hi in zip(domain.inclusive_min, domain.exclusive_max, strict=True)
         )
 
-    async def fetch_missing(parts: tuple[Partition, ...], async_source: AsyncSource) -> None:
+    async def fetch_missing(
+        parts: tuple[Partition, ...], async_source: zarr.AsyncArray[Any]
+    ) -> None:
         missing = {
             cell_key(part): cell_selection(part) for part in parts if cell_key(part) not in cache
         }
         cells = await asyncio.gather(
             *(async_source.getitem(selection) for selection in missing.values())
         )
-        cache.update(zip(missing.keys(), cells, strict=True))
+        cache.update(
+            (key, np.asanyarray(cell)) for key, cell in zip(missing.keys(), cells, strict=True)
+        )
 
-    async def read_cached(view: LazyArray, async_source: AsyncSource) -> np.ndarray:
+    async def read_cached(
+        view: LazyArray, async_source: zarr.AsyncArray[Any]
+    ) -> np.ndarray[Any, Any]:
         parts = tuple(view.parts())
         await fetch_missing(parts, async_source)
         out = np.empty(view.shape, dtype=view.dtype)
@@ -134,9 +206,9 @@ def test_decoded_chunk_cache(store: dict[str, Any], source: zarr.Array) -> None:
 
     async def scenario() -> tuple[np.ndarray, np.ndarray]:
         async_source = await zarr.api.asynchronous.open_array(store=store)
-        first = await read_cached(LazyArray(source).lazy[5:25, 3:27], async_source)
+        first = await read_cached(LazyArray(cast(Any, source)).lazy[5:25, 3:27], async_source)
         # The second view overlaps the first, so most cells are already cached.
-        second = await read_cached(LazyArray(source).lazy[15:35, ::2], async_source)
+        second = await read_cached(LazyArray(cast(Any, source)).lazy[15:35, ::2], async_source)
         return first, second
 
     first, second = asyncio.run(scenario())
@@ -147,40 +219,26 @@ def test_decoded_chunk_cache(store: dict[str, Any], source: zarr.Array) -> None:
     assert len(cache) == 12
 
 
-def test_query_parts_fall_back(store: dict[str, Any], source: zarr.Array) -> None:
-    """A query part refuses to lower; the wrapper's own reader is the fallback.
+def test_query_parts_fetch_cover_asynchronously(
+    store: dict[str, Any], source: zarr.Array[Any]
+) -> None:
+    """A query part fetches its cover asynchronously and gathers in memory.
 
     A gather (`oindex`, `vindex`, a mask) has no single-slab spelling, so
-    `source_selection` raises `ValueError` instead of guessing one. A consumer
-    mixing selection kinds catches that and resolves the part through
-    `part.view.result()`, which reads through the wrapped array's reader.
-    Catching the dedicated subclass — not bare `ValueError` — keeps a genuine
-    defect in the lowering loud instead of silently degrading every part to
-    the fallback path.
+    `source_selection` raises `NoBasicSelectionError` instead of guessing one.
+    The adapter catches that dedicated error, fetches the part's ascending
+    cover through AsyncArray, and applies its residual transform in memory.
     """
-    view = LazyArray(source).lazy.oindex[[30, 2, 2], 4:10]
+    view = (
+        LazyArray(cast(Any, source)).with_reader(_NoSynchronousRead()).lazy.oindex[[30, 2, 2], 4:10]
+    )
 
     async def scenario() -> np.ndarray:
         async_source = await zarr.api.asynchronous.open_array(store=store)
-        parts = tuple(view.parts())
-        out = np.empty(view.shape, dtype=view.dtype)
+        return await read_through(view, async_source)
 
-        async def resolve(part: Partition) -> tuple[Partition, np.ndarray]:
-            try:
-                selection = part.source_selection
-            except NoBasicSelectionError:
-                # The gathered axis needs a lookup, not a slab: read this part
-                # through the wrapper (synchronously here; a real consumer
-                # might push it to a thread, or fetch the part's bounding box
-                # and gather in memory).
-                return part, np.asarray(part.view.result())
-            return part, np.asarray(await async_source.getitem(selection))
-
-        for part, block in await asyncio.gather(*(resolve(part) for part in parts)):
-            out[part.out_selection] = block
-        return out
-
-    assert np.array_equal(asyncio.run(scenario()), source.oindex[[30, 2, 2], 4:10])
+    expected = np.asarray(source[:])[[30, 2, 2]][:, 4:10]
+    assert np.array_equal(asyncio.run(scenario()), expected)
 
 
 if __name__ == "__main__":

@@ -7,23 +7,26 @@ structure and this example shows `asyncio.gather` driving it.
 
 The example shows how to:
 
-- Lower each box-shaped partition to a backend-native request with
+- Lower each compatible box-shaped partition to a backend-native request with
   `part.source_selection` — a tuple of integers and slices in the wrapped
   array's own coordinates — and fetch all partitions concurrently, assembling
   each block with `out[part.out_selection] = await source.getitem(part.source_selection)`
+- Normalize the two NumPy basic selectors that `zarr.AsyncArray.getitem` does
+  not accept: a newaxis (`None`) and a negative-step slice. Those parts fetch
+  their ascending cover through Zarr and apply the residual transform in
+  memory.
 - Build a decoded-chunk cache keyed on each touched grid cell's global origin:
   fetch the cell (`projection.chunk_domain`) once, then serve every overlapping
   view from the cache with `part.chunk_local_selection`
 - Fall back for query partitions (`oindex`/`vindex`/mask selections), whose
   gathers have no single-slab spelling: `source_selection` raises
-  `NoBasicSelectionError`
-  and the part resolves through its own `part.view.result()` instead
+  `NoBasicSelectionError`, so the adapter fetches their ascending cover and
+  applies the residual gather in memory
 
 The async side only needs one method — `async def getitem(selection)` accepting
-a basic selection — so the same loop drives an HTTP range endpoint or any other
-async source. Note that a reversing view (`lazy[::-1]`) lowers to a
-negative-step slice, which Zarr's basic selections reject; inspect the slice
-steps if your backend only walks forward.
+ascending basic slices — so the same adapter drives an HTTP range endpoint or
+any other async source with Zarr's selection dialect. A backend with a wider
+dialect can take the direct `source_selection` path for more parts.
 
 ## Running the Example
 

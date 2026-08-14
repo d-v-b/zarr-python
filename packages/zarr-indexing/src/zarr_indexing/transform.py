@@ -61,11 +61,13 @@ if TYPE_CHECKING:
 type BasicSelection = tuple[int | slice | None, ...]
 """A selection in NumPy's basic-indexing dialect: one selector per axis.
 
-The request vocabulary of `source[selection]` under basic indexing — also the
-parameter type of `zarr.AsyncArray.getitem`. Denotationally a product of
-arithmetic progressions: an `int` reads one coordinate and drops its axis, a
-`slice` reads an arithmetic progression, and `None` fabricates an axis no
-source axis backs. Produced by
+The request vocabulary of `source[selection]` under NumPy basic indexing.
+It is deliberately wider than `zarr.AsyncArray.getitem`'s selection type:
+Zarr rejects `None` and negative-step slices, so an integration with that
+backend must normalize those two forms before making the request.
+Denotationally this is a product of arithmetic progressions: an `int` reads one
+coordinate and drops its axis, a `slice` reads an arithmetic progression, and
+`None` fabricates an axis no source axis backs. Produced by
 [`IndexTransform.as_basic_selection`][zarr_indexing.transform.IndexTransform.as_basic_selection]
 and the `Partition` lowering properties; which cells a value denotes is
 relative to the array it is applied to.

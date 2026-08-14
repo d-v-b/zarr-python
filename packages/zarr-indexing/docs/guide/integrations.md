@@ -88,12 +88,13 @@ same read relative to the part's grid cell, for consumers caching decoded
 chunks. `projection.chunk_domain` locates that cell in the source, so it is
 what to fetch and a sound cache key; `base_coords` counts cells of whatever
 base the view partitions, so it keys a cache only alongside the grid that
-produced it. A query part (an `oindex`/`vindex` gather) has
-no slab spelling and raises `NoBasicSelectionError` (a `ValueError`
-subclass), so mixed consumers fall back to
-`part.view.result()` for those parts — or stay on their own I/O path with
-`part.view.transform.decompose()`, which factors *any* transform into a basic
-cover to fetch plus a residual to resolve in memory. The
+produced it. A query part (an `oindex`/`vindex` gather) has no slab spelling
+and raises `NoBasicSelectionError` (a `ValueError` subclass), so the AsyncArray
+adapter stays on its own I/O path with `part.view.transform.decompose()`. That
+factors the transform into an ascending basic cover to fetch plus a residual
+to resolve in memory. The same path handles NumPy's newaxis and negative-step
+slices, which Zarr's narrower basic-selection dialect rejects even though
+`source_selection` can spell them. The
 [asyncio example](../examples/lazy_indexing_asyncio.md) drives all three
 loops — gather-per-part, decoded-chunk cache, and the query fallback — with
 `asyncio.gather` over `zarr.AsyncArray`.

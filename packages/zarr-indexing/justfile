@@ -30,7 +30,7 @@ lint:
 
 # Type-check the package sources, documentation Python, and their contract tests
 typecheck:
-    uv run --group test --with pyright pyright
+    uv run --project ../.. --group test --with-editable . --with pyright pyright
 
 # Run everything CI runs for this package
 check: lint typecheck test test-tensorstore docs-check
