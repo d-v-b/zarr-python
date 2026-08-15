@@ -7,9 +7,11 @@ consumers can catch a single type. The leaf classes also derive from
 """
 
 __all__ = [
+    "ChunkCoordsOutOfBoundsError",
     "ChunkKeyConfigurationError",
     "ChunkKeyDecodeError",
     "ChunkKeyEncodingError",
+    "ChunkKeyOutOfBoundsError",
     "ChunkKeyRegistryError",
     "InvalidChunkCoordsError",
     "UnknownChunkKeyEncodingError",
@@ -48,5 +50,23 @@ class ChunkKeyDecodeError(ChunkKeyEncodingError, ValueError):
     """Raised when a chunk key cannot be decoded into chunk grid indices."""
 
 
+class ChunkKeyOutOfBoundsError(ChunkKeyDecodeError):
+    """Raised when a well-formed chunk key names a chunk outside a bounded encoding's grid.
+
+    Distinguishes "not a chunk key at all" (the parent `ChunkKeyDecodeError`)
+    from "a chunk key, but not for this grid": the key is a valid output of
+    the underlying encoding, but its coordinates have the wrong rank or fall
+    outside the grid extent.
+    """
+
+
 class InvalidChunkCoordsError(ChunkKeyEncodingError, ValueError):
     """Raised when chunk grid indices passed to `encode` are not non-negative integers."""
+
+
+class ChunkCoordsOutOfBoundsError(InvalidChunkCoordsError):
+    """Raised when chunk grid indices fall outside a bounded encoding's grid.
+
+    The coordinates are valid in isolation (non-negative integers), but have
+    the wrong rank for the grid or an index at or beyond the grid extent.
+    """

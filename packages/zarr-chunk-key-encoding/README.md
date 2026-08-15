@@ -11,6 +11,9 @@ and (where well-defined) back again. This package provides:
 - `ChunkKeyEncoding` — the abstract base class
 - `DefaultChunkKeyEncoding`, `V2ChunkKeyEncoding` — the two encodings defined
   by the [Zarr v3 core spec](https://zarr-specs.readthedocs.io/en/latest/v3/core/index.html#chunk-key-encoding)
+- `BoundedChunkKeyEncoding` (via `ChunkKeyEncoding.bind`) — an encoding
+  restricted to a known chunk grid, whose finite key set supports membership
+  testing, iteration, and `len`
 - a name-keyed registry with entry-point discovery, modeled on the plugin
   registry of the [zarrs](https://docs.rs/zarrs_chunk_key_encoding) Rust
   implementation, so third-party encodings are first-class
@@ -54,6 +57,35 @@ Design notes, relative to the chunk key encoding code inside `zarr`:
 ```bash
 pip install zarr-chunk-key-encoding
 ```
+
+## Binding to a chunk grid
+
+A plain encoding maps *any* tuple of non-negative integers to a key. When an
+array's chunk grid shape is known, `bind` restricts the domain to the grid's
+valid indices, making the key set a first-class finite collection:
+
+```python
+>>> from zarr_chunk_key_encoding import DefaultChunkKeyEncoding
+>>> bounded = DefaultChunkKeyEncoding().bind((2, 3))
+>>> bounded.encode((1, 2))
+'c/1/2'
+>>> "c/1/2" in bounded
+True
+>>> "c/2/0" in bounded  # out of bounds
+False
+>>> "c/01/2" in bounded  # non-canonical spelling
+False
+>>> len(bounded)
+6
+```
+
+Membership is the full store-key check — grammar, rank, bounds, and
+canonical spelling — in one test, which is exactly what a server validating
+candidate chunk keys against an array needs. Bounded `decode` is also a
+*total* inverse of `encode`: with the grid rank known, the `v2` encoding's
+rank-zero ambiguity (`"0"` is the key for both `()` and `(0,)`) disappears.
+For sharded arrays, bind the shard grid shape, since shards are the unit of
+storage.
 
 ## Registering a custom encoding
 

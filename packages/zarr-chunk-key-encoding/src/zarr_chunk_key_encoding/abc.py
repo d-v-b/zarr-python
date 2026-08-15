@@ -22,10 +22,13 @@ See https://zarr-specs.readthedocs.io/en/latest/v3/core/index.html#chunk-key-enc
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import ClassVar, Self
+from typing import TYPE_CHECKING, ClassVar, Self
 
 from typing_extensions import TypeAliasType
 from zarr_metadata import JSONValue
+
+if TYPE_CHECKING:
+    from zarr_chunk_key_encoding.bounded import BoundedChunkKeyEncoding
 
 __all__ = [
     "ChunkKeyEncoding",
@@ -136,3 +139,33 @@ class ChunkKeyEncoding(ABC):
             If this encoding does not support decoding.
         """
         raise NotImplementedError(f"{type(self).__name__} does not implement decode.")
+
+    def bind(self, grid_shape: Sequence[int]) -> "BoundedChunkKeyEncoding":
+        """Bind this encoding to a chunk grid, restricting its domain.
+
+        The result is a `zarr_chunk_key_encoding.bounded.BoundedChunkKeyEncoding`:
+        its ``encode`` and ``decode`` reject coordinates and keys outside the
+        grid, its ``decode`` is a total inverse of ``encode`` (resolving the
+        ``v2`` encoding's rank-zero ambiguity), and its valid key set is a
+        finite collection supporting ``in``, iteration, and ``len``.
+
+        Parameters
+        ----------
+        grid_shape : Sequence[int]
+            The number of chunks along each dimension. For arrays using
+            sharding, pass the shard grid shape, since shards are the unit
+            of storage.
+
+        Returns
+        -------
+        BoundedChunkKeyEncoding
+            This encoding, restricted to the given grid.
+
+        Raises
+        ------
+        ChunkKeyConfigurationError
+            If any grid shape entry is not a non-negative integer.
+        """
+        from zarr_chunk_key_encoding.bounded import BoundedChunkKeyEncoding
+
+        return BoundedChunkKeyEncoding(encoding=self, grid_shape=tuple(grid_shape))

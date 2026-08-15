@@ -25,6 +25,24 @@ defines two encodings, both provided here:
 {'name': 'default', 'configuration': {'separator': '/'}}
 ```
 
+When the chunk grid shape is known,
+[`bind`][zarr_chunk_key_encoding.abc.ChunkKeyEncoding.bind] restricts the
+encoding to the grid's valid indices. The resulting
+[`BoundedChunkKeyEncoding`][zarr_chunk_key_encoding.bounded.BoundedChunkKeyEncoding]
+treats the valid key set as a finite collection — membership testing checks
+grammar, rank, bounds, and canonical spelling in one test — and its `decode`
+is a total inverse of `encode`:
+
+```python
+>>> bounded = encoding.bind((2, 3))
+>>> "c/1/2" in bounded
+True
+>>> "c/2/0" in bounded  # out of bounds
+False
+>>> len(bounded)
+6
+```
+
 ## Design
 
 The package is modeled on how the [zarrs](https://docs.rs/zarrs_chunk_key_encoding)

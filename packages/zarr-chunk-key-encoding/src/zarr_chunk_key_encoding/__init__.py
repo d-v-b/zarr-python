@@ -7,6 +7,9 @@ and (where well-defined) back again. This package provides:
 - `ChunkKeyEncoding` — the abstract base class
 - `DefaultChunkKeyEncoding`, `V2ChunkKeyEncoding` — the two encodings
   defined by the Zarr v3 core spec
+- `BoundedChunkKeyEncoding` — an encoding bound to a known chunk grid
+  (via `ChunkKeyEncoding.bind`), whose finite key set supports membership
+  testing, iteration, and `len`
 - a name-keyed registry (`register_chunk_key_encoding` and friends) with
   entry-point discovery, modeled on the plugin registry of the `zarrs`
   Rust implementation
@@ -29,11 +32,14 @@ behavior for those types.
 from importlib.metadata import version
 
 from zarr_chunk_key_encoding.abc import ChunkKeyEncoding, ChunkKeyEncodingJSON
+from zarr_chunk_key_encoding.bounded import BoundedChunkKeyEncoding
 from zarr_chunk_key_encoding.default import DefaultChunkKeyEncoding
 from zarr_chunk_key_encoding.errors import (
+    ChunkCoordsOutOfBoundsError,
     ChunkKeyConfigurationError,
     ChunkKeyDecodeError,
     ChunkKeyEncodingError,
+    ChunkKeyOutOfBoundsError,
     ChunkKeyRegistryError,
     InvalidChunkCoordsError,
     UnknownChunkKeyEncodingError,
@@ -57,6 +63,8 @@ __version__ = version("zarr-chunk-key-encoding")
 __all__ = [
     "ENTRY_POINT_GROUP",
     "SEPARATORS",
+    "BoundedChunkKeyEncoding",
+    "ChunkCoordsOutOfBoundsError",
     "ChunkKeyConfigurationError",
     "ChunkKeyDecodeError",
     "ChunkKeyEncoding",
@@ -64,6 +72,7 @@ __all__ = [
     "ChunkKeyEncodingJSON",
     "ChunkKeyEncodingLike",
     "ChunkKeyEncodingParams",
+    "ChunkKeyOutOfBoundsError",
     "ChunkKeyRegistryError",
     "DefaultChunkKeyEncoding",
     "InvalidChunkCoordsError",
