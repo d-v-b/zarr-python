@@ -12,10 +12,23 @@ __all__ = [
     "ChunkKeyDecodeError",
     "ChunkKeyEncodingError",
     "ChunkKeyOutOfBoundsError",
+    "ChunkKeyPluginWarning",
     "ChunkKeyRegistryError",
     "InvalidChunkCoordsError",
     "UnknownChunkKeyEncodingError",
 ]
+
+
+class ChunkKeyPluginWarning(UserWarning):
+    """Warned when an entry point in the plugin group cannot be registered.
+
+    Discovery skips the offending entry point rather than failing, so one
+    broken third-party package cannot make unrelated lookups raise. Callers
+    who would rather treat a broken plugin as fatal can escalate this
+    category::
+
+        warnings.simplefilter("error", ChunkKeyPluginWarning)
+    """
 
 
 class ChunkKeyEncodingError(Exception):

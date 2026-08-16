@@ -24,6 +24,7 @@ neither, so a consumer can accept only the tiers it is willing to honour --
 see `registered_chunk_key_encodings` and `get_chunk_key_encoding_support`.
 """
 
+import warnings
 from collections.abc import Mapping
 from importlib.metadata import entry_points
 from typing import TYPE_CHECKING, Final, NotRequired, cast
@@ -33,6 +34,7 @@ from typing_extensions import TypeAliasType, TypedDict
 from zarr_chunk_key_encoding.abc import ChunkKeyEncoding, ChunkKeyEncodingJSON
 from zarr_chunk_key_encoding.errors import (
     ChunkKeyConfigurationError,
+    ChunkKeyPluginWarning,
     ChunkKeyRegistryError,
     UnknownChunkKeyEncodingError,
 )
@@ -91,20 +93,54 @@ def _load_entry_points() -> None:
 
     Entry points never displace explicit registrations: a name that is
     already registered is skipped.
+
+    A broken entry point -- one that fails to import, does not load to a
+    `ChunkKeyEncoding` subclass, or is rejected by
+    `register_chunk_key_encoding` -- is skipped with a
+    `ChunkKeyPluginWarning` rather than raised. Discovery runs lazily from
+    any lookup that misses, so raising would let one unrelated third-party
+    package turn every such lookup into a hard error, and would strand the
+    entry points enumerated after it.
     """
     global _entry_points_loaded
     if _entry_points_loaded:
         return
-    _entry_points_loaded = True
     for entry_point in entry_points(group=ENTRY_POINT_GROUP):
-        cls = entry_point.load()
-        if not (isinstance(cls, type) and issubclass(cls, ChunkKeyEncoding)):
-            raise ChunkKeyRegistryError(
+        try:
+            cls = entry_point.load()
+        except Exception as e:  # noqa: BLE001 - any import failure in third-party code
+            warnings.warn(
                 f"Entry point {entry_point.name!r} in group {ENTRY_POINT_GROUP!r} "
-                f"loaded {cls!r}, which is not a ChunkKeyEncoding subclass."
+                f"could not be loaded, and was skipped: {e!r}",
+                ChunkKeyPluginWarning,
+                stacklevel=2,
             )
+            continue
+        if not (isinstance(cls, type) and issubclass(cls, ChunkKeyEncoding)):
+            warnings.warn(
+                f"Entry point {entry_point.name!r} in group {ENTRY_POINT_GROUP!r} "
+                f"loaded {cls!r}, which is not a ChunkKeyEncoding subclass, and "
+                f"was skipped.",
+                ChunkKeyPluginWarning,
+                stacklevel=2,
+            )
+            continue
         if cls.name not in _registry:
-            _registry[cls.name] = cls
+            # Routed through the public function rather than assigning to
+            # `_registry`, so that an entry point cannot bypass the checks it
+            # applies -- notably the one stopping a plugin from claiming the
+            # CORE support level for a name the spec does not define.
+            try:
+                register_chunk_key_encoding(cls)
+            except ChunkKeyRegistryError as e:
+                warnings.warn(
+                    f"Entry point {entry_point.name!r} in group "
+                    f"{ENTRY_POINT_GROUP!r} could not be registered, and was "
+                    f"skipped: {e}",
+                    ChunkKeyPluginWarning,
+                    stacklevel=2,
+                )
+    _entry_points_loaded = True
 
 
 def register_chunk_key_encoding(cls: type[ChunkKeyEncoding], *, overwrite: bool = False) -> None:

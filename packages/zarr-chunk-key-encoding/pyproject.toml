@@ -74,14 +74,14 @@ packages = ["src/zarr_chunk_key_encoding"]
 
 # An allowlist, so nothing that merely happens to sit in the package directory
 # — a scratch script, a stray notebook, a local `.venv` — can ride along in a
-# release. The list keeps an sdist self-testing and self-documenting: `/tests`
-# is the whole test dependency (the parity module skips when `zarr` is absent,
-# which it is from an unpacked sdist), and `/docs` plus `/mkdocs.yml` are a
-# self-contained site (mkdocstrings reads `src`, nothing reaches outside the
-# package) so `just docs-check` runs from an unpacked sdist too. `changes/`
-# and `.readthedocs.yaml` are deliberately absent: towncrier fragments are
-# repo bookkeeping, and the RTD config addresses paths from the repo root.
-# `pyproject.toml`, `README.md` and `LICENSE.txt` are added by hatchling itself.
+# release. `/tests` and `/docs` ship so that a downstream packager can read and
+# audit them, not so they can be run in place: every `justfile` recipe layers
+# the sibling `../zarr-metadata` in as an editable overlay, and `test-parity`
+# resolves the repo root, neither of which exists in an unpacked sdist. Running
+# them needs the source tree. `changes/` and `.readthedocs.yaml` are
+# deliberately absent: towncrier fragments are repo bookkeeping, and the RTD
+# config addresses paths from the repo root. `pyproject.toml`, `README.md` and
+# `LICENSE.txt` are added by hatchling itself.
 [tool.hatch.build.targets.sdist]
 include = [
     "/src",
