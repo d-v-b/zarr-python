@@ -97,7 +97,7 @@ class ZarristaEngine:
     def write_selection(
         self, selection: Region, value: NDBuffer, *, prototype: BufferPrototype
     ) -> None:
-        value_np = np.ascontiguousarray(value.as_ndarray_like())
+        value_np = np.asarray(value.as_ndarray_like(), order="C")
         self._arr.store_array_subset(_region_to_selection(selection), value_np)
 
 
@@ -168,7 +168,7 @@ class ZarristaAsyncEngine:
         self, selection: Region, value: NDBuffer, *, prototype: BufferPrototype
     ) -> None:
         arr = await self._ensure_arr()
-        value_np = np.ascontiguousarray(value.as_ndarray_like())
+        value_np = np.asarray(value.as_ndarray_like(), order="C")
         await arr.store_array_subset(_region_to_selection(selection), value_np)
 
 

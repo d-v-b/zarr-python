@@ -24,6 +24,13 @@ CASES = [
         (512, 512),
         (128, 128),
         None,
+        np.s_[128:256, 128:256],
+        id="single-full",
+    ),
+    pytest.param(
+        (512, 512),
+        (128, 128),
+        None,
         np.s_[160:224, 160:224],
         id="single-partial",
     ),

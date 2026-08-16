@@ -121,18 +121,18 @@ not a redesign of returned buffer ownership or device support.
 The synchronous write becomes equivalent to:
 
 ```python
-data = np.ascontiguousarray(value.as_ndarray_like())
+data = np.asarray(value.as_ndarray_like(), order="C")
 array.store_array_subset(selection, data)
 ```
 
 The asynchronous write performs the same input normalization and awaits the corresponding
 zarrista call.
 
-Keeping `np.ascontiguousarray` preserves the current accepted input and memory-layout
-semantics while switching ownership of partial-write logic. Current zarrista accepts a
-`DataInput` backed by DLPack, `ArrayBytes`, or a buffer, but broadening zarr-python's device
-or zero-copy behavior is not part of this change. A copy may still occur during input
-normalization.
+Using `np.asarray(..., order="C")` preserves 0-D inputs while ensuring non-scalar inputs
+are C-contiguous. (`np.ascontiguousarray` promotes a 0-D input to shape `(1,)`, which does
+not match a scalar destination.) Current zarrista accepts a `DataInput` backed by DLPack,
+`ArrayBytes`, or a buffer, but broadening zarr-python's device or zero-copy behavior is not
+part of this change. A copy may still occur during input normalization.
 
 Zarrista validates the selection, shape, dtype, and contiguity at its boundary. Its errors
 continue to propagate through the engine in the same manner as other zarrista operations;

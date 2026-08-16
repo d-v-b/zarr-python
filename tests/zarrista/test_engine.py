@@ -125,11 +125,30 @@ def test_zarrista_engine_with_metadata_retains_storage(tmp_path: Path) -> None:
     np.testing.assert_array_equal(actual, np.asarray(z[2:7, 1:5]))
 
 
+def test_zarrista_scalar_write(tmp_path: Path) -> None:
+    zarr.create_array(LocalStore(tmp_path), shape=(), chunks=(), dtype="int32")
+    ze = zarr.open_array(LocalStore(tmp_path), engine="zarrista")
+
+    ze[...] = np.int32(7)
+
+    assert np.asarray(ze[...]).item() == 7
+
+
+def test_zarrista_empty_region_write_is_a_noop(tmp_path: Path) -> None:
+    z = _make(tmp_path)
+    expected = np.asarray(z[:, :]).copy()
+    ze = zarr.open_array(LocalStore(tmp_path), engine="zarrista")
+
+    ze[3:3, 1:5] = np.empty((0, 4), dtype="float32")
+
+    np.testing.assert_array_equal(np.asarray(z[:, :]), expected)
+
+
 def test_zarrista_reads_are_writable(tmp_path: Path) -> None:
-    # zarrista's `Tensor` wraps Rust-owned memory that `np.asarray` exposes
-    # read-only. zarr-python reads have always returned writable arrays, so the
-    # facade must copy such a result -- both on the full-box identity path and
-    # on a partial (bounding-box) read.
+    # zarrista's `FixedLengthTensor` wraps Rust-owned memory that `np.asarray`
+    # exposes read-only. zarr-python reads have always returned writable arrays,
+    # so the facade must copy such a result -- both on the full-box identity
+    # path and on a partial (bounding-box) read.
     _make(tmp_path)
     ze = zarr.open_array(LocalStore(tmp_path), engine="zarrista")
 
@@ -216,4 +235,42 @@ async def test_zarrista_async_engine_read_write_combinations(tmp_path: Path) -> 
     replacement = -np.arange(42, dtype="float32").reshape(6, 7)
     await ze.setitem((slice(4, 10), slice(2, 9)), replacement)
     expected[4:10, 2:9] = replacement
+    np.testing.assert_array_equal(np.asarray(await z.getitem((slice(None), slice(None)))), expected)
+
+
+async def test_zarrista_async_scalar_write(tmp_path: Path) -> None:
+    obstore = pytest.importorskip("obstore")
+    from zarr.api import asynchronous as async_api
+    from zarr.storage import ObjectStore
+
+    store = ObjectStore(obstore.store.LocalStore(prefix=str(tmp_path)))
+    await async_api.create_array(store=store, shape=(), chunks=(), dtype="int32")
+    ze = await async_api.open_array(store=store, engine="zarrista")
+
+    await ze.setitem(Ellipsis, np.int32(7))
+
+    assert np.asarray(await ze.getitem(Ellipsis)).item() == 7
+
+
+async def test_zarrista_async_sharded_region_write(tmp_path: Path) -> None:
+    obstore = pytest.importorskip("obstore")
+    from zarr.api import asynchronous as async_api
+    from zarr.storage import ObjectStore
+
+    store = ObjectStore(obstore.store.LocalStore(prefix=str(tmp_path)))
+    z = await async_api.create_array(
+        store=store,
+        shape=(12, 12),
+        chunks=(3, 3),
+        shards=(6, 6),
+        dtype="int32",
+    )
+    expected = np.arange(144, dtype="int32").reshape(12, 12)
+    await z.setitem((slice(None), slice(None)), expected)
+    ze = await async_api.open_array(store=store, engine="zarrista")
+    replacement = -(np.arange(72, dtype="int32") + 1).reshape(8, 9)
+
+    await ze.setitem((slice(2, 10), slice(2, 11)), replacement)
+
+    expected[2:10, 2:11] = replacement
     np.testing.assert_array_equal(np.asarray(await z.getitem((slice(None), slice(None)))), expected)

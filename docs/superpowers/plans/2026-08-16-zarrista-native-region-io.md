@@ -14,7 +14,7 @@
 
 - Preserve the public `Region`, engine methods, array indexing APIs, and on-disk format.
 - Do not change public codec signatures or introduce CuTe expressions.
-- Keep `np.ascontiguousarray(value.as_ndarray_like())`; zero-copy and device inputs are out of scope.
+- Normalize with `np.asarray(value.as_ndarray_like(), order="C")` so non-scalar inputs are C-contiguous without promoting 0-D inputs; zero-copy and device inputs are out of scope.
 - Pin zarrista exactly to `92d26b65b90e9715d5c658c71b9216449f25ae64`.
 - Keep all unrelated untracked workspace files untouched and unstaged.
 - Use conventional commits with `Assisted-by: Codex:GPT-5`.
