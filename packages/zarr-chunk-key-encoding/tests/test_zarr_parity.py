@@ -3,9 +3,17 @@
 These tests only run when `zarr` is importable (e.g. via
 `just test-parity`, which layers this package over the repo-root
 environment); the package itself does not depend on `zarr`.
+
+Skipping is the right default -- the package-isolated test runs have no
+`zarr` and should not fail for its absence -- but it would also let this
+suite silently never run anywhere. Setting `ZARR_PARITY_REQUIRED` turns the
+skip into a hard import error, so the job that exists to run these tests
+fails loudly if its environment ever stops providing `zarr`.
 """
 
 from __future__ import annotations
+
+import os
 
 import pytest
 
@@ -15,7 +23,10 @@ from zarr_chunk_key_encoding import (
     V2ChunkKeyEncoding,
 )
 
-zarr_cke = pytest.importorskip("zarr.core.chunk_key_encodings")
+if os.environ.get("ZARR_PARITY_REQUIRED"):
+    import zarr.core.chunk_key_encodings as zarr_cke
+else:
+    zarr_cke = pytest.importorskip("zarr.core.chunk_key_encodings")
 
 COORDS: tuple[tuple[int, ...], ...] = ((), (0,), (1, 23), (0, 0, 0), (7, 8, 9, 10))
 
