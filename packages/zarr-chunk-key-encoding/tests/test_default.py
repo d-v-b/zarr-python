@@ -52,7 +52,7 @@ def test_encode_decode(
             DefaultChunkKeyEncoding(separator="/"),
         ),
         (
-            {"name": "default", "must_understand": False},
+            {"name": "default", "must_understand": True},
             DefaultChunkKeyEncoding(),
         ),
     ],
@@ -149,9 +149,33 @@ def test_from_json_invalid_separator() -> None:
         DefaultChunkKeyEncoding.from_json({"name": "default", "configuration": {"separator": "-"}})
 
 
-def test_from_json_non_boolean_must_understand() -> None:
+@pytest.mark.parametrize("value", ["yes", 1, None, False])
+def test_from_json_must_understand_must_be_true(value: object) -> None:
+    """Anything but the boolean `true` is rejected.
+
+    `false` included: the v3 spec does not support it for chunk key
+    encodings, since a reader that does not recognize one cannot skip it,
+    so a document carrying it is malformed rather than merely redundant.
+    """
     with pytest.raises(ChunkKeyConfigurationError, match="'must_understand'"):
-        DefaultChunkKeyEncoding.from_json({"name": "default", "must_understand": "yes"})
+        DefaultChunkKeyEncoding.from_json({"name": "default", "must_understand": value})
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"name": "default", 1: "x", "zz": "y"},
+        {"name": "default", "configuration": {1: "x", "zz": "y"}},
+    ],
+)
+def test_from_json_mixed_type_keys(data: object) -> None:
+    """Unexpected keys of mixed types are reported, not sorted into a TypeError.
+
+    Every error this package raises derives from `ChunkKeyEncodingError`;
+    sorting `1` against `"zz"` to build the message would break that.
+    """
+    with pytest.raises(ChunkKeyConfigurationError, match="unexpected keys"):
+        DefaultChunkKeyEncoding.from_json(data)  # type: ignore[arg-type]
 
 
 def test_from_json_invalid_type() -> None:

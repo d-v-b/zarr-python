@@ -25,8 +25,7 @@ __all__ = [
 ]
 
 # Keys permitted in the top-level named-configuration envelope, per the v3
-# core spec. `must_understand` is validated but otherwise ignored: whether it
-# is true or false, this package understands the encodings it constructs.
+# core spec.
 _ENVELOPE_KEYS: Final = frozenset({"name", "configuration", "must_understand"})
 
 
@@ -42,7 +41,14 @@ def parse_named_config_json(
     ``{"name": ..., "configuration": {...}, "must_understand": ...}``.
     Validation is strict: unexpected envelope keys, a mismatched ``name``, a
     non-mapping ``configuration``, unexpected configuration keys, and a
-    non-boolean ``must_understand`` are all rejected.
+    ``must_understand`` that is not the boolean ``true`` are all rejected.
+
+    ``must_understand: false`` is rejected rather than ignored. The v3 spec
+    does not support it for this extension point -- an implementation that
+    meets a chunk key encoding it does not recognize cannot skip the array,
+    it has to fail -- so the field is meaningless here and a document
+    carrying it is malformed. ``true`` is accepted as a redundant spelling of
+    the default.
 
     Parameters
     ----------
@@ -75,10 +81,13 @@ def parse_named_config_json(
             f"{expected_name!r} or a JSON object, got {data!r}."
         )
     # Decoded JSON objects always have string keys; assert that view for the
-    # type checker. Non-string keys would surface in the extra-keys check.
+    # type checker. A caller passing a hand-built mapping need not honour
+    # that, so non-string keys are reported by the extra-keys check below --
+    # sorted by `repr`, since sorting a mix of, say, `1` and `"zz"` directly
+    # raises TypeError, which would escape this package's error hierarchy.
     mapping = cast("Mapping[str, JSONValue]", data)
 
-    extra_keys = sorted(k for k in mapping if k not in _ENVELOPE_KEYS)
+    extra_keys = sorted((k for k in mapping if k not in _ENVELOPE_KEYS), key=repr)
     if extra_keys:
         raise ChunkKeyConfigurationError(
             f"Invalid chunk key encoding metadata: unexpected keys {extra_keys}. "
@@ -92,10 +101,12 @@ def parse_named_config_json(
         raise ChunkKeyConfigurationError(
             f"Invalid chunk key encoding name: {mapping['name']!r}. Expected {expected_name!r}."
         )
-    if "must_understand" in mapping and not isinstance(mapping["must_understand"], bool):
+    if "must_understand" in mapping and mapping["must_understand"] is not True:
         raise ChunkKeyConfigurationError(
-            f"Invalid chunk key encoding metadata: 'must_understand' must be a "
-            f"boolean, got {mapping['must_understand']!r}."
+            f"Invalid chunk key encoding metadata: 'must_understand' must be "
+            f"true, got {mapping['must_understand']!r}. The Zarr v3 spec does "
+            f"not support 'must_understand': false for chunk key encodings, "
+            f"since a reader that does not recognize one cannot skip it."
         )
 
     configuration = mapping.get("configuration", {})
@@ -104,7 +115,9 @@ def parse_named_config_json(
             f"Invalid chunk key encoding metadata: 'configuration' must be a "
             f"JSON object, got {configuration!r}."
         )
-    extra_config_keys = sorted(k for k in configuration if k not in allowed_configuration_keys)
+    extra_config_keys = sorted(
+        (k for k in configuration if k not in allowed_configuration_keys), key=repr
+    )
     if extra_config_keys:
         raise ChunkKeyConfigurationError(
             f"Invalid configuration for chunk key encoding {expected_name!r}: "
