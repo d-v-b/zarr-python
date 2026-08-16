@@ -71,6 +71,13 @@ jobs:
         shell: bash
         working-directory: packages/zarr-chunk-key-encoding
     steps:
+      # A shallow checkout is deliberate here, though this job builds the repo
+      # root and hatch-vcs therefore derives a tag-less fallback version for
+      # `zarr`. That is harmless: nothing constrains zarr's version. The
+      # failure this looks like -- an editable sibling whose derived version
+      # has to clear a dependency floor -- was a constraint-satisfaction
+      # problem, not a version-derivation one, and `test-parity` was changed
+      # to take zarr-metadata from the index precisely so it cannot recur.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
