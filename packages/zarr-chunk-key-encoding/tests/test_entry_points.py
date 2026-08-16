@@ -57,19 +57,12 @@ class _FakeEntryPoint:
         return self._value
 
 
-@pytest.fixture(autouse=True)
-def _isolate_registry(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Give each test a private copy of the registry and discovery flag.
-
-    The registry is process-wide module state, so without this a test that
-    registers a plugin would leak into every later test.
-    """
-    monkeypatch.setattr(registry_module, "_registry", dict(registry_module._registry))
-    monkeypatch.setattr(registry_module, "_entry_points_loaded", False)
-
-
 def _patch_entry_points(monkeypatch: pytest.MonkeyPatch, *entries: _FakeEntryPoint) -> None:
-    """Make discovery see exactly *entries*."""
+    """Make discovery see exactly *entries*.
+
+    Overrides the registry isolation in `conftest`, which otherwise leaves
+    discovery finding nothing.
+    """
     monkeypatch.setattr(registry_module, "entry_points", lambda group: entries if group else ())
 
 
