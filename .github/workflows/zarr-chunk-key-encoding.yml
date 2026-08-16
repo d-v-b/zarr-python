@@ -74,12 +74,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          # This recipe resolves the sibling zarr-metadata as an editable
-          # overlay against this package's `zarr-metadata>=0.4.0` floor, and
-          # hatch-vcs derives that overlay's version from tags. A shallow
-          # clone has none, so the overlay builds as 0.1.dev1 and resolution
-          # fails; full history makes it the real post-0.4.0 version.
-          fetch-depth: 0
       - name: Install uv
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:

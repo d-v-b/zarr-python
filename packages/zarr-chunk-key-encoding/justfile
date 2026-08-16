@@ -15,8 +15,18 @@ test *args:
 
 # Run the zarr parity tests against the repo-root environment, which
 # provides `zarr` (deliberately not a dependency of this package).
+#
+# Unlike `test`, this does not overlay the sibling zarr-metadata: resolving
+# this package's `zarr-metadata>=0.4.0` floor against an editable sibling
+# means hatch-vcs has to derive that sibling's version from `zarr_metadata-v*`
+# tags, and a clone without them (a fork whose tags were never pushed, a
+# shallow CI checkout) silently produces a pre-0.4.0 version and an
+# unsatisfiable resolution. Taking zarr-metadata from the index instead makes
+# this recipe independent of tag hygiene, and checks this package against the
+# released zarr-metadata it actually declares. Lockstep development of the two
+# packages is what `test` is for.
 test-parity *args:
-    uv run --project ../.. --group test --with-editable . --with-editable ../zarr-metadata python -m pytest tests/test_zarr_parity.py {{ args }}
+    uv run --project ../.. --group test --with-editable . python -m pytest tests/test_zarr_parity.py {{ args }}
 
 # Lint with the same invocation CI uses
 lint:
