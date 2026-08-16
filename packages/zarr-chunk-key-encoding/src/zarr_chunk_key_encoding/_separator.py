@@ -10,7 +10,7 @@ module provides the shared runtime alias and validator.
 
 from typing import Final, Literal
 
-from zarr_chunk_key_encoding.errors import ChunkKeyConfigurationError
+from zarr_chunk_key_encoding._errors import ChunkKeyConfigurationError
 
 __all__ = [
     "SEPARATORS",

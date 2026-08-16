@@ -2,7 +2,26 @@
 
 from __future__ import annotations
 
+import pathlib
+
 import zarr_chunk_key_encoding
+
+
+def test_every_module_is_private() -> None:
+    """`__all__` in the top-level package is the entire public API.
+
+    Every module beneath it is named with a leading underscore, so import
+    paths like `zarr_chunk_key_encoding.abc` are not part of the contract and
+    can be reorganized freely. A new module added without the underscore
+    would silently widen that contract, so it is checked rather than trusted.
+    """
+    package_dir = pathlib.Path(zarr_chunk_key_encoding.__file__).parent
+    public = sorted(
+        p.name
+        for p in package_dir.glob("*.py")
+        if p.stem != "__init__" and not p.stem.startswith("_")
+    )
+    assert public == []
 
 
 def test_all_names_resolve() -> None:

@@ -34,10 +34,10 @@ belongs in one shared package rather than reinvented here.
 
 from importlib.metadata import version
 
-from zarr_chunk_key_encoding.abc import ChunkKey, ChunkKeyEncoding, ChunkKeyEncodingJSON
-from zarr_chunk_key_encoding.bounded import BoundedChunkKeyEncoding
-from zarr_chunk_key_encoding.default import DefaultChunkKeyEncoding
-from zarr_chunk_key_encoding.errors import (
+from zarr_chunk_key_encoding._abc import ChunkKey, ChunkKeyEncoding, ChunkKeyEncodingJSON
+from zarr_chunk_key_encoding._bounded import BoundedChunkKeyEncoding
+from zarr_chunk_key_encoding._default import DefaultChunkKeyEncoding
+from zarr_chunk_key_encoding._errors import (
     ChunkCoordsOutOfBoundsError,
     ChunkKeyConfigurationError,
     ChunkKeyDecodeError,
@@ -46,7 +46,7 @@ from zarr_chunk_key_encoding.errors import (
     InvalidChunkCoordsError,
     UnknownChunkKeyEncodingError,
 )
-from zarr_chunk_key_encoding.from_json import (
+from zarr_chunk_key_encoding._from_json import (
     CHUNK_KEY_ENCODINGS,
     ChunkKeyEncodingLike,
     ChunkKeyEncodingParams,
@@ -54,8 +54,8 @@ from zarr_chunk_key_encoding.from_json import (
     get_chunk_key_encoding_class,
     parse_chunk_key_encoding,
 )
-from zarr_chunk_key_encoding.separator import SEPARATORS, Separator, parse_separator
-from zarr_chunk_key_encoding.v2 import V2ChunkKeyEncoding
+from zarr_chunk_key_encoding._separator import SEPARATORS, Separator, parse_separator
+from zarr_chunk_key_encoding._v2 import V2ChunkKeyEncoding
 
 __version__ = version("zarr-chunk-key-encoding")
 

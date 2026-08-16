@@ -28,15 +28,15 @@ import math
 from collections.abc import Collection, Iterator, Sequence
 from dataclasses import dataclass
 
-from zarr_chunk_key_encoding._parsing import normalize_chunk_coords
-from zarr_chunk_key_encoding.abc import ChunkKey, ChunkKeyEncoding
-from zarr_chunk_key_encoding.errors import (
+from zarr_chunk_key_encoding._abc import ChunkKey, ChunkKeyEncoding
+from zarr_chunk_key_encoding._errors import (
     ChunkCoordsOutOfBoundsError,
     ChunkKeyConfigurationError,
     ChunkKeyDecodeError,
     ChunkKeyOutOfBoundsError,
     InvalidChunkCoordsError,
 )
+from zarr_chunk_key_encoding._parsing import normalize_chunk_coords
 
 __all__ = [
     "BoundedChunkKeyEncoding",

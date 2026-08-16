@@ -34,7 +34,7 @@ from typing_extensions import TypeAliasType
 from zarr_metadata import JSONValue
 
 if TYPE_CHECKING:
-    from zarr_chunk_key_encoding.bounded import BoundedChunkKeyEncoding
+    from zarr_chunk_key_encoding._bounded import BoundedChunkKeyEncoding
 
 __all__ = [
     "ChunkKey",
@@ -54,7 +54,7 @@ came out of an encoding rather than accepting any string.
 ``decode`` deliberately accepts plain ``str``, since its job is judging
 untrusted input. Code that has validated a candidate string by other means
 (for example a successful membership test against a
-`zarr_chunk_key_encoding.bounded.BoundedChunkKeyEncoding`) may brand it
+`BoundedChunkKeyEncoding`) may brand it
 directly with ``ChunkKey(candidate)``.
 """
 
@@ -166,7 +166,7 @@ class ChunkKeyEncoding(ABC):
     def bind(self, grid_shape: Sequence[int]) -> "BoundedChunkKeyEncoding":
         """Bind this encoding to a chunk grid, restricting its domain.
 
-        The result is a `zarr_chunk_key_encoding.bounded.BoundedChunkKeyEncoding`:
+        The result is a `BoundedChunkKeyEncoding`:
         its ``encode`` and ``decode`` reject coordinates and keys outside the
         grid, its ``decode`` is a total inverse of ``encode`` (resolving the
         ``v2`` encoding's rank-zero ambiguity), and its valid key set is a
@@ -189,6 +189,6 @@ class ChunkKeyEncoding(ABC):
         ChunkKeyConfigurationError
             If any grid shape entry is not a non-negative integer.
         """
-        from zarr_chunk_key_encoding.bounded import BoundedChunkKeyEncoding
+        from zarr_chunk_key_encoding._bounded import BoundedChunkKeyEncoding
 
         return BoundedChunkKeyEncoding(encoding=self, grid_shape=tuple(grid_shape))

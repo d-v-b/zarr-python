@@ -12,7 +12,7 @@ from typing import Final, cast
 
 from zarr_metadata import JSONValue
 
-from zarr_chunk_key_encoding.errors import (
+from zarr_chunk_key_encoding._errors import (
     ChunkKeyConfigurationError,
     ChunkKeyDecodeError,
     InvalidChunkCoordsError,

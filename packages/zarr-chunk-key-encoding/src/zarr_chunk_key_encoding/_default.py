@@ -19,14 +19,14 @@ from zarr_metadata.v3.chunk_key_encoding.default import (
     DefaultChunkKeyEncodingObject,
 )
 
+from zarr_chunk_key_encoding._abc import ChunkKey, ChunkKeyEncoding, ChunkKeyEncodingJSON
+from zarr_chunk_key_encoding._errors import ChunkKeyDecodeError
 from zarr_chunk_key_encoding._parsing import (
     normalize_chunk_coords,
     parse_grid_index,
     parse_named_config_json,
 )
-from zarr_chunk_key_encoding.abc import ChunkKey, ChunkKeyEncoding, ChunkKeyEncodingJSON
-from zarr_chunk_key_encoding.errors import ChunkKeyDecodeError
-from zarr_chunk_key_encoding.separator import Separator, parse_separator
+from zarr_chunk_key_encoding._separator import Separator, parse_separator
 
 __all__ = [
     "DefaultChunkKeyEncoding",

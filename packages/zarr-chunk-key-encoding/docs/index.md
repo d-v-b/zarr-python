@@ -26,9 +26,9 @@ defines two encodings, both provided here:
 ```
 
 When the chunk grid shape is known,
-[`bind`][zarr_chunk_key_encoding.abc.ChunkKeyEncoding.bind] restricts the
+[`bind`][zarr_chunk_key_encoding.ChunkKeyEncoding.bind] restricts the
 encoding to the grid's valid indices. The resulting
-[`BoundedChunkKeyEncoding`][zarr_chunk_key_encoding.bounded.BoundedChunkKeyEncoding]
+[`BoundedChunkKeyEncoding`][zarr_chunk_key_encoding.BoundedChunkKeyEncoding]
 treats the valid key set as a finite collection — membership testing checks
 grammar, rank, bounds, and canonical spelling in one test — and its `decode`
 is a total inverse of `encode`:
@@ -65,14 +65,14 @@ Rust implementation factors chunk key encodings into a small standalone crate:
 
 - Encodings are identified by the `name` in their v3 metadata and constructed
   from it
-  ([`chunk_key_encoding_from_json`][zarr_chunk_key_encoding.from_json.chunk_key_encoding_from_json]).
-- [`encode`][zarr_chunk_key_encoding.abc.ChunkKeyEncoding.encode] is
-  required; [`decode`][zarr_chunk_key_encoding.abc.ChunkKeyEncoding.decode]
+  ([`chunk_key_encoding_from_json`][zarr_chunk_key_encoding.chunk_key_encoding_from_json]).
+- [`encode`][zarr_chunk_key_encoding.ChunkKeyEncoding.encode] is
+  required; [`decode`][zarr_chunk_key_encoding.ChunkKeyEncoding.decode]
   is optional, since an encoding need not be injective.
 
 Where decoding is defined, it is a *strict* inverse of encoding: malformed
 or non-canonical keys (`c/01`, `c/-1`, a wrong prefix or separator) raise
-[`ChunkKeyDecodeError`][zarr_chunk_key_encoding.errors.ChunkKeyDecodeError]
+[`ChunkKeyDecodeError`][zarr_chunk_key_encoding.ChunkKeyDecodeError]
 instead of being silently normalized, and `encode` validates that its input
 coordinates are non-negative integers (anything implementing `__index__`,
 so NumPy integers work).
@@ -108,6 +108,6 @@ group name is a compatibility ratchet the moment a third party publishes
 against it.
 
 Subclassing
-[`ChunkKeyEncoding`][zarr_chunk_key_encoding.abc.ChunkKeyEncoding] works
+[`ChunkKeyEncoding`][zarr_chunk_key_encoding.ChunkKeyEncoding] works
 today, and `chunk_key_encoding_from_json`'s signature is the one an open set
 would use, so growing into a registry later is an additive change.

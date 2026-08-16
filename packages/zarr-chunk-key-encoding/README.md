@@ -17,6 +17,11 @@ and (where well-defined) back again. This package provides:
 - `chunk_key_encoding_from_json` / `parse_chunk_key_encoding` — construct
   encodings from JSON metadata or looser user input
 
+Everything public is importable from the top-level `zarr_chunk_key_encoding`
+namespace, and its `__all__` is the whole API. Every module beneath it is
+named with a leading underscore: submodule paths are implementation detail
+and may be reorganized without a major version.
+
 JSON shapes are typed by
 [zarr-metadata](https://zarr-metadata.readthedocs.io/); this package supplies
 the runtime behavior for those types. It does not import `zarr`. It is

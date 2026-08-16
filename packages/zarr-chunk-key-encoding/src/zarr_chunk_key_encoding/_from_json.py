@@ -25,14 +25,14 @@ from typing import TYPE_CHECKING, Final, NotRequired, cast
 
 from typing_extensions import TypeAliasType, TypedDict
 
-from zarr_chunk_key_encoding.abc import ChunkKeyEncoding, ChunkKeyEncodingJSON
-from zarr_chunk_key_encoding.default import DefaultChunkKeyEncoding
-from zarr_chunk_key_encoding.errors import (
+from zarr_chunk_key_encoding._abc import ChunkKeyEncoding, ChunkKeyEncodingJSON
+from zarr_chunk_key_encoding._default import DefaultChunkKeyEncoding
+from zarr_chunk_key_encoding._errors import (
     ChunkKeyConfigurationError,
     UnknownChunkKeyEncodingError,
 )
-from zarr_chunk_key_encoding.separator import Separator
-from zarr_chunk_key_encoding.v2 import V2ChunkKeyEncoding
+from zarr_chunk_key_encoding._separator import Separator
+from zarr_chunk_key_encoding._v2 import V2ChunkKeyEncoding
 
 if TYPE_CHECKING:
     from zarr_metadata import JSONValue
