@@ -138,6 +138,40 @@ def test_entry_point_cannot_claim_core(monkeypatch: pytest.MonkeyPatch) -> None:
     }
 
 
+def test_subclass_without_name_is_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A genuine subclass that forgets `name` is skipped, not left to raise.
+
+    `name` is an un-defaulted ClassVar, so such a class passes the subclass
+    check and used to raise AttributeError straight back out of discovery --
+    breaking every later lookup, which is the failure discovery is supposed
+    to contain.
+    """
+    nameless = type(_Plugin)("_Nameless", (ChunkKeyEncoding,), dict(vars(_Plugin)))
+    del nameless.name  # type: ignore[misc]
+    _patch_entry_points(
+        monkeypatch, _FakeEntryPoint("nameless", nameless), _FakeEntryPoint("good", _Plugin)
+    )
+    with pytest.warns(ChunkKeyPluginWarning, match="does not define a string 'name'"):
+        assert get_chunk_key_encoding_class(_Plugin.name) is _Plugin
+
+
+def test_support_must_be_an_enum_member(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A plain string is not accepted as a support level.
+
+    `ChunkKeyEncodingSupport` is a `StrEnum`, so ``support = "core"`` would
+    compare equal to CORE for every consumer while failing the identity check
+    that guards the tier -- registering unvalidated, then reporting as core.
+    """
+    sneaky = type(_Plugin)("_Sneaky", (_Plugin,), {"name": "test.sneaky", "support": "core"})
+    _patch_entry_points(monkeypatch, _FakeEntryPoint("sneaky", sneaky))
+    with (
+        pytest.warns(ChunkKeyPluginWarning, match="not a ChunkKeyEncodingSupport member"),
+        pytest.raises(Exception, match="Unknown chunk key encoding"),
+    ):
+        get_chunk_key_encoding_class("test.sneaky")
+    assert "test.sneaky" not in registered_chunk_key_encodings()
+
+
 def test_discovery_runs_at_most_once(monkeypatch: pytest.MonkeyPatch) -> None:
     """A second miss does not re-scan, so a warning is not repeated forever."""
     calls = 0

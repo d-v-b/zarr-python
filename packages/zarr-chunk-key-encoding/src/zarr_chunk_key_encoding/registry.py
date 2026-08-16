@@ -125,6 +125,20 @@ def _load_entry_points() -> None:
                 stacklevel=2,
             )
             continue
+        # `name` is an un-defaulted ClassVar on the ABC, so a genuine subclass
+        # that forgets it reaches here and would raise AttributeError on the
+        # attribute access below -- outside the try, and so back out through
+        # discovery, which is the fault isolation this function exists to
+        # provide. Check it as a rejection case instead.
+        if not isinstance(getattr(cls, "name", None), str):
+            warnings.warn(
+                f"Entry point {entry_point.name!r} in group {ENTRY_POINT_GROUP!r} "
+                f"loaded {cls!r}, which does not define a string 'name', and "
+                f"was skipped.",
+                ChunkKeyPluginWarning,
+                stacklevel=2,
+            )
+            continue
         if cls.name not in _registry:
             # Routed through the public function rather than assigning to
             # `_registry`, so that an entry point cannot bypass the checks it
@@ -165,6 +179,19 @@ def register_chunk_key_encoding(cls: type[ChunkKeyEncoding], *, overwrite: bool 
         `ChunkKeyEncodingSupport.CORE` for a name the Zarr v3 core spec does
         not define.
     """
+    # Required to be a real enum member, not merely something equal to one.
+    # `ChunkKeyEncodingSupport` is a `StrEnum`, so a class declaring
+    # `support = "core"` would compare equal to CORE for every consumer while
+    # failing the identity check below -- registering unvalidated and then
+    # reporting itself as core. Rejecting non-members closes that off.
+    # Widen to `object` (the cast defeats narrowing from the annotation) so
+    # the check stays a meaningful runtime guard for untyped third-party
+    # classes instead of being flagged as unnecessary.
+    if not isinstance(cast("object", cls.support), ChunkKeyEncodingSupport):
+        raise ChunkKeyRegistryError(
+            f"Chunk key encoding {cls.name!r} declares support level "
+            f"{cls.support!r}, which is not a ChunkKeyEncodingSupport member."
+        )
     # Checked so that CORE means "the spec defines this" rather than "the
     # author said so" -- otherwise the tier a consumer gates on would be
     # self-asserted by the very code it is trying to gate.
