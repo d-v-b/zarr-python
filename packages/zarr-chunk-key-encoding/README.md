@@ -46,6 +46,11 @@ Design notes, relative to the chunk key encoding code inside `zarr`:
   integers (anything implementing `__index__`, so NumPy integers work), and
   invalid coordinates raise `InvalidChunkCoordsError` rather than producing
   an unusable key.
+- `encode` returns `ChunkKey`, a `typing.NewType` brand over `str` — the
+  static analogue of the validated `StoreKey` newtype in `zarrs` — so
+  key-consuming code can require proof that a string came out of an encoding.
+  `decode` deliberately accepts plain `str`, since its job is judging
+  untrusted input.
 - All errors derive from `ChunkKeyEncodingError`.
 - Following zarrs, registrations can be reversed
   (`unregister_chunk_key_encoding`), and JSON metadata is resolved through

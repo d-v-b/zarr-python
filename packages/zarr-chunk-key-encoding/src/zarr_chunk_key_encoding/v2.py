@@ -26,7 +26,7 @@ from zarr_chunk_key_encoding._parsing import (
     parse_grid_index,
     parse_named_config_json,
 )
-from zarr_chunk_key_encoding.abc import ChunkKeyEncoding, ChunkKeyEncodingJSON
+from zarr_chunk_key_encoding.abc import ChunkKey, ChunkKeyEncoding, ChunkKeyEncodingJSON
 from zarr_chunk_key_encoding.errors import ChunkKeyDecodeError
 from zarr_chunk_key_encoding.separator import Separator, parse_separator
 
@@ -92,7 +92,7 @@ class V2ChunkKeyEncoding(ChunkKeyEncoding):
             configuration=V2ChunkKeyEncodingConfiguration(separator=self.separator),
         )
 
-    def encode(self, chunk_coords: Sequence[int]) -> str:
+    def encode(self, chunk_coords: Sequence[int]) -> ChunkKey:
         """Encode chunk grid indices into a store key.
 
         Raises
@@ -102,8 +102,8 @@ class V2ChunkKeyEncoding(ChunkKeyEncoding):
         """
         indices = normalize_chunk_coords(chunk_coords)
         if not indices:
-            return "0"
-        return self.separator.join(map(str, indices))
+            return ChunkKey("0")
+        return ChunkKey(self.separator.join(map(str, indices)))
 
     def decode(self, chunk_key: str) -> tuple[int, ...]:
         """Decode a store key into chunk grid indices.

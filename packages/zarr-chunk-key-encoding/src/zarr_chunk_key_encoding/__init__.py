@@ -31,7 +31,7 @@ behavior for those types.
 
 from importlib.metadata import version
 
-from zarr_chunk_key_encoding.abc import ChunkKeyEncoding, ChunkKeyEncodingJSON
+from zarr_chunk_key_encoding.abc import ChunkKey, ChunkKeyEncoding, ChunkKeyEncodingJSON
 from zarr_chunk_key_encoding.bounded import BoundedChunkKeyEncoding
 from zarr_chunk_key_encoding.default import DefaultChunkKeyEncoding
 from zarr_chunk_key_encoding.errors import (
@@ -65,6 +65,7 @@ __all__ = [
     "SEPARATORS",
     "BoundedChunkKeyEncoding",
     "ChunkCoordsOutOfBoundsError",
+    "ChunkKey",
     "ChunkKeyConfigurationError",
     "ChunkKeyDecodeError",
     "ChunkKeyEncoding",

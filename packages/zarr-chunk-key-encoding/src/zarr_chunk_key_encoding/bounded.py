@@ -29,7 +29,7 @@ from collections.abc import Collection, Iterator, Sequence
 from dataclasses import dataclass
 
 from zarr_chunk_key_encoding._parsing import normalize_chunk_coords
-from zarr_chunk_key_encoding.abc import ChunkKeyEncoding
+from zarr_chunk_key_encoding.abc import ChunkKey, ChunkKeyEncoding
 from zarr_chunk_key_encoding.errors import (
     ChunkCoordsOutOfBoundsError,
     ChunkKeyConfigurationError,
@@ -70,7 +70,7 @@ def _parse_grid_shape(grid_shape: Sequence[int]) -> tuple[int, ...]:
 
 
 @dataclass(frozen=True)
-class BoundedChunkKeyEncoding(Collection[str]):
+class BoundedChunkKeyEncoding(Collection[ChunkKey]):
     """A chunk key encoding restricted to a known chunk grid.
 
     Construct with `ChunkKeyEncoding.bind`, or directly. The valid key set
@@ -120,7 +120,7 @@ class BoundedChunkKeyEncoding(Collection[str]):
             c < g for c, g in zip(coords, self.grid_shape, strict=True)
         )
 
-    def encode(self, chunk_coords: Sequence[int]) -> str:
+    def encode(self, chunk_coords: Sequence[int]) -> ChunkKey:
         """Encode chunk grid indices into a store key.
 
         Parameters
@@ -130,7 +130,7 @@ class BoundedChunkKeyEncoding(Collection[str]):
 
         Returns
         -------
-        str
+        ChunkKey
             The store key for the chunk, relative to the array's prefix.
 
         Raises
@@ -196,7 +196,7 @@ class BoundedChunkKeyEncoding(Collection[str]):
             return False
         return True
 
-    def __iter__(self) -> Iterator[str]:
+    def __iter__(self) -> Iterator[ChunkKey]:
         """Iterate over all valid chunk keys, in row-major order of their grid indices."""
         for coords in itertools.product(*(range(g) for g in self.grid_shape)):
             yield self.encoding.encode(coords)

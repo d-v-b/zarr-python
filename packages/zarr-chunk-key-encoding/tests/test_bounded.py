@@ -9,6 +9,7 @@ import pytest
 from zarr_chunk_key_encoding import (
     BoundedChunkKeyEncoding,
     ChunkCoordsOutOfBoundsError,
+    ChunkKey,
     ChunkKeyConfigurationError,
     ChunkKeyDecodeError,
     ChunkKeyEncoding,
@@ -165,9 +166,9 @@ class _NoDecode(ChunkKeyEncoding):
         """Return the name-only object form."""
         return {"name": self.name}
 
-    def encode(self, chunk_coords: Sequence[int]) -> str:
+    def encode(self, chunk_coords: Sequence[int]) -> ChunkKey:
         """Join coordinates with `/`, using `z` for the rank-zero key."""
-        return "/".join(str(c) for c in chunk_coords) or "z"
+        return ChunkKey("/".join(str(c) for c in chunk_coords) or "z")
 
 
 def test_contains_without_decode() -> None:
