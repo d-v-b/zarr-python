@@ -9,6 +9,15 @@ default:
 # The sibling zarr-metadata package is layered in as an editable overlay so
 # the two packages can be developed in lockstep; the published package
 # depends on the released zarr-metadata distribution.
+#
+# Unlike `test-parity`, this recipe is safe on a tag-less shallow checkout,
+# though the two look alike. `uv sync` resolves this package's
+# `zarr-metadata>=0.4.0` floor against the index first, and `--with-editable`
+# then overlays the local build without re-resolving it -- so the overlay's
+# hatch-vcs version, which needs `zarr_metadata-v*` tags to be meaningful,
+# never has to satisfy the floor. `test-parity` resolved against the repo
+# root instead, which did force the overlay through the floor, and that is
+# why it stopped overlaying zarr-metadata at all.
 # Run the test suite; extra args are passed to pytest
 test *args:
     uv run --group test --with-editable ../zarr-metadata python -m pytest tests {{ args }}
