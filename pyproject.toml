@@ -136,7 +136,7 @@ dev = [
 ]
 zarrista = [
     {include-group = "test"},
-    "zarrista @ git+https://github.com/developmentseed/zarrista@95e47ad4c414c5920f0cf15550f923039641da8e",
+    "zarrista @ git+https://github.com/developmentseed/zarrista@92d26b65b90e9715d5c658c71b9216449f25ae64",
     # zarrista's `store` submodule unconditionally imports both of these
     # (for its `AsyncStore` type alias), even though neither is declared in
     # zarrista's own package metadata as a runtime dependency.

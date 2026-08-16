@@ -105,14 +105,14 @@ def test_zarrista_rejects_v2(tmp_path: Path) -> None:
 
 
 def test_zarrista_vlen_read_not_implemented(tmp_path: Path) -> None:
-    # zarrista decodes vlen dtypes (e.g. strings) to a `VariableArray`, which
-    # only exposes the Arrow C Data interface -- `np.asarray` on it does not
-    # raise, it silently produces a wrong-shape 0-d `object` array. The engine
-    # must reject this itself rather than let a bogus read through.
+    # zarrista decodes vlen dtypes (e.g. strings) to a
+    # `VariableLengthTensor`. Although current zarrista can convert it to
+    # NumPy, integrating its dtype semantics is outside this engine's current
+    # fixed-width contract, so it must still be rejected explicitly.
     z = zarr.create_array(LocalStore(tmp_path), shape=(4,), chunks=(2,), dtype="str")
     z[:] = np.array(["a", "bb", "ccc", "dddd"], dtype=object)
     ze = zarr.open_array(LocalStore(tmp_path), engine="zarrista")
-    with pytest.raises(NotImplementedError, match="VariableArray"):
+    with pytest.raises(NotImplementedError, match="VariableLengthTensor"):
         ze[:]
 
 
