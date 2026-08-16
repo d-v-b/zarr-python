@@ -63,7 +63,7 @@ def _patch_entry_points(monkeypatch: pytest.MonkeyPatch, *entries: _FakeEntryPoi
     Overrides the registry isolation in `conftest`, which otherwise leaves
     discovery finding nothing.
     """
-    monkeypatch.setattr(registry_module, "entry_points", lambda group: entries if group else ())
+    monkeypatch.setattr(registry_module._registry, "_iter_entry_points", lambda: entries)
 
 
 def test_discovery_registers_plugin(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -176,12 +176,12 @@ def test_discovery_runs_at_most_once(monkeypatch: pytest.MonkeyPatch) -> None:
     """A second miss does not re-scan, so a warning is not repeated forever."""
     calls = 0
 
-    def counting_entry_points(group: str) -> tuple[_FakeEntryPoint, ...]:
+    def counting_entry_points() -> tuple[_FakeEntryPoint, ...]:
         nonlocal calls
         calls += 1
         return ()
 
-    monkeypatch.setattr(registry_module, "entry_points", counting_entry_points)
+    monkeypatch.setattr(registry_module._registry, "_iter_entry_points", counting_entry_points)
     for _ in range(3):
         with pytest.raises(Exception, match="Unknown chunk key encoding"):
             get_chunk_key_encoding_class("nonexistent")

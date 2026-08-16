@@ -12,7 +12,9 @@ Third-party packages can register encodings in two ways:
 - imperatively, by calling `register_chunk_key_encoding` at import time, or
 - declaratively, via the ``zarr_chunk_key_encoding`` entry point group. Each
   entry point must load to a `ChunkKeyEncoding` subclass; entry points are
-  loaded lazily, the first time a name lookup would otherwise fail.
+  loaded lazily, the first time a name lookup would otherwise fail. A broken
+  entry point is skipped with a `ChunkKeyPluginWarning` rather than raised,
+  so one third-party package cannot break discovery for everything else.
 
 The built-in ``default`` and ``v2`` encodings are registered when the
 `zarr_chunk_key_encoding` package is imported.
@@ -22,15 +24,20 @@ Every registered encoding carries a
 whether it is defined by the core spec, registered in `zarr-extensions`, or
 neither, so a consumer can accept only the tiers it is willing to honour --
 see `registered_chunk_key_encodings` and `get_chunk_key_encoding_support`.
+
+The mechanics are the same for every Zarr v3 extension point, so they live
+in the chunk-key-agnostic `zarr_chunk_key_encoding._registry_core`; this
+module is the chunk-key-encoding-specific face of it. The functions below
+are the public API and stay put even if that machinery is later shared with
+other extension points.
 """
 
-import warnings
 from collections.abc import Mapping
-from importlib.metadata import entry_points
 from typing import TYPE_CHECKING, Final, NotRequired, cast
 
 from typing_extensions import TypeAliasType, TypedDict
 
+from zarr_chunk_key_encoding._registry_core import Registry
 from zarr_chunk_key_encoding.abc import ChunkKeyEncoding, ChunkKeyEncodingJSON
 from zarr_chunk_key_encoding.errors import (
     ChunkKeyConfigurationError,
@@ -63,8 +70,18 @@ __all__ = [
 ENTRY_POINT_GROUP: Final = "zarr_chunk_key_encoding"
 """The entry point group scanned for third-party chunk key encodings."""
 
-_registry: dict[str, type[ChunkKeyEncoding]] = {}
-_entry_points_loaded: bool = False
+_registry: Final = Registry(
+    base_class=ChunkKeyEncoding,
+    entry_point_group=ENTRY_POINT_GROUP,
+    kind_label="chunk key encoding",
+    core_names=CORE_CHUNK_KEY_ENCODING_NAMES,
+    support_enum=ChunkKeyEncodingSupport,
+    core_support=ChunkKeyEncodingSupport.CORE,
+    registry_error=ChunkKeyRegistryError,
+    unknown_error=UnknownChunkKeyEncodingError,
+    plugin_warning=ChunkKeyPluginWarning,
+)
+"""The process-wide registry. Reach it through the functions below."""
 
 
 class ChunkKeyEncodingParams(TypedDict, closed=True):
@@ -88,75 +105,6 @@ an instance, the flat params form, a short-hand name string, or the
 named-configuration JSON object form."""
 
 
-def _load_entry_points() -> None:
-    """Register encodings declared via the entry point group, at most once.
-
-    Entry points never displace explicit registrations: a name that is
-    already registered is skipped.
-
-    A broken entry point -- one that fails to import, does not load to a
-    `ChunkKeyEncoding` subclass, or is rejected by
-    `register_chunk_key_encoding` -- is skipped with a
-    `ChunkKeyPluginWarning` rather than raised. Discovery runs lazily from
-    any lookup that misses, so raising would let one unrelated third-party
-    package turn every such lookup into a hard error, and would strand the
-    entry points enumerated after it.
-    """
-    global _entry_points_loaded
-    if _entry_points_loaded:
-        return
-    for entry_point in entry_points(group=ENTRY_POINT_GROUP):
-        try:
-            cls = entry_point.load()
-        except Exception as e:  # noqa: BLE001 - any import failure in third-party code
-            warnings.warn(
-                f"Entry point {entry_point.name!r} in group {ENTRY_POINT_GROUP!r} "
-                f"could not be loaded, and was skipped: {e!r}",
-                ChunkKeyPluginWarning,
-                stacklevel=2,
-            )
-            continue
-        if not (isinstance(cls, type) and issubclass(cls, ChunkKeyEncoding)):
-            warnings.warn(
-                f"Entry point {entry_point.name!r} in group {ENTRY_POINT_GROUP!r} "
-                f"loaded {cls!r}, which is not a ChunkKeyEncoding subclass, and "
-                f"was skipped.",
-                ChunkKeyPluginWarning,
-                stacklevel=2,
-            )
-            continue
-        # `name` is an un-defaulted ClassVar on the ABC, so a genuine subclass
-        # that forgets it reaches here and would raise AttributeError on the
-        # attribute access below -- outside the try, and so back out through
-        # discovery, which is the fault isolation this function exists to
-        # provide. Check it as a rejection case instead.
-        if not isinstance(getattr(cls, "name", None), str):
-            warnings.warn(
-                f"Entry point {entry_point.name!r} in group {ENTRY_POINT_GROUP!r} "
-                f"loaded {cls!r}, which does not define a string 'name', and "
-                f"was skipped.",
-                ChunkKeyPluginWarning,
-                stacklevel=2,
-            )
-            continue
-        if cls.name not in _registry:
-            # Routed through the public function rather than assigning to
-            # `_registry`, so that an entry point cannot bypass the checks it
-            # applies -- notably the one stopping a plugin from claiming the
-            # CORE support level for a name the spec does not define.
-            try:
-                register_chunk_key_encoding(cls)
-            except ChunkKeyRegistryError as e:
-                warnings.warn(
-                    f"Entry point {entry_point.name!r} in group "
-                    f"{ENTRY_POINT_GROUP!r} could not be registered, and was "
-                    f"skipped: {e}",
-                    ChunkKeyPluginWarning,
-                    stacklevel=2,
-                )
-    _entry_points_loaded = True
-
-
 def register_chunk_key_encoding(cls: type[ChunkKeyEncoding], *, overwrite: bool = False) -> None:
     """Register a chunk key encoding class under its ``name``.
 
@@ -175,44 +123,12 @@ def register_chunk_key_encoding(cls: type[ChunkKeyEncoding], *, overwrite: bool 
     ------
     ChunkKeyRegistryError
         If the name is already registered to a different class and
-        ``overwrite`` is false, or if the class claims
+        ``overwrite`` is false, if the class declares a ``support`` that is
+        not a `ChunkKeyEncodingSupport` member, or if it claims
         `ChunkKeyEncodingSupport.CORE` for a name the Zarr v3 core spec does
         not define.
     """
-    # Required to be a real enum member, not merely something equal to one.
-    # `ChunkKeyEncodingSupport` is a `StrEnum`, so a class declaring
-    # `support = "core"` would compare equal to CORE for every consumer while
-    # failing the identity check below -- registering unvalidated and then
-    # reporting itself as core. Rejecting non-members closes that off.
-    # Widen to `object` (the cast defeats narrowing from the annotation) so
-    # the check stays a meaningful runtime guard for untyped third-party
-    # classes instead of being flagged as unnecessary.
-    if not isinstance(cast("object", cls.support), ChunkKeyEncodingSupport):
-        raise ChunkKeyRegistryError(
-            f"Chunk key encoding {cls.name!r} declares support level "
-            f"{cls.support!r}, which is not a ChunkKeyEncodingSupport member."
-        )
-    # Checked so that CORE means "the spec defines this" rather than "the
-    # author said so" -- otherwise the tier a consumer gates on would be
-    # self-asserted by the very code it is trying to gate.
-    if (
-        cls.support is ChunkKeyEncodingSupport.CORE
-        and cls.name not in CORE_CHUNK_KEY_ENCODING_NAMES
-    ):
-        raise ChunkKeyRegistryError(
-            f"Chunk key encoding {cls.name!r} declares support level "
-            f"{ChunkKeyEncodingSupport.CORE!r}, but the Zarr v3 core spec "
-            f"defines only {sorted(CORE_CHUNK_KEY_ENCODING_NAMES)}. Use "
-            f"{ChunkKeyEncodingSupport.EXTENSION!r} if it is registered in "
-            f"zarr-extensions, or {ChunkKeyEncodingSupport.CUSTOM!r} otherwise."
-        )
-    existing = _registry.get(cls.name)
-    if existing is not None and existing is not cls and not overwrite:
-        raise ChunkKeyRegistryError(
-            f"A chunk key encoding named {cls.name!r} is already registered "
-            f"({existing!r}). Pass overwrite=True to replace it."
-        )
-    _registry[cls.name] = cls
+    _registry.register(cls, overwrite=overwrite)
 
 
 def unregister_chunk_key_encoding(name: str) -> None:
@@ -228,9 +144,7 @@ def unregister_chunk_key_encoding(name: str) -> None:
     UnknownChunkKeyEncodingError
         If no encoding is registered under ``name``.
     """
-    if name not in _registry:
-        raise UnknownChunkKeyEncodingError(name, registered_chunk_key_encodings())
-    del _registry[name]
+    _registry.unregister(name)
 
 
 def get_chunk_key_encoding_class(name: str) -> type[ChunkKeyEncoding]:
@@ -253,12 +167,7 @@ def get_chunk_key_encoding_class(name: str) -> type[ChunkKeyEncoding]:
     UnknownChunkKeyEncodingError
         If no encoding is registered under ``name``.
     """
-    if name not in _registry:
-        _load_entry_points()
-    try:
-        return _registry[name]
-    except KeyError:
-        raise UnknownChunkKeyEncodingError(name, registered_chunk_key_encodings()) from None
+    return _registry.get(name)
 
 
 def get_chunk_key_encoding_support(name: str) -> ChunkKeyEncodingSupport:
@@ -281,7 +190,7 @@ def get_chunk_key_encoding_support(name: str) -> ChunkKeyEncodingSupport:
     UnknownChunkKeyEncodingError
         If no encoding is registered under ``name``.
     """
-    return get_chunk_key_encoding_class(name).support
+    return cast("ChunkKeyEncodingSupport", _registry.support_of(name))
 
 
 def registered_chunk_key_encodings(
@@ -303,9 +212,7 @@ def registered_chunk_key_encodings(
     tuple of str
         The matching names, sorted.
     """
-    if support is None:
-        return tuple(sorted(_registry))
-    return tuple(sorted(name for name, cls in _registry.items() if cls.support is support))
+    return _registry.names(support=support)
 
 
 def chunk_key_encoding_from_json(data: ChunkKeyEncodingJSON) -> ChunkKeyEncoding:
