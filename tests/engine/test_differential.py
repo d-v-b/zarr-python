@@ -114,3 +114,27 @@ def test_sharded_reads(
     z[:, :] = data
     zr = zarr.open_array(LocalStore(path), engine=engine)
     np.testing.assert_array_equal(np.asarray(zr[2:8, 3:9]), data[2:8, 3:9])
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+def test_sharded_writes(
+    engine: EngineName,
+    tmp_path: Path,
+) -> None:
+    z = zarr.create_array(
+        LocalStore(tmp_path),
+        shape=SHAPE,
+        chunks=(3, 4),
+        shards=(6, 8),
+        dtype="int32",
+    )
+    data = np.arange(90, dtype="int32").reshape(SHAPE)
+    z[:, :] = data
+    zw = zarr.open_array(LocalStore(tmp_path), engine=engine)
+    replacement = -(np.arange(42, dtype="int32") + 1).reshape(7, 6)
+    expected = data.copy()
+    expected[2:9, 3:9] = replacement
+
+    zw[2:9, 3:9] = replacement
+
+    np.testing.assert_array_equal(np.asarray(z[:, :]), expected)

@@ -84,6 +84,47 @@ def test_zarrista_engine_edge_chunk_full_write(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("shape", "chunks", "shards", "selection"),
+    [
+        pytest.param((10, 9), (3, 4), None, np.s_[2:10, 1:9], id="regular-edge"),
+        pytest.param((12, 12), (3, 3), (6, 6), np.s_[2:10, 2:11], id="sharded"),
+    ],
+)
+def test_zarrista_region_writes_preserve_unselected_values(
+    tmp_path: Path,
+    shape: tuple[int, int],
+    chunks: tuple[int, int],
+    shards: tuple[int, int] | None,
+    selection: tuple[slice, slice],
+) -> None:
+    initial = np.arange(np.prod(shape), dtype="int32").reshape(shape)
+    z = zarr.create_array(
+        LocalStore(tmp_path), shape=shape, chunks=chunks, shards=shards, dtype="int32"
+    )
+    z[:, :] = initial
+    ze = zarr.open_array(LocalStore(tmp_path), engine="zarrista")
+    value_shape = tuple(index.stop - index.start for index in selection)
+    value = -(np.arange(np.prod(value_shape), dtype="int32") + 1).reshape(value_shape)
+    expected = initial.copy()
+    expected[selection] = value
+
+    ze[selection] = value
+
+    np.testing.assert_array_equal(np.asarray(z[:, :]), expected)
+
+
+def test_zarrista_engine_with_metadata_retains_storage(tmp_path: Path) -> None:
+    z = _make(tmp_path)
+    ze = zarr.open_array(LocalStore(tmp_path), engine="zarrista")
+    prototype = default_buffer_prototype()
+
+    rebound = ze.engine.with_metadata(ze.metadata)
+    actual = rebound.read_selection(Region(start=(2, 1), end_exclusive=(7, 5)), prototype=prototype)
+
+    np.testing.assert_array_equal(actual, np.asarray(z[2:7, 1:5]))
+
+
 def test_zarrista_reads_are_writable(tmp_path: Path) -> None:
     # zarrista's `Tensor` wraps Rust-owned memory that `np.asarray` exposes
     # read-only. zarr-python reads have always returned writable arrays, so the
@@ -153,18 +194,26 @@ async def test_zarrista_async_engine_read_write_combinations(tmp_path: Path) -> 
 
     store = ObjectStore(obstore.store.LocalStore(prefix=str(tmp_path)))
     z = await async_api.create_array(store=store, shape=(10, 9), chunks=(3, 4), dtype="float32")
-    await z.setitem((slice(None), slice(None)), np.arange(90, dtype="float32").reshape(10, 9))
+    expected = np.arange(90, dtype="float32").reshape(10, 9)
+    await z.setitem((slice(None), slice(None)), expected)
     ze = await async_api.open_array(store=store, engine="zarrista")
 
     # contiguous read
     out = await ze.getitem((slice(2, 7), slice(1, 5)))
-    expected = await z.getitem((slice(2, 7), slice(1, 5)))
-    np.testing.assert_array_equal(np.asarray(out), np.asarray(expected))
+    expected_subset = await z.getitem((slice(2, 7), slice(1, 5)))
+    np.testing.assert_array_equal(np.asarray(out), np.asarray(expected_subset))
     # full-chunk-aligned write
     await ze.setitem((slice(0, 3), slice(0, 4)), np.zeros((3, 4), dtype="float32"))
+    expected[0:3, 0:4] = 0
     written = await z.getitem((slice(0, 3), slice(0, 4)))
     np.testing.assert_array_equal(np.asarray(written), np.zeros((3, 4), dtype="float32"))
     # partial-chunk RMW write
     await ze.setitem((slice(1, 2), slice(1, 2)), np.float32(99.0))
+    expected[1, 1] = 99
     assert float(np.asarray(await z.getitem((1, 1)))) == 99.0
     assert float(np.asarray(await z.getitem((0, 0)))) == 0.0  # untouched neighbor
+    # multi-chunk write, including edge chunks
+    replacement = -np.arange(42, dtype="float32").reshape(6, 7)
+    await ze.setitem((slice(4, 10), slice(2, 9)), replacement)
+    expected[4:10, 2:9] = replacement
+    np.testing.assert_array_equal(np.asarray(await z.getitem((slice(None), slice(None)))), expected)
