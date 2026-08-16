@@ -11,7 +11,7 @@ support tiers, fault isolation around third-party code) is the same for
 every v3 extension point, and belongs in one shared place rather than
 reinvented per package. Until that package exists, this one stays a library
 of the spec-defined encodings. Note that Zarr v3 already has an established
-entry point group for this extension point, ``zarr.chunk_key_encoding``,
+entry point group for this extension point, `zarr.chunk_key_encoding`,
 which `zarr` itself scans; adding a second, competing one is exactly the
 commitment worth not making early, since an entry point group is a
 compatibility ratchet the moment a third party publishes against it.
@@ -59,9 +59,9 @@ additions to it.
 class ChunkKeyEncodingParams(TypedDict, closed=True):
     """Flat keyword form for specifying a chunk key encoding.
 
-    A convenience input shape (``{"name": ..., "separator": ...}``) accepted
+    A convenience input shape (`{"name": ..., "separator": ...}`) accepted
     by `parse_chunk_key_encoding`; it is not valid Zarr metadata. Closed
-    (PEP 728): exactly ``name`` and optionally ``separator``.
+    (PEP 728): exactly `name` and optionally `separator`.
     """
 
     name: str
@@ -83,7 +83,7 @@ def get_chunk_key_encoding_class(name: str) -> type[ChunkKeyEncoding]:
     Parameters
     ----------
     name : str
-        The ``name`` field of the encoding's v3 metadata.
+        The `name` field of the encoding's v3 metadata.
 
     Returns
     -------
@@ -104,7 +104,7 @@ def get_chunk_key_encoding_class(name: str) -> type[ChunkKeyEncoding]:
 def chunk_key_encoding_from_json(data: ChunkKeyEncodingJSON) -> ChunkKeyEncoding:
     """Construct a chunk key encoding from Zarr v3 JSON metadata.
 
-    Resolves the class by ``name``, then delegates to its ``from_json``.
+    Resolves the class by `name`, then delegates to its `from_json`.
 
     Parameters
     ----------
@@ -119,7 +119,7 @@ def chunk_key_encoding_from_json(data: ChunkKeyEncodingJSON) -> ChunkKeyEncoding
     Raises
     ------
     ChunkKeyConfigurationError
-        If the metadata carries no usable ``name``, or the named class
+        If the metadata carries no usable `name`, or the named class
         rejects the metadata.
     UnknownChunkKeyEncodingError
         If the name is not one the Zarr v3 core spec defines.
@@ -153,7 +153,7 @@ def parse_chunk_key_encoding(data: ChunkKeyEncodingLike) -> ChunkKeyEncoding:
     Accepts, in addition to everything `chunk_key_encoding_from_json`
     accepts: existing `ChunkKeyEncoding` instances (returned unchanged) and
     the flat `ChunkKeyEncodingParams` form
-    (``{"name": ..., "separator": ...}``).
+    (`{"name": ..., "separator": ...}`).
 
     Parameters
     ----------

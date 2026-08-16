@@ -1,9 +1,9 @@
 """
 The `v2` chunk key encoding (Zarr v3 core spec).
 
-The chunk with grid index ``(k, j, i, ...)`` is stored under the key
-``k<sep>j<sep>i...``; the single chunk of a zero-dimensional array is stored
-under ``"0"``. The separator defaults to ``"."``. This reproduces the chunk
+The chunk with grid index `(k, j, i, ...)` is stored under the key
+`k<sep>j<sep>i...`; the single chunk of a zero-dimensional array is stored
+under `"0"`. The separator defaults to `"."`. This reproduces the chunk
 layout of Zarr v2 stores, so existing v2 arrays can be converted to v3
 without renaming chunks; it is not recommended for new arrays.
 
@@ -37,12 +37,12 @@ __all__ = [
 
 @dataclass(frozen=True)
 class V2ChunkKeyEncoding(ChunkKeyEncoding):
-    """The v3 ``v2`` (v2-compatibility) chunk key encoding.
+    """The v3 `v2` (v2-compatibility) chunk key encoding.
 
     Attributes
     ----------
     separator : Separator
-        The character placed between coordinates. Defaults to ``"."``.
+        The character placed between coordinates. Defaults to `"."`.
 
     Examples
     --------
@@ -55,9 +55,9 @@ class V2ChunkKeyEncoding(ChunkKeyEncoding):
 
     Notes
     -----
-    This encoding is not injective at rank zero: the empty grid index ``()``
-    encodes to ``"0"``, the same key produced by the rank-one index ``(0,)``.
-    ``decode("0")`` returns ``(0,)``; recovering ``()`` requires knowing out
+    This encoding is not injective at rank zero: the empty grid index `()`
+    encodes to `"0"`, the same key produced by the rank-one index `(0,)`.
+    `decode("0")` returns `(0,)`; recovering `()` requires knowing out
     of band that the array is zero-dimensional.
     """
 
@@ -69,7 +69,7 @@ class V2ChunkKeyEncoding(ChunkKeyEncoding):
 
     @classmethod
     def from_json(cls, data: ChunkKeyEncodingJSON) -> Self:
-        """Construct from ``"v2"`` or ``{"name": "v2", ...}`` metadata.
+        """Construct from `"v2"` or `{"name": "v2", ...}` metadata.
 
         Raises
         ------
@@ -108,13 +108,13 @@ class V2ChunkKeyEncoding(ChunkKeyEncoding):
     def decode(self, chunk_key: str) -> tuple[int, ...]:
         """Decode a store key into chunk grid indices.
 
-        Inverse of ``encode`` for arrays of rank one and higher; see the
+        Inverse of `encode` for arrays of rank one and higher; see the
         class docstring for the rank-zero ambiguity.
 
         Raises
         ------
         ChunkKeyDecodeError
-            If the key is not a valid output of ``encode`` for this separator.
+            If the key is not a valid output of `encode` for this separator.
         """
         if chunk_key == "":
             raise ChunkKeyDecodeError(

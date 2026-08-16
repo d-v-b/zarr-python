@@ -38,16 +38,16 @@ def parse_named_config_json(
     """Validate a named-configuration JSON envelope and return its configuration.
 
     Accepts either the spec's short-hand name string or the object form
-    ``{"name": ..., "configuration": {...}, "must_understand": ...}``.
-    Validation is strict: unexpected envelope keys, a mismatched ``name``, a
-    non-mapping ``configuration``, unexpected configuration keys, and a
-    ``must_understand`` that is not the boolean ``true`` are all rejected.
+    `{"name": ..., "configuration": {...}, "must_understand": ...}`.
+    Validation is strict: unexpected envelope keys, a mismatched `name`, a
+    non-mapping `configuration`, unexpected configuration keys, and a
+    `must_understand` that is not the boolean `true` are all rejected.
 
-    ``must_understand: false`` is rejected rather than ignored. The v3 spec
+    `must_understand: false` is rejected rather than ignored. The v3 spec
     does not support it for this extension point -- an implementation that
     meets a chunk key encoding it does not recognize cannot skip the array,
     it has to fail -- so the field is meaningless here and a document
-    carrying it is malformed. ``true`` is accepted as a redundant spelling of
+    carrying it is malformed. `true` is accepted as a redundant spelling of
     the default.
 
     Parameters
@@ -55,9 +55,9 @@ def parse_named_config_json(
     data : object
         Unvalidated JSON: the short-hand name string or the object form.
     expected_name : str
-        The registered name the ``name`` field must equal.
+        The registered name the `name` field must equal.
     allowed_configuration_keys : tuple of str
-        The set of keys permitted in ``configuration``.
+        The set of keys permitted in `configuration`.
 
     Returns
     -------
@@ -130,9 +130,9 @@ def parse_named_config_json(
 def normalize_chunk_coords(chunk_coords: Sequence[int]) -> tuple[int, ...]:
     """Normalize chunk grid indices to a tuple of built-in non-negative ints.
 
-    Accepts any objects implementing ``__index__`` (so NumPy integers work),
-    which also normalizes ``True``/``False`` to ``1``/``0`` instead of letting
-    them stringify as ``"True"``/``"False"``.
+    Accepts any objects implementing `__index__` (so NumPy integers work),
+    which also normalizes `True`/`False` to `1`/`0` instead of letting
+    them stringify as `"True"`/`"False"`.
 
     Parameters
     ----------
@@ -167,8 +167,8 @@ def parse_grid_index(part: str, chunk_key: str) -> int:
     """Parse one coordinate substring of a chunk key into a grid index.
 
     Only canonical decimal representations are accepted: ASCII digits with no
-    sign and no leading zeros (except ``"0"`` itself). This guarantees that
-    decoding is the exact inverse of encoding; keys like ``"c/01"`` were not
+    sign and no leading zeros (except `"0"` itself). This guarantees that
+    decoding is the exact inverse of encoding; keys like `"c/01"` were not
     produced by these encodings and are rejected rather than silently
     normalized.
 

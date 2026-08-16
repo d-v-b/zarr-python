@@ -1,9 +1,9 @@
 """
 The `default` chunk key encoding (Zarr v3 core spec).
 
-The chunk with grid index ``(k, j, i, ...)`` is stored under the key
-``c<sep>k<sep>j<sep>i...``; the single chunk of a zero-dimensional array is
-stored under ``"c"``. The separator defaults to ``"/"``.
+The chunk with grid index `(k, j, i, ...)` is stored under the key
+`c<sep>k<sep>j<sep>i...`; the single chunk of a zero-dimensional array is
+stored under `"c"`. The separator defaults to `"/"`.
 
 See https://zarr-specs.readthedocs.io/en/latest/v3/core/index.html#chunk-key-encoding
 """
@@ -35,13 +35,13 @@ __all__ = [
 
 @dataclass(frozen=True)
 class DefaultChunkKeyEncoding(ChunkKeyEncoding):
-    """The v3 ``default`` chunk key encoding.
+    """The v3 `default` chunk key encoding.
 
     Attributes
     ----------
     separator : Separator
-        The character placed between the ``c`` prefix and each coordinate.
-        Defaults to ``"/"``.
+        The character placed between the `c` prefix and each coordinate.
+        Defaults to `"/"`.
 
     Examples
     --------
@@ -61,7 +61,7 @@ class DefaultChunkKeyEncoding(ChunkKeyEncoding):
 
     @classmethod
     def from_json(cls, data: ChunkKeyEncodingJSON) -> Self:
-        """Construct from ``"default"`` or ``{"name": "default", ...}`` metadata.
+        """Construct from `"default"` or `{"name": "default", ...}` metadata.
 
         Raises
         ------
@@ -96,12 +96,12 @@ class DefaultChunkKeyEncoding(ChunkKeyEncoding):
         return ChunkKey(self.separator.join(("c", *map(str, indices))))
 
     def decode(self, chunk_key: str) -> tuple[int, ...]:
-        """Decode a store key into chunk grid indices. Exact inverse of ``encode``.
+        """Decode a store key into chunk grid indices. Exact inverse of `encode`.
 
         Raises
         ------
         ChunkKeyDecodeError
-            If the key is not a valid output of ``encode`` for this separator.
+            If the key is not a valid output of `encode` for this separator.
         """
         if chunk_key == "c":
             return ()

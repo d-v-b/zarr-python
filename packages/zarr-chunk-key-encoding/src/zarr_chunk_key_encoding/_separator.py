@@ -36,12 +36,12 @@ def parse_separator(data: object) -> Separator:
     Returns
     -------
     Separator
-        The input, narrowed to the ``Separator`` type.
+        The input, narrowed to the `Separator` type.
 
     Raises
     ------
     ChunkKeyConfigurationError
-        If the input is not ``"."`` or ``"/"``.
+        If the input is not `"."` or `"/"`.
     """
     if data not in SEPARATORS:
         raise ChunkKeyConfigurationError(

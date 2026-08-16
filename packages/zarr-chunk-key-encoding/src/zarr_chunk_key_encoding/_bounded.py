@@ -6,13 +6,13 @@ key. Once an array's chunk grid shape is known, the meaningful domain shrinks
 to the finite set of valid grid indices, and the image becomes a finite set
 of keys. `BoundedChunkKeyEncoding` models that restriction:
 
-- ``encode`` and ``decode`` reject coordinates and keys outside the grid
+- `encode` and `decode` reject coordinates and keys outside the grid
   (`ChunkCoordsOutOfBoundsError` and `ChunkKeyOutOfBoundsError`).
-- ``decode`` becomes a total inverse of ``encode``. In particular the ``v2``
-  encoding's rank-zero ambiguity — ``"0"`` is the key for both ``()`` and
-  ``(0,)`` — disappears, because the grid rank is known.
+- `decode` becomes a total inverse of `encode`. In particular the `v2`
+  encoding's rank-zero ambiguity — `"0"` is the key for both `()` and
+  `(0,)` — disappears, because the grid rank is known.
 - The valid key set is a first-class finite collection: membership testing
-  (``key in bounded``), iteration, and ``len``.
+  (`key in bounded`), iteration, and `len`.
 
 Consumers that validate candidate store keys against an array — an HTTP
 server routing requests, for example — get the full check (grammar, rank,
@@ -74,14 +74,14 @@ class BoundedChunkKeyEncoding(Collection[ChunkKey]):
     """A chunk key encoding restricted to a known chunk grid.
 
     Construct with `ChunkKeyEncoding.bind`, or directly. The valid key set
-    is finite, so instances are collections of keys: ``key in bounded``
+    is finite, so instances are collections of keys: `key in bounded`
     checks grammar, rank, bounds, and canonical spelling in one test,
-    ``iter`` enumerates every valid key, and ``len`` counts the chunks.
+    `iter` enumerates every valid key, and `len` counts the chunks.
     Membership testing and iteration require nothing beyond the underlying
-    encoding, except that membership delegates to ``decode`` and therefore
-    raises ``NotImplementedError`` for encodings that do not implement it
+    encoding, except that membership delegates to `decode` and therefore
+    raises `NotImplementedError` for encodings that do not implement it
     (rank-zero grids excepted, where the single valid key is compared
-    directly against ``encode(())``).
+    directly against `encode(())`).
 
     Attributes
     ----------
@@ -150,12 +150,12 @@ class BoundedChunkKeyEncoding(Collection[ChunkKey]):
         return self.encoding.encode(indices)
 
     def decode(self, chunk_key: str) -> tuple[int, ...]:
-        """Decode a store key into chunk grid indices. Total inverse of ``encode``.
+        """Decode a store key into chunk grid indices. Total inverse of `encode`.
 
         Because the grid rank is known, this resolves ambiguities the
-        unbounded ``decode`` cannot: on a zero-dimensional grid the only
-        valid key is ``encode(())``, so the ``v2`` encoding's ``"0"``
-        decodes to ``()`` here rather than ``(0,)``.
+        unbounded `decode` cannot: on a zero-dimensional grid the only
+        valid key is `encode(())`, so the `v2` encoding's `"0"`
+        decodes to `()` here rather than `(0,)`.
 
         Parameters
         ----------
