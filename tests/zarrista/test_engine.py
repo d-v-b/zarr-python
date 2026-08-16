@@ -8,8 +8,11 @@ import pytest
 pytest.importorskip("zarrista")
 
 import zarr
+from zarr.abc.engine import Region
+from zarr.core.buffer import default_buffer_prototype
 from zarr.errors import UnsupportedEngineError
 from zarr.storage import LocalStore
+from zarr.zarrista._engine import ZarristaEngine
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -19,6 +22,31 @@ def _make(tmp_path: Path) -> zarr.Array[Any]:
     z = zarr.create_array(LocalStore(tmp_path), shape=(10, 9), chunks=(3, 4), dtype="float32")
     z[:, :] = np.arange(90, dtype="float32").reshape(10, 9)
     return z
+
+
+class SubsetWriteArray:
+    def __init__(self) -> None:
+        self.writes: list[tuple[tuple[slice, ...], np.ndarray[Any, Any]]] = []
+
+    def store_array_subset(self, selection: tuple[slice, ...], data: np.ndarray[Any, Any]) -> None:
+        self.writes.append((selection, data.copy()))
+
+
+def test_zarrista_write_uses_array_subset_contract() -> None:
+    backend = SubsetWriteArray()
+    engine = ZarristaEngine(backend)
+    prototype = default_buffer_prototype()
+    value_np = np.arange(6, dtype="int32").reshape(3, 2).T
+    assert not value_np.flags.c_contiguous
+    value = prototype.nd_buffer.from_numpy_array(value_np)
+
+    engine.write_selection(Region(start=(1, 2), end_exclusive=(3, 5)), value, prototype=prototype)
+
+    assert len(backend.writes) == 1
+    selection, written = backend.writes[0]
+    assert selection == (slice(1, 3), slice(2, 5))
+    np.testing.assert_array_equal(written, [[0, 2, 4], [1, 3, 5]])
+    assert written.flags.c_contiguous
 
 
 def test_zarrista_engine_read_write_combinations(tmp_path: Path) -> None:
