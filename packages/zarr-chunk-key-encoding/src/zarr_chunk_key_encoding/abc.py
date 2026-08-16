@@ -27,6 +27,8 @@ from typing import TYPE_CHECKING, ClassVar, NewType, Self
 from typing_extensions import TypeAliasType
 from zarr_metadata import JSONValue
 
+from zarr_chunk_key_encoding.support import ChunkKeyEncodingSupport
+
 if TYPE_CHECKING:
     from zarr_chunk_key_encoding.bounded import BoundedChunkKeyEncoding
 
@@ -72,9 +74,21 @@ class ChunkKeyEncoding(ABC):
     and ``encode``. Implementing ``decode`` is optional: encodings that are
     not injective (or for which decoding is simply not needed) may leave the
     default implementation, which raises ``NotImplementedError``.
+
+    Subclasses defined outside this package should also set ``support`` to
+    `ChunkKeyEncodingSupport.EXTENSION` if the encoding is registered in the
+    `zarr-extensions` repository; the default, ``CUSTOM``, is the safe
+    assumption for anything that is not.
     """
 
     name: ClassVar[str]
+
+    support: ClassVar[ChunkKeyEncodingSupport] = ChunkKeyEncodingSupport.CUSTOM
+    """Where this encoding comes from — core spec, registered extension, or
+    neither. Declared on the class so that an encoding registered through
+    the entry point group carries its own provenance, and so that holders of
+    an instance can gate on it without a registry lookup. Registering a class
+    that claims ``CORE`` for a name the spec does not define is an error."""
 
     @classmethod
     @abstractmethod

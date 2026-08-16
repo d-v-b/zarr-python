@@ -92,16 +92,48 @@ rank-zero ambiguity (`"0"` is the key for both `()` and `(0,)`) disappears.
 For sharded arrays, bind the shard grid shape, since shards are the unit of
 storage.
 
+## Support levels
+
+Chunk key encoding is an extension point, so the set of encodings is
+open-ended. Every registered encoding records where it comes from:
+
+| Level | Meaning |
+| --- | --- |
+| `CORE` | Defined by the Zarr v3 core spec: `default` and `v2` |
+| `EXTENSION` | Registered in [zarr-extensions](https://github.com/zarr-developers/zarr-extensions) |
+| `CUSTOM` | Neither — third-party or local (the default) |
+
+This matters more here than at most extension points, because the spec's
+usual escape hatch does not apply: `must_understand: false` is *not*
+supported for chunk key encodings, so a reader that meets one it does not
+know has to fail rather than ignore it. Deciding which tiers you accept is
+the only graceful option:
+
+```python
+>>> from zarr_chunk_key_encoding import ChunkKeyEncodingSupport, registered_chunk_key_encodings
+>>> registered_chunk_key_encodings(support=ChunkKeyEncodingSupport.CORE)
+('default', 'v2')
+```
+
+`CORE` cannot be self-asserted: registering a class that claims it for a name
+the spec does not define raises `ChunkKeyRegistryError`.
+
 ## Registering a custom encoding
 
 Subclass `ChunkKeyEncoding` and register it, either imperatively:
 
 ```python
-from zarr_chunk_key_encoding import ChunkKeyEncoding, register_chunk_key_encoding
+from zarr_chunk_key_encoding import (
+    ChunkKeyEncoding,
+    ChunkKeyEncodingSupport,
+    register_chunk_key_encoding,
+)
 
 
 class MyEncoding(ChunkKeyEncoding):
     name = "my_encoding"
+    # Defaults to CUSTOM; set EXTENSION if registered in zarr-extensions.
+    support = ChunkKeyEncodingSupport.CUSTOM
     ...
 
 

@@ -43,6 +43,23 @@ False
 6
 ```
 
+Because chunk key encoding is an extension point, the registry also records
+where each encoding comes from — the core spec, the `zarr-extensions`
+registry, or neither — as a
+[`ChunkKeyEncodingSupport`][zarr_chunk_key_encoding.support.ChunkKeyEncodingSupport]
+level. A consumer that only accepts spec-defined encodings can take the
+filtered listing as its allowlist:
+
+```python
+>>> from zarr_chunk_key_encoding import ChunkKeyEncodingSupport, registered_chunk_key_encodings
+>>> registered_chunk_key_encodings(support=ChunkKeyEncodingSupport.CORE)
+('default', 'v2')
+```
+
+This matters more here than at most extension points: `must_understand:
+false` is not supported for chunk key encodings, so a reader that meets an
+unknown one must fail rather than ignore it.
+
 ## Design
 
 The package is modeled on how the [zarrs](https://docs.rs/zarrs_chunk_key_encoding)

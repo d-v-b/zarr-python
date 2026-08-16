@@ -50,17 +50,23 @@ from zarr_chunk_key_encoding.registry import (
     ChunkKeyEncodingParams,
     chunk_key_encoding_from_json,
     get_chunk_key_encoding_class,
+    get_chunk_key_encoding_support,
     parse_chunk_key_encoding,
     register_chunk_key_encoding,
     registered_chunk_key_encodings,
     unregister_chunk_key_encoding,
 )
 from zarr_chunk_key_encoding.separator import SEPARATORS, Separator, parse_separator
+from zarr_chunk_key_encoding.support import (
+    CORE_CHUNK_KEY_ENCODING_NAMES,
+    ChunkKeyEncodingSupport,
+)
 from zarr_chunk_key_encoding.v2 import V2ChunkKeyEncoding
 
 __version__ = version("zarr-chunk-key-encoding")
 
 __all__ = [
+    "CORE_CHUNK_KEY_ENCODING_NAMES",
     "ENTRY_POINT_GROUP",
     "SEPARATORS",
     "BoundedChunkKeyEncoding",
@@ -73,6 +79,7 @@ __all__ = [
     "ChunkKeyEncodingJSON",
     "ChunkKeyEncodingLike",
     "ChunkKeyEncodingParams",
+    "ChunkKeyEncodingSupport",
     "ChunkKeyOutOfBoundsError",
     "ChunkKeyRegistryError",
     "DefaultChunkKeyEncoding",
@@ -83,6 +90,7 @@ __all__ = [
     "__version__",
     "chunk_key_encoding_from_json",
     "get_chunk_key_encoding_class",
+    "get_chunk_key_encoding_support",
     "parse_chunk_key_encoding",
     "parse_separator",
     "register_chunk_key_encoding",

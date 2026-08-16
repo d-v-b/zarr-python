@@ -16,6 +16,12 @@ Third-party packages can register encodings in two ways:
 
 The built-in ``default`` and ``v2`` encodings are registered when the
 `zarr_chunk_key_encoding` package is imported.
+
+Every registered encoding carries a
+`zarr_chunk_key_encoding.support.ChunkKeyEncodingSupport` level saying
+whether it is defined by the core spec, registered in `zarr-extensions`, or
+neither, so a consumer can accept only the tiers it is willing to honour --
+see `registered_chunk_key_encodings` and `get_chunk_key_encoding_support`.
 """
 
 from collections.abc import Mapping
@@ -31,6 +37,10 @@ from zarr_chunk_key_encoding.errors import (
     UnknownChunkKeyEncodingError,
 )
 from zarr_chunk_key_encoding.separator import Separator
+from zarr_chunk_key_encoding.support import (
+    CORE_CHUNK_KEY_ENCODING_NAMES,
+    ChunkKeyEncodingSupport,
+)
 
 if TYPE_CHECKING:
     from zarr_metadata import JSONValue
@@ -41,6 +51,7 @@ __all__ = [
     "ChunkKeyEncodingParams",
     "chunk_key_encoding_from_json",
     "get_chunk_key_encoding_class",
+    "get_chunk_key_encoding_support",
     "parse_chunk_key_encoding",
     "register_chunk_key_encoding",
     "registered_chunk_key_encodings",
@@ -114,8 +125,24 @@ def register_chunk_key_encoding(cls: type[ChunkKeyEncoding], *, overwrite: bool 
     ------
     ChunkKeyRegistryError
         If the name is already registered to a different class and
-        ``overwrite`` is false.
+        ``overwrite`` is false, or if the class claims
+        `ChunkKeyEncodingSupport.CORE` for a name the Zarr v3 core spec does
+        not define.
     """
+    # Checked so that CORE means "the spec defines this" rather than "the
+    # author said so" -- otherwise the tier a consumer gates on would be
+    # self-asserted by the very code it is trying to gate.
+    if (
+        cls.support is ChunkKeyEncodingSupport.CORE
+        and cls.name not in CORE_CHUNK_KEY_ENCODING_NAMES
+    ):
+        raise ChunkKeyRegistryError(
+            f"Chunk key encoding {cls.name!r} declares support level "
+            f"{ChunkKeyEncodingSupport.CORE!r}, but the Zarr v3 core spec "
+            f"defines only {sorted(CORE_CHUNK_KEY_ENCODING_NAMES)}. Use "
+            f"{ChunkKeyEncodingSupport.EXTENSION!r} if it is registered in "
+            f"zarr-extensions, or {ChunkKeyEncodingSupport.CUSTOM!r} otherwise."
+        )
     existing = _registry.get(cls.name)
     if existing is not None and existing is not cls and not overwrite:
         raise ChunkKeyRegistryError(
@@ -171,9 +198,51 @@ def get_chunk_key_encoding_class(name: str) -> type[ChunkKeyEncoding]:
         raise UnknownChunkKeyEncodingError(name, registered_chunk_key_encodings()) from None
 
 
-def registered_chunk_key_encodings() -> tuple[str, ...]:
-    """Return the names of all registered chunk key encodings, sorted."""
-    return tuple(sorted(_registry))
+def get_chunk_key_encoding_support(name: str) -> ChunkKeyEncodingSupport:
+    """Look up a registered encoding's support level.
+
+    Entry points are loaded on the first lookup that would otherwise fail.
+
+    Parameters
+    ----------
+    name : str
+        The registered name of the encoding.
+
+    Returns
+    -------
+    ChunkKeyEncodingSupport
+        Whether the encoding is core, a registered extension, or custom.
+
+    Raises
+    ------
+    UnknownChunkKeyEncodingError
+        If no encoding is registered under ``name``.
+    """
+    return get_chunk_key_encoding_class(name).support
+
+
+def registered_chunk_key_encodings(
+    *, support: ChunkKeyEncodingSupport | None = None
+) -> tuple[str, ...]:
+    """Return the names of registered chunk key encodings, sorted.
+
+    Parameters
+    ----------
+    support : ChunkKeyEncodingSupport or None
+        If given, return only encodings at this support level. This is the
+        hook for gating: a consumer that only accepts spec-defined encodings
+        can take ``support=ChunkKeyEncodingSupport.CORE`` as its allowlist.
+        Note that entry points are *not* force-loaded here, so a filtered
+        listing reflects what has been registered so far.
+
+    Returns
+    -------
+    tuple of str
+        The matching names, sorted.
+    """
+    if support is None:
+        return tuple(sorted(_registry))
+    return tuple(sorted(name for name, cls in _registry.items() if cls.support is support))
 
 
 def chunk_key_encoding_from_json(data: ChunkKeyEncodingJSON) -> ChunkKeyEncoding:
