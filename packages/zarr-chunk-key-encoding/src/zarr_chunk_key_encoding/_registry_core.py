@@ -125,11 +125,22 @@ class Registry(Generic[T]):
         Raises
         ------
         Exception
-            The configured ``registry_error``, if the declared support level
-            is not a member of the support enumeration, if it claims the core
-            level for a name the spec does not define, or if the name is
-            taken and ``overwrite`` is false.
+            The configured ``registry_error``, if the class does not define a
+            string ``name``, if the declared support level is not a member of
+            the support enumeration, if it claims the core level for a name
+            the spec does not define, or if the name is taken and
+            ``overwrite`` is false.
         """
+        # Checked first, and here rather than only on the discovery path, so
+        # that both ways of registering fail identically. `name` is typically
+        # an un-defaulted ClassVar on the base class, so a hand-written
+        # subclass that forgets it would otherwise reach the lookup below and
+        # raise a bare AttributeError. Every message after this interpolates
+        # `cls.name`, so this has to come before them.
+        if not isinstance(getattr(cls, "name", None), str):
+            raise self._registry_error(
+                f"{self._kind_label.capitalize()} class {cls!r} does not define a string 'name'."
+            )
         self._check_support(cls)
         existing = self._classes.get(cls.name)
         if existing is not None and existing is not cls and not overwrite:
@@ -246,16 +257,11 @@ class Registry(Generic[T]):
                 f"{self._base_class.__name__} subclass, and was skipped."
             )
             return
-        # `name` is typically an un-defaulted ClassVar on the base class, so a
-        # genuine subclass that forgets it would raise AttributeError from the
-        # access below -- back out through discovery, defeating the isolation
-        # this method exists to provide. Treat it as another rejection.
-        if not isinstance(getattr(cls, "name", None), str):
-            self._skip(
-                f"{where} loaded {cls!r}, which does not define a string 'name', and was skipped."
-            )
-            return
-        if cls.name in self._classes:
+        # `getattr` rather than `cls.name`: a genuine subclass that forgets
+        # `name` must reach `register` below, which rejects it with a proper
+        # error, instead of raising AttributeError here -- back out through
+        # discovery, defeating the isolation this method exists to provide.
+        if getattr(cls, "name", None) in self._classes:
             return
         # Routed through `register` rather than assigning to `_classes`, so an
         # entry point cannot bypass the checks it applies -- notably the one

@@ -101,6 +101,18 @@ def test_support_compares_as_string() -> None:
     assert ChunkKeyEncodingSupport("extension") is ChunkKeyEncodingSupport.EXTENSION
 
 
+def test_registering_without_a_name_is_rejected() -> None:
+    """A subclass that forgets `name` gets a package error, not AttributeError.
+
+    Entry-point discovery already rejected this; registering directly must
+    fail the same way rather than raising from the attribute access.
+    """
+    nameless = type(_Stub)("_Nameless", (ChunkKeyEncoding,), dict(vars(_Stub)))
+    del nameless.name  # type: ignore[misc]
+    with pytest.raises(ChunkKeyRegistryError, match="does not define a string 'name'"):
+        register_chunk_key_encoding(nameless)
+
+
 def test_falsely_claiming_core_is_rejected(stub_cls: type[_Stub]) -> None:
     """A non-spec name may not register as CORE, so the tier cannot be
     self-asserted by the code a consumer is trying to gate."""
