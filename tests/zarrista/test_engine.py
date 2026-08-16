@@ -59,6 +59,15 @@ def test_zarrista_engine_edge_chunk_full_write(tmp_path: Path) -> None:
     )
 
 
+def test_zarrista_scalar_write(tmp_path: Path) -> None:
+    zarr.create_array(LocalStore(tmp_path), shape=(), chunks=(), dtype="int32")
+    ze = zarr.open_array(LocalStore(tmp_path), engine="zarrista")
+
+    ze[...] = np.int32(7)
+
+    assert np.asarray(ze[...]).item() == 7
+
+
 def test_zarrista_reads_are_writable(tmp_path: Path) -> None:
     # zarrista's `Tensor` wraps Rust-owned memory that `np.asarray` exposes
     # read-only. zarr-python reads have always returned writable arrays, and
@@ -181,4 +190,42 @@ async def test_zarrista_async_engine_writes(tmp_path: Path) -> None:
 
     # read back through the *default* engine: the bytes have to be right on
     # disk, not merely round-trip through zarrista
+    np.testing.assert_array_equal(np.asarray(await z.getitem((slice(None), slice(None)))), expected)
+
+
+async def test_zarrista_async_scalar_write(tmp_path: Path) -> None:
+    obstore = pytest.importorskip("obstore")
+    from zarr.api import asynchronous as async_api
+    from zarr.storage import ObjectStore
+
+    store = ObjectStore(obstore.store.LocalStore(prefix=str(tmp_path)))
+    await async_api.create_array(store=store, shape=(), chunks=(), dtype="int32")
+    ze = await async_api.open_array(store=store, engine="zarrista")
+
+    await ze.setitem(Ellipsis, np.int32(7))
+
+    assert np.asarray(await ze.getitem(Ellipsis)).item() == 7
+
+
+async def test_zarrista_async_sharded_region_write(tmp_path: Path) -> None:
+    obstore = pytest.importorskip("obstore")
+    from zarr.api import asynchronous as async_api
+    from zarr.storage import ObjectStore
+
+    store = ObjectStore(obstore.store.LocalStore(prefix=str(tmp_path)))
+    z = await async_api.create_array(
+        store=store,
+        shape=(12, 12),
+        chunks=(3, 3),
+        shards=(6, 6),
+        dtype="int32",
+    )
+    expected = np.arange(144, dtype="int32").reshape(12, 12)
+    await z.setitem((slice(None), slice(None)), expected)
+    ze = await async_api.open_array(store=store, engine="zarrista")
+    replacement = -(np.arange(72, dtype="int32") + 1).reshape(8, 9)
+
+    await ze.setitem((slice(2, 10), slice(2, 11)), replacement)
+
+    expected[2:10, 2:11] = replacement
     np.testing.assert_array_equal(np.asarray(await z.getitem((slice(None), slice(None)))), expected)

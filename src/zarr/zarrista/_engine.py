@@ -89,10 +89,14 @@ def _as_contiguous(array: npt.NDArray[Any]) -> npt.NDArray[Any]:
     reports it as C-contiguous when it holds at most one element per axis. The
     buffer zarrista then sees is not the dense block it expects, so force a
     real copy whenever a stride is 0.
+
+    `np.ascontiguousarray` also promotes a rank-0 array to shape ``(1,)``.
+    `np.asarray(order="C")` provides the same layout normalization without
+    changing dimensionality.
     """
     if any(stride == 0 for stride in array.strides):
-        return np.ascontiguousarray(array.copy())
-    return np.ascontiguousarray(array)
+        array = array.copy()
+    return np.asarray(array, order="C")
 
 
 def _reject_fields(fields: Fields | None) -> None:
