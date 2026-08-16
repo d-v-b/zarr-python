@@ -19,8 +19,7 @@ nav:
       - '<code class="doc-symbol doc-symbol-toc doc-symbol-module"></code> <code>zarr_chunk_key_encoding.default</code>': api/default.md
       - '<code class="doc-symbol doc-symbol-toc doc-symbol-module"></code> <code>zarr_chunk_key_encoding.v2</code>': api/v2.md
       - '<code class="doc-symbol doc-symbol-toc doc-symbol-module"></code> <code>zarr_chunk_key_encoding.bounded</code>': api/bounded.md
-      - '<code class="doc-symbol doc-symbol-toc doc-symbol-module"></code> <code>zarr_chunk_key_encoding.registry</code>': api/registry.md
-      - '<code class="doc-symbol doc-symbol-toc doc-symbol-module"></code> <code>zarr_chunk_key_encoding.support</code>': api/support.md
+      - '<code class="doc-symbol doc-symbol-toc doc-symbol-module"></code> <code>zarr_chunk_key_encoding.from_json</code>': api/from_json.md
       - '<code class="doc-symbol doc-symbol-toc doc-symbol-module"></code> <code>zarr_chunk_key_encoding.separator</code>': api/separator.md
       - '<code class="doc-symbol doc-symbol-toc doc-symbol-module"></code> <code>zarr_chunk_key_encoding.errors</code>': api/errors.md
   - Changelog: https://github.com/zarr-developers/zarr-python/blob/main/packages/zarr-chunk-key-encoding/CHANGELOG.md

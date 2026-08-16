@@ -6,15 +6,21 @@ integers identifying a cell in the chunk grid) to the string key under which
 that chunk is stored, and — when possible — back again.
 
 The design follows the `zarrs` Rust implementation, which models chunk key
-encodings as a small standalone crate with a name-keyed plugin registry:
+encodings as a small standalone crate:
 
-- Encodings are identified by a registered ``name`` (a class variable here, a
-  plugin identifier in `zarrs`).
+- Encodings are identified by a ``name``, the value of the ``name`` field in
+  their v3 metadata.
 - Instances are constructed from Zarr v3 JSON metadata (``from_json``, the
   analogue of `zarrs`' fallible ``create``) and can always report their
   metadata back (``to_json``, the analogue of ``configuration``).
 - ``encode`` is required; ``decode`` is optional, since an encoding need not
   be injective in general (`zarrs` omits decoding entirely).
+
+`zarrs` also has a plugin registry, which this package deliberately does not
+reproduce: that machinery is common to every v3 extension point (`zarrs`
+factors it into a separate ``zarrs_plugin`` crate) and belongs in one shared
+place. Subclassing this ABC is supported; discovering those subclasses
+automatically is not something this package does.
 
 See https://zarr-specs.readthedocs.io/en/latest/v3/core/index.html#chunk-key-encoding
 """
@@ -26,8 +32,6 @@ from typing import TYPE_CHECKING, ClassVar, NewType, Self
 
 from typing_extensions import TypeAliasType
 from zarr_metadata import JSONValue
-
-from zarr_chunk_key_encoding.support import ChunkKeyEncodingSupport
 
 if TYPE_CHECKING:
     from zarr_chunk_key_encoding.bounded import BoundedChunkKeyEncoding
@@ -74,21 +78,9 @@ class ChunkKeyEncoding(ABC):
     and ``encode``. Implementing ``decode`` is optional: encodings that are
     not injective (or for which decoding is simply not needed) may leave the
     default implementation, which raises ``NotImplementedError``.
-
-    Subclasses defined outside this package should also set ``support`` to
-    `ChunkKeyEncodingSupport.EXTENSION` if the encoding is registered in the
-    `zarr-extensions` repository; the default, ``CUSTOM``, is the safe
-    assumption for anything that is not.
     """
 
     name: ClassVar[str]
-
-    support: ClassVar[ChunkKeyEncodingSupport] = ChunkKeyEncodingSupport.CUSTOM
-    """Where this encoding comes from — core spec, registered extension, or
-    neither. Declared on the class so that an encoding registered through
-    the entry point group carries its own provenance, and so that holders of
-    an instance can gate on it without a registry lookup. Registering a class
-    that claims ``CORE`` for a name the spec does not define is an error."""
 
     @classmethod
     @abstractmethod

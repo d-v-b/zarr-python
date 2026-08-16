@@ -10,14 +10,17 @@ and (where well-defined) back again. This package provides:
 - `BoundedChunkKeyEncoding` — an encoding bound to a known chunk grid
   (via `ChunkKeyEncoding.bind`), whose finite key set supports membership
   testing, iteration, and `len`
-- a name-keyed registry (`register_chunk_key_encoding` and friends) with
-  entry-point discovery, modeled on the plugin registry of the `zarrs`
-  Rust implementation
 - `chunk_key_encoding_from_json` / `parse_chunk_key_encoding` — construct
   encodings from JSON metadata or looser user input
 
 JSON shapes are typed by `zarr-metadata`; this package supplies the runtime
 behavior for those types.
+
+Chunk key encoding is a Zarr v3 extension point, but this package covers the
+closed set the core spec defines: there is no registration API and no entry
+point group. The machinery for third-party encodings — registration,
+discovery, provenance tiers — is common to every v3 extension point and
+belongs in one shared package rather than reinvented here.
 
 >>> from zarr_chunk_key_encoding import chunk_key_encoding_from_json
 >>> encoding = chunk_key_encoding_from_json(
@@ -40,35 +43,24 @@ from zarr_chunk_key_encoding.errors import (
     ChunkKeyDecodeError,
     ChunkKeyEncodingError,
     ChunkKeyOutOfBoundsError,
-    ChunkKeyPluginWarning,
-    ChunkKeyRegistryError,
     InvalidChunkCoordsError,
     UnknownChunkKeyEncodingError,
 )
-from zarr_chunk_key_encoding.registry import (
-    ENTRY_POINT_GROUP,
+from zarr_chunk_key_encoding.from_json import (
+    CHUNK_KEY_ENCODINGS,
     ChunkKeyEncodingLike,
     ChunkKeyEncodingParams,
     chunk_key_encoding_from_json,
     get_chunk_key_encoding_class,
-    get_chunk_key_encoding_support,
     parse_chunk_key_encoding,
-    register_chunk_key_encoding,
-    registered_chunk_key_encodings,
-    unregister_chunk_key_encoding,
 )
 from zarr_chunk_key_encoding.separator import SEPARATORS, Separator, parse_separator
-from zarr_chunk_key_encoding.support import (
-    CORE_CHUNK_KEY_ENCODING_NAMES,
-    ChunkKeyEncodingSupport,
-)
 from zarr_chunk_key_encoding.v2 import V2ChunkKeyEncoding
 
 __version__ = version("zarr-chunk-key-encoding")
 
 __all__ = [
-    "CORE_CHUNK_KEY_ENCODING_NAMES",
-    "ENTRY_POINT_GROUP",
+    "CHUNK_KEY_ENCODINGS",
     "SEPARATORS",
     "BoundedChunkKeyEncoding",
     "ChunkCoordsOutOfBoundsError",
@@ -80,10 +72,7 @@ __all__ = [
     "ChunkKeyEncodingJSON",
     "ChunkKeyEncodingLike",
     "ChunkKeyEncodingParams",
-    "ChunkKeyEncodingSupport",
     "ChunkKeyOutOfBoundsError",
-    "ChunkKeyPluginWarning",
-    "ChunkKeyRegistryError",
     "DefaultChunkKeyEncoding",
     "InvalidChunkCoordsError",
     "Separator",
@@ -92,13 +81,6 @@ __all__ = [
     "__version__",
     "chunk_key_encoding_from_json",
     "get_chunk_key_encoding_class",
-    "get_chunk_key_encoding_support",
     "parse_chunk_key_encoding",
     "parse_separator",
-    "register_chunk_key_encoding",
-    "registered_chunk_key_encodings",
-    "unregister_chunk_key_encoding",
 ]
-
-register_chunk_key_encoding(DefaultChunkKeyEncoding)
-register_chunk_key_encoding(V2ChunkKeyEncoding)

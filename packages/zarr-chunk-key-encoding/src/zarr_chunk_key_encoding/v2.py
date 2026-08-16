@@ -29,7 +29,6 @@ from zarr_chunk_key_encoding._parsing import (
 from zarr_chunk_key_encoding.abc import ChunkKey, ChunkKeyEncoding, ChunkKeyEncodingJSON
 from zarr_chunk_key_encoding.errors import ChunkKeyDecodeError
 from zarr_chunk_key_encoding.separator import Separator, parse_separator
-from zarr_chunk_key_encoding.support import ChunkKeyEncodingSupport
 
 __all__ = [
     "V2ChunkKeyEncoding",
@@ -63,7 +62,6 @@ class V2ChunkKeyEncoding(ChunkKeyEncoding):
     """
 
     name: ClassVar[V2ChunkKeyEncodingName] = V2_CHUNK_KEY_ENCODING_NAME
-    support: ClassVar[ChunkKeyEncodingSupport] = ChunkKeyEncodingSupport.CORE
     separator: Separator = "."
 
     def __post_init__(self) -> None:

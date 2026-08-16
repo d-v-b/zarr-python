@@ -14,9 +14,6 @@ and (where well-defined) back again. This package provides:
 - `BoundedChunkKeyEncoding` (via `ChunkKeyEncoding.bind`) — an encoding
   restricted to a known chunk grid, whose finite key set supports membership
   testing, iteration, and `len`
-- a name-keyed registry with entry-point discovery, modeled on the plugin
-  registry of the [zarrs](https://docs.rs/zarrs_chunk_key_encoding) Rust
-  implementation, so third-party encodings are first-class
 - `chunk_key_encoding_from_json` / `parse_chunk_key_encoding` — construct
   encodings from JSON metadata or looser user input
 
@@ -52,10 +49,8 @@ Design notes, relative to the chunk key encoding code inside `zarr`:
   `decode` deliberately accepts plain `str`, since its job is judging
   untrusted input.
 - All errors derive from `ChunkKeyEncodingError`.
-- Following zarrs, registrations can be reversed
-  (`unregister_chunk_key_encoding`), and JSON metadata is resolved through
-  the registry by `name`, so third-party encodings round-trip through
-  `chunk_key_encoding_from_json` exactly like the built-ins.
+- JSON metadata is resolved by `name` against the closed set of
+  spec-defined encodings; see below.
 
 ## Installation
 
@@ -92,64 +87,35 @@ rank-zero ambiguity (`"0"` is the key for both `()` and `(0,)`) disappears.
 For sharded arrays, bind the shard grid shape, since shards are the unit of
 storage.
 
-## Support levels
+## Extensibility
 
-Chunk key encoding is an extension point, so the set of encodings is
-open-ended. Every registered encoding records where it comes from:
-
-| Level | Meaning |
-| --- | --- |
-| `CORE` | Defined by the Zarr v3 core spec: `default` and `v2` |
-| `EXTENSION` | Registered in [zarr-extensions](https://github.com/zarr-developers/zarr-extensions) |
-| `CUSTOM` | Neither — third-party or local (the default) |
-
-This matters more here than at most extension points, because the spec's
-usual escape hatch does not apply: `must_understand: false` is *not*
-supported for chunk key encodings, so a reader that meets one it does not
-know has to fail rather than ignore it. Deciding which tiers you accept is
-the only graceful option:
+Chunk key encoding is a Zarr v3 *extension point*, so the set of encodings is
+open-ended in principle. This package covers the closed set the core spec
+defines, and deliberately provides no registration API and no entry point
+group:
 
 ```python
->>> from zarr_chunk_key_encoding import ChunkKeyEncodingSupport, registered_chunk_key_encodings
->>> registered_chunk_key_encodings(support=ChunkKeyEncodingSupport.CORE)
-('default', 'v2')
+>>> from zarr_chunk_key_encoding import CHUNK_KEY_ENCODINGS
+>>> sorted(CHUNK_KEY_ENCODINGS)
+['default', 'v2']
 ```
 
-`CORE` cannot be self-asserted: registering a class that claims it for a name
-the spec does not define raises `ChunkKeyRegistryError`.
+The machinery third-party encodings need — registration, entry-point
+discovery, and a notion of which encodings are spec-defined versus
+registered in
+[zarr-extensions](https://github.com/zarr-developers/zarr-extensions) versus
+purely local — is identical for all five v3 extension points. The `zarrs`
+Rust implementation factors exactly that into a shared
+[zarrs_plugin](https://docs.rs/zarrs_plugin) crate that each extension-point
+crate depends on, and the same layer belongs in one shared Python package
+rather than reinvented here. Note too that `zarr` already scans a
+`zarr.chunk_key_encoding` entry point group; a second, competing group is a
+commitment worth not making early, since a group name is a compatibility
+ratchet the moment a third party publishes against it.
 
-## Registering a custom encoding
-
-Subclass `ChunkKeyEncoding` and register it, either imperatively:
-
-```python
-from zarr_chunk_key_encoding import (
-    ChunkKeyEncoding,
-    ChunkKeyEncodingSupport,
-    register_chunk_key_encoding,
-)
-
-
-class MyEncoding(ChunkKeyEncoding):
-    name = "my_encoding"
-    # Defaults to CUSTOM; set EXTENSION if registered in zarr-extensions.
-    support = ChunkKeyEncodingSupport.CUSTOM
-    ...
-
-
-register_chunk_key_encoding(MyEncoding)
-```
-
-or declaratively from another package, via the `zarr_chunk_key_encoding`
-entry point group:
-
-```toml
-[project.entry-points.zarr_chunk_key_encoding]
-my_encoding = "my_package:MyEncoding"
-```
-
-Entry points are loaded lazily, the first time a name lookup would otherwise
-fail.
+Subclassing `ChunkKeyEncoding` works today, and
+`chunk_key_encoding_from_json`'s signature is the one an open set would use,
+so growing into a registry later is an additive change.
 
 ## Developing
 

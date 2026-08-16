@@ -15,8 +15,15 @@ def test_all_names_resolve() -> None:
         assert hasattr(zarr_chunk_key_encoding, name)
 
 
-def test_builtin_encodings_registered_on_import() -> None:
-    """Importing the package registers the two spec-defined encodings."""
-    registered = zarr_chunk_key_encoding.registered_chunk_key_encodings()
-    assert "default" in registered
-    assert "v2" in registered
+def test_no_plugin_surface() -> None:
+    """The package exposes no registration or discovery API.
+
+    Chunk key encoding is an extension point, but that machinery is common
+    to every v3 extension point and belongs in a shared package. Adding it
+    here later is compatible; removing it after release would not be, so
+    this pins the absence.
+    """
+    for name in zarr_chunk_key_encoding.__all__:
+        assert "register" not in name
+        assert "ENTRY_POINT" not in name
+        assert "Support" not in name

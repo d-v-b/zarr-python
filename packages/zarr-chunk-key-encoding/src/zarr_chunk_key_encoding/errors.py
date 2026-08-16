@@ -12,23 +12,9 @@ __all__ = [
     "ChunkKeyDecodeError",
     "ChunkKeyEncodingError",
     "ChunkKeyOutOfBoundsError",
-    "ChunkKeyPluginWarning",
-    "ChunkKeyRegistryError",
     "InvalidChunkCoordsError",
     "UnknownChunkKeyEncodingError",
 ]
-
-
-class ChunkKeyPluginWarning(UserWarning):
-    """Warned when an entry point in the plugin group cannot be registered.
-
-    Discovery skips the offending entry point rather than failing, so one
-    broken third-party package cannot make unrelated lookups raise. Callers
-    who would rather treat a broken plugin as fatal can escalate this
-    category::
-
-        warnings.simplefilter("error", ChunkKeyPluginWarning)
-    """
 
 
 class ChunkKeyEncodingError(Exception):
@@ -44,19 +30,19 @@ class ChunkKeyConfigurationError(ChunkKeyEncodingError, ValueError):
 
 
 class UnknownChunkKeyEncodingError(ChunkKeyEncodingError, ValueError):
-    """Raised when a chunk key encoding name is not present in the registry."""
+    """Raised when a chunk key encoding name is not one this package knows.
 
-    def __init__(self, name: str, registered: tuple[str, ...]) -> None:
+    The set of known names is closed: the encodings the Zarr v3 core spec
+    defines. Chunk key encoding is an extension point, so a name outside that
+    set is not necessarily invalid -- only unknown here.
+    """
+
+    def __init__(self, name: str, known: tuple[str, ...]) -> None:
         self.name = name
-        self.registered = registered
+        self.known = known
         super().__init__(
-            f"Unknown chunk key encoding {name!r}. "
-            f"Registered chunk key encodings: {sorted(registered)}."
+            f"Unknown chunk key encoding {name!r}. Known chunk key encodings: {sorted(known)}."
         )
-
-
-class ChunkKeyRegistryError(ChunkKeyEncodingError, ValueError):
-    """Raised when a registration conflicts with an existing registry entry."""
 
 
 class ChunkKeyDecodeError(ChunkKeyEncodingError, ValueError):

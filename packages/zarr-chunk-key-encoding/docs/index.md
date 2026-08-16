@@ -43,37 +43,29 @@ False
 6
 ```
 
-Because chunk key encoding is an extension point, the registry also records
-where each encoding comes from — the core spec, the `zarr-extensions`
-registry, or neither — as a
-[`ChunkKeyEncodingSupport`][zarr_chunk_key_encoding.support.ChunkKeyEncodingSupport]
-level. A consumer that only accepts spec-defined encodings can take the
-filtered listing as its allowlist:
+Chunk key encoding is a Zarr v3 *extension point*, so the set of encodings
+is open-ended in principle. This package covers the closed set the core spec
+defines, and deliberately provides no registration API and no entry point
+group:
 
 ```python
->>> from zarr_chunk_key_encoding import ChunkKeyEncodingSupport, registered_chunk_key_encodings
->>> registered_chunk_key_encodings(support=ChunkKeyEncodingSupport.CORE)
-('default', 'v2')
+>>> from zarr_chunk_key_encoding import CHUNK_KEY_ENCODINGS
+>>> sorted(CHUNK_KEY_ENCODINGS)
+['default', 'v2']
 ```
 
-This matters more here than at most extension points: `must_understand:
-false` is not supported for chunk key encodings, so a reader that meets an
-unknown one must fail rather than ignore it.
+The machinery third-party encodings need is identical for all five v3
+extension points, so it belongs in one shared package rather than reinvented
+here — see [Extensibility](#extensibility) below.
 
 ## Design
 
 The package is modeled on how the [zarrs](https://docs.rs/zarrs_chunk_key_encoding)
-Rust implementation factors chunk key encodings into a small standalone crate
-with a name-keyed plugin registry:
+Rust implementation factors chunk key encodings into a small standalone crate:
 
-- Encodings are identified by their registered `name` and constructed from
-  Zarr v3 JSON metadata via the registry
-  ([`chunk_key_encoding_from_json`][zarr_chunk_key_encoding.registry.chunk_key_encoding_from_json]).
-- Third-party encodings register imperatively
-  ([`register_chunk_key_encoding`][zarr_chunk_key_encoding.registry.register_chunk_key_encoding])
-  or declaratively via the `zarr_chunk_key_encoding` entry point group, and
-  registrations can be reversed
-  ([`unregister_chunk_key_encoding`][zarr_chunk_key_encoding.registry.unregister_chunk_key_encoding]).
+- Encodings are identified by the `name` in their v3 metadata and constructed
+  from it
+  ([`chunk_key_encoding_from_json`][zarr_chunk_key_encoding.from_json.chunk_key_encoding_from_json]).
 - [`encode`][zarr_chunk_key_encoding.abc.ChunkKeyEncoding.encode] is
   required; [`decode`][zarr_chunk_key_encoding.abc.ChunkKeyEncoding.decode]
   is optional, since an encoding need not be injective.
@@ -94,3 +86,28 @@ supplies the runtime behavior for those types. It does not import `zarr`.
 ```bash
 pip install zarr-chunk-key-encoding
 ```
+
+## Extensibility
+
+The `zarrs` Rust implementation puts its plugin registry in a separate
+[zarrs_plugin](https://docs.rs/zarrs_plugin) crate that every
+extension-point crate depends on, because registration, entry-point
+discovery, and the distinction between spec-defined, `zarr-extensions`-registered,
+and purely local encodings are the same problem for all five v3 extension
+points. The equivalent Python layer belongs in one shared package, so this
+one does not provide it.
+
+That distinction matters more here than at most extension points:
+`must_understand: false` is not supported for chunk key encodings, so a
+reader that meets an unknown one must fail rather than ignore it, which
+makes deciding up front which encodings you accept the only graceful option.
+
+`zarr` also already scans a `zarr.chunk_key_encoding` entry point group. A
+second, competing group is a commitment worth not making early, since a
+group name is a compatibility ratchet the moment a third party publishes
+against it.
+
+Subclassing
+[`ChunkKeyEncoding`][zarr_chunk_key_encoding.abc.ChunkKeyEncoding] works
+today, and `chunk_key_encoding_from_json`'s signature is the one an open set
+would use, so growing into a registry later is an additive change.
