@@ -76,6 +76,77 @@ def test_collection_semantics() -> None:
     assert "c/0/0" not in empty
 
 
+@pytest.mark.parametrize("encoding", ENCODINGS, ids=repr)
+@pytest.mark.parametrize("grid_shape", [(), (5,), (2, 3), (0, 4)])
+def test_json_round_trip(encoding: ChunkKeyEncoding, grid_shape: tuple[int, ...]) -> None:
+    """`to_json` produces the documented shape, with the grid shape as a list
+    and the encoding's own metadata nested, and `from_json` inverts it exactly
+    — including for the degenerate grids."""
+    bounded = encoding.bind(grid_shape)
+    data = bounded.to_json()
+    assert set(data) == {"grid_shape", "chunk_key_encoding"}
+    assert data["grid_shape"] == list(grid_shape)
+    assert data["chunk_key_encoding"] == encoding.to_json()
+    assert BoundedChunkKeyEncoding.from_json(data) == bounded
+
+
+def test_from_json_accepts_tuple_and_short_name() -> None:
+    """Hand-built input may use a tuple grid shape and the short-hand
+    encoding name; both normalize to the canonical form."""
+    bounded = BoundedChunkKeyEncoding.from_json(
+        {"grid_shape": (2, 3), "chunk_key_encoding": "default"}
+    )
+    assert bounded == DefaultChunkKeyEncoding().bind((2, 3))
+    assert bounded.to_json()["grid_shape"] == [2, 3]
+
+
+def test_from_json_not_a_mapping() -> None:
+    """Non-object input is rejected with a package error."""
+    with pytest.raises(ChunkKeyConfigurationError, match="expected a JSON object"):
+        BoundedChunkKeyEncoding.from_json(["grid_shape", "chunk_key_encoding"])
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"grid_shape": [2, 3]},
+        {"chunk_key_encoding": "default"},
+        {"grid_shape": [2, 3], "chunk_key_encoding": "default", "extra": 1},
+    ],
+    ids=["missing-encoding", "missing-shape", "extra-key"],
+)
+def test_from_json_wrong_keys(data: object) -> None:
+    """The envelope must carry exactly the two documented keys."""
+    with pytest.raises(ChunkKeyConfigurationError, match="expected exactly the keys"):
+        BoundedChunkKeyEncoding.from_json(data)
+
+
+@pytest.mark.parametrize("grid_shape", ["23", 5, None, {"a": 1}])
+def test_from_json_grid_shape_not_a_sequence(grid_shape: object) -> None:
+    """A grid shape that is not a list is rejected before it can be iterated
+    — including a string, which is a sequence but not of integers."""
+    with pytest.raises(ChunkKeyConfigurationError, match="'grid_shape' must be a list"):
+        BoundedChunkKeyEncoding.from_json(
+            {"grid_shape": grid_shape, "chunk_key_encoding": "default"}
+        )
+
+
+def test_from_json_invalid_grid_entries() -> None:
+    """Grid shape entries are validated the same way as direct construction."""
+    with pytest.raises(ChunkKeyConfigurationError, match="Invalid chunk grid shape"):
+        BoundedChunkKeyEncoding.from_json({"grid_shape": [2, -1], "chunk_key_encoding": "default"})
+
+
+def test_from_json_invalid_nested_encoding() -> None:
+    """Errors from the nested encoding metadata propagate unchanged."""
+    from zarr_chunk_key_encoding import UnknownChunkKeyEncodingError
+
+    with pytest.raises(UnknownChunkKeyEncodingError, match="not_an_encoding"):
+        BoundedChunkKeyEncoding.from_json(
+            {"grid_shape": [2, 3], "chunk_key_encoding": "not_an_encoding"}
+        )
+
+
 def test_bind_equivalent_to_constructor() -> None:
     """`bind` is a convenience for direct construction."""
     encoding = DefaultChunkKeyEncoding()

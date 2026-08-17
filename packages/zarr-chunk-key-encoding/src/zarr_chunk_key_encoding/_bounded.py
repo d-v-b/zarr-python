@@ -18,17 +18,23 @@ Consumers that validate candidate store keys against an array — an HTTP
 server routing requests, for example — get the full check (grammar, rank,
 bounds, canonical spelling) as a single membership test.
 
-Bounded encodings are a runtime construct, not a metadata one: the grid
-shape lives in the array metadata, not in the chunk key encoding metadata,
-so `BoundedChunkKeyEncoding` has no JSON form and no registry entry.
+A bounded encoding is not a Zarr v3 metadata extension: it has no `name`
+and is not something an array's `chunk_key_encoding` field can hold, since
+the grid shape lives elsewhere in the array metadata. It does have a JSON
+form of its own, though — `{"grid_shape": [...], "chunk_key_encoding": ...}`
+— so that a consumer can persist or transmit the bound object as a unit
+(`to_json` / `from_json`, typed as `BoundedChunkKeyEncodingJSON`).
 """
 
 import itertools
 import math
-from collections.abc import Collection, Iterator, Sequence
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Self, cast
 
-from zarr_chunk_key_encoding._abc import ChunkKey, ChunkKeyEncoding
+from typing_extensions import TypedDict
+
+from zarr_chunk_key_encoding._abc import ChunkKey, ChunkKeyEncoding, ChunkKeyEncodingJSON
 from zarr_chunk_key_encoding._errors import (
     ChunkCoordsOutOfBoundsError,
     ChunkKeyConfigurationError,
@@ -38,9 +44,25 @@ from zarr_chunk_key_encoding._errors import (
 )
 from zarr_chunk_key_encoding._parsing import normalize_chunk_coords
 
+if TYPE_CHECKING:
+    from zarr_metadata import JSONValue
+
 __all__ = [
     "BoundedChunkKeyEncoding",
+    "BoundedChunkKeyEncodingJSON",
 ]
+
+
+class BoundedChunkKeyEncodingJSON(TypedDict, closed=True):
+    """The JSON form of a `BoundedChunkKeyEncoding`.
+
+    Closed (PEP 728): exactly these two keys. `chunk_key_encoding` holds the
+    underlying encoding's own metadata, in either the short-hand name string
+    or named-configuration object form.
+    """
+
+    grid_shape: list[int]
+    chunk_key_encoding: ChunkKeyEncodingJSON
 
 
 def _parse_grid_shape(grid_shape: Sequence[int]) -> tuple[int, ...]:
@@ -106,6 +128,8 @@ class BoundedChunkKeyEncoding(Collection[ChunkKey]):
     False
     >>> len(bounded)
     6
+    >>> bounded.to_json()
+    {'grid_shape': [2, 3], 'chunk_key_encoding': {'name': 'default', 'configuration': {'separator': '/'}}}
     """
 
     encoding: ChunkKeyEncoding
@@ -113,6 +137,75 @@ class BoundedChunkKeyEncoding(Collection[ChunkKey]):
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "grid_shape", _parse_grid_shape(self.grid_shape))
+
+    @classmethod
+    def from_json(cls, data: object) -> Self:
+        """Construct from the JSON form produced by `to_json`.
+
+        Parameters
+        ----------
+        data : object
+            Unvalidated JSON: an object with exactly the keys `grid_shape`
+            (a list of non-negative integers) and `chunk_key_encoding` (the
+            underlying encoding's own metadata, in either form).
+
+        Returns
+        -------
+        Self
+            The bound encoding.
+
+        Raises
+        ------
+        ChunkKeyConfigurationError
+            If the envelope is not that shape, or the grid shape or nested
+            encoding metadata is invalid.
+        UnknownChunkKeyEncodingError
+            If the nested encoding names one this package does not know.
+        """
+        # Deferred: `_from_json` imports `_default` and `_v2`, which import
+        # `_abc`, whose `bind` imports this module. Nothing here is needed at
+        # import time, so resolve it at call time and keep the graph acyclic.
+        from zarr_chunk_key_encoding._from_json import chunk_key_encoding_from_json
+
+        if not isinstance(data, Mapping):
+            raise ChunkKeyConfigurationError(
+                f"Invalid bounded chunk key encoding metadata: expected a JSON "
+                f"object with keys 'grid_shape' and 'chunk_key_encoding', got {data!r}."
+            )
+        mapping = cast("Mapping[str, JSONValue]", data)
+        expected = {"grid_shape", "chunk_key_encoding"}
+        if set(mapping) != expected:
+            raise ChunkKeyConfigurationError(
+                f"Invalid bounded chunk key encoding metadata: expected exactly "
+                f"the keys {sorted(expected)}, got {sorted(mapping, key=repr)}."
+            )
+        grid_shape = mapping["grid_shape"]
+        if not isinstance(grid_shape, Sequence) or isinstance(grid_shape, str):
+            raise ChunkKeyConfigurationError(
+                f"Invalid bounded chunk key encoding metadata: 'grid_shape' must "
+                f"be a list of integers, got {grid_shape!r}."
+            )
+        # `_parse_grid_shape` (via `__init__`) validates the entries; the
+        # sequence check above only rules out shapes it could not iterate.
+        encoding = chunk_key_encoding_from_json(
+            cast("ChunkKeyEncodingJSON", mapping["chunk_key_encoding"])
+        )
+        return cls(encoding=encoding, grid_shape=tuple(cast("Sequence[int]", grid_shape)))
+
+    def to_json(self) -> BoundedChunkKeyEncodingJSON:
+        """Return the JSON form: the grid shape and the encoding's own metadata.
+
+        Returns
+        -------
+        BoundedChunkKeyEncodingJSON
+            `{"grid_shape": [...], "chunk_key_encoding": {...}}`. The grid
+            shape is a list, since JSON has no tuple; `from_json` accepts
+            either.
+        """
+        return BoundedChunkKeyEncodingJSON(
+            grid_shape=list(self.grid_shape),
+            chunk_key_encoding=self.encoding.to_json(),
+        )
 
     def _in_grid(self, coords: tuple[int, ...]) -> bool:
         """Whether non-negative *coords* name a cell of the grid."""

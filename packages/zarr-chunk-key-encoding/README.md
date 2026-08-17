@@ -92,6 +92,18 @@ rank-zero ambiguity (`"0"` is the key for both `()` and `(0,)`) disappears.
 For sharded arrays, bind the shard grid shape, since shards are the unit of
 storage.
 
+A bound encoding is not a Zarr v3 metadata extension — it has no `name`, and
+an array's `chunk_key_encoding` field cannot hold one — but it does have a
+JSON form of its own, so a consumer can persist or transmit the bound object
+as a unit:
+
+```python
+>>> bounded.to_json()
+{'grid_shape': [2, 3], 'chunk_key_encoding': {'name': 'default', 'configuration': {'separator': '/'}}}
+>>> BoundedChunkKeyEncoding.from_json(bounded.to_json()) == bounded
+True
+```
+
 ## Extensibility
 
 Chunk key encoding is a Zarr v3 *extension point*, so the set of encodings is

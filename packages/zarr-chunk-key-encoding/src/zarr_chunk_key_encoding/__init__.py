@@ -35,7 +35,7 @@ belongs in one shared package rather than reinvented here.
 from importlib.metadata import version
 
 from zarr_chunk_key_encoding._abc import ChunkKey, ChunkKeyEncoding, ChunkKeyEncodingJSON
-from zarr_chunk_key_encoding._bounded import BoundedChunkKeyEncoding
+from zarr_chunk_key_encoding._bounded import BoundedChunkKeyEncoding, BoundedChunkKeyEncodingJSON
 from zarr_chunk_key_encoding._default import DefaultChunkKeyEncoding
 from zarr_chunk_key_encoding._errors import (
     ChunkCoordsOutOfBoundsError,
@@ -63,6 +63,7 @@ __all__ = [
     "CHUNK_KEY_ENCODINGS",
     "SEPARATORS",
     "BoundedChunkKeyEncoding",
+    "BoundedChunkKeyEncodingJSON",
     "ChunkCoordsOutOfBoundsError",
     "ChunkKey",
     "ChunkKeyConfigurationError",
