@@ -163,8 +163,8 @@ class ChunkKeyEncoding(ABC):
         """
         raise NotImplementedError(f"{type(self).__name__} does not implement decode.")
 
-    def bind_grid_shape(self, grid_shape: Sequence[int]) -> "BoundedChunkKeyEncoding":
-        """Bind this encoding to a chunk grid, restricting its domain.
+    def to_bounded(self, grid_shape: Sequence[int]) -> "BoundedChunkKeyEncoding":
+        """Return this encoding bound to a chunk grid, restricting its domain.
 
         The result is a `BoundedChunkKeyEncoding`:
         its `encode` and `decode` reject coordinates and keys outside the

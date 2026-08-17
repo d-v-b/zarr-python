@@ -95,7 +95,7 @@ def _parse_grid_shape(grid_shape: Sequence[int]) -> tuple[int, ...]:
 class BoundedChunkKeyEncoding(Collection[ChunkKey]):
     """A chunk key encoding restricted to a known chunk grid.
 
-    Construct with `ChunkKeyEncoding.bind_grid_shape`, or directly. The valid key set
+    Construct with `ChunkKeyEncoding.to_bounded`, or directly. The valid key set
     is finite, so instances are collections of keys: `key in bounded`
     checks grammar, rank, bounds, and canonical spelling in one test,
     `iter` enumerates every valid key, and `len` counts the chunks.
@@ -117,7 +117,7 @@ class BoundedChunkKeyEncoding(Collection[ChunkKey]):
     Examples
     --------
     >>> from zarr_chunk_key_encoding import DefaultChunkKeyEncoding
-    >>> bounded = DefaultChunkKeyEncoding().bind_grid_shape((2, 3))
+    >>> bounded = DefaultChunkKeyEncoding().to_bounded((2, 3))
     >>> bounded.encode((1, 2))
     'c/1/2'
     >>> bounded.decode("c/1/2")
@@ -163,7 +163,7 @@ class BoundedChunkKeyEncoding(Collection[ChunkKey]):
             If the nested encoding names one this package does not know.
         """
         # Deferred: `_from_json` imports `_default` and `_v2`, which import
-        # `_abc`, whose `bind_grid_shape` imports this module. Nothing here is needed at
+        # `_abc`, whose `to_bounded` imports this module. Nothing here is needed at
         # import time, so resolve it at call time and keep the graph acyclic.
         from zarr_chunk_key_encoding._from_json import chunk_key_encoding_from_json
 

@@ -11,7 +11,7 @@ and (where well-defined) back again. This package provides:
 - `ChunkKeyEncoding` — the abstract base class
 - `DefaultChunkKeyEncoding`, `V2ChunkKeyEncoding` — the two encodings defined
   by the [Zarr v3 core spec](https://zarr-specs.readthedocs.io/en/latest/v3/core/index.html#chunk-key-encoding)
-- `BoundedChunkKeyEncoding` (via `ChunkKeyEncoding.bind_grid_shape`) — an encoding
+- `BoundedChunkKeyEncoding` (via `ChunkKeyEncoding.to_bounded`) — an encoding
   restricted to a known chunk grid, whose finite key set supports membership
   testing, iteration, and `len`
 - `chunk_key_encoding_from_json` / `parse_chunk_key_encoding` — construct
@@ -66,12 +66,12 @@ pip install zarr-chunk-key-encoding
 ## Binding to a chunk grid
 
 A plain encoding maps *any* tuple of non-negative integers to a key. When an
-array's chunk grid shape is known, `bind_grid_shape` restricts the domain to the grid's
+array's chunk grid shape is known, `to_bounded` restricts the domain to the grid's
 valid indices, making the key set a first-class finite collection:
 
 ```python
 >>> from zarr_chunk_key_encoding import DefaultChunkKeyEncoding
->>> bounded = DefaultChunkKeyEncoding().bind_grid_shape((2, 3))
+>>> bounded = DefaultChunkKeyEncoding().to_bounded((2, 3))
 >>> bounded.encode((1, 2))
 'c/1/2'
 >>> "c/1/2" in bounded
