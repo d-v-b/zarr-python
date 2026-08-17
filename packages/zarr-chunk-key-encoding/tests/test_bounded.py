@@ -147,12 +147,22 @@ def test_from_json_invalid_nested_encoding() -> None:
         )
 
 
-def test_bind_equivalent_to_constructor() -> None:
-    """`to_bounded` is a convenience for direct construction."""
+def test_construction_paths_agree() -> None:
+    """`to_bounded`, `from_unbounded`, and direct construction all produce the
+    same object; the first two are the two directions of one conversion, and
+    a list grid shape normalizes to the tuple the others carry."""
     encoding = DefaultChunkKeyEncoding()
-    assert encoding.to_bounded((2, 3)) == BoundedChunkKeyEncoding(
-        encoding=encoding, grid_shape=(2, 3)
-    )
+    direct = BoundedChunkKeyEncoding(encoding=encoding, grid_shape=(2, 3))
+    assert encoding.to_bounded((2, 3)) == direct
+    assert BoundedChunkKeyEncoding.from_unbounded(encoding, (2, 3)) == direct
+    assert BoundedChunkKeyEncoding.from_unbounded(encoding, [2, 3]) == direct
+    assert BoundedChunkKeyEncoding.from_unbounded(encoding, [2, 3]).grid_shape == (2, 3)
+
+
+def test_from_unbounded_invalid_grid_shape() -> None:
+    """Grid shape validation applies on this path too."""
+    with pytest.raises(ChunkKeyConfigurationError):
+        BoundedChunkKeyEncoding.from_unbounded(DefaultChunkKeyEncoding(), (2, -1))
 
 
 def test_encode_invalid_coords() -> None:

@@ -191,4 +191,4 @@ class ChunkKeyEncoding(ABC):
         """
         from zarr_chunk_key_encoding._bounded import BoundedChunkKeyEncoding
 
-        return BoundedChunkKeyEncoding(encoding=self, grid_shape=tuple(grid_shape))
+        return BoundedChunkKeyEncoding.from_unbounded(self, grid_shape)

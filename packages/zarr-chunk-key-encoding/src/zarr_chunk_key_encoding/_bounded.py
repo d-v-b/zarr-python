@@ -95,7 +95,8 @@ def _parse_grid_shape(grid_shape: Sequence[int]) -> tuple[int, ...]:
 class BoundedChunkKeyEncoding(Collection[ChunkKey]):
     """A chunk key encoding restricted to a known chunk grid.
 
-    Construct with `ChunkKeyEncoding.to_bounded`, or directly. The valid key set
+    Construct with `ChunkKeyEncoding.to_bounded` or `from_unbounded` (the
+    same conversion, from either end), or directly. The valid key set
     is finite, so instances are collections of keys: `key in bounded`
     checks grammar, rank, bounds, and canonical spelling in one test,
     `iter` enumerates every valid key, and `len` counts the chunks.
@@ -137,6 +138,35 @@ class BoundedChunkKeyEncoding(Collection[ChunkKey]):
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "grid_shape", _parse_grid_shape(self.grid_shape))
+
+    @classmethod
+    def from_unbounded(cls, encoding: ChunkKeyEncoding, grid_shape: Sequence[int]) -> Self:
+        """Bind an unbounded encoding to a chunk grid.
+
+        The inverse direction of `ChunkKeyEncoding.to_bounded`, which
+        delegates here; the two are interchangeable and this is the one
+        place the construction lives.
+
+        Parameters
+        ----------
+        encoding : ChunkKeyEncoding
+            The encoding to restrict.
+        grid_shape : Sequence[int]
+            The number of chunks along each dimension. For arrays using
+            sharding, pass the shard grid shape, since shards are the unit
+            of storage.
+
+        Returns
+        -------
+        Self
+            The bound encoding.
+
+        Raises
+        ------
+        ChunkKeyConfigurationError
+            If any grid shape entry is not a non-negative integer.
+        """
+        return cls(encoding=encoding, grid_shape=tuple(grid_shape))
 
     @classmethod
     def from_json(cls, data: object) -> Self:
@@ -190,7 +220,7 @@ class BoundedChunkKeyEncoding(Collection[ChunkKey]):
         encoding = chunk_key_encoding_from_json(
             cast("ChunkKeyEncodingJSON", mapping["chunk_key_encoding"])
         )
-        return cls(encoding=encoding, grid_shape=tuple(cast("Sequence[int]", grid_shape)))
+        return cls.from_unbounded(encoding, cast("Sequence[int]", grid_shape))
 
     def to_json(self) -> BoundedChunkKeyEncodingJSON:
         """Return the JSON form: the grid shape and the encoding's own metadata.
