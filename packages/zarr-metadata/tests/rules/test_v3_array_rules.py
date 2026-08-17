@@ -160,7 +160,7 @@ def test_error_transpose_rank_mismatch() -> None:
         {**BASE, "codecs": ({"name": "transpose", "configuration": {"order": (2, 0, 1)}}, "bytes")}
     )
     assert loc == ("codecs", 0, "configuration", "order")
-    assert "shape has 2 dimensions" in message
+    assert "incoming array has 2 dimensions" in message
 
 
 def test_error_sharding_inner_pipeline_order() -> None:
@@ -183,7 +183,7 @@ def test_error_sharding_index_codecs_no_array_bytes() -> None:
 def test_error_sharding_rank_mismatch() -> None:
     loc, message = _sole_problem({**BASE, "codecs": (_shard(chunk_shape=(2,)),)})
     assert loc == ("codecs", 0, "configuration", "chunk_shape")
-    assert "enclosing chunk has 2 dimensions" in message
+    assert "incoming array has 2 dimensions" in message
 
 
 def test_error_sharding_not_divisible() -> None:

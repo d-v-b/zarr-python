@@ -8,12 +8,15 @@ composition judgments and live here.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from zarr_metadata.model._validation import ValidationProblem
 from zarr_metadata.rules._registry import entity_rule
 from zarr_metadata.v3._extension_points import DATA_TYPE
 from zarr_metadata.v3.data_type.struct import STRUCT_DATA_TYPE_NAME
+
+if TYPE_CHECKING:
+    from zarr_metadata.rules._spec import ArraySpec
 
 _ARRAY_V3 = "zarr_v3_array"
 
@@ -39,7 +42,7 @@ def _field_names(configuration: Mapping[str, object]) -> tuple[tuple[int, str], 
 
 @entity_rule(_ARRAY_V3, DATA_TYPE, STRUCT_DATA_TYPE_NAME)
 def field_names_are_non_empty(
-    configuration: Mapping[str, object], document: Mapping[str, object]
+    configuration: Mapping[str, object], document: Mapping[str, object], incoming: ArraySpec | None
 ) -> tuple[ValidationProblem, ...]:
     """A struct field must be addressable, so its name cannot be empty."""
     return tuple(
@@ -53,7 +56,7 @@ def field_names_are_non_empty(
 
 @entity_rule(_ARRAY_V3, DATA_TYPE, STRUCT_DATA_TYPE_NAME)
 def field_names_are_unique(
-    configuration: Mapping[str, object], document: Mapping[str, object]
+    configuration: Mapping[str, object], document: Mapping[str, object], incoming: ArraySpec | None
 ) -> tuple[ValidationProblem, ...]:
     """Duplicate field names make a fill value's per-field mapping ambiguous."""
     seen: dict[str, int] = {}

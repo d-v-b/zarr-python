@@ -9,12 +9,14 @@ shape validator.
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, cast
 
 from zarr_metadata.rules._engine import Rule, as_string_mapping, prefixed
+from zarr_metadata.rules._spec import ArraySpec, initial_spec, propagate
 from zarr_metadata.v3._extension_points import (
+    CHUNK_GRID,
     ExtensionPointField,
     canonical_name,
     identifier_of,
@@ -30,9 +32,17 @@ if TYPE_CHECKING:
     from zarr_metadata.model._validation import ValidationProblem
 
 EntityCheck = Callable[
-    [Mapping[str, object], Mapping[str, object]], "tuple[ValidationProblem, ...]"
+    [Mapping[str, object], Mapping[str, object], "ArraySpec | None"],
+    "tuple[ValidationProblem, ...]",
 ]
-"""An entity rule's check: `(configuration, document)` in, problems out.
+"""An entity rule's check: `(configuration, document, incoming)` in, problems out.
+
+`incoming` is the `ArraySpec` the entity receives — for a codec, the
+array as transformed by every codec before it in the chain; for a
+top-level entity such as a chunk grid, the document's own array. It is
+None when the entity sits after an unknown codec (nothing downstream can
+know its input) or when the caller has no chain context. Rules that need
+it decline on None; rules that do not simply ignore it.
 
 Problems carry locations relative to the entity's `configuration`; the
 dispatcher re-bases them onto the entity's position in the document.
@@ -184,6 +194,7 @@ def run_entity_rules(
     value: object,
     document: Mapping[str, object],
     loc: tuple[str | int, ...],
+    incoming: ArraySpec | None = None,
 ) -> tuple[ValidationProblem, ...]:
     """Run the rules registered for whatever entity `value` names.
 
@@ -208,7 +219,9 @@ def run_entity_rules(
     for rule in rules:
         if not rule.requires <= document.keys():
             continue
-        problems.extend(prefixed((*loc, "configuration"), rule.check(configuration, document)))
+        problems.extend(
+            prefixed((*loc, "configuration"), rule.check(configuration, document, incoming))
+        )
     return tuple(problems)
 
 
@@ -251,24 +264,68 @@ def dispatch_field_sequence(
         if not isinstance(entries, (list, tuple)):
             return ()
         sequence = cast("tuple[object, ...]", entries)
-        problems: list[ValidationProblem] = []
-        for index, entry in enumerate(sequence):
-            problems.extend(run_entity_rules(field, entry, document, (field, index)))
-        return tuple(problems)
+        return run_chain_rules(field, sequence, document, (field,), chain_initial_spec(document))
 
     _DISPATCHED_FIELDS.add(field)
     check.__name__ = f"_dispatch_{field}_entity_rules"
     return check
 
 
+def run_chain_rules(
+    field: ExtensionPointField,
+    codecs: Sequence[object],
+    document: Mapping[str, object],
+    loc: tuple[str | int, ...],
+    initial: ArraySpec,
+) -> tuple[ValidationProblem, ...]:
+    """Run entity rules over a codec chain, propagating the array spec.
+
+    Each codec's rules receive the spec that codec actually receives —
+    the array as transformed by everything before it. Shared by the
+    top-level `codecs` dispatcher and by sharding, whose inner pipelines
+    are chains that start from the inner chunk.
+    """
+    problems: list[ValidationProblem] = []
+    for index, entry, incoming in propagate(
+        codecs, initial, lambda codec: entity_configuration(field, codec)
+    ):
+        problems.extend(run_entity_rules(field, entry, document, (*loc, index), incoming))
+    return tuple(problems)
+
+
+def chain_initial_spec(document: Mapping[str, object]) -> ArraySpec:
+    """The spec entering a document's top-level codec chain.
+
+    The array a chunk pipeline encodes is one chunk: shape from a regular
+    grid this package can read (None otherwise), data type from the
+    document. Non-positive chunk extents yield None for the shape — the
+    grid's own values rule owns that complaint, and geometry against a
+    zero extent is noise on top of it.
+    """
+    from zarr_metadata.v3.chunk_grid.regular import REGULAR_CHUNK_GRID_NAME
+
+    grid = document.get("chunk_grid")
+    chunk_shape: tuple[int, ...] | None = None
+    if entity_name(grid) == REGULAR_CHUNK_GRID_NAME:
+        configuration = entity_configuration(CHUNK_GRID, grid)
+        extents = configuration.get("chunk_shape") if configuration is not None else None
+        if isinstance(extents, tuple):
+            values = cast("tuple[object, ...]", extents)
+            if all(isinstance(v, int) and not isinstance(v, bool) and v >= 1 for v in values):
+                chunk_shape = cast("tuple[int, ...]", values)
+    return initial_spec(document, chunk_shape)
+
+
 __all__ = [
     "EntityCheck",
     "EntityRule",
+    "chain_initial_spec",
     "dispatched_fields",
     "document_rule",
     "document_rules",
     "entity_rule",
     "entity_rules",
     "registered_entities",
+    "run_chain_rules",
     "run_entity_rules",
 ]
