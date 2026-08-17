@@ -203,6 +203,14 @@ matrix.deps.features = [
 matrix.deps.dependency-groups = [
   {value = "remote-tests", if = ["optional"]},
 ]
+matrix.deps.extra-dependencies = [
+  # PyCuTe: NVIDIA's pure-Python reference implementation of the CuTe layout
+  # algebra, used ONLY as a test oracle for the sharding codec's offset
+  # arithmetic (tests/test_codecs/test_sharding_cute_oracle.py; the module is
+  # skipped when pycute is absent). Not on PyPI, so pinned to a commit. Never
+  # import it at runtime.
+  {value = "pycute @ git+https://github.com/NVlabs/CuTe.git@2e12e571c3882c5be669f8d326d630853a3571aa", if = ["optional"]},
+]
 
 [tool.hatch.envs.test.scripts]
 run-coverage = [
