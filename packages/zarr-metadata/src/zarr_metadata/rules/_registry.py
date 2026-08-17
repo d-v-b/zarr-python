@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, cast
 
 from zarr_metadata.rules._engine import Rule, as_string_mapping, prefixed
-from zarr_metadata.rules._spec import ArraySpec, initial_spec, propagate
+from zarr_metadata.rules._spec import NOTHING_KNOWN, ArraySpec, initial_spec, propagate
 from zarr_metadata.v3._extension_points import (
     CHUNK_GRID,
     ExtensionPointField,
@@ -32,17 +32,17 @@ if TYPE_CHECKING:
     from zarr_metadata.model._validation import ValidationProblem
 
 EntityCheck = Callable[
-    [Mapping[str, object], Mapping[str, object], "ArraySpec | None"],
+    [Mapping[str, object], Mapping[str, object], "ArraySpec"],
     "tuple[ValidationProblem, ...]",
 ]
 """An entity rule's check: `(configuration, document, incoming)` in, problems out.
 
 `incoming` is the `ArraySpec` the entity receives — for a codec, the
-array as transformed by every codec before it in the chain; for a
-top-level entity such as a chunk grid, the document's own array. It is
-None when the entity sits after an unknown codec (nothing downstream can
-know its input) or when the caller has no chain context. Rules that need
-it decline on None; rules that do not simply ignore it.
+array as transformed by every codec before it in the chain. Fields this
+package cannot determine are `UNKNOWN` (never `None`, which is a real
+value); a caller with no chain context passes `NOTHING_KNOWN`. Rules that
+need a field test it `is UNKNOWN` and decline; rules that do not simply
+ignore the spec.
 
 Problems carry locations relative to the entity's `configuration`; the
 dispatcher re-bases them onto the entity's position in the document.
@@ -194,7 +194,7 @@ def run_entity_rules(
     value: object,
     document: Mapping[str, object],
     loc: tuple[str | int, ...],
-    incoming: ArraySpec | None = None,
+    incoming: ArraySpec = NOTHING_KNOWN,
 ) -> tuple[ValidationProblem, ...]:
     """Run the rules registered for whatever entity `value` names.
 

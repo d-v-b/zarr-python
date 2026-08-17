@@ -46,7 +46,7 @@ def _expanded_extent(spec: Sequence[object]) -> int | None:
 
 @entity_rule(_ARRAY_V3, CHUNK_GRID, RECTILINEAR_CHUNK_GRID_NAME)
 def chunk_extents_are_positive(
-    configuration: Mapping[str, object], document: Mapping[str, object], incoming: ArraySpec | None
+    configuration: Mapping[str, object], document: Mapping[str, object], incoming: ArraySpec
 ) -> tuple[ValidationProblem, ...]:
     """Every chunk extent, bare or run-length encoded, must be positive."""
     chunk_shapes = cast("tuple[object, ...]", configuration["chunk_shapes"])
@@ -87,7 +87,7 @@ def chunk_extents_are_positive(
 
 @entity_rule(_ARRAY_V3, CHUNK_GRID, RECTILINEAR_CHUNK_GRID_NAME, requires=frozenset({"shape"}))
 def tiles_the_array(
-    configuration: Mapping[str, object], document: Mapping[str, object], incoming: ArraySpec | None
+    configuration: Mapping[str, object], document: Mapping[str, object], incoming: ArraySpec
 ) -> tuple[ValidationProblem, ...]:
     """One spec per dimension, and explicit specs must sum to that extent.
 

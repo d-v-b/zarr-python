@@ -13,7 +13,14 @@ from typing import TYPE_CHECKING
 import pytest
 
 from zarr_metadata.rules import validate_array_metadata_v3
-from zarr_metadata.rules._spec import ArraySpec, propagate, transitions_registered
+from zarr_metadata.rules._spec import (
+    NOTHING_KNOWN,
+    UNKNOWN,
+    ArraySpec,
+    initial_spec,
+    propagate,
+    transitions_registered,
+)
 from zarr_metadata.v3.codec.kind import ARRAY_ARRAY_CODEC_NAMES
 
 if TYPE_CHECKING:
@@ -102,13 +109,13 @@ def test_propagate_yields_incoming_spec_per_codec() -> None:
     from zarr_metadata.v3._extension_points import CODECS
 
     chain = (_transpose(1, 0), "bytes", "crc32c")
-    seen = list(
-        propagate(chain, ArraySpec((6, 4), "uint8"), lambda c: entity_configuration(CODECS, c))
-    )
+    start = ArraySpec((6, 4), "uint8", 0)
+    seen = list(propagate(chain, start, lambda c: entity_configuration(CODECS, c)))
     incoming = [spec for _, _, spec in seen]
-    assert incoming[0] == ArraySpec((6, 4), "uint8")  # transpose receives the chunk
-    assert incoming[1] == ArraySpec((4, 6), "uint8")  # bytes receives the transposed chunk
-    assert incoming[2] == ArraySpec(None, "uint8")  # past array->bytes: no shape, dtype kept
+    assert incoming[0] == ArraySpec((6, 4), "uint8", 0)  # transpose receives the chunk
+    assert incoming[1] == ArraySpec((4, 6), "uint8", 0)  # bytes receives the transposed chunk
+    # past array->bytes: no array, so no shape; type and fill carry through
+    assert incoming[2] == ArraySpec(UNKNOWN, "uint8", 0)
 
 
 def test_cast_value_changes_the_downstream_data_type() -> None:
@@ -116,10 +123,46 @@ def test_cast_value_changes_the_downstream_data_type() -> None:
     from zarr_metadata.v3._extension_points import CODECS
 
     chain = ({"name": "cast_value", "configuration": {"data_type": "float32"}}, "bytes")
+    start = ArraySpec((6, 4), "uint8", 7)
+    seen = list(propagate(chain, start, lambda c: entity_configuration(CODECS, c)))
+    # The type is compositional and propagates; the fill value would need
+    # the cast implemented, so it becomes UNKNOWN — a stated boundary.
+    assert seen[1][2] == ArraySpec((6, 4), "float32", UNKNOWN)
+
+
+def test_null_fill_value_is_a_value_not_unknown() -> None:
+    # `fill_value: null` is spec-valid for null-permitting data types. It
+    # must propagate as None, distinguishable from a fill value this
+    # package could not determine — which is why UNKNOWN is a sentinel.
+    document = {"data_type": "string", "fill_value": None}
+    spec = initial_spec(document, (4,))
+    assert spec.fill_value is None
+    assert spec.fill_value is not UNKNOWN
+    # ...and an absent key is a third, distinct fact.
+    absent = initial_spec({"data_type": "string"}, (4,))
+    assert absent.fill_value is UNKNOWN
+
+
+def test_null_fill_value_survives_a_transpose() -> None:
+    from zarr_metadata.rules._registry import entity_configuration
+    from zarr_metadata.v3._extension_points import CODECS
+
+    start = ArraySpec((6, 4), "string", None)
     seen = list(
-        propagate(chain, ArraySpec((6, 4), "uint8"), lambda c: entity_configuration(CODECS, c))
+        propagate((_transpose(1, 0), "bytes"), start, lambda c: entity_configuration(CODECS, c))
     )
-    assert seen[1][2] == ArraySpec((6, 4), "float32")
+    assert seen[1][2].fill_value is None  # still null, still not UNKNOWN
+
+
+def test_unknown_codec_yields_nothing_known() -> None:
+    from zarr_metadata.rules._registry import entity_configuration
+    from zarr_metadata.v3._extension_points import CODECS
+
+    start = ArraySpec((6, 4), "uint8", 0)
+    seen = list(
+        propagate(({"name": "zfpy"}, "bytes"), start, lambda c: entity_configuration(CODECS, c))
+    )
+    assert seen[1][2] is NOTHING_KNOWN
 
 
 def test_every_array_array_codec_registers_a_transition() -> None:

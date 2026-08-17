@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, cast
 from zarr_metadata.model._validation import ValidationProblem
 from zarr_metadata.rules._pipeline import pipeline_order_problems, shape_problems
 from zarr_metadata.rules._registry import entity_rule, run_chain_rules
-from zarr_metadata.rules._spec import ArraySpec
+from zarr_metadata.rules._spec import NOTHING_KNOWN, UNKNOWN, ArraySpec
 from zarr_metadata.v3._extension_points import CODECS
 from zarr_metadata.v3.codec.sharding_indexed import SHARDING_INDEXED_CODEC_NAME
 
@@ -37,7 +37,7 @@ _ARRAY_V3 = "zarr_v3_array"
 
 @entity_rule(_ARRAY_V3, CODECS, SHARDING_INDEXED_CODEC_NAME)
 def inner_chunk_extents_are_positive(
-    configuration: Mapping[str, object], document: Mapping[str, object], incoming: ArraySpec | None
+    configuration: Mapping[str, object], document: Mapping[str, object], incoming: ArraySpec
 ) -> tuple[ValidationProblem, ...]:
     chunk_shape = cast("tuple[int, ...]", configuration["chunk_shape"])
     return tuple(
@@ -53,7 +53,7 @@ def inner_chunk_extents_are_positive(
 
 @entity_rule(_ARRAY_V3, CODECS, SHARDING_INDEXED_CODEC_NAME)
 def inner_chunks_tile_the_incoming_array(
-    configuration: Mapping[str, object], document: Mapping[str, object], incoming: ArraySpec | None
+    configuration: Mapping[str, object], document: Mapping[str, object], incoming: ArraySpec
 ) -> tuple[ValidationProblem, ...]:
     """The inner chunk must rank-match and evenly divide the array it receives.
 
@@ -61,7 +61,7 @@ def inner_chunks_tile_the_incoming_array(
     upstream, or a non-regular grid at the top level — rather than
     guessing from the document.
     """
-    if incoming is None or incoming.shape is None:
+    if incoming.shape is UNKNOWN:
         return ()
     outer = incoming.shape
     inner = cast("tuple[int, ...]", configuration["chunk_shape"])
@@ -88,7 +88,7 @@ def inner_chunks_tile_the_incoming_array(
 
 @entity_rule(_ARRAY_V3, CODECS, SHARDING_INDEXED_CODEC_NAME)
 def inner_pipelines_are_pipelines(
-    configuration: Mapping[str, object], document: Mapping[str, object], incoming: ArraySpec | None
+    configuration: Mapping[str, object], document: Mapping[str, object], incoming: ArraySpec
 ) -> tuple[ValidationProblem, ...]:
     """`codecs` and `index_codecs` obey the pipeline rules, recursively.
 
@@ -103,12 +103,11 @@ def inner_pipelines_are_pipelines(
         isinstance(v, int) and not isinstance(v, bool) and v >= 1
         for v in cast("tuple[object, ...]", inner_shape)
     ):
-        inner_start: ArraySpec | None = None
+        inner_start = NOTHING_KNOWN
     else:
-        inner_start = ArraySpec(
-            cast("tuple[int, ...]", inner_shape),
-            incoming.data_type if incoming is not None else None,
-        )
+        # The inner pipeline encodes the inner chunk: same type and fill
+        # value as arrived here, shape of one inner chunk.
+        inner_start = incoming.with_shape(cast("tuple[int, ...]", inner_shape))
     problems: list[ValidationProblem] = []
     for key in ("codecs", "index_codecs"):
         entries = configuration[key]
@@ -117,16 +116,8 @@ def inner_pipelines_are_pipelines(
         sequence = cast("tuple[object, ...]", entries)
         problems.extend(pipeline_order_problems(sequence, (key,)))
         problems.extend(shape_problems(sequence, (key,)))
-        # The index pipeline encodes the shard index, not the array: it has
-        # no array spec, so its entity rules receive none.
-        start = inner_start if key == "codecs" else None
-        problems.extend(
-            run_chain_rules(
-                CODECS, sequence, document, (key,), start if start is not None else _NO_SPEC
-            )
-        )
+        # The index pipeline encodes the shard index, not the array: its
+        # entity rules receive a spec that knows nothing.
+        start = inner_start if key == "codecs" else NOTHING_KNOWN
+        problems.extend(run_chain_rules(CODECS, sequence, document, (key,), start))
     return tuple(problems)
-
-
-_NO_SPEC = ArraySpec(None, None)
-"""A spec carrying no information, for chains that encode no array."""

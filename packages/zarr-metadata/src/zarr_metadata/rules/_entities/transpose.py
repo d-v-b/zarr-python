@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, cast
 
 from zarr_metadata.model._validation import ValidationProblem
 from zarr_metadata.rules._registry import entity_rule
-from zarr_metadata.rules._spec import ArraySpec, spec_transition
+from zarr_metadata.rules._spec import UNKNOWN, ArraySpec, spec_transition
 from zarr_metadata.v3._extension_points import CODECS
 from zarr_metadata.v3.codec.transpose import TRANSPOSE_CODEC_NAME
 
@@ -20,20 +20,20 @@ _ARRAY_V3 = "zarr_v3_array"
 def permute_shape(configuration: Mapping[str, object], incoming: ArraySpec) -> ArraySpec:
     """The outgoing shape is the incoming shape permuted by `order`.
 
-    Declines (shape None) when the order is not a permutation of the
+    Declines (shape UNKNOWN) when the order is not a permutation of the
     incoming rank: the rules below report that, and any shape derived
     from a bad order would be a guess.
     """
     order = cast("tuple[int, ...]", configuration["order"])
     shape = incoming.shape
-    if shape is None or sorted(order) != list(range(len(shape))):
-        return incoming.with_shape(None)
+    if shape is UNKNOWN or sorted(order) != list(range(len(shape))):
+        return incoming.with_shape(UNKNOWN)
     return incoming.with_shape(tuple(shape[axis] for axis in order))
 
 
 @entity_rule(_ARRAY_V3, CODECS, TRANSPOSE_CODEC_NAME)
 def order_is_a_permutation(
-    configuration: Mapping[str, object], document: Mapping[str, object], incoming: ArraySpec | None
+    configuration: Mapping[str, object], document: Mapping[str, object], incoming: ArraySpec
 ) -> tuple[ValidationProblem, ...]:
     """`order` must be a permutation of its own indices.
 
@@ -54,7 +54,7 @@ def order_is_a_permutation(
 
 @entity_rule(_ARRAY_V3, CODECS, TRANSPOSE_CODEC_NAME)
 def order_matches_incoming_rank(
-    configuration: Mapping[str, object], document: Mapping[str, object], incoming: ArraySpec | None
+    configuration: Mapping[str, object], document: Mapping[str, object], incoming: ArraySpec
 ) -> tuple[ValidationProblem, ...]:
     """A transpose permutes the array it receives, so ranks must agree.
 
@@ -63,7 +63,7 @@ def order_matches_incoming_rank(
     transpose it is that transpose's output. Declines when the incoming
     shape is unknown.
     """
-    if incoming is None or incoming.shape is None:
+    if incoming.shape is UNKNOWN:
         return ()
     order = cast("tuple[int, ...]", configuration["order"])
     if len(order) == len(incoming.shape):

@@ -42,7 +42,7 @@ def _field_names(configuration: Mapping[str, object]) -> tuple[tuple[int, str], 
 
 @entity_rule(_ARRAY_V3, DATA_TYPE, STRUCT_DATA_TYPE_NAME)
 def field_names_are_non_empty(
-    configuration: Mapping[str, object], document: Mapping[str, object], incoming: ArraySpec | None
+    configuration: Mapping[str, object], document: Mapping[str, object], incoming: ArraySpec
 ) -> tuple[ValidationProblem, ...]:
     """A struct field must be addressable, so its name cannot be empty."""
     return tuple(
@@ -56,7 +56,7 @@ def field_names_are_non_empty(
 
 @entity_rule(_ARRAY_V3, DATA_TYPE, STRUCT_DATA_TYPE_NAME)
 def field_names_are_unique(
-    configuration: Mapping[str, object], document: Mapping[str, object], incoming: ArraySpec | None
+    configuration: Mapping[str, object], document: Mapping[str, object], incoming: ArraySpec
 ) -> tuple[ValidationProblem, ...]:
     """Duplicate field names make a fill value's per-field mapping ambiguous."""
     seen: dict[str, int] = {}
