@@ -26,7 +26,7 @@ defines two encodings, both provided here:
 ```
 
 When the chunk grid shape is known,
-[`bind`][zarr_chunk_key_encoding.ChunkKeyEncoding.bind] restricts the
+[`bind_grid_shape`][zarr_chunk_key_encoding.ChunkKeyEncoding.bind_grid_shape] restricts the
 encoding to the grid's valid indices. The resulting
 [`BoundedChunkKeyEncoding`][zarr_chunk_key_encoding.BoundedChunkKeyEncoding]
 treats the valid key set as a finite collection — membership testing checks
@@ -34,7 +34,7 @@ grammar, rank, bounds, and canonical spelling in one test — and its `decode`
 is a total inverse of `encode`:
 
 ```python
->>> bounded = encoding.bind((2, 3))
+>>> bounded = encoding.bind_grid_shape((2, 3))
 >>> "c/1/2" in bounded
 True
 >>> "c/2/0" in bounded  # out of bounds

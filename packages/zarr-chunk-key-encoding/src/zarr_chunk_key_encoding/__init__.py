@@ -8,7 +8,7 @@ and (where well-defined) back again. This package provides:
 - `DefaultChunkKeyEncoding`, `V2ChunkKeyEncoding` — the two encodings
   defined by the Zarr v3 core spec
 - `BoundedChunkKeyEncoding` — an encoding bound to a known chunk grid
-  (via `ChunkKeyEncoding.bind`), whose finite key set supports membership
+  (via `ChunkKeyEncoding.bind_grid_shape`), whose finite key set supports membership
   testing, iteration, and `len`
 - `chunk_key_encoding_from_json` / `parse_chunk_key_encoding` — construct
   encodings from JSON metadata or looser user input
