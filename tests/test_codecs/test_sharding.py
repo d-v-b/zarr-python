@@ -1262,3 +1262,45 @@ def test_shard_reader_to_dict_vectorized(chunks_per_shard: tuple[int, ...]) -> N
             assert buf.to_bytes() == present[coords]
         else:
             assert buf is None
+
+
+@pytest.mark.parametrize("nested", [False, True], ids=["single", "nested"])
+@pytest.mark.parametrize(
+    "selection",
+    [
+        (np.array([0, 1]), np.array([0, 1])),
+        (np.array([1, 0]), np.array([3, 1])),
+        (np.array([0, -5, 3]), np.array([-1, 1, 2, 3])),
+        (np.array([1, 0]), slice(0, 3)),
+        (np.array([1, 0]), 2),
+    ],
+    ids=["sorted", "unsorted", "negative", "array+slice", "array+int"],
+)
+def test_sharding_orthogonal_write_multiple_array_dims(
+    selection: tuple[Any, ...], nested: bool
+) -> None:
+    """Orthogonal writes with more than one array-indexed dimension reach the shard
+    as an ``ix_``-style coordinate selection; the value block must be flattened to
+    match the inner coordinate indexer. See issue #4280."""
+    inner: list[Any] = [BytesCodec()]
+    if nested:
+        inner = [ShardingCodec(chunk_shape=(2, 2), codecs=inner)]
+    arr = zarr.create_array(
+        store={},
+        shape=(5, 4),
+        dtype="int8",
+        chunks=(2, 4),
+        fill_value=0,
+        serializer=ShardingCodec(chunk_shape=(2, 2), codecs=inner),
+        compressors=None,
+    )
+    ref = np.zeros((5, 4), dtype="int8")
+    ix = tuple(np.atleast_1d(np.arange(n)[s]) for n, s in zip((5, 4), selection, strict=True))
+    block = np.arange(1, 1 + ix[0].size * ix[1].size, dtype="int8").reshape(ix[0].size, ix[1].size)
+    ref[np.ix_(*ix)] = block
+    # integer-indexed dimensions are dropped from the written value
+    value = block.reshape(
+        [i.size for i, s in zip(ix, selection, strict=True) if not isinstance(s, int)]
+    )
+    arr.oindex[selection] = value
+    np.testing.assert_array_equal(arr[:], ref)
