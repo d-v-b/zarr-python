@@ -1085,6 +1085,24 @@ def test_mixed_scalar_and_list_dims_keep_shorthand(tmp_path: Path) -> None:
     assert grid.chunk_shapes == (5, (10, 20, 70))
 
 
+def test_from_array_keeps_uniform_rectilinear_grid() -> None:
+    """`from_array` on a rectilinear source whose edges happen to be uniform
+    keeps the rectilinear grid kind instead of raising. The runtime grid
+    collapses uniform edges to `FixedDimension` as an optimization, but
+    `.chunks` is only defined by the stored metadata kind, so the "keep"
+    logic must dispatch on the metadata, not the runtime grid (gh-4272)."""
+    from zarr.core.metadata.v3 import ArrayV3Metadata
+
+    src = zarr.create_array(MemoryStore(), shape=(3,), chunks=[[3]], dtype="uint8")
+    src[:] = 1
+    assert src.info is not None  # _info must not raise either
+    dst = zarr.from_array(MemoryStore(), data=src, name="0", write_data=False)
+    assert isinstance(dst.metadata, ArrayV3Metadata)
+    assert isinstance(src.metadata, ArrayV3Metadata)
+    assert isinstance(dst.metadata.chunk_grid, RectilinearChunkGridMetadata)
+    assert dst.metadata.chunk_grid == src.metadata.chunk_grid
+
+
 def test_resize_uniform_rectilinear_appends_edge() -> None:
     """Growing an explicitly rectilinear array whose edges look regular appends
     a new edge chunk, while the same sizes declared as a scalar extend the

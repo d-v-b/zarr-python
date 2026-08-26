@@ -125,6 +125,7 @@ from zarr.core.metadata.v2 import (
 )
 from zarr.core.metadata.v3 import (
     ChunkGridMetadata,
+    RegularChunkGridMetadata,
     create_chunk_grid_metadata,
     parse_node_type_array,
 )
@@ -1821,7 +1822,7 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
     def _info(
         self, count_chunks_initialized: int | None = None, count_bytes_stored: int | None = None
     ) -> Any:
-        chunk_shape = self.chunks if self._chunk_grid.is_regular else None
+        chunk_shape = self.chunks if _stored_chunk_grid_is_regular(self.metadata) else None
         return ArrayInfo(
             _zarr_format=self.metadata.zarr_format,
             _data_type=self._zdtype,
@@ -4764,6 +4765,20 @@ async def create_array(
         )
 
 
+def _stored_chunk_grid_is_regular(metadata: ArrayMetadata) -> bool:
+    """Whether the *stored* chunk grid is regular, i.e. `.chunks` and `.shards`
+    are defined.
+
+    Distinct from the runtime ``ChunkGrid.is_regular``: the runtime grid
+    collapses a rectilinear dimension whose edges happen to be uniform to a
+    ``FixedDimension`` as an optimization, so it can report regular for an
+    array whose stored metadata — and therefore `.chunks` — is rectilinear.
+    """
+    if isinstance(metadata, ArrayV2Metadata):
+        return True
+    return isinstance(metadata.chunk_grid, RegularChunkGridMetadata)
+
+
 def _parse_keep_array_attr(
     data: AnyArray | npt.ArrayLike,
     chunks: ChunksLike | Literal["auto", "keep"],
@@ -4792,12 +4807,12 @@ def _parse_keep_array_attr(
 ]:
     if isinstance(data, Array):
         if chunks == "keep":
-            if data._chunk_grid.is_regular:
+            if _stored_chunk_grid_is_regular(data.metadata):
                 chunks = data.chunks
             else:
                 chunks = data.write_chunk_sizes
         if shards == "keep":
-            shards = data.shards if data._chunk_grid.is_regular else None
+            shards = data.shards if _stored_chunk_grid_is_regular(data.metadata) else None
         if zarr_format is None:
             zarr_format = data.metadata.zarr_format
         if filters == "keep":
