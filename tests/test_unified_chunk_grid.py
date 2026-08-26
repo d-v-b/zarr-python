@@ -1028,6 +1028,96 @@ def test_e2e_chunk_grid_name_regular_from_dict(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Input syntax determines grid kind (gh-4272)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("shape", "chunks", "expected_type"),
+    [
+        # scalar specs (including numpy integers and the -1 sentinel) produce a regular grid
+        ((30,), (10,), RegularChunkGridMetadata),
+        ((30,), 10, RegularChunkGridMetadata),
+        ((30,), (np.int64(10),), RegularChunkGridMetadata),
+        ((30,), -1, RegularChunkGridMetadata),
+        # explicit per-chunk lists stay rectilinear even when the sizes are uniform
+        ((30,), [[10, 10, 10]], RectilinearChunkGridMetadata),
+        # ... or uniform with a short tail (the append-oriented time-series layout of gh-4272)
+        ((168 * 13 + 24,), [[168] * 13 + [24]], RectilinearChunkGridMetadata),
+        # genuinely varying edges are rectilinear too
+        ((60,), [[10, 20, 30]], RectilinearChunkGridMetadata),
+    ],
+    ids=[
+        "scalar-tuple",
+        "scalar-int",
+        "scalar-numpy-int",
+        "full-span-sentinel",
+        "explicit-uniform",
+        "explicit-uniform-short-tail",
+        "explicit-varying",
+    ],
+)
+def test_chunk_grid_kind_follows_input_syntax(
+    tmp_path: Path, shape: tuple[int, ...], chunks: Any, expected_type: type
+) -> None:
+    """The stored grid kind is decided by the input syntax, not the chunk sizes:
+    scalar specs produce a regular grid, while explicit per-chunk lists produce
+    a rectilinear grid even when the sizes happen to describe a regular one
+    (gh-4272)."""
+    from zarr.core.metadata.v3 import ArrayV3Metadata
+
+    arr = zarr.create_array(store=tmp_path / "arr.zarr", shape=shape, chunks=chunks, dtype="int32")
+    assert isinstance(arr.metadata, ArrayV3Metadata)
+    assert isinstance(arr.metadata.chunk_grid, expected_type)
+
+
+def test_mixed_scalar_and_list_dims_keep_shorthand(tmp_path: Path) -> None:
+    """In a mixed spec, a scalar dimension serializes as the bare-int step-size
+    shorthand while an explicit list keeps its per-chunk edges."""
+    from zarr.core.metadata.v3 import ArrayV3Metadata
+
+    arr = zarr.create_array(
+        store=tmp_path / "arr.zarr", shape=(30, 100), chunks=(5, [10, 20, 70]), dtype="int32"
+    )
+    assert isinstance(arr.metadata, ArrayV3Metadata)
+    grid = arr.metadata.chunk_grid
+    assert isinstance(grid, RectilinearChunkGridMetadata)
+    assert grid.chunk_shapes == (5, (10, 20, 70))
+
+
+def test_resize_uniform_rectilinear_appends_edge() -> None:
+    """Growing an explicitly rectilinear array whose edges look regular appends
+    a new edge chunk, while the same sizes declared as a scalar extend the
+    uniform pattern instead (gh-4272), so an append-only workload writing the
+    grown region touches exactly one new chunk."""
+    from zarr.core.metadata.v3 import ArrayV3Metadata
+
+    rect_store: dict[str, Any] = {}
+    rect = zarr.create_array(store=rect_store, shape=(30,), chunks=[[10, 10, 10]], dtype="int32")
+    rect.resize((45,))
+    assert isinstance(rect.metadata, ArrayV3Metadata)
+    rect_grid = rect.metadata.chunk_grid
+    assert isinstance(rect_grid, RectilinearChunkGridMetadata)
+    assert rect_grid.chunk_shapes == ((10, 10, 10, 15),)
+    assert rect.nchunks == 4
+    # the appended region is exactly the new edge chunk
+    rect[30:45] = 1
+    assert sorted(k for k in rect_store if k.startswith("c/")) == ["c/3"]
+
+    reg_store: dict[str, Any] = {}
+    reg = zarr.create_array(store=reg_store, shape=(30,), chunks=(10,), dtype="int32")
+    reg.resize((45,))
+    assert isinstance(reg.metadata, ArrayV3Metadata)
+    reg_grid = reg.metadata.chunk_grid
+    assert isinstance(reg_grid, RegularChunkGridMetadata)
+    assert reg_grid.chunk_shape == (10,)
+    assert reg.nchunks == 5
+    # the same write straddles two chunks of the extended uniform pattern
+    reg[30:45] = 1
+    assert sorted(k for k in reg_store if k.startswith("c/")) == ["c/3", "c/4"]
+
+
+# ---------------------------------------------------------------------------
 # Sharding compatibility tests
 # ---------------------------------------------------------------------------
 

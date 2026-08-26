@@ -73,12 +73,12 @@ def test_guess_chunks(shape: tuple[int, ...], itemsize: int) -> None:
         ((30, -1, -1), (100, 20, 10), (30, 20, 10)),
         ((30, 20, -1), (100, 20, 10), (30, 20, 10)),
         ((30, 20, 10), (100, 20, 10), (30, 20, 10)),
-        # dask-style chunks describing a regular grid collapse to the uniform form
-        (((100, 100, 100), (50, 50)), (300, 100), (100, 50)),
-        (((100, 100, 50),), (250,), (100,)),
-        (((100,),), (100,), (100,)),
-        # genuinely irregular explicit chunks keep the per-chunk form
-        (((10, 20, 70), (50, 50)), (100, 100), ((10, 20, 70), 50)),
+        # dask-style explicit lists always keep the per-chunk rectilinear form,
+        # even when the sizes describe a regular grid (gh-4272)
+        (((100, 100, 100), (50, 50)), (300, 100), ((100, 100, 100), (50, 50))),
+        (((100, 100, 50),), (250,), ((100, 100, 50),)),
+        (((100,),), (100,), ((100,),)),
+        (((10, 20, 70), (50, 50)), (100, 100), ((10, 20, 70), (50, 50))),
         # no chunking (False means each dimension is one chunk spanning the full extent)
         (False, (100,), (100,)),
         (False, (100, 50), (100, 50)),
@@ -96,7 +96,7 @@ def test_guess_chunks(shape: tuple[int, ...], itemsize: int) -> None:
         ((np.int32(30), np.int64(-1)), (100, 20), (30, 20)),
         (np.array([10, 10]), (100, 100), (10, 10)),
         # rectilinear chunks given as numpy arrays
-        ((np.array([60, 40]), np.array([50, 50])), (100, 100), (60, 50)),
+        ((np.array([60, 40]), np.array([50, 50])), (100, 100), ((60, 40), (50, 50))),
     ],
 )
 def test_normalize_chunks(
@@ -112,9 +112,9 @@ def test_normalize_chunks(
         ((100,), (10,), None, (10,), None),
         # explicit regular shards
         ((100,), (10,), (50,), (50,), (10,)),
-        # rectilinear shards describing a regular-with-boundary grid collapse
-        ((100,), (10,), ((60, 40),), (60,), (10,)),
-        # genuinely irregular rectilinear shards keep the per-chunk form
+        # rectilinear shards keep the per-chunk form even when the sizes
+        # describe a regular-with-boundary grid (gh-4272)
+        ((100,), (10,), ((60, 40),), ((60, 40),), (10,)),
         ((100,), (10,), ((30, 60, 10),), ((30, 60, 10),), (10,)),
         # dict-style shards
         ((100, 100), (10, 10), {"shape": (50, 50)}, (50, 50), (10, 10)),
@@ -291,18 +291,18 @@ def test_normalize_chunks_nd_errors(case: ExpectFail[tuple[Any, tuple[int, ...]]
         Expect(input=(-1, 100), output=FixedDimension(size=100, extent=100), id="full-span"),
         # zero-length span preserves the declared chunk size.
         Expect(input=(10, 0), output=FixedDimension(size=10, extent=0), id="uniform-zero-span"),
-        # explicit lists that describe a regular grid collapse to the uniform form.
+        # explicit lists always keep the per-chunk form, even when the sizes
+        # describe a regular grid (gh-4272).
         Expect(
             input=([10, 10, 10], 30),
-            output=FixedDimension(size=10, extent=30),
+            output=VaryingDimension([10, 10, 10], extent=30),
             id="explicit-regular",
         ),
         Expect(
             input=([10, 10, 5], 25),
-            output=FixedDimension(size=10, extent=25),
+            output=VaryingDimension([10, 10, 5], extent=25),
             id="explicit-boundary",
         ),
-        # genuinely irregular edges keep the explicit per-chunk form.
         Expect(
             input=([10, 20, 70], 100),
             output=VaryingDimension([10, 20, 70], extent=100),
@@ -314,8 +314,8 @@ def test_normalize_chunks_nd_errors(case: ExpectFail[tuple[Any, tuple[int, ...]]
 def test_normalize_chunks_1d(
     case: Expect[tuple[Any, int], FixedDimension | VaryingDimension],
 ) -> None:
-    """Both output variants bind chunk sizes to the span: uniform specs become
-    `FixedDimension` (O(1) regardless of chunk count), irregular explicit
+    """Both output variants bind chunk sizes to the span: scalar specs become
+    `FixedDimension` (O(1) regardless of chunk count), explicit per-chunk
     lists become `VaryingDimension`."""
     chunks, span = case.input
     assert normalize_chunks_1d(chunks, span) == case.output

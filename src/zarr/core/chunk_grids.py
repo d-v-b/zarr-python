@@ -703,16 +703,18 @@ def _guess_regular_chunks(
 def normalize_chunks_1d(chunks: int | Iterable[object], span: int) -> DimensionGrid:
     """
     Normalize a one-dimensional chunk specification into a dimension grid:
-    `FixedDimension` for uniform chunk sizes, `VaryingDimension` for explicit
-    per-chunk sizes that genuinely vary. Both variants bind the chunk sizes to
+    `FixedDimension` for scalar chunk sizes, `VaryingDimension` for explicit
+    per-chunk size lists. Both variants bind the chunk sizes to
     the span, and the uniform form is O(1) in the number of chunks — a
     dimension with `2**62` chunks must not materialize one entry per chunk.
 
     `-1` means "one chunk covering the entire span."
-    Explicit chunk size lists must sum to the span exactly; lists that describe
-    a regular grid (all sizes equal, or equal with a smaller boundary chunk)
-    collapse to `FixedDimension`. For uniform sizes the last chunk may overhang
-    the span.
+    Explicit chunk size lists must sum to the span exactly and always produce
+    `VaryingDimension`, even when the sizes happen to be uniform: the input
+    syntax declares the grid kind, so a per-chunk list is preserved as a
+    rectilinear dimension rather than silently collapsed to a regular one,
+    which would change how the dimension grows on resize. For scalar sizes
+    the last chunk may overhang the span.
     """
     # `numbers.Integral` rather than `int` so that numpy integer scalars (which are not
     # `int` subclasses) take the uniform-chunk path instead of being treated as a sequence.
@@ -750,8 +752,6 @@ def normalize_chunks_1d(chunks: int | Iterable[object], span: int) -> DimensionG
             raise ValueError(f"All chunk sizes must be positive, got {ints}")
         if sum(ints) != span:
             raise ValueError(f"Chunk sizes {ints} do not sum to span {span}")
-        if is_regular_1d(ints):
-            return FixedDimension(size=ints[0], extent=span)
         return VaryingDimension(ints, extent=span)
 
 
