@@ -219,6 +219,70 @@ class TestChunkResolutionSorted1D:
             chunk_sel, _, _ = sub_transform_to_selections(sub_t, out_indices)
             np.testing.assert_array_equal(chunk_sel[0], expected_chunk)
 
+    def test_sorted_vindex_final_chunk_boundary_does_not_overflow(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The boundary after the final selected chunk is not searched."""
+        max_intp = np.iinfo(np.intp).max
+        chunk_size = max_intp // 2 + 1
+        idx = np.arange(max_intp - 4, max_intp, dtype=np.intp)
+        t = IndexTransform.from_shape((max_intp,)).vindex[idx]
+        grid = ChunkGrid(dimensions=(FixedDimension(size=chunk_size, extent=max_intp),))
+
+        original = np.searchsorted
+        searched_boundaries: list[int] = []
+
+        def checked_searchsorted(array: np.ndarray, boundary: int, *, side: str) -> np.intp:
+            assert boundary <= max_intp
+            searched_boundaries.append(boundary)
+            return original(array, boundary, side=side)
+
+        monkeypatch.setattr(np, "searchsorted", checked_searchsorted)
+        results = list(iter_chunk_transforms(t, grid._dimensions))
+
+        assert searched_boundaries == []
+        assert [result[0] for result in results] == [(1,)]
+        _, sub_t, out_indices = results[0]
+        chunk_sel, out_sel, _ = sub_transform_to_selections(sub_t, out_indices)
+        np.testing.assert_array_equal(chunk_sel[0], idx - chunk_size)
+        np.testing.assert_array_equal(out_sel[0], np.arange(idx.size))
+
+    def test_sorted_vindex_searches_only_internal_boundary_before_final_chunk(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Internal boundaries are searched while the final boundary is derived."""
+        max_intp = np.iinfo(np.intp).max
+        chunk_size = max_intp // 2 + 1
+        idx = np.array(
+            [chunk_size - 2, chunk_size - 1, chunk_size, chunk_size + 1, max_intp - 1],
+            dtype=np.intp,
+        )
+        t = IndexTransform.from_shape((max_intp,)).vindex[idx]
+        grid = ChunkGrid(dimensions=(FixedDimension(size=chunk_size, extent=max_intp),))
+
+        original = np.searchsorted
+        searched_boundaries: list[int] = []
+
+        def checked_searchsorted(array: np.ndarray, boundary: int, *, side: str) -> np.intp:
+            assert boundary <= max_intp
+            searched_boundaries.append(boundary)
+            return original(array, boundary, side=side)
+
+        monkeypatch.setattr(np, "searchsorted", checked_searchsorted)
+        results = list(iter_chunk_transforms(t, grid._dimensions))
+
+        assert searched_boundaries == [chunk_size]
+        assert [result[0] for result in results] == [(0,), (1,)]
+        expected_chunk_indices = (idx[:2], idx[2:] - chunk_size)
+        expected_out_indices = (np.arange(2), np.arange(2, idx.size))
+        for result, expected_chunk, expected_out in zip(
+            results, expected_chunk_indices, expected_out_indices, strict=True
+        ):
+            _, sub_t, out_indices = result
+            chunk_sel, out_sel, _ = sub_transform_to_selections(sub_t, out_indices)
+            np.testing.assert_array_equal(chunk_sel[0], expected_chunk)
+            np.testing.assert_array_equal(out_sel[0], expected_out)
+
     def test_sorted_vindex_with_zero_sized_dimension_uses_general_resolution(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
