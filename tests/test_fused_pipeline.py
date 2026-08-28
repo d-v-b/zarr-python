@@ -29,7 +29,7 @@ from zarr.core.buffer.cpu import NDBuffer as CPUNDBuffer
 from zarr.core.chunk_utils import ChunkTransform, evolve_codecs
 from zarr.core.codec_pipeline import AsyncChunkTransform, FusedCodecPipeline
 from zarr.core.config import config as zarr_config
-from zarr.core.dtype import get_data_type_from_native_dtype
+from zarr.core.dtype import Float32, Float64, Int32, UInt8, ZDType
 from zarr.registry import register_codec
 from zarr.storage import MemoryStore, StorePath, WrapperStore
 from zarr.storage._utils import _normalize_byte_range_index
@@ -42,16 +42,18 @@ if TYPE_CHECKING:
     from zarr.core.buffer import Buffer, NDBuffer
 
 
+_FLOAT64 = Float64()
+
+
 def _make_spec(
     shape: tuple[int, ...],
-    dtype: str = "float64",
+    zdtype: ZDType[Any, Any] = _FLOAT64,
     fill_value: float = 0,
     *,
     write_empty_chunks: bool = True,
     prototype: BufferPrototype | None = None,
 ) -> ArraySpec:
     """An ArraySpec with the C-order defaults shared by the tests in this file."""
-    zdtype = get_data_type_from_native_dtype(np.dtype(dtype))
     return ArraySpec(
         shape=shape,
         dtype=zdtype,
@@ -156,19 +158,20 @@ def test_evolve_from_array_spec() -> None:
 
 
 @pytest.mark.parametrize(
-    ("dtype", "shape"),
+    ("zdtype", "shape"),
     [
-        ("float64", (100,)),
-        ("float32", (50,)),
-        ("int32", (200,)),
-        ("float64", (10, 10)),
+        (Float64(), (100,)),
+        (Float32(), (50,)),
+        (Int32(), (200,)),
+        (Float64(), (10, 10)),
     ],
     ids=["f64-1d", "f32-1d", "i32-1d", "f64-2d"],
 )
-def test_read_write_sync_roundtrip(dtype: str, shape: tuple[int, ...]) -> None:
+def test_read_write_sync_roundtrip(zdtype: ZDType[Any, Any], shape: tuple[int, ...]) -> None:
     """Data written via write_sync can be read back via read_sync."""
     store = MemoryStore()
-    spec = _make_spec(shape, dtype)
+    dtype = zdtype.to_native_dtype()
+    spec = _make_spec(shape, zdtype)
 
     pipeline = FusedCodecPipeline.from_codecs((BytesCodec(),))
     pipeline = pipeline.evolve_from_array_spec(spec)
@@ -469,7 +472,7 @@ async def test_encode_and_write_as_completed_cancels_stray_writes_on_failure() -
         async def set_if_not_exists(self, default: Buffer) -> None:
             pass
 
-    chunk_spec = _make_spec((1,), "uint8")
+    chunk_spec = _make_spec((1,), UInt8())
     chunk_array = CPUNDBuffer.from_numpy_array(np.zeros(1, dtype="uint8"))
     transform = ChunkTransform(codecs=(BytesCodec(),))
 
@@ -548,7 +551,7 @@ def test_shared_transform_decode_alternating_specs() -> None:
     # two distinct specs (different shapes) sharing the one transform + cache slot
     cases = []
     for shape in [(5, 7), (3, 11)]:
-        spec = _make_spec(shape, "int32")
+        spec = _make_spec(shape, Int32())
         arr = np.arange(int(np.prod(shape)), dtype="int32").reshape(shape)
         encoded = transform.encode_chunk(CPUNDBuffer.from_numpy_array(arr), spec)
         assert encoded is not None
@@ -642,7 +645,7 @@ def test_write_over_sync_byte_setter_takes_sync_path() -> None:
     """
     from zarr.codecs.sharding import _ShardingByteSetter
 
-    spec = _make_spec((10,), "uint8")
+    spec = _make_spec((10,), UInt8())
     pipeline = FusedCodecPipeline.from_codecs([BytesCodec()]).evolve_from_array_spec(spec)
     assert pipeline.sync_transform is not None
 
@@ -815,7 +818,7 @@ def test_async_chunk_transform_matches_sync(
     touches.
     """
     shape = (4, 4)
-    spec = _make_spec(shape, "int32")
+    spec = _make_spec(shape, Int32())
     evolved = evolve_codecs(case.input, spec)
     sync_t = ChunkTransform(codecs=evolved)
     async_t = AsyncChunkTransform(codecs=evolved)
@@ -839,7 +842,7 @@ def test_async_decode_encode_passes_through_none_chunks() -> None:
     """`FusedCodecPipeline.decode`/`encode` (the async batch entry points used
     on the fallback path) map a None chunk to None and leave real chunks
     untouched — pins the None-passthrough branch the default sync path skips."""
-    spec = _make_spec((4,), "int32")
+    spec = _make_spec((4,), Int32())
     pipeline = FusedCodecPipeline.from_codecs([BytesCodec()]).evolve_from_array_spec(spec)
 
     data = np.arange(4, dtype="int32")
