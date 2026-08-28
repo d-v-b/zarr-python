@@ -42,6 +42,7 @@ from zarr.registry import get_codec_class
 if TYPE_CHECKING:
     from typing import Self
 
+    from zarr.codecs.sharding import ShardingCodec
     from zarr.core.buffer import Buffer, BufferPrototype
     from zarr.core.chunk_grids import ChunkGrid
     from zarr.core.dtype.wrapper import TBaseDType, TBaseScalar
@@ -570,25 +571,31 @@ class ArrayV3Metadata(Metadata):
     # They require knowledge of codecs (ShardingCodec) and don't belong on a metadata DTO.
 
     @property
+    def sharding_codec(self) -> ShardingCodec | None:
+        """The array's sharding codec, or None if the array is not sharded."""
+        from zarr.codecs.sharding import ShardingCodec
+
+        if len(self.codecs) == 1 and isinstance(self.codecs[0], ShardingCodec):
+            return self.codecs[0]
+        return None
+
+    @property
     def chunks(self) -> tuple[int, ...]:
+        if (sharding_codec := self.sharding_codec) is not None:
+            # Inner chunks are always regular, whatever the shape of the outer
+            # (shard) grid.
+            return sharding_codec.chunk_shape
         if not isinstance(self.chunk_grid, RegularChunkGridMetadata):
             msg = (
                 "The `chunks` attribute is only defined for arrays using regular chunk grids. "
                 "This array has a rectilinear chunk grid. Use `read_chunk_sizes` for general access."
             )
             raise NotImplementedError(msg)
-
-        from zarr.codecs.sharding import ShardingCodec
-
-        if len(self.codecs) == 1 and isinstance(self.codecs[0], ShardingCodec):
-            return self.codecs[0].chunk_shape
         return self.chunk_grid.chunk_shape
 
     @property
     def shards(self) -> tuple[int, ...] | None:
-        from zarr.codecs.sharding import ShardingCodec
-
-        if len(self.codecs) == 1 and isinstance(self.codecs[0], ShardingCodec):
+        if self.sharding_codec is not None:
             if not isinstance(self.chunk_grid, RegularChunkGridMetadata):
                 msg = (
                     "The `shards` attribute is only defined for arrays using regular chunk grids. "
@@ -600,10 +607,8 @@ class ArrayV3Metadata(Metadata):
 
     @property
     def inner_codecs(self) -> tuple[Codec, ...]:
-        from zarr.codecs.sharding import ShardingCodec
-
-        if len(self.codecs) == 1 and isinstance(self.codecs[0], ShardingCodec):
-            return self.codecs[0].codecs
+        if (sharding_codec := self.sharding_codec) is not None:
+            return sharding_codec.codecs
         return self.codecs
 
     def encode_chunk_key(self, chunk_coords: tuple[int, ...]) -> str:

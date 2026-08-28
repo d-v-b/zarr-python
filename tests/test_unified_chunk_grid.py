@@ -1085,22 +1085,74 @@ def test_mixed_scalar_and_list_dims_keep_shorthand(tmp_path: Path) -> None:
     assert grid.chunk_shapes == (5, (10, 20, 70))
 
 
-def test_from_array_keeps_uniform_rectilinear_grid() -> None:
-    """`from_array` on a rectilinear source whose edges happen to be uniform
-    keeps the rectilinear grid kind instead of raising. The runtime grid
-    collapses uniform edges to `FixedDimension` as an optimization, but
-    `.chunks` is only defined by the stored metadata kind, so the "keep"
-    logic must dispatch on the metadata, not the runtime grid (gh-4272)."""
+# The chunk/shard spec matrix for `from_array` round-trip tests. Every kind of
+# spec `create_array` accepts should appear here, so that any change to how
+# specs are normalized or stored is automatically checked against the "keep"
+# path of `from_array` as well.
+FROM_ARRAY_KEEP_CASES = [
+    pytest.param((30, 40), (10, 20), None, id="regular"),
+    pytest.param((40, 40), (5, 10), (10, 20), id="regular-sharded"),
+    pytest.param((60, 100), [[10, 20, 30], [50, 50]], None, id="rectilinear"),
+    pytest.param((9, 30), (3, [10, 20]), None, id="rectilinear-mixed-bare-int"),
+    pytest.param((3,), [[3]], None, id="rectilinear-uniform-list"),
+    pytest.param((100,), (10,), [[50, 50]], id="rectilinear-sharded"),
+]
+
+
+@pytest.mark.parametrize("write_data", [True, False])
+@pytest.mark.parametrize(("shape", "chunks", "shards"), FROM_ARRAY_KEEP_CASES)
+def test_from_array_keep_roundtrips_chunk_grid(
+    shape: tuple[int, ...], chunks: Any, shards: Any, write_data: bool
+) -> None:
+    """For every chunk/shard spec accepted by `create_array`, `from_array` with
+    the default "keep" parameters reproduces the source's stored chunk grid and
+    codecs exactly: the grid kind is preserved (gh-4272), uniform dimensions
+    keep their bare-int shorthand instead of being expanded per chunk, and
+    sharding survives — including under a rectilinear shard grid. `.info` is
+    defined for every kind of source, and the default data copy works for
+    every kind of grid."""
     from zarr.core.metadata.v3 import ArrayV3Metadata
 
-    src = zarr.create_array(MemoryStore(), shape=(3,), chunks=[[3]], dtype="uint8")
-    src[:] = 1
-    assert src.info is not None  # _info must not raise either
-    dst = zarr.from_array(MemoryStore(), data=src, name="0", write_data=False)
-    assert isinstance(dst.metadata, ArrayV3Metadata)
+    src = zarr.create_array(
+        MemoryStore(), shape=shape, chunks=chunks, shards=shards, dtype="uint16"
+    )
+    src[:] = np.arange(np.prod(shape), dtype="uint16").reshape(shape)
+    assert src.info is not None
+    dst = zarr.from_array(MemoryStore(), data=src, name="0", write_data=write_data)
     assert isinstance(src.metadata, ArrayV3Metadata)
-    assert isinstance(dst.metadata.chunk_grid, RectilinearChunkGridMetadata)
+    assert isinstance(dst.metadata, ArrayV3Metadata)
     assert dst.metadata.chunk_grid == src.metadata.chunk_grid
+    assert dst.metadata.codecs == src.metadata.codecs
+    if write_data:
+        np.testing.assert_array_equal(dst[:], src[:])
+
+
+def test_chunks_raises_for_nonsharded_rectilinear_grid() -> None:
+    """`.chunks` has no uniform value for a non-sharded rectilinear grid."""
+    arr = zarr.create_array(MemoryStore(), shape=(30,), chunks=[[10, 20]], dtype="int32")
+    with pytest.raises(NotImplementedError, match="regular chunk grids"):
+        _ = arr.chunks
+
+
+def test_shards_raises_for_rectilinear_shard_grid() -> None:
+    """`.shards` has no uniform value when the shard grid is rectilinear."""
+    arr = zarr.create_array(
+        MemoryStore(), shape=(100,), chunks=(10,), shards=[[50, 50]], dtype="int32"
+    )
+    with pytest.raises(NotImplementedError, match="regular chunk grids"):
+        _ = arr.shards
+
+
+def test_from_array_keep_is_o1_in_chunk_count() -> None:
+    """`chunks="keep"` passes uniform dimensions through as bare-int shorthand
+    rather than expanding one entry per chunk, so copying array metadata is
+    O(ndim), not O(nchunks): this completes instantly despite ~2**60 chunks
+    along the first dimension (and would hang if the shorthand were expanded)."""
+    src = zarr.create_array(MemoryStore(), shape=(2**62, 30), chunks=(3, [10, 20]), dtype="uint8")
+    dst = zarr.from_array(MemoryStore(), data=src, name="0", write_data=False)
+    grid = dst.metadata.chunk_grid
+    assert isinstance(grid, RectilinearChunkGridMetadata)
+    assert grid.chunk_shapes == (3, (10, 20))
 
 
 def test_resize_uniform_rectilinear_appends_edge() -> None:
