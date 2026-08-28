@@ -849,7 +849,9 @@ def test_sharded_roundtrip_with_async_only_inner_codec() -> None:
 # ---------------------------------------------------------------------------
 # AsyncChunkTransform: the async per-chunk codec chain used on the async
 # fallback path. It is the async mirror of ChunkTransform, so it must produce
-# identical bytes/arrays. The default (Fused, sync-store) path never uses it;
+# identical bytes/arrays — except for gzip's embedded 4-byte MTIME header
+# field, which the assertions deliberately ignore when a GzipCodec is present.
+# The default (Fused, sync-store) path never uses it;
 # these tests drive it directly over multi-codec chains so the aa/bb loops and
 # the all-fill drop branch are exercised.
 # ---------------------------------------------------------------------------
@@ -867,8 +869,10 @@ def test_sharded_roundtrip_with_async_only_inner_codec() -> None:
 )
 def test_async_chunk_transform_matches_sync(codecs: tuple[Any, ...]) -> None:
     """`AsyncChunkTransform.decode_chunk`/`encode_chunk` must round-trip and
-    produce exactly what the synchronous `ChunkTransform` produces, across
-    array->array, array->bytes, and bytes->bytes codec combinations.
+    produce what the synchronous `ChunkTransform` produces, across
+    array->array, array->bytes, and bytes->bytes codec combinations. Output is
+    byte-identical except for gzip's embedded 4-byte MTIME header field, which
+    the assertion deliberately ignores when a GzipCodec is present.
 
     This is the async mirror of the codecs the default pipeline runs
     synchronously; a divergence here corrupts data only on the async fallback
