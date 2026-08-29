@@ -35,6 +35,9 @@ closely model the content of the Zarr specifications, such as:
 - **Optional Pydantic integration** ([`zarr_metadata.pydantic`](api/pydantic.md),
   requires Pydantic 2.13 or newer): each model as a Pydantic field type that
   validates raw documents through the same strict parser.
+- **Optional msgspec integration** ([`zarr_metadata.msgspec`](api/msgspec.md),
+  requires msgspec 0.19 or newer): field types and a decode hook that route
+  raw documents through the same strict parser.
 
 ## What this is for
 
@@ -66,6 +69,15 @@ encoded = metadata.to_key_value()["zarr.json"]
 A bare `TypeAdapter` over a public document `TypedDict` is a coercive shape
 adapter, not a Zarr conformance validator; it may coerce values or discard
 members that the strict model parser rejects.
+
+The optional msgspec integration does the same through msgspec's decode hook:
+
+```python
+import msgspec
+import zarr_metadata.msgspec as zmm
+
+metadata = msgspec.convert(raw, zmm.ZarrV3ArrayMetadata, dec_hook=zmm.dec_hook)
+```
 
 ## Validation boundary
 
