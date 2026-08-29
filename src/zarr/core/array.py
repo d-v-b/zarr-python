@@ -1207,10 +1207,10 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         """
         Calculate the number of chunks that have been initialized in storage.
 
-        This value is calculated as the product of the number of initialized shards and the number
-        of chunks per shard. For arrays that do not use sharding, the number of chunks per shard is
-        effectively 1, and in that case the number of chunks initialized is the same as the number
-        of stored objects associated with an array.
+        This value is calculated as the sum of the number of chunks in every initialized shard
+        (shard sizes can vary when the shard grid is rectilinear). For arrays that do not use
+        sharding, each stored object holds one chunk, so the number of chunks initialized is the
+        same as the number of stored objects associated with an array.
 
         Returns
         -------
@@ -1820,10 +1820,17 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         rectilinear_grid = _stored_rectilinear_grid(self.metadata)
         sharded = _sharding_codec(self.metadata) is not None
         # `.chunks` (the inner chunk shape when sharded) is undefined only for a
-        # non-sharded rectilinear grid; `.shards` is undefined for a rectilinear
-        # shard grid. ArrayInfo renders None as "<variable>" / omits the line.
+        # non-sharded rectilinear grid, which ArrayInfo renders as "<variable>";
+        # `.shards` is undefined for a rectilinear shard grid, where the
+        # "<variable>" sentinel keeps the array rendered as sharded.
         chunk_shape = self.chunks if (rectilinear_grid is None or sharded) else None
-        shard_shape = self.shards if rectilinear_grid is None else None
+        shard_shape: tuple[int, ...] | Literal["<variable>"] | None
+        if rectilinear_grid is None:
+            shard_shape = self.shards
+        elif sharded:
+            shard_shape = "<variable>"
+        else:
+            shard_shape = None
         return ArrayInfo(
             _zarr_format=self.metadata.zarr_format,
             _data_type=self._zdtype,
@@ -2301,10 +2308,10 @@ class Array[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         """
         Calculate the number of chunks that have been initialized in storage.
 
-        This value is calculated as the product of the number of initialized shards and the number of
-        chunks per shard. For arrays that do not use sharding, the number of chunks per shard is effectively 1,
-        and in that case the number of chunks initialized is the same as the number of stored objects associated with an
-        array. For a direct count of the number of initialized stored objects, see `nshards_initialized`.
+        This value is calculated as the sum of the number of chunks in every initialized shard
+        (shard sizes can vary when the shard grid is rectilinear). For arrays that do not use sharding,
+        each stored object holds one chunk, so the number of chunks initialized is the same as the number
+        of stored objects associated with an array. For a direct count of the number of initialized stored objects, see `nshards_initialized`.
 
         Returns
         -------
@@ -5359,10 +5366,10 @@ async def _nchunks_initialized(
     """
     Calculate the number of chunks that have been initialized in storage.
 
-    This value is calculated as the product of the number of initialized shards and the number
-    of chunks per shard. For arrays that do not use sharding, the number of chunks per shard is
-    effectively 1, and in that case the number of chunks initialized is the same as the number
-    of stored objects associated with an array.
+    This value is calculated as the sum of the number of chunks in every initialized shard
+    (shard sizes can vary when the shard grid is rectilinear). For arrays that do not use
+    sharding, each stored object holds one chunk, so the number of chunks initialized is the
+    same as the number of stored objects associated with an array.
 
     Parameters
     ----------
@@ -5374,13 +5381,22 @@ async def _nchunks_initialized(
     nchunks_initialized : int
         The number of chunks that have been initialized.
     """
-    if array.shards is None:
-        chunks_per_shard = 1
-    else:
-        chunks_per_shard = product(
-            tuple(a // b for a, b in zip(array.shards, array.chunks, strict=True))
-        )
-    return (await _nshards_initialized(array)) * chunks_per_shard
+    if _sharding_codec(array.metadata) is None:
+        return await _nshards_initialized(array)
+    # Count the inner chunks of each initialized shard individually: shard
+    # sizes vary when the shard grid is rectilinear. `.chunks` is the inner
+    # chunk shape, which is defined for any sharded array.
+    inner_chunks = array.chunks
+    grid = array._chunk_grid
+    initialized = set(await _shards_initialized(array))
+    total = 0
+    for coords in grid.all_chunk_coords():
+        spec = grid[coords]
+        if spec is not None and array.metadata.encode_chunk_key(coords) in initialized:
+            total += product(
+                tuple(s // c for s, c in zip(spec.codec_shape, inner_chunks, strict=True))
+            )
+    return total
 
 
 async def _nshards_initialized(

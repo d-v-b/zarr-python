@@ -1118,6 +1118,9 @@ def test_from_array_keep_roundtrips_chunk_grid(
     )
     src[:] = np.arange(np.prod(shape), dtype="uint16").reshape(shape)
     assert src.info is not None
+    # The array is fully written, so every chunk is initialized, whatever the
+    # grid kind and sharding layout.
+    assert src.nchunks_initialized == src.nchunks
     dst = zarr.from_array(MemoryStore(), data=src, name="0", write_data=write_data)
     assert isinstance(src.metadata, ArrayV3Metadata)
     assert isinstance(dst.metadata, ArrayV3Metadata)
@@ -1125,6 +1128,34 @@ def test_from_array_keep_roundtrips_chunk_grid(
     assert dst.metadata.codecs == src.metadata.codecs
     if write_data:
         np.testing.assert_array_equal(dst[:], src[:])
+
+
+def test_info_reports_variable_shard_shape_for_rectilinear_shard_grid() -> None:
+    """A sharded array whose shard grid is rectilinear has no uniform shard
+    shape. `.info` must still present it as sharded — shard shape rendered as
+    `<variable>`, and the initialized count labeled as shards, not chunks."""
+    arr = zarr.create_array(
+        MemoryStore(), shape=(100,), chunks=(10,), shards=[[50, 50]], dtype="int32"
+    )
+    arr[:] = 1
+    assert "Shard shape        : <variable>" in repr(arr.info)
+    info = arr.info_complete()
+    assert "Shards Initialized : 2" in repr(info)
+    assert arr.nchunks_initialized == 10
+
+
+def test_nchunks_initialized_counts_per_shard_for_rectilinear_shard_grid() -> None:
+    """With a rectilinear shard grid the chunk count per shard varies, so the
+    initialized-chunk count is summed per stored shard rather than derived
+    from a uniform multiplier."""
+    arr = zarr.create_array(
+        MemoryStore(), shape=(90,), chunks=(10,), shards=[[60, 30]], dtype="int32"
+    )
+    assert arr.nchunks_initialized == 0
+    arr[60:90] = 1  # initializes only the second shard, which holds 3 chunks
+    assert arr.nchunks_initialized == 3
+    arr[0:10] = 1  # initializes the first shard, which holds 6 chunks
+    assert arr.nchunks_initialized == 9
 
 
 def test_chunks_raises_for_nonsharded_rectilinear_grid() -> None:
