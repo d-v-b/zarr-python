@@ -77,7 +77,12 @@ import msgspec
 import zarr_metadata.msgspec as zmm
 
 metadata = msgspec.convert(raw, zmm.ZarrV3ArrayMetadata, dec_hook=zmm.dec_hook)
+encoded = metadata.to_key_value()["zarr.json"]
 ```
+
+Serialization stays explicit (`to_json` / `to_key_value`): msgspec encodes
+dataclasses natively, so no hook can make `msgspec.json.encode` emit the
+canonical document — see [`zarr_metadata.msgspec`](api/msgspec.md).
 
 ## Validation boundary
 
