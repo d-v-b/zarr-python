@@ -197,6 +197,12 @@ def test_decode_malformed_key() -> None:
         assert key not in bounded
 
 
+def test_oversized_integer_key_is_not_a_member() -> None:
+    """Membership treats integer components above Python's conversion limit as malformed."""
+    bounded = DefaultChunkKeyEncoding().to_bounded((1,))
+    assert "c/" + "9" * 5_000 not in bounded
+
+
 def test_decode_wrong_rank() -> None:
     """A well-formed key of the wrong rank raises `ChunkKeyOutOfBoundsError`."""
     bounded = DefaultChunkKeyEncoding().to_bounded((2, 3))

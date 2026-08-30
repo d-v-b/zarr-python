@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import operator
+
 import pytest
 
 from zarr_chunk_key_encoding import (
@@ -68,6 +70,12 @@ def test_known_set_is_the_spec_encodings() -> None:
     }
     assert get_chunk_key_encoding_class("default") is DefaultChunkKeyEncoding
     assert get_chunk_key_encoding_class("v2") is V2ChunkKeyEncoding
+
+
+def test_known_set_is_immutable() -> None:
+    """The closed dispatch table cannot become a process-wide registry at runtime."""
+    with pytest.raises(TypeError):
+        operator.setitem(CHUNK_KEY_ENCODINGS, "custom", DefaultChunkKeyEncoding)
 
 
 def test_get_unknown_name() -> None:

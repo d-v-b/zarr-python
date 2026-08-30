@@ -21,6 +21,7 @@ a registry later does not change them.
 """
 
 from collections.abc import Mapping
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, NotRequired, cast
 
 from typing_extensions import TypeAliasType, TypedDict
@@ -45,10 +46,12 @@ __all__ = [
     "parse_chunk_key_encoding",
 ]
 
-CHUNK_KEY_ENCODINGS: Final[Mapping[str, type[ChunkKeyEncoding]]] = {
-    DefaultChunkKeyEncoding.name: DefaultChunkKeyEncoding,
-    V2ChunkKeyEncoding.name: V2ChunkKeyEncoding,
-}
+CHUNK_KEY_ENCODINGS: Final[Mapping[str, type[ChunkKeyEncoding]]] = MappingProxyType(
+    {
+        DefaultChunkKeyEncoding.name: DefaultChunkKeyEncoding,
+        V2ChunkKeyEncoding.name: V2ChunkKeyEncoding,
+    }
+)
 """The chunk key encodings defined by the Zarr v3 core spec, by name.
 
 A closed mapping, not a registry: it is not mutable, and nothing discovers

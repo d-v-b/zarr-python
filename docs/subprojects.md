@@ -47,8 +47,8 @@ without taking on `zarr` as a dependency.
     ---
 
     Chunk key encodings for Zarr v3 arrays: the spec-defined `default` and
-    `v2` encodings, a registry so third-party encodings are first-class, and
-    strict decoding of a store key back to a chunk grid index.
+    `v2` encodings, grid-bounded encodings with finite key sets, and strict
+    decoding of a store key back to a chunk grid index.
 
     ```bash
     pip install zarr-chunk-key-encoding

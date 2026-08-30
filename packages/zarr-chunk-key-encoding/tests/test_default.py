@@ -112,6 +112,12 @@ def test_decode_non_canonical_part() -> None:
         DefaultChunkKeyEncoding().decode("c/01")
 
 
+def test_decode_oversized_integer_part() -> None:
+    """Integer conversion limits are reported through the package error hierarchy."""
+    with pytest.raises(ChunkKeyDecodeError, match="not a canonical"):
+        DefaultChunkKeyEncoding().decode("c/" + "9" * 5_000)
+
+
 def test_decode_empty_part() -> None:
     with pytest.raises(ChunkKeyDecodeError, match="not a canonical"):
         DefaultChunkKeyEncoding().decode("c/")

@@ -193,4 +193,9 @@ def parse_grid_index(part: str, chunk_key: str) -> int:
         raise ChunkKeyDecodeError(
             f"Invalid chunk key {chunk_key!r}: {part!r} is not a canonical non-negative integer."
         )
-    return int(part)
+    try:
+        return int(part)
+    except ValueError as e:
+        raise ChunkKeyDecodeError(
+            f"Invalid chunk key {chunk_key!r}: {part!r} is not a canonical non-negative integer."
+        ) from e
