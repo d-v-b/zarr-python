@@ -27,12 +27,19 @@ from zarr_metadata.rules._pipeline import pipeline_order_problems, shape_problem
 from zarr_metadata.rules._registry import entity_rule, run_chain_rules
 from zarr_metadata.rules._spec import NOTHING_KNOWN, UNKNOWN, ArraySpec
 from zarr_metadata.v3._extension_points import CODECS
+from zarr_metadata.v3._shape import entity_name
+from zarr_metadata.v3.codec.blosc import BLOSC_CODEC_NAME
+from zarr_metadata.v3.codec.gzip import GZIP_CODEC_NAME
 from zarr_metadata.v3.codec.sharding_indexed import SHARDING_INDEXED_CODEC_NAME
+from zarr_metadata.v3.codec.zstd import ZSTD_CODEC_NAME
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
 _ARRAY_V3 = "zarr_v3_array"
+_VARIABLE_SIZE_CODECS = frozenset(
+    {BLOSC_CODEC_NAME, GZIP_CODEC_NAME, SHARDING_INDEXED_CODEC_NAME, ZSTD_CODEC_NAME}
+)
 
 
 @entity_rule(_ARRAY_V3, CODECS, SHARDING_INDEXED_CODEC_NAME)
@@ -121,3 +128,20 @@ def inner_pipelines_are_pipelines(
         start = inner_start if key == "codecs" else NOTHING_KNOWN
         problems.extend(run_chain_rules(CODECS, sequence, document, (key,), start))
     return tuple(problems)
+
+
+@entity_rule(_ARRAY_V3, CODECS, SHARDING_INDEXED_CODEC_NAME)
+def index_codecs_have_fixed_encoded_size(
+    configuration: Mapping[str, object], document: Mapping[str, object], incoming: ArraySpec
+) -> tuple[ValidationProblem, ...]:
+    """The shard index must have an encoded size derivable from metadata."""
+    entries = cast("tuple[object, ...]", configuration["index_codecs"])
+    return tuple(
+        ValidationProblem(
+            ("index_codecs", index),
+            f"{name!r} produces variable-size output; index_codecs must be fixed-size",
+            "invalid_value",
+        )
+        for index, entry in enumerate(entries)
+        if (name := entity_name(entry)) in _VARIABLE_SIZE_CODECS
+    )

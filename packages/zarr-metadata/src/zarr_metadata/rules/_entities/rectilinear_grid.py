@@ -114,11 +114,11 @@ def tiles_the_array(
         if not _is_int(extent) or _is_int(spec) or not isinstance(spec, tuple):
             continue
         total = _expanded_extent(cast("tuple[object, ...]", spec))
-        if total is not None and total != extent:
+        if total is not None and total < cast("int", extent):
             problems.append(
                 ValidationProblem(
                     ("chunk_shapes", dim),
-                    f"chunk sizes sum to {total} but shape[{dim}] is {extent}",
+                    f"chunk sizes sum to {total} but must cover shape[{dim}] extent {extent}",
                     "invalid_value",
                 )
             )

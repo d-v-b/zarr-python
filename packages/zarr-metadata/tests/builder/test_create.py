@@ -227,3 +227,23 @@ def test_error_v2_consolidated_format_is_not_one() -> None:
     assert [(problem.loc, problem.kind) for problem in exc_info.value.problems] == [
         (("zarr_consolidated_format",), "invalid_value")
     ]
+
+
+def test_error_v2_consolidated_array_entry_is_invalid() -> None:
+    with pytest.raises(MetadataValidationError) as exc_info:
+        create_zarr_v2_consolidated_metadata_json(
+            zarr_consolidated_format=1,
+            metadata={"foo/.zarray": {}},  # type: ignore[typeddict-item]
+        )
+    assert any(
+        problem.loc[:2] == ("metadata", "foo/.zarray") and problem.kind == "missing_key"
+        for problem in exc_info.value.problems
+    )
+
+
+def test_error_v2_consolidated_entry_has_unknown_suffix() -> None:
+    with pytest.raises(MetadataValidationError, match="metadata file suffix"):
+        create_zarr_v2_consolidated_metadata_json(
+            zarr_consolidated_format=1,
+            metadata={"foo/data": {}},  # type: ignore[typeddict-item]
+        )

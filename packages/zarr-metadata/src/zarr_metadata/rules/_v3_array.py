@@ -158,9 +158,13 @@ def _check_fill_for_dtype(dtype_name: str, value: object) -> str | None:
             return None
         return _check_byte_sequence(value, None)
     if dtype_name in ("numpy.datetime64", "numpy.timedelta64"):
-        if value == "NaT" or _is_int(value):
+        if value == "NaT":
             return None
-        return f"expected an integer or 'NaT', got {value!r}"
+        if not _is_int(value):
+            return f"expected a signed 64-bit integer or 'NaT', got {value!r}"
+        if not -(2**63) <= cast(int, value) <= 2**63 - 1:
+            return f"expected a signed 64-bit integer, got {value!r}"
+        return None
     if dtype_name == "struct":
         if isinstance(value, Mapping):
             return None
@@ -206,9 +210,12 @@ def _check_data_type_spelling(document: Mapping[str, object]) -> tuple[Validatio
 
 
 def _check_fill_matches_dtype(document: Mapping[str, object]) -> tuple[ValidationProblem, ...]:
-    dtype_name = _dtype_name(document["data_type"])
+    data_type = document["data_type"]
+    dtype_name = _dtype_name(data_type)
     if dtype_name is None:
         return ()
+    if dtype_name == "struct":
+        return _struct_fill_problems(data_type, document["fill_value"], ("fill_value",))
     reason = _check_fill_for_dtype(dtype_name, document["fill_value"])
     if reason is None:
         return ()
@@ -219,6 +226,75 @@ def _check_fill_matches_dtype(document: Mapping[str, object]) -> tuple[Validatio
             "invalid_value",
         ),
     )
+
+
+def _struct_fill_problems(
+    data_type: object, fill_value: object, loc: tuple[str | int, ...]
+) -> tuple[ValidationProblem, ...]:
+    """Validate a struct fill mapping against every field, recursively."""
+    if not isinstance(fill_value, Mapping):
+        return (
+            ValidationProblem(
+                loc,
+                f"fill_value invalid for data_type 'struct': expected an object of "
+                f"per-field fill values, got {fill_value!r}",
+                "invalid_value",
+            ),
+        )
+    envelope = as_string_mapping(data_type)
+    configuration = (
+        as_string_mapping(envelope.get("configuration")) if envelope is not None else None
+    )
+    fields = configuration.get("fields") if configuration is not None else None
+    if not isinstance(fields, tuple):
+        return ()  # malformed data type: the structural validator owns it
+
+    fill_mapping = cast("Mapping[object, object]", fill_value)
+    problems: list[ValidationProblem] = []
+    field_names: set[str] = set()
+    for field in cast("tuple[object, ...]", fields):
+        field_mapping = as_string_mapping(field)
+        if field_mapping is None:
+            continue
+        name = field_mapping.get("name")
+        field_data_type = field_mapping.get("data_type")
+        if not isinstance(name, str) or field_data_type is None:
+            continue
+        field_names.add(name)
+        field_loc = (*loc, name)
+        if name not in fill_mapping:
+            problems.append(
+                ValidationProblem(
+                    field_loc, f"missing fill value for struct field {name!r}", "missing_key"
+                )
+            )
+            continue
+        field_fill = fill_mapping[name]
+        nested_name = _dtype_name(field_data_type)
+        if nested_name == "struct":
+            problems.extend(_struct_fill_problems(field_data_type, field_fill, field_loc))
+            continue
+        if nested_name is None:
+            continue
+        reason = _check_fill_for_dtype(nested_name, field_fill)
+        if reason is not None:
+            problems.append(
+                ValidationProblem(
+                    field_loc,
+                    f"fill value invalid for struct field {name!r} with data_type "
+                    f"{nested_name!r}: {reason}",
+                    "invalid_value",
+                )
+            )
+    problems.extend(
+        ValidationProblem((*loc, key), f"unknown struct fill field {key!r}", "unknown_key")
+        for key in sorted(
+            candidate
+            for candidate in fill_mapping.keys() - field_names
+            if isinstance(candidate, str)
+        )
+    )
+    return tuple(problems)
 
 
 # ---------------------------------------------------------------------------

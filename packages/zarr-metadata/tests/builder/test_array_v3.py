@@ -25,6 +25,11 @@ COMPLETE: dict[str, object] = {
     "codecs": ("bytes",),
 }
 
+LITTLE_ENDIAN_BYTES: dict[str, object] = {
+    "name": "bytes",
+    "configuration": {"endian": "little"},
+}
+
 
 def _steps(*chunks: dict[str, object]) -> tuple[dict[str, object], ...]:
     return chunks
@@ -39,14 +44,38 @@ CASES: dict[str, tuple[Sequence[dict[str, object]], dict[str, object]]] = {
         _steps(
             {"fill_value": "NaN"},
             {"data_type": "float32"},
-            {k: v for k, v in COMPLETE.items() if k not in ("fill_value", "data_type")},
+            {
+                **{
+                    k: v
+                    for k, v in COMPLETE.items()
+                    if k not in ("fill_value", "data_type", "codecs")
+                },
+                "codecs": (LITTLE_ENDIAN_BYTES,),
+            },
         ),
-        {**COMPLETE, "fill_value": "NaN", "data_type": "float32"},
+        {
+            **COMPLETE,
+            "fill_value": "NaN",
+            "data_type": "float32",
+            "codecs": (LITTLE_ENDIAN_BYTES,),
+        },
     ),
     "conflict-escape-by-pair": (
         # uint8/0 established, then both members of the couple change at once.
-        _steps(COMPLETE, {"data_type": "float64", "fill_value": "Infinity"}),
-        {**COMPLETE, "data_type": "float64", "fill_value": "Infinity"},
+        _steps(
+            COMPLETE,
+            {
+                "data_type": "float64",
+                "fill_value": "Infinity",
+                "codecs": (LITTLE_ENDIAN_BYTES,),
+            },
+        ),
+        {
+            **COMPLETE,
+            "data_type": "float64",
+            "fill_value": "Infinity",
+            "codecs": (LITTLE_ENDIAN_BYTES,),
+        },
     ),
     "field-replacement": (
         _steps(COMPLETE, {"shape": (8, 8)}, {"chunk_grid": COMPLETE["chunk_grid"]}),

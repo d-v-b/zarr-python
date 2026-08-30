@@ -59,7 +59,7 @@ def main() -> None:
             chunk_key_encoding={"name": "default", "configuration": {"separator": "/"}},
             codecs=(
                 {"name": "transpose", "configuration": {"order": (1, 0)}},
-                "bytes",
+                {"name": "bytes", "configuration": {"endian": "little"}},
                 "crc32c",
             ),
             dimension_names=("y", "x"),

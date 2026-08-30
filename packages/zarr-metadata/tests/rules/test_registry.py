@@ -49,10 +49,8 @@ from zarr_metadata.v3._shape import modelled_entities
 _RULE_FREE = frozenset(
     {
         (CODECS, "blosc"),
-        (CODECS, "bytes"),
         (CODECS, "cast_value"),
         (CODECS, "crc32c"),
-        (CODECS, "gzip"),
         (CODECS, "scale_offset"),
         (CODECS, "zstd"),
         (CHUNK_KEY_ENCODING, "default"),
@@ -74,8 +72,6 @@ _RULE_FREE = frozenset(
         (DATA_TYPE, RAW_BYTES_FAMILY),
         (DATA_TYPE, "bytes"),
         (DATA_TYPE, "string"),
-        (DATA_TYPE, "numpy.datetime64"),
-        (DATA_TYPE, "numpy.timedelta64"),
     }
 )
 

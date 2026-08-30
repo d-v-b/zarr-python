@@ -36,6 +36,8 @@ from zarr_metadata.rules import (
     ZARR_V3_ARRAY_RULES,
     ZARR_V3_GROUP_RULES,
     run_rules,
+    validate_array_metadata_v2,
+    validate_group_metadata_v2,
 )
 from zarr_metadata.rules._v3_group import consolidated_entries_problems
 
@@ -270,12 +272,8 @@ def _validate_v2_consolidated_envelope(
 ) -> tuple[ValidationProblem, ...]:
     """Every reason `document` is not a `.zmetadata` envelope.
 
-    Checks the envelope only: both keys present, an integer format marker,
-    and `metadata` a string-keyed mapping of JSON objects. The nested
-    per-path documents are typed but deliberately not deep-validated —
-    which file shape each value must have is keyed on its path suffix, a
-    store-layout concern; validate entries individually with the model
-    layer when reading untrusted data.
+    Checks both envelope and entries. Each entry's path suffix identifies
+    the strict on-disk document shape that its value must satisfy.
     """
     problems: list[ValidationProblem] = []
     fmt = document.get("zarr_consolidated_format")
@@ -318,9 +316,32 @@ def _validate_v2_consolidated_envelope(
                         )
                     )
                 else:
+                    entry_mapping = cast("Mapping[str, object]", entry)
                     problems.extend(
                         ValidationProblem(("metadata", key, *found.loc), found.message, found.kind)
                         for found in validate_json(cast("object", entry))
+                    )
+                    if key.endswith(".zarray"):
+                        nested = validate_array_metadata_v2(entry_mapping) + _reject_attributes(
+                            entry_mapping
+                        )
+                    elif key.endswith(".zgroup"):
+                        nested = validate_group_metadata_v2(entry_mapping) + _reject_attributes(
+                            entry_mapping
+                        )
+                    elif key.endswith(".zattrs"):
+                        nested = ()
+                    else:
+                        nested = (
+                            ValidationProblem(
+                                (),
+                                "expected a v2 metadata file suffix: .zarray, .zgroup, or .zattrs",
+                                "invalid_value",
+                            ),
+                        )
+                    problems.extend(
+                        ValidationProblem(("metadata", key, *found.loc), found.message, found.kind)
+                        for found in nested
                     )
     return tuple(problems)
 
@@ -330,12 +351,10 @@ def create_zarr_v2_consolidated_metadata_json(
 ) -> ZarrV2ConsolidatedMetadataJSON:
     """A validated `.zmetadata` consolidated metadata document.
 
-    The runtime pass checks the envelope — key presence, an integer
-    format marker, `metadata` as a string-keyed mapping of JSON objects —
-    for the callers the signature's static enforcement cannot see
-    (`**`-splatted mappings, untyped code). The nested per-path documents
-    are typed but not deep-validated here; validate them individually
-    with the model layer when reading untrusted data.
+    The runtime pass checks the envelope and validates each nested value
+    against the strict document shape selected by its path suffix. This is
+    the runtime backstop for callers the signature's static enforcement
+    cannot see (`**`-splatted mappings, untyped code).
     """
     normalized = _normalized(kwargs)
     _raise_if_problems(_validate_v2_consolidated_envelope(normalized))

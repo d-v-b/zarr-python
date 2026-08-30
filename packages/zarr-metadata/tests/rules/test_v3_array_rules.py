@@ -50,6 +50,14 @@ VALID_CASES: dict[str, Mapping[str, object]] = {
             "configuration": {"kind": "inline", "chunk_shapes": ((2, 2), (1, 3))},
         },
     },
+    "rectilinear-explicit-overflow": {
+        **BASE,
+        "shape": (6,),
+        "chunk_grid": {
+            "name": "rectilinear",
+            "configuration": {"kind": "inline", "chunk_shapes": ((4, 4, 4),)},
+        },
+    },
     "rectilinear-rle-and-uniform": {
         **BASE,
         "chunk_grid": {
@@ -78,6 +86,26 @@ VALID_CASES: dict[str, Mapping[str, object]] = {
                 )
             ),
         ),
+    },
+    "nested-struct": {
+        **BASE,
+        "data_type": {
+            "name": "struct",
+            "configuration": {
+                "fields": (
+                    {"name": "id", "data_type": "uint8"},
+                    {
+                        "name": "point",
+                        "data_type": {
+                            "name": "struct",
+                            "configuration": {"fields": ({"name": "x", "data_type": "int16"},)},
+                        },
+                    },
+                )
+            },
+        },
+        "fill_value": {"id": 1, "point": {"x": -2}},
+        "codecs": ({"name": "bytes", "configuration": {"endian": "little"}},),
     },
     "unknown-grid-passes": {
         **BASE,
@@ -126,12 +154,12 @@ def test_error_rectilinear_sum_mismatch() -> None:
             **BASE,
             "chunk_grid": {
                 "name": "rectilinear",
-                "configuration": {"kind": "inline", "chunk_shapes": ((3, 3), (2, 2))},
+                "configuration": {"kind": "inline", "chunk_shapes": ((3,), (2, 2))},
             },
         }
     )
     assert loc == ("chunk_grid", "configuration", "chunk_shapes", 0)
-    assert "sum to 6" in message
+    assert "sum to 3" in message
 
 
 def test_error_rectilinear_nonpositive_rle() -> None:
@@ -180,6 +208,24 @@ def test_error_sharding_index_codecs_no_array_bytes() -> None:
     assert "no array->bytes codec" in message
 
 
+def test_error_sharding_index_codecs_are_variable_sized() -> None:
+    loc, message = _sole_problem(
+        {
+            **BASE,
+            "codecs": (
+                _shard(
+                    index_codecs=(
+                        "bytes",
+                        {"name": "gzip", "configuration": {"level": 1}},
+                    )
+                ),
+            ),
+        }
+    )
+    assert loc == ("codecs", 0, "configuration", "index_codecs", 1)
+    assert "fixed-size" in message
+
+
 def test_error_sharding_rank_mismatch() -> None:
     loc, message = _sole_problem({**BASE, "codecs": (_shard(chunk_shape=(2,)),)})
     assert loc == ("codecs", 0, "configuration", "chunk_shape")
@@ -221,6 +267,117 @@ def test_error_sharding_inner_chunk_extent_zero() -> None:
         and "positive chunk extent" in p.message
         for p in problems
     )
+
+
+def test_error_bytes_requires_endian_for_multibyte_data() -> None:
+    loc, message = _sole_problem({**BASE, "data_type": "int32", "codecs": ("bytes",)})
+    assert loc == ("codecs", 0, "configuration", "endian")
+    assert "required" in message
+
+
+def test_error_bytes_rejects_variable_length_data_type() -> None:
+    loc, message = _sole_problem(
+        {**BASE, "data_type": "string", "fill_value": "", "codecs": ("bytes",)}
+    )
+    assert loc == ("codecs", 0, "configuration")
+    assert "not compatible" in message
+
+
+def test_error_struct_fields_are_empty() -> None:
+    doc = {
+        **BASE,
+        "data_type": {"name": "struct", "configuration": {"fields": ()}},
+        "fill_value": {},
+    }
+    loc, message = _sole_problem(doc)
+    assert loc == ("data_type", "configuration", "fields")
+    assert "at least one" in message
+
+
+def test_error_struct_field_is_variable_length() -> None:
+    doc = {
+        **BASE,
+        "data_type": {
+            "name": "struct",
+            "configuration": {"fields": ({"name": "label", "data_type": "string"},)},
+        },
+        "fill_value": {"label": ""},
+    }
+    problems = validate_array_metadata_v3(doc)
+    assert any(
+        problem.loc == ("data_type", "configuration", "fields", 0, "data_type")
+        and "fixed-size" in problem.message
+        for problem in problems
+    )
+
+
+def test_error_struct_fill_is_missing_field() -> None:
+    doc = {
+        **BASE,
+        "data_type": {
+            "name": "struct",
+            "configuration": {"fields": ({"name": "x", "data_type": "uint8"},)},
+        },
+        "fill_value": {},
+    }
+    loc, message = _sole_problem(doc)
+    assert loc == ("fill_value", "x")
+    assert "missing" in message
+
+
+def test_error_struct_fill_field_is_invalid() -> None:
+    doc = {
+        **BASE,
+        "data_type": {
+            "name": "struct",
+            "configuration": {"fields": ({"name": "x", "data_type": "uint8"},)},
+        },
+        "fill_value": {"x": 300},
+    }
+    loc, message = _sole_problem(doc)
+    assert loc == ("fill_value", "x")
+    assert "[0, 255]" in message
+
+
+def test_error_gzip_level_is_out_of_range() -> None:
+    doc = {
+        **BASE,
+        "codecs": ("bytes", {"name": "gzip", "configuration": {"level": 99}}),
+    }
+    loc, message = _sole_problem(doc)
+    assert loc == ("codecs", 1, "configuration", "level")
+    assert "[0, 9]" in message
+
+
+@pytest.mark.parametrize("data_type_name", ["numpy.datetime64", "numpy.timedelta64"])
+def test_error_numpy_time_scale_factor_is_out_of_range(data_type_name: str) -> None:
+    doc = {
+        **BASE,
+        "data_type": {
+            "name": data_type_name,
+            "configuration": {"unit": "ns", "scale_factor": 0},
+        },
+        "codecs": ({"name": "bytes", "configuration": {"endian": "little"}},),
+    }
+    loc, message = _sole_problem(doc)
+    assert loc == ("data_type", "configuration", "scale_factor")
+    assert "[1, 2147483647]" in message
+
+
+@pytest.mark.parametrize("data_type_name", ["numpy.datetime64", "numpy.timedelta64"])
+def test_error_numpy_time_fill_is_out_of_range(data_type_name: str) -> None:
+    doc = {
+        **BASE,
+        "data_type": {
+            "name": data_type_name,
+            "configuration": {"unit": "ns", "scale_factor": 1},
+        },
+        "fill_value": 2**80,
+        "codecs": ({"name": "bytes", "configuration": {"endian": "little"}},),
+    }
+    loc, message = _sole_problem(doc)
+    assert loc == ("fill_value",)
+    assert "64-bit" in message
 
 
 def test_error_consolidated_child_violates_array_rules() -> None:

@@ -237,8 +237,13 @@ def entity_configuration(field: ExtensionPointField, value: object) -> Mapping[s
         return None
     mapping = as_string_mapping(value)
     if mapping is None:
-        return None
-    return as_string_mapping(mapping.get("configuration"))
+        # Bare-string metadata is the canonical spelling for entities whose
+        # configuration is optional. Rules still need a real mapping to run
+        # against, especially when they judge a missing optional member.
+        return {} if isinstance(value, str) else None
+    if "configuration" not in mapping:
+        return {}
+    return as_string_mapping(mapping["configuration"])
 
 
 def dispatch_field(
