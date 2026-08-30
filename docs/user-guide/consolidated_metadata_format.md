@@ -7,16 +7,6 @@ with Zarr-Python, and for people who need to know exactly what Zarr-Python
 puts on disk. For an introduction to *using* consolidated metadata from
 Python, see [Consolidated metadata](consolidated_metadata.md).
 
-!!! warning "Status"
-    Consolidated metadata is **not part of the Zarr format 3 core
-    specification**. The format described here for Zarr format 3 follows the
-    proposal in [zarr-specs#309](https://github.com/zarr-developers/zarr-specs/pull/309)
-    by Tom Augspurger, which is still open at the time of writing. Until that
-    (or a successor) proposal is accepted, Zarr-Python's behaviour is the
-    de facto reference, and it may change to track the specification.
-
-    Consolidated metadata for Zarr format 2 follows the format established by
-    Zarr-Python 2.x, with one deviation noted [below](#zarr-format-2).
 
 The key words "MUST", "MUST NOT", "SHOULD", "SHOULD NOT", and "MAY" in this
 document are to be interpreted as described in
