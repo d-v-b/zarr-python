@@ -40,8 +40,7 @@ and, from the proposal's description:
 A hierarchy is **consolidated at** a group (the *consolidating group*). The
 consolidating group's own metadata document gains a copy of the metadata of
 every node below it, at every depth. Nothing about the child nodes' own
-metadata documents changes: they remain in the store and remain authoritative
-for writers.
+metadata documents changes.
 
 Two representations of the same information appear in this document:
 
