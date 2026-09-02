@@ -1,41 +1,39 @@
 """Chunk resolution — mapping transforms to chunk-level I/O.
 
-Given an `IndexTransform` (which coordinates a user wants to access) and a
-`ChunkGrid` (how storage is divided into chunks), chunk resolution answers:
+Given an `IndexTransform` (which coordinates a request reads) and one grid per
+storage dimension (how storage is divided into chunks), chunk resolution
+answers:
 
     For each chunk, which storage coordinates does this transform touch,
-    and where do those values land in the output buffer?
+    and where do those values land in the request?
 
-The algorithm is:
-
-1. **Enumerate candidate chunks** — determine which chunks could possibly
-   be touched by the transform's output coordinate ranges.
-
-2. **Intersect** — for each candidate chunk, call
-   `transform.intersect(chunk_domain)` to restrict the transform to
-   coordinates within that chunk. If the intersection is empty, skip it.
-
-3. **Translate** — shift the restricted transform to chunk-local coordinates
-   via `transform.translate(-chunk_origin)`.
-
-4. **Project** — pair the chunk-local storage transform with a transform back
-   to the request's cells. Both use the same compact, zero-origin domain.
-
-Sorted one-dimensional correlated array maps can be partitioned directly
-because every touched chunk owns a contiguous slice of the index array. That
-case bypasses candidate enumeration and repeated intersection.
-
-The public result is a lazy, reusable `ChunkPlan`. Each `ChunkProjection` is
-source-independent: it identifies the chunk and expresses both sides of the
-gather without assuming NumPy selectors, a codec pipeline, or an execution
+The public result is a lazy, reusable `ChunkPlan` whose rows are
+`ChunkProjection`s. Each identifies a chunk and pairs a chunk-local transform
+with a transform back to the request's cells, over one shared zero-origin
+cell domain, without assuming NumPy selectors, a codec pipeline, or a
 scheduler.
 
-Behind the walk sits its factored form, the `GridPartition`: one table per
-output dimension the transform reads independently (`StridedSet`,
-`IndexedSet`) and one `JointSet` for correlated index arrays. A projection is
-one row of each table combined, so the tables cost the *sum* of the touched
-chunks per axis rather than their product, and a vectorized consumer can read
-them directly without materializing a projection per chunk.
+The plan is computed in factored form, the `GridPartition`. Restricting a
+transform to a chunk box distributes over output dimensions whenever each
+output map reads its own input axis — every basic and orthogonal selection —
+so each axis is resolved once against its grid into a table:
+
+- `StridedSet` — a `ConstantMap` or `DimensionMap` axis: one row per touched
+  chunk, holding the chunk-local start, the extent, the request origin of the
+  first cell, and whether the row covers its chunk exactly once.
+- `IndexedSet` — an orthogonal `ArrayMap` axis: its coordinates grouped by
+  chunk in CSR form, with the request positions they fill.
+- `JointSet` — the correlated (`vindex`) index arrays, which read the same
+  input axes and so do not distribute: their points are sorted into chunks
+  together, once.
+
+A projection is one row of each table combined. Building the tables costs the
+sum of the touched chunks per axis rather than their product, rows are
+materialized only on request, and a consumer may read the tables directly
+instead. The one transform with no factored form is a hand-built diagonal,
+two output maps reading one input axis; `ChunkPlan` walks those by
+intersecting the whole transform with each candidate chunk
+(`IndexTransform.intersect`).
 """
 
 from __future__ import annotations
@@ -209,7 +207,8 @@ def plan_chunks(
     Returns
     -------
     ChunkPlan
-        A reusable plan whose projections are computed lazily.
+        A reusable plan whose projections are computed lazily; its
+        `partition()` is the factored form they are derived from.
 
     Examples
     --------

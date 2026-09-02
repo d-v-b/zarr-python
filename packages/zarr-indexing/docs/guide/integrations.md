@@ -27,6 +27,32 @@ example intentionally begins with already decoded in-memory chunks: storage
 keys, codecs, scheduling, caching, and asynchronous orchestration remain the
 consumer's policy rather than responsibilities of the plan.
 
+## Reading the tables directly {#reading-the-tables-directly}
+
+A consumer that fetches many chunks per request — a codec pipeline, a
+prefetcher — does not need a `ChunkProjection` object per chunk. The plan's
+[factored form](index.md#a-plan-is-a-product-of-per-axis-tables) is a few
+NumPy arrays per axis, and everything a chunk copy needs is a row of each:
+the chunk index, the chunk-local start and extent, and where the cells land
+in the request. `chunk_coords()` alone answers "which chunks?" for a prefetch,
+without materializing anything.
+
+The example assembles a strided box from its `StridedSet` tables, one slice
+per chunk. Two details carry over from the guide: a table row's `origin` is a
+*literal* request coordinate, so placing it in a positional buffer subtracts
+the domain's `inclusive_min`; and a descending stride needs the same care with
+a negative stop that any NumPy slice does.
+
+```python
+--8<-- "snippets/grid_partition.py:table-consumer"
+```
+
+The four reads are the four chunks the two axis tables multiply out to, and no
+intermediate transform, domain, or projection was built. A gather reads its
+`IndexedSet` rows the same way — `index[pointer[i]:pointer[i + 1]]` and the
+matching `positions` — and a `vindex` selection its `JointSet` rows, whose
+`local` coordinates already have the chunk origin subtracted.
+
 ## One slab read or many part reads
 
 A backend with its own native subset read — a Rust or C zarr implementation,

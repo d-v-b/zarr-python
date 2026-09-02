@@ -35,6 +35,16 @@ about the deliberately matching semantics:
   discriminator, and `tests/test_ndsel_tensorstore.py` loads our bodies into
   `tensorstore.IndexTransform(json=...)` and round-trips them back through our
   engine layer.
+- **Chunk partitioning.** Both factor a transform over a grid before visiting
+  any cell. TensorStore's `IndexTransformGridPartition` holds *strided sets*
+  (one per affine grid dimension) and *index array sets* (correlated array
+  dimensions grouped into connected sets, their points partitioned by grid
+  cell), and derives a per-cell transform on iteration.
+  [`GridPartition`](api/chunk_resolution.md) is the same structure —
+  `StridedSet` and `IndexedSet` tables per axis, a `JointSet` for correlated
+  arrays — and derives each `ChunkProjection` from one row of each table
+  ([the guide](guide/index.md#a-plan-is-a-product-of-per-axis-tables) shows
+  the tables).
 
 The representations differ in one place: index arrays. Both models want an index
 array at the transform's full input rank, with singleton axes for the dimensions
@@ -85,11 +95,14 @@ safe, `partial` proves it is not, and `unknown` conservatively covers fancy
 selections whose duplicates would require additional work to classify.
 
 The comparison also runs the other way. TensorStore is a mature, heavily
-optimized C++ system whose performance this library cannot approach: resolution
-here is Python-level bookkeeping over NumPy, and the per-part overhead is
-significant. This library is small and depends on nothing beyond NumPy, so the
-algebra can be adopted by a Python project that wants the model without the C++
-runtime.
+optimized C++ system whose performance this library cannot approach. Planning
+here is vectorized per axis, but each materialized `ChunkProjection` is
+Python-level bookkeeping over NumPy — two domains, two transforms and the
+projection itself — so the per-part overhead of the object view is
+significant; a consumer that reads the partition's tables directly pays only
+for the copies it makes. This library is small and depends on nothing beyond
+NumPy, so the algebra can be adopted by a Python project that wants the model
+without the C++ runtime.
 
 ## Bounding-box selections vs query selections
 
@@ -146,7 +159,11 @@ soon as any stride exceeds 1. The two also behave differently under
 partitioning: a box touches a regularly-spaced run of parts, in increasing
 order, each at most once — a stride larger than a part's extent skips parts
 outright, so the run is not contiguous — while a query can touch any subset of
-them, in any order, more than once.
+them, in any order, more than once. The
+[partition](guide/index.md#a-plan-is-a-product-of-per-axis-tables) makes the
+split structural: a box factors into one `StridedSet` per axis, an orthogonal
+query adds `IndexedSet`s, and only correlated (`vindex`) arrays need the
+`JointSet`.
 
 [`LazyArray`](api/lazy_array.md) exposes the category directly:
 
