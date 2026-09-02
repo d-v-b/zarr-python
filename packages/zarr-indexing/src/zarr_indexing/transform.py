@@ -178,6 +178,19 @@ class IndexTransform:
         return len(self.output)
 
     @classmethod
+    def _unchecked(cls, domain: IndexDomain, output: tuple[OutputIndexMap, ...]) -> IndexTransform:
+        """Build a transform whose maps the caller has already fitted to `domain`.
+
+        Skips `__post_init__`. For internal producers such as chunk resolution,
+        which derive every map from an already-valid transform and build two
+        transforms per chunk.
+        """
+        transform = object.__new__(cls)
+        object.__setattr__(transform, "domain", domain)
+        object.__setattr__(transform, "output", output)
+        return transform
+
+    @classmethod
     def identity(cls, domain: IndexDomain) -> IndexTransform:
         """The identity transform over `domain`: every result cell reads the source at its own address."""
         output = tuple(DimensionMap(input_dimension=i) for i in range(domain.ndim))
@@ -545,11 +558,7 @@ class IndexTransform:
             else:
                 # m: ArrayMap (OutputIndexMap = ConstantMap | DimensionMap | ArrayMap)
                 new_output.append(
-                    ArrayMap(
-                        index_array=m.index_array,
-                        offset=m.offset + s,
-                        stride=m.stride,
-                    )
+                    m._with_affine(m.offset + s, m.stride)  # pyright: ignore[reportPrivateUsage]
                 )
         return IndexTransform(domain=self.domain, output=tuple(new_output))
 
@@ -1026,9 +1035,72 @@ def _intersect_orthogonal(
     return (result, out_indices)
 
 
+@dataclass(frozen=True, slots=True)
+class _CorrelatedBlock:
+    """The correlated index arrays of a general transform, flattened over the broadcast block.
+
+    Built once per transform by `_prepare_correlated` so that intersecting the
+    transform with many chunks does not re-broadcast and re-scan the arrays for
+    each chunk: `flat_storage` holds the storage coordinate of every block
+    point per correlated output dimension, `flat_index` the raw index values.
+    """
+
+    correlated_dims: tuple[int, ...]
+    broadcast_axes: tuple[int, ...]
+    broadcast_shape: tuple[int, ...]
+    flat_index: dict[int, np.ndarray[Any, np.dtype[np.intp]]]
+    flat_storage: dict[int, np.ndarray[Any, np.dtype[np.intp]]]
+
+
+def _prepare_correlated(transform: IndexTransform) -> _CorrelatedBlock:
+    """Flatten a general transform's index arrays over its broadcast block."""
+    correlated_dims = tuple(i for i, m in enumerate(transform.output) if isinstance(m, ArrayMap))
+
+    # The broadcast axes are exactly the input axes no `DimensionMap` binds: a
+    # correlated transform's input domain is its residual slice axes plus the
+    # collapsed broadcast block. Deriving them by complement rather than from the
+    # index array's non-singleton axes keeps this correct when a broadcast axis
+    # is itself size 1, and when NumPy's placement rule puts the broadcast block
+    # somewhere other than the front (see `_broadcast_insertion_point`).
+    bound_axes = {m.input_dimension for m in transform.output if isinstance(m, DimensionMap)}
+    broadcast_axes = tuple(a for a in range(transform.input_rank) if a not in bound_axes)
+    broadcast_shape = tuple(transform.domain.shape[a] for a in broadcast_axes)
+
+    flat_index: dict[int, np.ndarray[Any, np.dtype[np.intp]]] = {}
+    flat_storage: dict[int, np.ndarray[Any, np.dtype[np.intp]]] = {}
+    for out_dim in correlated_dims:
+        arr_map = cast("ArrayMap", transform.output[out_dim])
+        if any(a not in broadcast_axes for a in arr_map.dependency_axes):
+            # Reachable only by hand-building a transform: no selection binds
+            # the same input axis to both a slice map and an index array.
+            raise NotImplementedError(
+                "intersecting a transform whose index array varies over an "
+                "input dimension also bound by a slice map is not supported"
+            )
+        arr = arr_map.index_array
+        # Index arrays are singleton on every non-broadcast axis, so they
+        # collapse (C-order) to the broadcast block. A map may also be singleton
+        # along a block axis it does not vary over (an orthogonal member, or a
+        # leftover broadcast axis), so the collapsed array is broadcast up to the
+        # full block rather than reshaped.
+        block = arr.reshape(tuple(arr.shape[a] for a in broadcast_axes))
+        flat = np.ascontiguousarray(np.broadcast_to(block, broadcast_shape)).reshape(-1)
+        flat_index[out_dim] = np.asarray(flat, dtype=np.intp)
+        flat_storage[out_dim] = checked_affine(arr_map.offset, arr_map.stride, flat)
+    return _CorrelatedBlock(
+        correlated_dims=correlated_dims,
+        broadcast_axes=broadcast_axes,
+        broadcast_shape=broadcast_shape,
+        flat_index=flat_index,
+        flat_storage=flat_storage,
+    )
+
+
 def _intersect_general(
     transform: IndexTransform,
     output_domain: IndexDomain,
+    block: _CorrelatedBlock | None = None,
+    positions: np.ndarray[Any, np.dtype[np.intp]] | None = None,
 ) -> tuple[IndexTransform, np.ndarray[Any, np.dtype[np.intp]]] | None:
     """Intersect a transform with any index-array structure, pointwise.
 
@@ -1051,49 +1123,33 @@ def _intersect_general(
     rank 0: the block either survives whole or the intersection is empty. The
     result keeps only the residual slice axes and `out_indices` loses its leading
     points axis, so the sub-transform's rank still matches the view's.
+
+    `block` is the transform's flattened correlated arrays (`_prepare_correlated`),
+    reused across many chunks by chunk resolution. `positions` names the block
+    points that land in `output_domain`, ascending; a caller that has already
+    partitioned the points by chunk supplies it so the intersection costs
+    ``O(surviving points)`` rather than a scan of the whole block.
     """
-    correlated_dims = [i for i, m in enumerate(transform.output) if isinstance(m, ArrayMap)]
+    if block is None:
+        block = _prepare_correlated(transform)
+    correlated_dims = block.correlated_dims
+    broadcast_axes = block.broadcast_axes
+    broadcast_shape = block.broadcast_shape
 
-    # The broadcast axes are exactly the input axes no `DimensionMap` binds: a
-    # correlated transform's input domain is its residual slice axes plus the
-    # collapsed broadcast block. Deriving them by complement rather than from the
-    # index array's non-singleton axes keeps this correct when a broadcast axis
-    # is itself size 1, and when NumPy's placement rule puts the broadcast block
-    # somewhere other than the front (see `_broadcast_insertion_point`).
-    bound_axes = {m.input_dimension for m in transform.output if isinstance(m, DimensionMap)}
-    broadcast_axes = tuple(a for a in range(transform.input_rank) if a not in bound_axes)
-    broadcast_shape = tuple(transform.domain.shape[a] for a in broadcast_axes)
-
-    for out_dim in correlated_dims:
-        arr_map = cast("ArrayMap", transform.output[out_dim])
-        if any(a not in broadcast_axes for a in arr_map.dependency_axes):
-            # Reachable only by hand-building a transform: no selection binds
-            # the same input axis to both a slice map and an index array.
-            raise NotImplementedError(
-                "intersecting a transform whose index array varies over an "
-                "input dimension also bound by a slice map is not supported"
-            )
-
-    # Joint bounds mask over the broadcast block.
-    combined: np.ndarray[Any, np.dtype[np.bool_]] | None = None
-    for out_dim in correlated_dims:
-        cm = cast("ArrayMap", transform.output[out_dim])
-        storage = checked_affine(cm.offset, cm.stride, cm.index_array)
-        lo = output_domain.inclusive_min[out_dim]
-        hi = output_domain.exclusive_max[out_dim]
-        mask = (storage >= lo) & (storage < hi)
-        combined = mask if combined is None else (combined & mask)
-    assert combined is not None
-    # Index arrays are singleton on every non-broadcast axis, so the mask
-    # collapses (C-order) to the broadcast block. A map may also be singleton
-    # along a block axis it does not vary over (an orthogonal member, or a
-    # leftover broadcast axis), so the collapsed mask is broadcast up to the
-    # full block rather than reshaped.
-    combined_block = combined.reshape(tuple(combined.shape[a] for a in broadcast_axes))
-    combined_bcast = np.broadcast_to(combined_block, broadcast_shape)
-    surviving = np.nonzero(combined_bcast.reshape(-1))[0].astype(np.intp)
-    if surviving.size == 0:
+    if positions is None:
+        # Joint bounds mask over the broadcast block.
+        combined: np.ndarray[Any, np.dtype[np.bool_]] | None = None
+        for out_dim in correlated_dims:
+            storage = block.flat_storage[out_dim]
+            lo = output_domain.inclusive_min[out_dim]
+            hi = output_domain.exclusive_max[out_dim]
+            mask = (storage >= lo) & (storage < hi)
+            combined = mask if combined is None else (combined & mask)
+        assert combined is not None
+        positions = np.flatnonzero(combined).astype(np.intp)
+    if positions.size == 0:
         return None
+    surviving = positions
 
     # Intersect residual (slice / constant) dimensions independently. Slice dims
     # are ordered by input dimension so their flat-buffer strides are row-major.
@@ -1118,14 +1174,9 @@ def _intersect_general(
 
     n_points = int(surviving.size)
     n_slice = len(slice_dims)
-    corr_values: dict[int, np.ndarray[Any, np.dtype[np.intp]]] = {}
-    for out_dim in correlated_dims:
-        arr = cast("ArrayMap", transform.output[out_dim]).index_array
-        block = arr.reshape(tuple(arr.shape[a] for a in broadcast_axes))
-        corr_values[out_dim] = np.asarray(
-            np.ascontiguousarray(np.broadcast_to(block, broadcast_shape)).reshape(-1)[surviving],
-            dtype=np.intp,
-        )
+    corr_values: dict[int, np.ndarray[Any, np.dtype[np.intp]]] = {
+        out_dim: block.flat_index[out_dim][surviving] for out_dim in correlated_dims
+    }
 
     # A rank-0 broadcast block contributes no axis: the leading `(n_points,)` of
     # the domain, of every index array, and of `out_indices` is present only when
@@ -1150,7 +1201,7 @@ def _intersect_general(
             corr = cast("ArrayMap", m)
             new_output.append(
                 ArrayMap(
-                    index_array=corr_values[out_dim].reshape(corr_shape).astype(np.intp),
+                    index_array=corr_values[out_dim].reshape(corr_shape),
                     offset=corr.offset,
                     stride=corr.stride,
                 )

@@ -465,7 +465,7 @@ class TestSortedOneDimensionalPlan:
         ] == [[0, 1], [2, 3], [4, 5]]
 
     def test_unsorted_coordinates_use_intersection(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Unsorted coordinates retain the general intersection path."""
+        """Unsorted coordinates are grouped by chunk without whole-transform intersections."""
         transform = IndexTransform.from_shape((12,)).vindex[np.array([9, 0, 4], dtype=np.intp)]
         grid = ChunkGrid(dimensions=(FixedDimension(size=4, extent=12),))
         calls = _count_intersect_calls(monkeypatch)
@@ -473,7 +473,7 @@ class TestSortedOneDimensionalPlan:
         projections = list(plan_chunks(transform, grid.dimensions))
 
         assert [projection.chunk_coords for projection in projections] == [(0,), (1,), (2,)]
-        assert calls["n"] == 3
+        assert calls["n"] == 0
 
 
 class CountingUnitGrid:
@@ -544,8 +544,8 @@ class TestTouchedOnlyCandidateEnumeration:
     @pytest.mark.parametrize(
         ("mode", "expected_coords", "expected_calls"),
         [
-            ("orthogonal", [(0, 0), (0, 999), (999, 0), (999, 999)], 4),
-            ("correlated", [(0, 0), (999, 999)], 2),
+            ("orthogonal", [(0, 0), (0, 999), (999, 0), (999, 999)], 0),
+            ("correlated", [(0, 0), (999, 999)], 0),
         ],
     )
     def test_sparse_two_dimensional_selection_uses_only_touched_combinations(
@@ -555,7 +555,12 @@ class TestTouchedOnlyCandidateEnumeration:
         expected_coords: list[tuple[int, int]],
         expected_calls: int,
     ) -> None:
-        """Orthogonal points use their outer product; correlated points remain paired."""
+        """Orthogonal points use their outer product; correlated points remain paired.
+
+        Neither walk intersects the whole transform per chunk: the orthogonal
+        axes are resolved once each, and correlated points are sorted into
+        their chunks up front.
+        """
         base = IndexTransform.from_shape((4000, 4000))
         first = np.array([1, 3997], dtype=np.intp)
         second = np.array([2, 3998], dtype=np.intp)
@@ -578,7 +583,7 @@ class TestTouchedOnlyCandidateEnumeration:
     def test_correlated_diagonal_scales_with_points_not_their_product(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Fifty diagonal points require fifty, rather than 2500, intersections."""
+        """Fifty diagonal points touch fifty chunks, not 2500, and need no re-intersection."""
         n_points = 50
         coordinates = np.arange(n_points, dtype=np.intp) * 8
         transform = IndexTransform.from_shape((4000, 4000)).vindex[coordinates, coordinates]
@@ -595,4 +600,143 @@ class TestTouchedOnlyCandidateEnumeration:
         assert sorted(projection.chunk_coords for projection in projections) == [
             (2 * index, 2 * index) for index in range(n_points)
         ]
-        assert calls["n"] == n_points
+        assert calls["n"] == 0
+
+
+# ---------------------------------------------------------------------------
+# GridPartition: the factored form
+# ---------------------------------------------------------------------------
+
+
+def _partition_cases() -> list[tuple[str, IndexTransform, tuple[Any, ...]]]:
+    base = IndexTransform.from_shape((7, 9, 5))
+    fixed = dimension_grids_from_chunks((3, 4, 2), shape=(7, 9, 5))
+    varying = (
+        VaryingDimension(edges=(2, 5), extent=7),
+        VaryingDimension(edges=(1, 4, 4), extent=9),
+        FixedDimension(size=2, extent=5),
+    )
+    return [
+        ("identity", base, fixed),
+        ("strided", base[1:6:2, 5:, ::3], fixed),
+        ("strided varying", base[1:6:2, 5:, ::3], varying),
+        ("scalars", base[3, :, 4], fixed),
+        ("reversed", base[::-1, 8:1:-1, :], fixed),
+        ("empty", base[3:3, :, :], fixed),
+        ("oindex arrays", base.oindex[np.array([6, 0, 0, 2]), :, np.array([4, 1])], fixed),
+        ("oindex mixed", base.oindex[np.array([1, 5]), 2, 1:5:2], varying),
+        ("oindex one element", base.oindex[np.array([2]), :, :], fixed),
+        ("vindex", base.vindex[np.array([0, 6, 6, 1]), np.array([8, 0, 1, 8]), :], fixed),
+        ("vindex varying", base.vindex[np.array([0, 6, 6, 1]), np.array([8, 0, 1, 8]), 2], varying),
+        (
+            "vindex 2-d block",
+            base.vindex[
+                np.array([[0, 6], [3, 1]]), np.array([[8, 0], [2, 8]]), np.array([[4, 0], [1, 1]])
+            ],
+            fixed,
+        ),
+        (
+            "vindex 1-d sorted",
+            IndexTransform.from_shape((20,)).vindex[np.array([1, 5, 9, 17])],
+            dimension_grids_from_chunks((4,), shape=(20,)),
+        ),
+        ("rank 0", IndexTransform.from_shape(()), ()),
+    ]
+
+
+@pytest.mark.parametrize("case", _partition_cases(), ids=lambda case: case[0])
+def test_partition_rows_match_general_walk(
+    case: tuple[str, IndexTransform, tuple[Any, ...]],
+) -> None:
+    """Every partition row equals the projection the whole-transform walk produces."""
+    _, transform, grids = case
+    partition = plan_chunks(transform, grids).partition()
+    rows = list(partition)
+    general = list(chunk_resolution._iter_general_projections(transform, grids))
+    assert rows == general
+    assert len(partition) == len(rows)
+    assert [partition[i] for i in range(len(partition))] == rows
+    if rows:
+        assert partition[-1] == rows[-1]
+
+
+@pytest.mark.parametrize("case", _partition_cases(), ids=lambda case: case[0])
+def test_partition_chunk_coords_are_vectorized_rows(
+    case: tuple[str, IndexTransform, tuple[Any, ...]],
+) -> None:
+    """`chunk_coords` reads the tables without materializing a row per chunk."""
+    _, transform, grids = case
+    partition = plan_chunks(transform, grids).partition()
+    coords = partition.chunk_coords()
+    assert coords.shape == (len(partition), transform.output_rank)
+    assert coords.tolist() == [list(p.chunk_coords) for p in partition]
+
+
+def test_partition_tables_describe_chunk_local_coordinates() -> None:
+    """The columnar tables carry exactly what each row's chunk transform maps to."""
+    transform = IndexTransform.from_shape((7, 9)).oindex[np.array([6, 0, 0, 2]), 5:]
+    grids = dimension_grids_from_chunks((3, 4), shape=(7, 9))
+    partition = plan_chunks(transform, grids).partition()
+    indexed, strided = partition.sets
+    assert isinstance(indexed, chunk_resolution.IndexedSet)
+    assert isinstance(strided, chunk_resolution.StridedSet)
+    # rows are in chunk order; the array [6, 0, 0, 2] lands in chunks 0, 0, 0, 2
+    assert indexed.chunk.tolist() == [0, 2]
+    assert indexed.pointer.tolist() == [0, 3, 4]
+    assert indexed.local.tolist() == [0, 0, 2, 0]
+    assert indexed.positions.tolist() == [1, 2, 3, 0]
+    assert strided.chunk.tolist() == [1, 2]
+    assert strided.local_start.tolist() == [1, 0]
+    assert strided.extent.tolist() == [3, 1]
+    assert strided.origin.tolist() == [5, 8]  # literal request coordinates: the axis is [5, 9)
+    assert strided.full.tolist() == [False, True]
+    for row, projection in enumerate(partition):
+        table_rows = np.unravel_index(row, partition.row_shape)
+        run = indexed.run(int(table_rows[0]))
+        storage = projection.chunk_transform.apply_many(
+            np.array(list(np.ndindex(*projection.chunk_transform.domain.shape)))
+        )
+        assert sorted(set(storage[:, 0].tolist())) == sorted(set(indexed.local[run].tolist()))
+
+
+def test_joint_set_groups_points_by_chunk() -> None:
+    transform = IndexTransform.from_shape((7, 9)).vindex[
+        np.array([0, 6, 6, 1]), np.array([8, 0, 1, 8])
+    ]
+    grids = dimension_grids_from_chunks((3, 4), shape=(7, 9))
+    joint = plan_chunks(transform, grids).partition().joint
+    assert joint is not None
+    assert joint.chunk.tolist() == [[0, 2], [2, 0]]
+    assert joint.pointer.tolist() == [0, 2, 4]
+    assert joint.positions.tolist() == [0, 3, 1, 2]
+    assert joint.local.tolist() == [[0, 0], [1, 0], [0, 0], [0, 1]]
+
+
+def test_partition_rejects_diagonal_but_plan_still_walks() -> None:
+    """Two maps reading one input axis have no factored form; the general walk covers them."""
+    transform = IndexTransform(
+        domain=IndexDomain.from_shape((4,)),
+        output=(DimensionMap(input_dimension=0), DimensionMap(input_dimension=0)),
+    )
+    grids = dimension_grids_from_chunks((2, 2), shape=(4, 4))
+    plan = plan_chunks(transform, grids)
+    with pytest.raises(ValueError, match="no factored form"):
+        plan.partition()
+    assert [p.chunk_coords for p in plan] == [(0, 0), (1, 1)]
+
+
+def test_partition_is_memoized_on_the_plan() -> None:
+    plan = plan_chunks(
+        IndexTransform.from_shape((6,)), dimension_grids_from_chunks((2,), shape=(6,))
+    )
+    assert plan.partition() is plan.partition()
+
+
+def test_partition_getitem_bounds() -> None:
+    partition = plan_chunks(
+        IndexTransform.from_shape((6,)), dimension_grids_from_chunks((2,), shape=(6,))
+    ).partition()
+    assert len(partition) == 3
+    assert partition[-1].chunk_coords == (2,)
+    with pytest.raises(IndexError):
+        partition[3]

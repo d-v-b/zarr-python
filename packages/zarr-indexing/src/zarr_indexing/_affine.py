@@ -14,6 +14,20 @@ def _fits_intp(value: int) -> bool:
     return _INTP_INFO.min <= value <= _INTP_INFO.max
 
 
+_DTYPE_LIMITS: dict[np.dtype[Any], tuple[bool, int]] = {}
+
+
+def _dtype_limits(dtype: np.dtype[Any]) -> tuple[bool, int]:
+    """Whether every value of an integer ``dtype`` fits ``np.intp``, and the dtype's largest magnitude."""
+    limits = _DTYPE_LIMITS.get(dtype)
+    if limits is None:
+        info = np.iinfo(dtype)
+        fits = int(info.min) >= _INTP_INFO.min and int(info.max) <= _INTP_INFO.max
+        limits = (fits, max(-int(info.min), int(info.max)))
+        _DTYPE_LIMITS[dtype] = limits
+    return limits
+
+
 @overload
 def checked_affine(offset: int, stride: int, coordinates: int) -> int: ...
 
@@ -37,6 +51,14 @@ def checked_affine(
     NumPy performs fixed-width arithmetic. The common representable case then
     uses an ``np.intp`` fast path whose multiplication and addition were proven
     safe; cancellation cases use exact object arithmetic.
+
+    Two shortcuts avoid scanning the array at all. The identity affine
+    (``offset == 0 and stride == 1``) of an array whose dtype fits ``np.intp``
+    cannot overflow, so it is returned as-is (re-typed). And when the dtype's
+    own bounds already prove ``offset + stride * value`` representable for
+    every value the dtype can hold, the fixed-width path is taken directly.
+    Chunk resolution builds many small maps, where the scan's cost is the
+    call overhead rather than the elements.
     """
     offset = int(offset)
     stride = int(stride)
@@ -49,8 +71,16 @@ def checked_affine(
     if coordinates.size == 0:
         return np.empty(coordinates.shape, dtype=np.intp)
 
-    coordinate_min = int(np.min(coordinates))
-    coordinate_max = int(np.max(coordinates))
+    dtype_fits, dtype_bound = _dtype_limits(coordinates.dtype)
+    if offset == 0 and stride == 1:
+        if dtype_fits:
+            return np.asarray(coordinates, dtype=np.intp)
+    elif abs(offset) + abs(stride) * dtype_bound <= _INTP_INFO.max:
+        intp_coordinates = coordinates.astype(np.intp, copy=False)
+        return np.asarray(offset + stride * intp_coordinates, dtype=np.intp)
+
+    coordinate_min = int(coordinates.min())
+    coordinate_max = int(coordinates.max())
     product_at_min = stride * coordinate_min
     product_at_max = stride * coordinate_max
     mapped_at_min = offset + product_at_min
