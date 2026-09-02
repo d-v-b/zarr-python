@@ -865,6 +865,8 @@ def _guess_num_chunks_per_axis_shard(
     if max_bytes < bytes_per_chunk:
         return 1
     num_axes = len(chunk_shape)
+    if num_axes == 0:
+        return 1
     chunks_per_shard = 1
     # First check for byte size, second check to make sure we don't go bigger than the array shape
     while (bytes_per_chunk * ((chunks_per_shard + 1) ** num_axes)) <= max_bytes and all(
