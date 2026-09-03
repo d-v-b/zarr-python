@@ -148,7 +148,7 @@ markdown_extensions:
   - pymdownx.tabbed:
       alternate_style: true
   - pymdownx.snippets:
-      # The package root is last so docs/changelog.md can include the
+      # The package root is last so docs/release-notes.md can include the
       # towncrier-managed CHANGELOG.md without moving it out of the package
       # root, where PyPI and GitHub readers expect it.
       base_path: [docs, examples, .]
