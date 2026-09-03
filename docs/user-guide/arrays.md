@@ -677,8 +677,9 @@ print(z_regular.write_chunk_sizes)
 Note that the `.chunks` property is not available for non-sharded rectilinear
 arrays, since there is no single uniform chunk shape — use `.write_chunk_sizes`
 (or `.read_chunk_sizes`) instead. Sharded arrays always have `.chunks`: it
-returns the inner chunk shape, which is regular even when the shard grid is
-rectilinear (see [Rectilinear shard boundaries](#rectilinear-shard-boundaries)).
+returns the inner chunk shape, which is always regular — the sharding codec
+requires a single uniform inner chunk shape, so only the shard boundaries can
+be rectilinear (see [Rectilinear shard boundaries](#rectilinear-shard-boundaries)).
 
 ### Resizing and appending
 

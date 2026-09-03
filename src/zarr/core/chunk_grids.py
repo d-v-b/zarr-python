@@ -738,12 +738,12 @@ def normalize_chunks_1d(chunks: int | Iterable[object], span: int) -> DimensionG
     # specifications never hit an ambiguous-truth-value error on `chunks == -1`.
     if isinstance(chunks, numbers.Integral):
         chunk_size = int(chunks)
+        if chunk_size < -1 or chunk_size == 0:
+            raise ValueError(f"Chunk size must be positive or -1, got {chunk_size}")
         if chunk_size == -1:
             # A zero-length span still gets chunk size 1 (chunk sizes must be positive),
             # matching the auto-chunking clamp in _guess_regular_chunks.
             return FixedDimension(size=max(span, 1), extent=span)
-        if chunk_size <= 0:
-            raise ValueError(f"Chunk size must be positive, got {chunk_size}")
         return FixedDimension(size=chunk_size, extent=span)
     else:
         try:

@@ -881,17 +881,23 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
 
         Examples
         --------
+        Without sharding, `read_chunk_sizes` and `write_chunk_sizes` are the same:
+
         >>> arr = zarr.create_array({}, dtype="i1", shape=(100, 80), chunks=(30, 40))
         >>> arr.read_chunk_sizes
         ((30, 30, 30, 10), (40, 40))
+
+        For a sharded array the two differ: reads are efficient at inner-chunk
+        granularity, while writes go to storage one shard at a time:
+
+        >>> sharded = zarr.create_array({}, dtype="i1", shape=(40,), chunks=(10,), shards=(20,))
+        >>> sharded.read_chunk_sizes
+        ((10, 10, 10, 10),)
+        >>> sharded.write_chunk_sizes
+        ((20, 20),)
         """
-
-        from zarr.codecs.sharding import ShardingCodec
-
-        codecs: tuple[Codec, ...] = getattr(self.metadata, "codecs", ())
-        if len(codecs) == 1 and isinstance(codecs[0], ShardingCodec):
-            inner_chunk_shape = codecs[0].chunk_shape
-            return _chunk_sizes_from_shape(self.shape, inner_chunk_shape)
+        if (sharding_codec := _sharding_codec(self.metadata)) is not None:
+            return _chunk_sizes_from_shape(self.shape, sharding_codec.chunk_shape)
         return self._chunk_grid.chunk_sizes
 
     @property
@@ -911,10 +917,20 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
 
         Examples
         --------
-        >>> import zarr.storage
+        Without sharding, `write_chunk_sizes` and `read_chunk_sizes` are the same:
+
         >>> arr = zarr.create_array({}, dtype="i1", shape=(100, 80), chunks=(30, 40))
         >>> arr.write_chunk_sizes
         ((30, 30, 30, 10), (40, 40))
+
+        For a sharded array the two differ: writes go to storage one shard at a
+        time, while reads are efficient at inner-chunk granularity:
+
+        >>> sharded = zarr.create_array({}, dtype="i1", shape=(40,), chunks=(10,), shards=(20,))
+        >>> sharded.write_chunk_sizes
+        ((20, 20),)
+        >>> sharded.read_chunk_sizes
+        ((10, 10, 10, 10),)
         """
 
         return self._chunk_grid.chunk_sizes
@@ -1817,7 +1833,7 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
     def _info(
         self, count_chunks_initialized: int | None = None, count_bytes_stored: int | None = None
     ) -> Any:
-        rectilinear_grid = _stored_rectilinear_grid(self.metadata)
+        rectilinear_grid = _stored_rectilinear_grid_or_none(self.metadata)
         sharded = _sharding_codec(self.metadata) is not None
         # `.chunks` (the inner chunk shape when sharded) is undefined only for a
         # non-sharded rectilinear grid, which ArrayInfo renders as "<variable>";
@@ -2064,10 +2080,21 @@ class Array[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
 
         Examples
         --------
+        Without sharding, `read_chunk_sizes` and `write_chunk_sizes` are the same:
+
         >>> import zarr
         >>> arr = zarr.create_array({}, dtype="i1", shape=(100, 80), chunks=(30, 40))
         >>> arr.read_chunk_sizes
         ((30, 30, 30, 10), (40, 40))
+
+        For a sharded array the two differ: reads are efficient at inner-chunk
+        granularity, while writes go to storage one shard at a time:
+
+        >>> sharded = zarr.create_array({}, dtype="i1", shape=(40,), chunks=(10,), shards=(20,))
+        >>> sharded.read_chunk_sizes
+        ((10, 10, 10, 10),)
+        >>> sharded.write_chunk_sizes
+        ((20, 20),)
         """
         return self.async_array.read_chunk_sizes
 
@@ -2088,10 +2115,21 @@ class Array[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
 
         Examples
         --------
+        Without sharding, `write_chunk_sizes` and `read_chunk_sizes` are the same:
+
         >>> import zarr
         >>> arr = zarr.create_array({}, dtype="i1", shape=(100, 80), chunks=(30, 40))
         >>> arr.write_chunk_sizes
         ((30, 30, 30, 10), (40, 40))
+
+        For a sharded array the two differ: writes go to storage one shard at a
+        time, while reads are efficient at inner-chunk granularity:
+
+        >>> sharded = zarr.create_array({}, dtype="i1", shape=(40,), chunks=(10,), shards=(20,))
+        >>> sharded.write_chunk_sizes
+        ((20, 20),)
+        >>> sharded.read_chunk_sizes
+        ((10, 10, 10, 10),)
         """
         return self.async_array.write_chunk_sizes
 
@@ -4802,7 +4840,9 @@ def _sharding_codec(metadata: ArrayMetadata) -> ShardingCodec | None:
     return None
 
 
-def _stored_rectilinear_grid(metadata: ArrayMetadata) -> RectilinearChunkGridMetadata | None:
+def _stored_rectilinear_grid_or_none(
+    metadata: ArrayMetadata,
+) -> RectilinearChunkGridMetadata | None:
     """The *stored* rectilinear chunk grid, or None if the stored grid is regular
     (in which case `.chunks` and `.shards` are defined).
 
@@ -4846,7 +4886,7 @@ def _parse_keep_array_attr(
     dict[str, JSON] | None,
 ]:
     if isinstance(data, Array):
-        rectilinear_grid = _stored_rectilinear_grid(data.metadata)
+        rectilinear_grid = _stored_rectilinear_grid_or_none(data.metadata)
         sharded = _sharding_codec(data.metadata) is not None
         if chunks == "keep":
             if rectilinear_grid is None or sharded:
