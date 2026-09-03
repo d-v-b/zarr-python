@@ -328,9 +328,7 @@ each projection are the next section's subject.)
 The plan describes work but does not perform it. It contains no array source,
 storage backend, codec pipeline, buffer, or scheduler. A Zarr reader, a task
 queue, or a viewport can consume the same logical plan and decide independently
-how and when to fetch its two chunks. Nor does it hold two projection objects:
-it holds one small table per axis, from which the projections are derived —
-[the last section](#a-plan-is-a-product-of-per-axis-tables) shows them.
+how and when to fetch its two chunks.
 
 On the wrapper, this partitioning is called **parts**: `with_parts(shape)`
 gives a `LazyArray` a grid of uniform boxes to divide its reads along
@@ -467,23 +465,23 @@ projection (0, 1) = axis-0 row 0 x axis-1 row 1 -> chunk (0, 1), local (1, 0:2),
 
 `ChunkPlan.partition()` returns this factored form, a `GridPartition`. Its
 `sets` hold one table per source axis, in axis order; `row_shape` is the
-number of rows in each; and a projection is addressed by one row index per
-table, walked in row-major order. The executable example reads the two tables
-above off the plan, checks that the plan's projections are exactly the
-partition's rows, and evaluates row `(0, 1)` on both of its transforms:
+number of rows in each; and the plan walks the rows in row-major order over
+it. The executable example reads the two tables above off the plan, checks
+that the plan's projections are exactly the partition's rows, and evaluates
+the second row on both of its transforms:
 
 ```python
 --8<-- "snippets/grid_partition.py:strided-tables"
 ```
 
 There are three kinds of table, matching the three map kinds and the one
-arrangement that does not factor:
-
-| Table | Holds | One row per |
-| --- | --- | --- |
-| `StridedSet` | A `ConstantMap` or `DimensionMap` axis: chunk-local `local_start`, `extent`, the request `origin` of the first cell, and `full`, whether the row covers its chunk exactly once | touched chunk along that axis |
-| `IndexedSet` | An orthogonal `ArrayMap` axis (`.oindex`): its coordinates grouped by chunk in CSR form — `pointer`, `index`, and the request `positions` they fill, with `local` for the chunk-local coordinates | touched chunk along that axis |
-| `JointSet` | The correlated arrays of a `.vindex` selection, which read the same request axes and so do not distribute: a chunk constrains all of them at once, so their points are sorted into chunks together, once | touched chunk, addressed on all correlated axes |
+arrangement that does not factor. A `StridedSet` holds a `ConstantMap` or
+`DimensionMap` axis; an `IndexedSet` holds an orthogonal `ArrayMap` axis
+(`.oindex`) with its coordinates grouped by chunk; and a `JointSet` holds the
+correlated arrays of a `.vindex` selection, which read the same request axes
+and so do not distribute — a chunk constrains all of them at once, so their
+points are sorted into chunks together, once. The
+[API reference](../api/chunk_resolution.md) documents every column.
 
 The gather from the previous section, `oindex[[4, 1, 1], 2:6]` over 3-by-4
 chunks, groups rows `1, 1` into chunk 0 and row `4` into chunk 1 while
@@ -496,15 +494,13 @@ its points paired in the joint table:
 
 Two properties follow from the factoring. Building the tables costs the *sum*
 of the chunks touched per axis, never their product, and correlated points
-cost one sort; a selection over a million chunks is described by three short
-tables. And projections are derived from rows only when asked for — by
-iterating, by `partition[row]`, or not at all: `chunk_coords()` lists every
-chunk the plan touches without materializing a row, and a consumer can read
-the columns directly, as [Integration boundaries](integrations.md#reading-the-tables-directly)
-shows. The only transform with no factored form is a hand-built diagonal, two
-output maps reading one request axis; `partition()` raises `ValueError` for
-it, and `plan_chunks` still walks it by intersecting the whole transform with
-each chunk.
+cost one sort. And projections are derived from rows only when asked for:
+`chunk_coords()` lists every chunk the plan touches without materializing a
+row, and a consumer can read the columns directly, as
+[Integration boundaries](integrations.md#reading-the-tables-directly) shows.
+The one shape with no factored form is a hand-built diagonal — two
+`DimensionMap`s reading one request axis, which no selection produces — and
+the plan rejects it with `ValueError`.
 
 ---
 

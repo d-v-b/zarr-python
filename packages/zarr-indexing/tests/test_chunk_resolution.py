@@ -55,19 +55,6 @@ def _points(domain: IndexDomain) -> list[tuple[int, ...]]:
     ]
 
 
-def _count_intersect_calls(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
-    """Count real intersections to protect touched-only candidate enumeration."""
-    calls = {"n": 0}
-    original = IndexTransform.intersect
-
-    def counting(self: IndexTransform, output_domain: IndexDomain) -> object:
-        calls["n"] += 1
-        return original(self, output_domain)
-
-    monkeypatch.setattr(IndexTransform, "intersect", counting)
-    return calls
-
-
 def test_basic_plan_is_reiterable_and_projects_both_spaces() -> None:
     """A plan can be revisited without losing either side of each projection."""
     transform = IndexTransform.from_shape((6,))[1:6]
@@ -143,14 +130,16 @@ def test_coverage_classification(transform: IndexTransform, expected: list[str])
     assert [projection.coverage for projection in plan_chunks(transform, grids)] == expected
 
 
-def test_repeated_input_dependency_is_not_full_coverage() -> None:
+def test_repeated_input_dependency_is_rejected() -> None:
+    """Two maps reading one input axis (a diagonal) have no factored form."""
     transform = IndexTransform(
         domain=IndexDomain.from_shape((2,)),
         output=(DimensionMap(input_dimension=0), DimensionMap(input_dimension=0)),
     )
     grids = dimension_grids_from_chunks((2, 2), (2, 2))
 
-    assert [projection.coverage for projection in plan_chunks(transform, grids)] == ["partial"]
+    with pytest.raises(ValueError, match="read input axis 0"):
+        list(plan_chunks(transform, grids))
 
 
 def test_unused_input_axis_is_not_full_coverage() -> None:
@@ -419,43 +408,16 @@ def test_empty_request_has_no_projections() -> None:
 
 
 class TestSortedOneDimensionalPlan:
-    def test_matches_general_resolution_for_randomized_selections(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The direct sorted path has the same paired transforms as intersection."""
-        rng = np.random.default_rng(0)
-        grids = (
-            ChunkGrid(dimensions=(FixedDimension(size=7, extent=30),)),
-            ChunkGrid(dimensions=(VaryingDimension(edges=(3, 4, 8, 5, 10), extent=30),)),
-        )
-        for grid in grids:
-            for _ in range(50):
-                indices = np.sort(rng.integers(0, 30, size=int(rng.integers(1, 80)))).astype(
-                    np.intp
-                )
-                transform = IndexTransform.from_shape((30,)).vindex[indices]
-                direct = list(plan_chunks(transform, grid.dimensions))
-                with monkeypatch.context() as context:
-                    context.setattr(
-                        chunk_resolution,
-                        "_one_dimensional_array_map",
-                        lambda _transform: None,
-                    )
-                    general = list(plan_chunks(transform, grid.dimensions))
-                assert direct == general
-
-    def test_sorted_coordinates_bypass_intersection(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_sorted_coordinates_bypass_intersection(self) -> None:
         """Sorted coordinates partition directly at touched chunk boundaries."""
         transform = IndexTransform.from_shape((12,)).vindex[
             np.array([0, 3, 4, 4, 9, 11], dtype=np.intp)
         ]
         grid = ChunkGrid(dimensions=(FixedDimension(size=4, extent=12),))
-        calls = _count_intersect_calls(monkeypatch)
 
         projections = list(plan_chunks(transform, grid.dimensions))
 
         assert [projection.chunk_coords for projection in projections] == [(0,), (1,), (2,)]
-        assert calls["n"] == 0
         assert [
             [
                 _storage_of(projection.cell_transform, point)[0]
@@ -464,16 +426,14 @@ class TestSortedOneDimensionalPlan:
             for projection in projections
         ] == [[0, 1], [2, 3], [4, 5]]
 
-    def test_unsorted_coordinates_use_intersection(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Unsorted coordinates are grouped by chunk without whole-transform intersections."""
+    def test_unsorted_coordinates_use_intersection(self) -> None:
+        """Unsorted coordinates are grouped by chunk, in chunk order."""
         transform = IndexTransform.from_shape((12,)).vindex[np.array([9, 0, 4], dtype=np.intp)]
         grid = ChunkGrid(dimensions=(FixedDimension(size=4, extent=12),))
-        calls = _count_intersect_calls(monkeypatch)
 
         projections = list(plan_chunks(transform, grid.dimensions))
 
         assert [projection.chunk_coords for projection in projections] == [(0,), (1,), (2,)]
-        assert calls["n"] == 0
 
 
 class CountingUnitGrid:
@@ -529,17 +489,15 @@ def test_sparse_affine_plan_handles_large_origin_cancellation() -> None:
 
 class TestTouchedOnlyCandidateEnumeration:
     def test_sparse_one_dimensional_selection_skips_the_dense_span(
-        self, monkeypatch: pytest.MonkeyPatch
+        self,
     ) -> None:
-        """Two sorted points on a 1000-cell grid require no intersections."""
+        """Two sorted points on a 1000-cell grid touch two chunks."""
         transform = IndexTransform.from_shape((4000,)).vindex[np.array([1, 3997], dtype=np.intp)]
         grid = ChunkGrid(dimensions=(FixedDimension(size=4, extent=4000),))
-        calls = _count_intersect_calls(monkeypatch)
 
         projections = list(plan_chunks(transform, grid.dimensions))
 
         assert [projection.chunk_coords for projection in projections] == [(0,), (999,)]
-        assert calls["n"] == 0
 
     @pytest.mark.parametrize(
         ("mode", "expected_coords", "expected_calls"),
@@ -550,17 +508,11 @@ class TestTouchedOnlyCandidateEnumeration:
     )
     def test_sparse_two_dimensional_selection_uses_only_touched_combinations(
         self,
-        monkeypatch: pytest.MonkeyPatch,
         mode: str,
         expected_coords: list[tuple[int, int]],
         expected_calls: int,
     ) -> None:
-        """Orthogonal points use their outer product; correlated points remain paired.
-
-        Neither walk intersects the whole transform per chunk: the orthogonal
-        axes are resolved once each, and correlated points are sorted into
-        their chunks up front.
-        """
+        """Orthogonal points use their outer product; correlated points remain paired."""
         base = IndexTransform.from_shape((4000, 4000))
         first = np.array([1, 3997], dtype=np.intp)
         second = np.array([2, 3998], dtype=np.intp)
@@ -573,17 +525,15 @@ class TestTouchedOnlyCandidateEnumeration:
                 FixedDimension(size=4, extent=4000),
             )
         )
-        calls = _count_intersect_calls(monkeypatch)
 
         projections = list(plan_chunks(transform, grid.dimensions))
 
         assert sorted(projection.chunk_coords for projection in projections) == expected_coords
-        assert calls["n"] == expected_calls
 
     def test_correlated_diagonal_scales_with_points_not_their_product(
-        self, monkeypatch: pytest.MonkeyPatch
+        self,
     ) -> None:
-        """Fifty diagonal points touch fifty chunks, not 2500, and need no re-intersection."""
+        """Fifty diagonal points touch fifty chunks, not 2500."""
         n_points = 50
         coordinates = np.arange(n_points, dtype=np.intp) * 8
         transform = IndexTransform.from_shape((4000, 4000)).vindex[coordinates, coordinates]
@@ -593,14 +543,12 @@ class TestTouchedOnlyCandidateEnumeration:
                 FixedDimension(size=4, extent=4000),
             )
         )
-        calls = _count_intersect_calls(monkeypatch)
 
         projections = list(plan_chunks(transform, grid.dimensions))
 
         assert sorted(projection.chunk_coords for projection in projections) == [
             (2 * index, 2 * index) for index in range(n_points)
         ]
-        assert calls["n"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -644,20 +592,50 @@ def _partition_cases() -> list[tuple[str, IndexTransform, tuple[Any, ...]]]:
     ]
 
 
+def _check_projections(transform: IndexTransform, projections: list[ChunkProjection]) -> None:
+    """The evaluation oracle: both transforms agree pointwise, cells tile the
+    request exactly once, chunk-local coordinates lie in the chunk, and
+    `coverage` is `full` exactly when a chunk's cells are each read once."""
+    has_array = any(isinstance(m, ArrayMap) for m in transform.output)
+    request_points: list[tuple[int, ...]] = []
+    for projection in projections:
+        assert projection.chunk_transform.domain == projection.cell_transform.domain
+        chunk_points: list[tuple[int, ...]] = []
+        for cell_point in _points(projection.cell_transform.domain):
+            request_point = _storage_of(projection.cell_transform, cell_point)
+            chunk_point = _storage_of(projection.chunk_transform, cell_point)
+            storage_point = _storage_of(transform, request_point)
+            chunk_origin = projection.chunk_domain.inclusive_min
+            assert chunk_point == tuple(
+                value - origin for value, origin in zip(storage_point, chunk_origin, strict=True)
+            )
+            assert all(
+                0 <= value < extent
+                for value, extent in zip(chunk_point, projection.chunk_domain.shape, strict=True)
+            )
+            request_points.append(request_point)
+            chunk_points.append(chunk_point)
+        if has_array:
+            assert projection.coverage == "unknown"
+        else:
+            covers = sorted(chunk_points) == sorted(
+                tuple(int(c) for c in cell) for cell in np.ndindex(*projection.chunk_domain.shape)
+            )
+            assert (projection.coverage == "full") == covers, projection
+    assert sorted(request_points) == sorted(_points(transform.domain))
+
+
 @pytest.mark.parametrize("case", _partition_cases(), ids=lambda case: case[0])
-def test_partition_rows_match_general_walk(
+def test_partition_rows_are_the_plan_and_satisfy_the_oracle(
     case: tuple[str, IndexTransform, tuple[Any, ...]],
 ) -> None:
-    """Every partition row equals the projection the whole-transform walk produces."""
     _, transform, grids = case
-    partition = plan_chunks(transform, grids).partition()
+    plan = plan_chunks(transform, grids)
+    partition = plan.partition()
     rows = list(partition)
-    general = list(chunk_resolution._iter_general_projections(transform, grids))
-    assert rows == general
+    assert rows == list(plan)
     assert len(partition) == len(rows)
-    assert [partition[i] for i in range(len(partition))] == rows
-    if rows:
-        assert partition[-1] == rows[-1]
+    _check_projections(transform, rows)
 
 
 @pytest.mark.parametrize("case", _partition_cases(), ids=lambda case: case[0])
@@ -688,7 +666,7 @@ def test_partition_tables_describe_chunk_local_coordinates() -> None:
     assert strided.chunk.tolist() == [1, 2]
     assert strided.local_start.tolist() == [1, 0]
     assert strided.extent.tolist() == [3, 1]
-    assert strided.origin.tolist() == [5, 8]  # literal request coordinates: the axis is [5, 9)
+    assert strided.origin.tolist() == [0, 3]  # positions along the request axis
     assert strided.full.tolist() == [False, True]
     for row, projection in enumerate(partition):
         table_rows = np.unravel_index(row, partition.row_shape)
@@ -712,17 +690,20 @@ def test_joint_set_groups_points_by_chunk() -> None:
     assert joint.local.tolist() == [[0, 0], [1, 0], [0, 0], [0, 1]]
 
 
-def test_partition_rejects_diagonal_but_plan_still_walks() -> None:
-    """Two maps reading one input axis have no factored form; the general walk covers them."""
+def test_partition_rejects_correlated_residual_diagonal() -> None:
+    """A diagonal among the residual slice axes of a correlated transform is rejected too."""
     transform = IndexTransform(
-        domain=IndexDomain.from_shape((4,)),
-        output=(DimensionMap(input_dimension=0), DimensionMap(input_dimension=0)),
+        domain=IndexDomain.from_shape((2, 3)),
+        output=(
+            ArrayMap(np.array([[0], [2]])),
+            ArrayMap(np.array([[1], [0]])),
+            DimensionMap(input_dimension=1),
+            DimensionMap(input_dimension=1),
+        ),
     )
-    grids = dimension_grids_from_chunks((2, 2), shape=(4, 4))
-    plan = plan_chunks(transform, grids)
-    with pytest.raises(ValueError, match="no factored form"):
-        plan.partition()
-    assert [p.chunk_coords for p in plan] == [(0, 0), (1, 1)]
+    grids = dimension_grids_from_chunks((2, 2, 2, 2), shape=(3, 3, 3, 3))
+    with pytest.raises(ValueError, match="read input axis 1"):
+        plan_chunks(transform, grids).partition()
 
 
 def test_partition_is_memoized_on_the_plan() -> None:
@@ -732,11 +713,37 @@ def test_partition_is_memoized_on_the_plan() -> None:
     assert plan.partition() is plan.partition()
 
 
-def test_partition_getitem_bounds() -> None:
-    partition = plan_chunks(
+def test_partition_len_is_exact() -> None:
+    """Row counts multiply as Python ints; a huge factored plan is never silently empty."""
+    plan = plan_chunks(
         IndexTransform.from_shape((6,)), dimension_grids_from_chunks((2,), shape=(6,))
+    )
+    partition = plan.partition()
+    huge = chunk_resolution.GridPartition(
+        transform=partition.transform,
+        dimension_grids=partition.dimension_grids,
+        sets=(),
+        joint=None,
+        row_shape=(2**32, 2**32),
+    )
+    assert huge.n_rows == 2**64
+    with pytest.raises(OverflowError):
+        len(huge)
+
+
+def test_partition_columns_are_read_only() -> None:
+    """A memoized partition's tables cannot be changed under a later walk."""
+    transform = IndexTransform.from_shape((7, 9)).oindex[np.array([6, 0, 0, 2]), 5:]
+    partition = plan_chunks(
+        transform, dimension_grids_from_chunks((3, 4), shape=(7, 9))
     ).partition()
-    assert len(partition) == 3
-    assert partition[-1].chunk_coords == (2,)
-    with pytest.raises(IndexError):
-        partition[3]
+    indexed, strided = partition.sets
+    for column in (
+        strided.chunk,
+        strided.local_start,
+        strided.origin,
+        indexed.index,
+        indexed.positions,
+    ):
+        with pytest.raises(ValueError, match="read-only"):
+            column[0] = 0

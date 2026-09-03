@@ -1039,10 +1039,10 @@ def _intersect_orthogonal(
 class _CorrelatedBlock:
     """The correlated index arrays of a general transform, flattened over the broadcast block.
 
-    Built once per transform by `_prepare_correlated` so that intersecting the
-    transform with many chunks does not re-broadcast and re-scan the arrays for
-    each chunk: `flat_storage` holds the storage coordinate of every block
-    point per correlated output dimension, `flat_index` the raw index values.
+    Built by `_prepare_correlated`: `flat_storage` holds the storage coordinate
+    of every block point per correlated output dimension, `flat_index` the raw
+    index values. Chunk resolution sorts `flat_storage` into chunks once to
+    build a `JointSet`; `_intersect_general` masks it for one output domain.
     """
 
     correlated_dims: tuple[int, ...]
@@ -1099,8 +1099,6 @@ def _prepare_correlated(transform: IndexTransform) -> _CorrelatedBlock:
 def _intersect_general(
     transform: IndexTransform,
     output_domain: IndexDomain,
-    block: _CorrelatedBlock | None = None,
-    positions: np.ndarray[Any, np.dtype[np.intp]] | None = None,
 ) -> tuple[IndexTransform, np.ndarray[Any, np.dtype[np.intp]]] | None:
     """Intersect a transform with any index-array structure, pointwise.
 
@@ -1123,33 +1121,24 @@ def _intersect_general(
     rank 0: the block either survives whole or the intersection is empty. The
     result keeps only the residual slice axes and `out_indices` loses its leading
     points axis, so the sub-transform's rank still matches the view's.
-
-    `block` is the transform's flattened correlated arrays (`_prepare_correlated`),
-    reused across many chunks by chunk resolution. `positions` names the block
-    points that land in `output_domain`, ascending; a caller that has already
-    partitioned the points by chunk supplies it so the intersection costs
-    ``O(surviving points)`` rather than a scan of the whole block.
     """
-    if block is None:
-        block = _prepare_correlated(transform)
+    block = _prepare_correlated(transform)
     correlated_dims = block.correlated_dims
     broadcast_axes = block.broadcast_axes
     broadcast_shape = block.broadcast_shape
 
-    if positions is None:
-        # Joint bounds mask over the broadcast block.
-        combined: np.ndarray[Any, np.dtype[np.bool_]] | None = None
-        for out_dim in correlated_dims:
-            storage = block.flat_storage[out_dim]
-            lo = output_domain.inclusive_min[out_dim]
-            hi = output_domain.exclusive_max[out_dim]
-            mask = (storage >= lo) & (storage < hi)
-            combined = mask if combined is None else (combined & mask)
-        assert combined is not None
-        positions = np.flatnonzero(combined).astype(np.intp)
-    if positions.size == 0:
+    # Joint bounds mask over the broadcast block.
+    combined: np.ndarray[Any, np.dtype[np.bool_]] | None = None
+    for out_dim in correlated_dims:
+        storage = block.flat_storage[out_dim]
+        lo = output_domain.inclusive_min[out_dim]
+        hi = output_domain.exclusive_max[out_dim]
+        mask = (storage >= lo) & (storage < hi)
+        combined = mask if combined is None else (combined & mask)
+    assert combined is not None
+    surviving = np.flatnonzero(combined).astype(np.intp)
+    if surviving.size == 0:
         return None
-    surviving = positions
 
     # Intersect residual (slice / constant) dimensions independently. Slice dims
     # are ordered by input dimension so their flat-buffer strides are row-major.

@@ -36,36 +36,17 @@ about the deliberately matching semantics:
   `tensorstore.IndexTransform(json=...)` and round-trips them back through our
   engine layer.
 - **Chunk partitioning.** Both factor a transform over a grid before visiting
-  any cell. TensorStore's `IndexTransformGridPartition` holds *strided sets*
-  (one per affine grid dimension) and *index array sets* (correlated array
-  dimensions grouped into connected sets, their points partitioned by grid
-  cell), and derives a per-cell transform on iteration.
-  [`GridPartition`](api/chunk_resolution.md) is the same structure —
-  `StridedSet` and `IndexedSet` tables per axis, a `JointSet` for correlated
-  arrays — and derives each `ChunkProjection` from one row of each table
-  ([the guide](guide/index.md#a-plan-is-a-product-of-per-axis-tables) shows
-  the tables).
-
-The representations differ in one place: index arrays. Both models want an index
-array at the transform's full input rank, with singleton axes for the dimensions
-a map does not vary over. TensorStore enforces it — its JSON parser rejects a
-rank-1 array over a rank-2 domain outright, with `Index array for output
-dimension 0 has rank 1 but must have rank 2` (checked against tensorstore
-0.1.84) — while our loader is the more permissive of the two and also accepts a
-lower-rank array that broadcasts against the input domain. That is a
-compatibility affordance, not a difference in the model: ndsel leaves index-array
-rank to [the engine layer](ndsel.md#lowering-to-a-transform), and everything the
-algebra builds itself is at full rank.
-
-The reason full rank matters here is that we *derive* meaning from those
-singletons rather than merely tolerating them: an array full-sized on one axis
-and singleton elsewhere is orthogonal, and one varying over several shared axes
-is vectorized, so the distinction is readable off the shape — and the shape is
-the *only* place it lives. An earlier `ArrayMap.input_dimension` field pinned
-the orthogonal axis redundantly and was retired: the one shape it disambiguated
-(a single-coordinate array, all axes singleton) is now normalized away at
-construction, collapsed to the `ConstantMap` it equals, exactly as
-[the serializer](api/json.md) has always collapsed it on the wire.
+  any cell, rather than intersecting the whole transform with each chunk.
+  TensorStore's `IndexTransformGridPartition` holds strided sets and index
+  array sets and derives a per-cell transform on iteration;
+  [`GridPartition`](api/chunk_resolution.md) has the same shape with two
+  simplifications. Its `StridedSet` is per storage axis, where TensorStore's
+  is per input dimension and spans every grid axis reading it (which is how
+  TensorStore serves the diagonal this library rejects), and it keeps one
+  `JointSet` for all correlated arrays where TensorStore keeps one index
+  array set per connected component. Both derive the per-chunk transforms
+  from the partition ([the guide](guide/index.md#a-plan-is-a-product-of-per-axis-tables)
+  shows the tables).
 
 Four deliberate differences:
 
@@ -96,11 +77,11 @@ selections whose duplicates would require additional work to classify.
 
 The comparison also runs the other way. TensorStore is a mature, heavily
 optimized C++ system whose performance this library cannot approach. Planning
-here is vectorized per axis, but each materialized `ChunkProjection` is
+here is per axis, never per chunk, but each materialized `ChunkProjection` is
 Python-level bookkeeping over NumPy — two domains, two transforms and the
 projection itself — so the per-part overhead of the object view is
-significant; a consumer that reads the partition's tables directly pays only
-for the copies it makes. This library is small and depends on nothing beyond
+significant; a consumer that reads the partition's tables directly pays no
+per-chunk object construction. This library is small and depends on nothing beyond
 NumPy, so the algebra can be adopted by a Python project that wants the model
 without the C++ runtime.
 
@@ -159,11 +140,7 @@ soon as any stride exceeds 1. The two also behave differently under
 partitioning: a box touches a regularly-spaced run of parts, in increasing
 order, each at most once — a stride larger than a part's extent skips parts
 outright, so the run is not contiguous — while a query can touch any subset of
-them, in any order, more than once. The
-[partition](guide/index.md#a-plan-is-a-product-of-per-axis-tables) makes the
-split structural: a box factors into one `StridedSet` per axis, an orthogonal
-query adds `IndexedSet`s, and only correlated (`vindex`) arrays need the
-`JointSet`.
+them, in any order, more than once.
 
 [`LazyArray`](api/lazy_array.md) exposes the category directly:
 

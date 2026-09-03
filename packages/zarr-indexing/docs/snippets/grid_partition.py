@@ -4,7 +4,8 @@ from typing import Any
 
 import numpy as np
 
-from zarr_indexing import IndexedSet, IndexTransform, StridedSet, plan_chunks
+from zarr_indexing import IndexDomain, IndexedSet, IndexTransform, StridedSet, plan_chunks
+from zarr_indexing.output_map import DimensionMap
 from zarr_indexing.grid import dimension_grids_from_chunks
 
 # --8<-- [start:strided-tables]
@@ -24,9 +25,10 @@ assert columns.full.tolist() == [True, True]
 # One row of each table is one projection; the plan iterates exactly those rows.
 assert partition.row_shape == (1, 2)
 assert partition.chunk_coords().tolist() == [[0, 0], [0, 1]]
-assert list(partition) == list(plan)
-assert partition[1].chunk_transform.apply((0,)) == (1, 0)  # cell 0: chunk-local (1, 0) ...
-assert partition[1].cell_transform.apply((0,)) == (2,)  # ... which is request column 2
+rows = list(partition)
+assert rows == list(plan)
+assert rows[1].chunk_transform.apply((0,)) == (1, 0)  # cell 0: chunk-local (1, 0) ...
+assert rows[1].cell_transform.apply((0,)) == (2,)  # ... which is request column 2
 # --8<-- [end:strided-tables]
 
 
@@ -69,6 +71,11 @@ def read_box_through_tables(
     out = np.empty(domain.shape, dtype=source.dtype)
     tables = [table for table in partition.sets if isinstance(table, StridedSet)]
     assert len(tables) == len(partition.sets)  # a box: strided tables only
+    # A chunk slab comes out in storage-axis order; the result is in request-axis
+    # order, and request axes no map reads (`None` in the selection) are length 1.
+    read_axes = [table.input_dimension for table in tables if table.input_dimension is not None]
+    to_request_order = tuple(np.argsort(read_axes))
+    unread_axes = [axis for axis in range(domain.ndim) if axis not in read_axes]
     reads: list[tuple[int, ...]] = []
     for table_rows in np.ndindex(*partition.row_shape):
         chunk_key: list[int] = []
@@ -85,11 +92,13 @@ def read_box_through_tables(
             if table.stride < 0 and stop < 0:
                 stop = None  # a negative stop would count from the end
             chunk_sel.append(slice(start, stop, table.stride))
-            # `origin` is a literal request coordinate; the buffer is positional.
-            first = int(table.origin[row]) - domain.inclusive_min[table.input_dimension]
+            first = int(table.origin[row])
             out_sel[table.input_dimension] = slice(first, first + count)
         chunk = source[tuple(slice(k * c, (k + 1) * c) for k, c in zip(chunk_key, chunks, strict=True))]
-        out[tuple(out_sel)] = chunk[tuple(chunk_sel)]
+        values = np.transpose(chunk[tuple(chunk_sel)], to_request_order)
+        for axis in unread_axes:
+            values = np.expand_dims(values, axis)
+        out[tuple(out_sel)] = values
         reads.append(tuple(chunk_key))
     return out, reads
 
@@ -99,4 +108,13 @@ box = IndexTransform.from_shape((7, 9))[1:6:2, 5:]
 values, reads = read_box_through_tables(image, (3, 4), box)
 np.testing.assert_array_equal(values, image[1:6:2, 5:])
 assert reads == [(0, 1), (0, 2), (1, 1), (1, 2)]
+
+# A reversed axis, an inserted axis, and a transposed transform read the same way.
+reversed_box = IndexTransform.from_shape((7, 9))[6:0:-1, None, ::3]
+np.testing.assert_array_equal(read_box_through_tables(image, (3, 4), reversed_box)[0], image[6:0:-1, None, ::3])
+transposed = IndexTransform(
+    domain=IndexDomain.from_shape((9, 7)),
+    output=(DimensionMap(input_dimension=1), DimensionMap(input_dimension=0)),
+)
+np.testing.assert_array_equal(read_box_through_tables(image, (3, 4), transposed)[0], image.T)
 # --8<-- [end:table-consumer]

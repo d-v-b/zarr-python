@@ -19,9 +19,9 @@ backends use an explicit `Reader` adapter.
 
 `plan_chunks` projects a transform through a caller-selected chunk grid without
 coupling the result to a storage backend or scheduler; `ChunkPlan.partition`
-(or `partition_transform`) exposes the plan's factored, columnar form as a
-`GridPartition` of `StridedSet`, `IndexedSet` and `JointSet` tables. `selection_to_transform`
-is also exported for consumers starting with a NumPy-style selection. The
+exposes the plan's factored, columnar form as a `GridPartition` of
+`StridedSet`, `IndexedSet` and `JointSet` tables. Consumers starting from a
+NumPy-style selection translate it with `zarr_indexing.boundary`. The
 `DimensionGridLike` Protocol describes the narrow grid surface chunk resolution
 consumes without importing zarr.
 """
@@ -36,7 +36,6 @@ from zarr_indexing.chunk_resolution import (
     IndexedSet,
     JointSet,
     StridedSet,
-    partition_transform,
     plan_chunks,
 )
 from zarr_indexing.domain import IndexDomain
@@ -122,7 +121,6 @@ __all__ = [
     "numpy_reader",
     "output_index_map_from_json",
     "parse_ndsel",
-    "partition_transform",
     "plan_chunks",
     "unit_step_reader",
 ]

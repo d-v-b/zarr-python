@@ -38,10 +38,11 @@ in the request. `chunk_coords()` alone answers "which chunks?" for a prefetch,
 without materializing anything.
 
 The example assembles a strided box from its `StridedSet` tables, one slice
-per chunk. Two details carry over from the guide: a table row's `origin` is a
-*literal* request coordinate, so placing it in a positional buffer subtracts
-the domain's `inclusive_min`; and a descending stride needs the same care with
-a negative stop that any NumPy slice does.
+per chunk. Three things a real consumer also has to get right are checked at
+the end: a descending stride needs the same care with a negative stop that any
+NumPy slice does, a chunk slab comes out in storage-axis order while the
+result is in request-axis order, and a request axis no map reads (`None` in
+the selection) is a length-one axis of the result.
 
 ```python
 --8<-- "snippets/grid_partition.py:table-consumer"

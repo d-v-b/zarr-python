@@ -37,9 +37,9 @@ and the wire format built on top of it.
 - [`zarr_indexing.chunk_resolution`](chunk_resolution.md) —
   `plan_chunks`, which lazily projects a request through a caller-selected grid,
   the reusable `ChunkPlan` and paired-transform `ChunkProjection` values, and
-  the plan's factored form: `GridPartition` (from `ChunkPlan.partition` or
-  `partition_transform`), holding one `StridedSet` or `IndexedSet` table per
-  axis and a `JointSet` for correlated index arrays
+  the plan's factored form: `GridPartition` (from `ChunkPlan.partition`),
+  holding one `StridedSet` or `IndexedSet` table per axis and a `JointSet`
+  for correlated index arrays
 - [`zarr_indexing.grid`](grid.md) — `DimensionGridLike`, the Protocol
   describing the narrow chunk-grid surface chunk resolution consumes, so that
   nothing here imports `zarr`, plus `EdgeDimensionGrid` and
