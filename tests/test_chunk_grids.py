@@ -3,17 +3,20 @@ from typing import Any
 import numpy as np
 import pytest
 
+import zarr
 from tests.conftest import Expect, ExpectFail
 from zarr.core.chunk_grids import (
     ChunkGrid,
     ChunkLayout,
     FixedDimension,
     VaryingDimension,
+    _guess_num_chunks_per_axis_shard,
     _guess_regular_chunks,
     normalize_chunks_1d,
     normalize_chunks_nd,
     resolve_outer_and_inner_chunks,
 )
+from zarr.errors import ZarrUserWarning
 
 
 def _assert_chunks_equal(
@@ -289,6 +292,8 @@ def test_normalize_chunks_nd_errors(case: ExpectFail[tuple[Any, tuple[int, ...]]
         Expect(input=(1, 2**62), output=FixedDimension(size=1, extent=2**62), id="uniform-huge"),
         # -1 sentinel branch: one chunk covering the full span.
         Expect(input=(-1, 100), output=FixedDimension(size=100, extent=100), id="full-span"),
+        # -1 on a zero-length span clamps to chunk size 1 (chunk sizes must be positive).
+        Expect(input=(-1, 0), output=FixedDimension(size=1, extent=0), id="full-span-empty"),
         # zero-length span preserves the declared chunk size.
         Expect(input=(10, 0), output=FixedDimension(size=10, extent=0), id="uniform-zero-span"),
         # explicit lists always keep the per-chunk form, even when the sizes
@@ -319,3 +324,62 @@ def test_normalize_chunks_1d(
     lists become `VaryingDimension`."""
     chunks, span = case.input
     assert normalize_chunks_1d(chunks, span) == case.output
+
+
+@pytest.mark.parametrize(
+    ("chunk_shape", "array_shape"),
+    [((), ()), ((0,), (0,)), ((0, 0), (0, 0))],
+    ids=["0d", "zero-1d", "zero-2d"],
+)
+def test_guess_num_chunks_per_axis_shard_degenerate(
+    chunk_shape: tuple[int, ...], array_shape: tuple[int, ...]
+) -> None:
+    """Degenerate chunk shapes must return 1 instead of hanging the search loop.
+
+    Regression test for https://github.com/zarr-developers/zarr-python/issues/4304.
+    """
+    assert (
+        _guess_num_chunks_per_axis_shard(
+            chunk_shape=chunk_shape,
+            item_size=8,
+            max_bytes=128 * 1024 * 1024,
+            array_shape=array_shape,
+        )
+        == 1
+    )
+
+
+def test_create_0d_array_auto_shards_with_target_shard_size() -> None:
+    """A 0-dimensional array with shards="auto" and a shard size budget must not hang.
+
+    Regression test for https://github.com/zarr-developers/zarr-python/issues/4304.
+    """
+    with (
+        zarr.config.set({"array.target_shard_size_bytes": 128 * 1024 * 1024}),
+        pytest.warns(ZarrUserWarning, match="Automatic shard shape inference is experimental"),
+    ):
+        arr = zarr.create_array(store={}, shape=(), dtype="int64", shards="auto")
+    assert arr.shards == ()
+
+
+@pytest.mark.parametrize(
+    "target_shard_size_bytes",
+    [None, 128 * 1024 * 1024],
+    ids=["no-budget", "budget"],
+)
+def test_create_zero_length_array_full_span_chunks_auto_shards(
+    target_shard_size_bytes: int | None,
+) -> None:
+    """`chunks=-1` on a zero-length axis with shards="auto" must neither hang nor raise.
+
+    The -1 sentinel used to resolve to chunk size 0 on zero-length axes, which broke
+    every sharding code path: a ZeroDivisionError without a shard size budget, and an
+    infinite loop with one (https://github.com/zarr-developers/zarr-python/issues/4304).
+    """
+    with (
+        zarr.config.set({"array.target_shard_size_bytes": target_shard_size_bytes}),
+        pytest.warns(ZarrUserWarning, match="Automatic shard shape inference is experimental"),
+    ):
+        arr = zarr.create_array(store={}, shape=(0,), dtype="int64", chunks=-1, shards="auto")
+    assert arr.chunks == (1,)
+    assert arr.shards == (1,)

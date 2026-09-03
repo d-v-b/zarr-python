@@ -723,7 +723,9 @@ def normalize_chunks_1d(chunks: int | Iterable[object], span: int) -> DimensionG
     if isinstance(chunks, numbers.Integral):
         chunk_size = int(chunks)
         if chunk_size == -1:
-            return FixedDimension(size=span, extent=span)
+            # A zero-length span still gets chunk size 1 (chunk sizes must be positive),
+            # matching the auto-chunking clamp in _guess_regular_chunks.
+            return FixedDimension(size=max(span, 1), extent=span)
         if chunk_size <= 0:
             raise ValueError(f"Chunk size must be positive, got {chunk_size}")
         return FixedDimension(size=chunk_size, extent=span)
@@ -837,7 +839,10 @@ def _guess_num_chunks_per_axis_shard(
 
     For example, for a (2,2,2) chunk size and item size 4, maximum bytes of 256 would return 2.
     In other words the shard would be a (2,2,2) grid of (2,2,2) chunks
-    i.e., prod(chunk_shape) * (returned_val * len(chunk_shape)) * item_size = 256 bytes.
+    i.e., prod(chunk_shape) * (returned_val ** len(chunk_shape)) * item_size = 256 bytes.
+
+    Degenerate chunk shapes — a 0-dimensional shape, or one containing a zero-length
+    axis — return 1, as the search loop's stopping conditions can never be met.
 
     Parameters
     ----------
@@ -858,6 +863,10 @@ def _guess_num_chunks_per_axis_shard(
     if max_bytes < bytes_per_chunk:
         return 1
     num_axes = len(chunk_shape)
+    # For a 0-dimensional chunk shape or one with a zero-length axis, both loop
+    # conditions below are constant, so the loop would never terminate.
+    if num_axes == 0 or bytes_per_chunk == 0:
+        return 1
     chunks_per_shard = 1
     # First check for byte size, second check to make sure we don't go bigger than the array shape
     while (bytes_per_chunk * ((chunks_per_shard + 1) ** num_axes)) <= max_bytes and all(
