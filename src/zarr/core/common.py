@@ -26,6 +26,8 @@ from zarr.errors import ZarrRuntimeWarning
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
 
+    from zarr.core.metadata.v3 import ChunkGridMetadata
+
 
 ZARR_JSON = "zarr.json"
 ZARRAY_JSON = ".zarray"
@@ -37,7 +39,10 @@ BytesLike = bytes | bytearray | memoryview
 ShapeLike = Iterable[int | np.integer[Any]] | int | np.integer[Any]
 # Per-dimension chunk specs may mix a bare int (uniform chunk size, the
 # rectilinear spec's step-size shorthand) with explicit edge-length sequences.
-ChunksLike = ShapeLike | Iterable[int | Iterable[int]]
+# A stored chunk grid (`ChunkGridMetadata`) is also accepted and is used
+# verbatim, under the tolerant stored-metadata validation rules (e.g. trailing
+# edges beyond the array extent, as left behind by a shrinking resize).
+type ChunksLike = ShapeLike | Iterable[int | Iterable[int]] | ChunkGridMetadata
 # For backwards compatibility
 ChunkCoords = tuple[int, ...]
 ZarrFormat = Literal[2, 3]

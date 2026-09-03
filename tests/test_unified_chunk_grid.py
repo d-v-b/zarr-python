@@ -1090,27 +1090,37 @@ def test_mixed_scalar_and_list_dims_keep_shorthand(tmp_path: Path) -> None:
 # specs are normalized or stored is automatically checked against the "keep"
 # path of `from_array` as well.
 FROM_ARRAY_KEEP_CASES = [
-    pytest.param((30, 40), (10, 20), None, id="regular"),
-    pytest.param((40, 40), (5, 10), (10, 20), id="regular-sharded"),
-    pytest.param((60, 100), [[10, 20, 30], [50, 50]], None, id="rectilinear"),
-    pytest.param((9, 30), (3, [10, 20]), None, id="rectilinear-mixed-bare-int"),
-    pytest.param((3,), [[3]], None, id="rectilinear-uniform-list"),
-    pytest.param((100,), (10,), [[50, 50]], id="rectilinear-sharded"),
+    pytest.param((30, 40), (10, 20), None, None, id="regular"),
+    pytest.param((40, 40), (5, 10), (10, 20), None, id="regular-sharded"),
+    pytest.param((60, 100), [[10, 20, 30], [50, 50]], None, None, id="rectilinear"),
+    pytest.param((9, 30), (3, [10, 20]), None, None, id="rectilinear-mixed-bare-int"),
+    pytest.param((3,), [[3]], None, None, id="rectilinear-uniform-list"),
+    pytest.param((100,), (10,), [[50, 50]], None, id="rectilinear-sharded"),
+    # A shrinking resize legally leaves trailing edges beyond the extent in the
+    # stored grid; the "keep" path must preserve them verbatim rather than
+    # re-validating the stored grid as if it were a user-supplied spec.
+    pytest.param((25,), [[5, 10, 10]], None, (18,), id="rectilinear-shrunk"),
+    pytest.param((100,), (10,), [[50, 50]], (80,), id="rectilinear-sharded-shrunk"),
 ]
 
 
 @pytest.mark.parametrize("write_data", [True, False])
-@pytest.mark.parametrize(("shape", "chunks", "shards"), FROM_ARRAY_KEEP_CASES)
+@pytest.mark.parametrize(("shape", "chunks", "shards", "resize_to"), FROM_ARRAY_KEEP_CASES)
 def test_from_array_keep_roundtrips_chunk_grid(
-    shape: tuple[int, ...], chunks: Any, shards: Any, write_data: bool
+    shape: tuple[int, ...],
+    chunks: Any,
+    shards: Any,
+    resize_to: tuple[int, ...] | None,
+    write_data: bool,
 ) -> None:
-    """For every chunk/shard spec accepted by `create_array`, `from_array` with
-    the default "keep" parameters reproduces the source's stored chunk grid and
-    codecs exactly: the grid kind is preserved (gh-4272), uniform dimensions
-    keep their bare-int shorthand instead of being expanded per chunk, and
-    sharding survives — including under a rectilinear shard grid. `.info` is
-    defined for every kind of source, and the default data copy works for
-    every kind of grid."""
+    """For every chunk/shard spec accepted by `create_array` — including grids
+    later shrunk by `resize`, whose stored edges legally overhang the extent —
+    `from_array` with the default "keep" parameters reproduces the source's
+    stored chunk grid and codecs exactly: the grid kind is preserved (gh-4272),
+    uniform dimensions keep their bare-int shorthand instead of being expanded
+    per chunk, and sharding survives — including under a rectilinear shard
+    grid. `.info` is defined for every kind of source, and the default data
+    copy works for every kind of grid."""
     from zarr.core.metadata.v3 import ArrayV3Metadata
 
     src = zarr.create_array(
@@ -1118,9 +1128,14 @@ def test_from_array_keep_roundtrips_chunk_grid(
     )
     src[:] = np.arange(np.prod(shape), dtype="uint16").reshape(shape)
     assert src.info is not None
-    # The array is fully written, so every chunk is initialized, whatever the
-    # grid kind and sharding layout.
-    assert src.nchunks_initialized == src.nchunks
+    if resize_to is None:
+        # The array is fully written, so every chunk is initialized, whatever
+        # the grid kind and sharding layout. (After a shrink the count reflects
+        # declared chunk sizes, which overhang the extent, so it is only
+        # asserted for the unresized cases.)
+        assert src.nchunks_initialized == src.nchunks
+    else:
+        src.resize(resize_to)
     dst = zarr.from_array(MemoryStore(), data=src, name="0", write_data=write_data)
     assert isinstance(src.metadata, ArrayV3Metadata)
     assert isinstance(dst.metadata, ArrayV3Metadata)
@@ -1156,6 +1171,79 @@ def test_nchunks_initialized_counts_per_shard_for_rectilinear_shard_grid() -> No
     assert arr.nchunks_initialized == 3
     arr[0:10] = 1  # initializes the first shard, which holds 6 chunks
     assert arr.nchunks_initialized == 9
+
+
+def test_nchunks_initialized_regular_sharded_multiply_matches_per_shard_sum() -> None:
+    """For a regular shard grid the count comes from an O(1) multiply
+    (initialized shards x chunks per shard); it must agree with summing each
+    initialized shard's chunk count individually, as done for rectilinear
+    shard grids."""
+    arr = zarr.create_array(MemoryStore(), shape=(100,), chunks=(5,), shards=(20,), dtype="int32")
+    arr[0:20] = 1
+    arr[40:60] = 1  # two initialized shards, four chunks each
+    assert arr._nshards_initialized == 2
+    assert arr.nchunks_initialized == 2 * 4
+    arr[:] = 1
+    assert arr.nchunks_initialized == arr.nchunks == 20
+
+
+def test_iter_shard_regions_bounds_check() -> None:
+    """An out-of-bounds selection fails loudly and consistently across the two
+    sibling shard-iteration APIs — these regions are the safe concurrent-write
+    partitions, so a miscomputed selection must not silently shrink."""
+    arr = zarr.create_array(MemoryStore(), shape=(30,), chunks=(10,), dtype="uint8")
+    with pytest.raises(IndexError, match="Invalid selection shape"):
+        list(arr._iter_shard_keys(origin=(1,), selection_shape=(5,)))
+    with pytest.raises(IndexError, match="Invalid selection shape"):
+        list(arr._iter_shard_regions(origin=(1,), selection_shape=(5,)))
+
+
+@pytest.mark.parametrize(
+    "chunks", [(5, [10, 20, 70]), ([10, 20, 70], 5)], ids=["int-first", "list-first"]
+)
+def test_mixed_chunks_gates_are_order_independent(chunks: Any) -> None:
+    """The v2 and chunks+shards gates must recognize a mixed per-dimension spec
+    as rectilinear regardless of which dimension carries the sequence."""
+    shape = (30, 100) if isinstance(chunks[0], int) else (100, 30)
+    with pytest.raises(ValueError, match="Rectilinear chunks with sharding is not supported"):
+        zarr.create_array(MemoryStore(), shape=shape, chunks=chunks, shards=(10, 10), dtype="uint8")
+    with pytest.raises(ValueError, match="Zarr format 2 does not support rectilinear chunk grids"):
+        zarr.create_array(MemoryStore(), shape=shape, chunks=chunks, zarr_format=2, dtype="uint8")
+
+
+def test_from_array_keep_preserves_all_bare_int_rectilinear_grid() -> None:
+    """A rectilinear grid using the bare-int shorthand on every dimension can
+    only arrive from externally written metadata — `create_array` never
+    produces one — and behaves identically to a regular grid. The "keep" path
+    stores the source grid verbatim, so even this grid keeps its kind."""
+    import json
+
+    from zarr.core.buffer import default_buffer_prototype
+    from zarr.core.metadata.v3 import ArrayV3Metadata
+    from zarr.core.sync import sync
+
+    meta = ArrayV3Metadata.from_dict(
+        {
+            "zarr_format": 3,
+            "node_type": "array",
+            "shape": [90, 40],
+            "chunk_grid": {
+                "name": "rectilinear",
+                "configuration": {"kind": "inline", "chunk_shapes": [30, 20]},
+            },
+            "chunk_key_encoding": {"name": "default"},
+            "data_type": "int32",
+            "fill_value": 0,
+            "codecs": [{"name": "bytes", "configuration": {"endian": "little"}}],
+        }
+    )
+    store = MemoryStore()
+    buf = default_buffer_prototype().buffer.from_bytes(json.dumps(meta.to_dict()).encode())
+    sync(store.set("a/zarr.json", buf))
+    src = zarr.open_array(store, path="a")
+    dst = zarr.from_array(MemoryStore(), data=src, name="0", write_data=False)
+    assert isinstance(dst.metadata, ArrayV3Metadata)
+    assert dst.metadata.chunk_grid == meta.chunk_grid
 
 
 def test_chunks_raises_for_nonsharded_rectilinear_grid() -> None:

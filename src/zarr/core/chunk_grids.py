@@ -13,7 +13,6 @@ from typing import (
     Any,
     NamedTuple,
     Protocol,
-    TypeGuard,
     cast,
     runtime_checkable,
 )
@@ -315,22 +314,27 @@ class ChunkSpec:
 # list of ints (explicit edges), or mixed RLE (e.g. [[10, 3], 5]).
 
 
-def _is_rectilinear_chunks(chunks: Any) -> TypeGuard[Sequence[Sequence[int]]]:
-    """Check if chunks is a nested sequence (e.g. [[10, 20], [5, 5]]).
+def _is_rectilinear_chunks(chunks: Any) -> bool:
+    """Check if chunks specifies a rectilinear grid along any dimension.
 
-    Returns True for inputs like [[10, 20], [5, 5]] or [(10, 20), (5, 5)].
+    Returns True for nested sequences like [[10, 20], [5, 5]], for mixed
+    per-dimension specs like (5, [10, 20]) regardless of which dimension
+    carries the sequence, and for stored rectilinear grid metadata.
     Returns False for flat sequences like (10, 10) or [10, 10].
     """
+    from zarr.core.metadata.v3 import RectilinearChunkGridMetadata
+
+    if isinstance(chunks, RectilinearChunkGridMetadata):
+        return True
     if isinstance(chunks, (str, int, ChunkGrid)):
         return False
     if not hasattr(chunks, "__iter__"):
         return False
     try:
-        first_elem = next(iter(chunks), None)
-        if first_elem is None:
-            return False
-        return hasattr(first_elem, "__iter__") and not isinstance(first_elem, (str, bytes, int))
-    except (TypeError, StopIteration):
+        return any(
+            hasattr(elem, "__iter__") and not isinstance(elem, (str, bytes, int)) for elem in chunks
+        )
+    except TypeError:
         return False
 
 
@@ -537,6 +541,12 @@ class ChunkGrid:
         selection_shape : Sequence[int] | None
             The number of chunks per dimension to iterate. Defaults to the
             remaining extent from origin.
+
+        Raises
+        ------
+        IndexError
+            If the selection extends past the grid shape (matching the bounds
+            check of `zarr.core.indexing._iter_grid`).
         """
         if origin is None:
             origin_parsed = (0,) * self.ndim
@@ -548,9 +558,15 @@ class ChunkGrid:
             )
         else:
             selection_shape_parsed = tuple(selection_shape)
-        ranges = tuple(
-            range(o, o + s) for o, s in zip(origin_parsed, selection_shape_parsed, strict=True)
-        )
+        ranges: tuple[range, ...] = ()
+        for idx, (o, g, s) in enumerate(
+            zip(origin_parsed, self.grid_shape, selection_shape_parsed, strict=True)
+        ):
+            if o + s > g:
+                raise IndexError(
+                    f"Invalid selection shape ({s}) for origin ({o}) and grid shape ({g}) at axis {idx}."
+                )
+            ranges += (range(o, o + s),)
         return itertools.product(*ranges)
 
     def iter_chunk_regions(
@@ -769,16 +785,24 @@ def normalize_chunks_nd(
     per dimension covering the full span), and explicit per-dimension lists
     of chunk sizes (regular or rectilinear).
 
-    This is the strict parser for user-supplied chunk specifications; use
-    `ChunkGrid.from_sizes` / `ChunkGrid.from_metadata` for stored metadata,
-    which is validated under more tolerant rules (e.g. trailing edges beyond
-    the array extent).
+    This is the strict parser for user-supplied chunk specifications. Stored
+    chunk grid metadata (`RegularChunkGridMetadata` /
+    `RectilinearChunkGridMetadata`) is accepted as well and is normalized under
+    the tolerant `ChunkGrid.from_sizes` rules instead (e.g. trailing edges
+    beyond the array extent, as left behind by a shrinking resize).
 
     For auto-chunking, use `guess_chunks` which returns a
     `ChunkGrid` directly. `chunks=None` and `chunks=True` are rejected
     here — the caller is responsible for choosing between explicit sizes
     and auto-chunking.
     """
+    from zarr.core.metadata.v3 import RectilinearChunkGridMetadata, RegularChunkGridMetadata
+
+    if isinstance(chunks, RegularChunkGridMetadata):
+        return ChunkGrid.from_sizes(shape, tuple(chunks.chunk_shape))
+    if isinstance(chunks, RectilinearChunkGridMetadata):
+        return ChunkGrid.from_sizes(shape, chunks.chunk_shapes)
+
     if chunks is None or chunks is True:
         raise ValueError(
             f'{chunks!r} is not a valid chunk input. Use chunks=None or chunks="auto" from the top-level API for auto-chunking, or pass an int / tuple of ints.'
