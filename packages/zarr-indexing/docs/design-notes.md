@@ -276,10 +276,13 @@ transform) — takes the pointwise path that collapses the joint block.
 Three limits remain, all intentional and all expected to be lifted:
 
 - **Affine diagonals.** A hand-built transform in which an *index array* and a
-  *slice map* bind the same input dimension, or two slice maps share one, is
-  rejected at resolution with `NotImplementedError`. No selection dialect
-  produces one; supporting them means lowering the slice maps into the joint
-  block too. *Planned.*
+  *slice map* bind the same input dimension is rejected at resolution with
+  `NotImplementedError`; one in which two slice maps share an input dimension
+  is rejected with `ValueError`, since it has no factored form. No selection
+  dialect produces either. Supporting the first means lowering the slice map
+  into the joint block; supporting the second means a strided table per
+  *input* dimension spanning every storage axis that reads it, as
+  TensorStore's does. *Planned.*
 - **Finite explicit bounds only.** `IndexDomain` has no implicit or unbounded
   dimensions; the message layer will normalize a body with `"-inf"`/`"+inf"`
   bounds, but the engine layer refuses to lower one into a transform.

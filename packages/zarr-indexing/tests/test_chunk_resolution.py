@@ -713,6 +713,19 @@ def test_partition_is_memoized_on_the_plan() -> None:
     assert plan.partition() is plan.partition()
 
 
+def test_wide_request_extent_is_preserved() -> None:
+    """A zero-stride map over a domain wider than np.intp touches one cell and keeps its extent."""
+    width = 2**63
+    transform = IndexTransform(
+        domain=IndexDomain((0,), (width,)),
+        output=(DimensionMap(input_dimension=0, offset=3, stride=0),),
+    )
+    (projection,) = plan_chunks(transform, dimension_grids_from_chunks((2,), shape=(5,)))
+    assert projection.chunk_coords == (1,)
+    assert projection.chunk_transform.domain.shape == (width,)
+    assert projection.coverage == "partial"
+
+
 def test_partition_len_is_exact() -> None:
     """Row counts multiply as Python ints; a huge factored plan is never silently empty."""
     plan = plan_chunks(

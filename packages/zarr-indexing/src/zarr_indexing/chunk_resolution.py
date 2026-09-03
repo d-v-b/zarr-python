@@ -257,6 +257,20 @@ def _freeze(*columns: np.ndarray[Any, Any]) -> None:
         column.setflags(write=False)
 
 
+def _wide_column(values: Sequence[int]) -> np.ndarray[Any, np.dtype[np.intp]]:
+    """An ``intp`` column, or an object column of exact ints when a value does not fit.
+
+    Request-domain extents are unbounded Python ints (a zero-stride map over
+    a `(2**63,)` domain is valid and touches one storage cell), so the two
+    columns measured along the request axis keep exact integers rather than
+    imposing a domain-size limit the algebra does not have.
+    """
+    try:
+        return np.array(values, dtype=np.intp)
+    except OverflowError:
+        return cast("np.ndarray[Any, np.dtype[np.intp]]", np.array(values, dtype=object))
+
+
 def _chunk_bounds(
     dg: DimensionGridLike, chunks: np.ndarray[Any, np.dtype[np.intp]]
 ) -> tuple[np.ndarray[Any, np.dtype[np.intp]], np.ndarray[Any, np.dtype[np.intp]]]:
@@ -278,7 +292,10 @@ class StridedSet:
     its cells are request positions ``[origin[i], origin[i] + extent[i])``
     along the input axis, counted from the request domain's lower bound.
 
-    Columns are read-only NumPy arrays.
+    Columns are read-only NumPy arrays. `extent` and `origin` are measured
+    along the request axis, whose bounds are arbitrary Python ints; they are
+    ``intp`` unless a value does not fit, in which case they hold exact ints
+    (``dtype=object``).
 
     Examples
     --------
@@ -548,8 +565,10 @@ def _strided_set(
     rows: list[tuple[int, int, int, int, int, int, bool]] = []
     # Exact Python-int arithmetic per touched chunk: the request's literal
     # coordinates can exceed np.intp before cancellation, and the number of
-    # touched chunks along one axis is a sum, not a product. Every column
-    # stored is chunk-local or positional, so it fits np.intp.
+    # touched chunks along one axis is a sum, not a product. Chunk-local
+    # columns fit np.intp; `extent` and `origin` scale with the request
+    # domain, which has arbitrary Python-int bounds, so they keep exact ints
+    # when they must (`_wide_column`).
     for (c,) in _dimension_map_candidates(m, lo, hi, dg):
         c_start = dg.chunk_offset(c)
         c_extent = _data_size(dg, c)
@@ -575,8 +594,8 @@ def _strided_set(
         chunk_start=np.array(columns[1], dtype=np.intp),
         chunk_extent=np.array(columns[2], dtype=np.intp),
         local_start=np.array(columns[3], dtype=np.intp),
-        extent=np.array(columns[4], dtype=np.intp),
-        origin=np.array(columns[5], dtype=np.intp),
+        extent=_wide_column(columns[4]),
+        origin=_wide_column(columns[5]),
         full=np.array(columns[6], dtype=np.bool_),
     )
 
