@@ -12,6 +12,7 @@ from zarr_indexing import (
     ChunkGrid,
     ChunkPlan,
     ChunkProjection,
+    EdgeDimensionGrid,
     FixedDimension,
     VaryingDimension,
     chunk_resolution,
@@ -564,6 +565,15 @@ def _partition_cases() -> list[tuple[str, IndexTransform, tuple[Any, ...]]]:
         VaryingDimension(edges=(1, 4, 4), extent=9),
         FixedDimension(size=2, extent=5),
     )
+    # Declared edges past the extent: the last chunk's data extent is shorter
+    # than its declared size, which is where `data_size` and `chunk_size` part.
+    clipped = (
+        VaryingDimension(edges=(5, 10), extent=7),
+        VaryingDimension(edges=(4, 4, 4), extent=9),
+        FixedDimension(size=3, extent=5),
+    )
+    # The minimal grid protocol: no `data_size`, so resolution falls back to `chunk_size`.
+    edges = (EdgeDimensionGrid([3, 4]), EdgeDimensionGrid([4, 5]), EdgeDimensionGrid([2, 3]))
     return [
         ("identity", base, fixed),
         ("strided", base[1:6:2, 5:, ::3], fixed),
@@ -576,6 +586,11 @@ def _partition_cases() -> list[tuple[str, IndexTransform, tuple[Any, ...]]]:
         ("oindex one element", base.oindex[np.array([2]), :, :], fixed),
         ("vindex", base.vindex[np.array([0, 6, 6, 1]), np.array([8, 0, 1, 8]), :], fixed),
         ("vindex varying", base.vindex[np.array([0, 6, 6, 1]), np.array([8, 0, 1, 8]), 2], varying),
+        ("strided clipped", base[1:7:2, 5:, ::3], clipped),
+        ("oindex clipped", base.oindex[np.array([6, 0, 6]), 8, 1:5:2], clipped),
+        ("vindex clipped", base.vindex[np.array([6, 6, 1]), np.array([8, 0, 8]), :], clipped),
+        ("strided edge grid", base[1:7:2, 5:, ::3], edges),
+        ("vindex edge grid", base.vindex[np.array([6, 6, 1]), np.array([8, 0, 8]), :], edges),
         (
             "vindex 2-d block",
             base.vindex[
