@@ -33,7 +33,11 @@ from zarr_indexing.chunk_resolution import (
     plan_chunks,
 )
 from zarr_indexing.domain import IndexDomain
-from zarr_indexing.errors import BoundsCheckError, VindexInvalidSelectionError
+from zarr_indexing.errors import (
+    BoundsCheckError,
+    NoBasicSelectionError,
+    VindexInvalidSelectionError,
+)
 from zarr_indexing.grid import (
     ChunkGrid,
     ChunkSpec,
@@ -69,6 +73,7 @@ from zarr_indexing.reader import (
     unit_step_reader,
 )
 from zarr_indexing.transform import (
+    BasicSelection,
     IndexTransform,
 )
 
@@ -77,6 +82,7 @@ __version__ = version("zarr-indexing")
 __all__ = [
     "ArrayMap",
     "BasicReader",
+    "BasicSelection",
     "BoundsCheckError",
     "ChunkCoverage",
     "ChunkGrid",
@@ -95,6 +101,7 @@ __all__ = [
     "IndexTransformJSON",
     "LazyArray",
     "NdselError",
+    "NoBasicSelectionError",
     "NumPyReader",
     "OutputIndexMap",
     "OutputIndexMapJSON",

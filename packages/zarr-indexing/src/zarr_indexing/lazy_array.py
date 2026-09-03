@@ -133,8 +133,10 @@ compute graph.
 Ownership
 ---------
 `result()` always allocates fresh system memory before reading through the
-selected reader. A `numpy.ma` source keeps its mask by receiving a masked
-output buffer; other source-specific array types do not survive materializing.
+selected reader. `result_into(out)` is the non-allocating form: the caller's
+buffer is validated against the view's shape and dtype, filled in place, and
+returned. A `numpy.ma` source keeps its mask by receiving a masked output
+buffer; other source-specific array types do not survive materializing.
 """
 
 from __future__ import annotations
@@ -145,7 +147,7 @@ import math
 import operator
 import uuid
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import numpy as np
@@ -168,11 +170,14 @@ from zarr_indexing.reader import (
     numpy_reader,
 )
 from zarr_indexing.transform import (
+    BasicSelection,
     IndexTransform,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
+
+    from zarr_indexing.domain import IndexDomain
 
     SelectFn = Callable[[Any, SelectionMode], "LazyArray"]
 
@@ -294,6 +299,64 @@ def _is_identity_transform(transform: IndexTransform, shape: tuple[int, ...]) ->
 @dataclass(frozen=True, slots=True, eq=False)
 class _PartOwner:
     """Opaque identity shared only by one view and the parts it prepared."""
+
+
+def _overlaps(out: np.ndarray[Any, Any], array: Any) -> bool:
+    """Whether `out` and `array` can be writing and reading the same memory.
+
+    Only NumPy sources can be compared this way; anything else reaches its
+    data through its own machinery, where sharing memory with a result buffer
+    is not expressible.
+    """
+    if not isinstance(array, np.ndarray):
+        return False
+    # The cheap bounds test first: an exact answer can cost real work, and it
+    # is only needed once the two are known to occupy overlapping memory.
+    return bool(np.may_share_memory(out, array)) and bool(np.shares_memory(out, array))
+
+
+def _has_internal_overlap(out: np.ndarray[Any, Any]) -> bool:
+    """Whether distinct logical cells of ``out`` may share storage.
+
+    NumPy exposes exact overlap checks between two arrays, but not within one
+    strided array. Prove the common layouts disjoint by walking axes from the
+    smallest absolute stride outward: each next axis must begin beyond the
+    complete byte span reachable through the axes already seen. Standard
+    slices, reversals, and transposes satisfy this proof. Ambiguous exotic
+    layouts are rejected along with layouts that definitely overlap; accepting
+    one would make ``result_into`` silently return a buffer whose logical cells
+    cannot hold distinct result values.
+    """
+    if out.size <= 1 or out.dtype.itemsize == 0:
+        return False
+    byte_span = out.dtype.itemsize
+    axes = sorted(
+        (abs(stride), extent)
+        for extent, stride in zip(out.shape, out.strides, strict=True)
+        if extent > 1
+    )
+    for stride, extent in axes:
+        if stride < byte_span:
+            return True
+        byte_span += (extent - 1) * stride
+    return False
+
+
+def _translated_domain(domain: IndexDomain, window: tuple[slice, ...]) -> IndexDomain:
+    """`domain`, expressed in the coordinates `window` was cut from.
+
+    Moving a region does not rename its axes, so `replace` carries everything
+    but the bounds — the labels among them — through unchanged.
+    """
+    return replace(
+        domain,
+        inclusive_min=tuple(
+            w.start + lo for w, lo in zip(window, domain.inclusive_min, strict=True)
+        ),
+        exclusive_max=tuple(
+            w.start + hi for w, hi in zip(window, domain.exclusive_max, strict=True)
+        ),
+    )
 
 
 def _partition_out_selection(
@@ -432,9 +495,18 @@ class Partition:
         domain, mapping each selected cell to chunk-local storage and request
         coordinates respectively. This is the authoritative placement model;
         `base_coords` and `is_complete` are conveniences derived from it.
+        `chunk_domain` locates the cell in the wrapped array's own global
+        coordinates, while `chunk_coords` names it in the grid the producing
+        view partitions — the two differ once a view partitions a window of
+        the source rather than the whole of it.
     base_coords
-        Which box of the base partitioning this is, one coordinate per dimension
-        of the wrapped array.
+        Which box of the base partitioning this is, one coordinate per
+        dimension of the wrapped array. A cell coordinate in the producing
+        view's grid, so it identifies a chunk of the source only for a view
+        that partitions the whole source (`base_shape` equals the source's
+        shape) with the source's own grid. A cache keyed on it must therefore
+        be keyed on that grid too, or on `projection.chunk_domain`, which is
+        global.
     box
         The box itself, in the global storage coordinates of the wrapped
         array: one `[inclusive_min, exclusive_max)` interval per dimension. It
@@ -446,9 +518,18 @@ class Partition:
         A `LazyArray` covering exactly the cells of the view that live in this
         box. Its transform directly addresses its raw wrapped `array`; only the
         projection's `chunk_transform` is chunk-local. Resolving the view reads
-        the box once through its selected reader. Named `view` rather than
-        `array` because `LazyArray.array` is the opposite thing — the raw
-        wrapped source — and the two sat next to each other meaning inverses.
+        the box once through its selected reader, handing it exactly the
+        `ReadContext` the parent view's partitioned `result()` passes, so a
+        reader keyed on `chunk_coords` behaves identically on either path.
+        That context carries this partition's `projection` when the parent
+        partitions the source itself; a part of a part partitions a window,
+        whose cell coordinates would name the wrong chunk of the source, so it
+        pairs with no projection and a projection-keyed reader refuses it
+        rather than reading the wrong cell. A further `.lazy` selection
+        describes a different read and drops the pairing too. Named
+        `view` rather than `array` because `LazyArray.array` is the opposite
+        thing — the raw wrapped source — and the two sat next to each other
+        meaning inverses.
     out_selection
         Where `view.result()` belongs in an array of the whole view's shape — a
         NumPy index tuple with one entry per dimension of the view, usable
@@ -488,6 +569,79 @@ class Partition:
     def is_complete(self) -> bool:
         """Whether the projection proves it covers the entire selected cell."""
         return self.projection.coverage == "full"
+
+    @property
+    def source_selection(self) -> BasicSelection:
+        """The basic selection on the raw wrapped array that reads this part.
+
+        Lowered from `view.transform` by
+        [`IndexTransform.as_basic_selection`][zarr_indexing.transform.IndexTransform.as_basic_selection],
+        so the coordinates are global to `view.array` and
+        `view.array[part.source_selection]` reads the same block
+        `view.result()` reads, in the same order. This is the request to hand
+        to a consumer-owned I/O layer whose vocabulary is a basic selection
+        rather than a transform. When that backend accepts NumPy's complete
+        basic-selection dialect, assembly is one line per part:
+
+        ```python
+        out[part.out_selection] = await source.getitem(part.source_selection)
+        ```
+
+        A query part has no slab to request and raises
+        [`NoBasicSelectionError`][zarr_indexing.errors.NoBasicSelectionError],
+        as do the two degenerate boxes with no basic-selection spelling: an
+        axis restored by repetition (reached by gathering a collapsed constant
+        with duplicates) and an axis broadcast from one cell. `view.is_box` is
+        therefore necessary but not sufficient — catching the error is what
+        decides it — and a consumer mixing selection kinds falls back to
+        `view.result()` for the parts that refuse. The dedicated subclass of
+        `ValueError` keeps that fallback from absorbing a genuine defect. A
+        consumer that must stay on its own I/O path even for query parts can
+        instead fetch the cover half of
+        [`view.transform.decompose()`][zarr_indexing.transform.IndexTransform.decompose]
+        and finish the gather in memory. A reversing view lowers to
+        a negative-step slice and a fabricated axis to `None`, which a backend
+        narrower than NumPy may not accept.
+
+        Examples
+        --------
+        >>> import numpy as np
+        >>> view = LazyArray.from_numpy(np.arange(12).reshape(3, 4)).with_parts((2, 2))
+        >>> [part.source_selection for part in view.lazy[1:, ::2].parts()]
+        [(slice(1, 2, 1), slice(0, 1, 2)), (slice(1, 2, 1), slice(2, 3, 2)), \
+(slice(2, 3, 1), slice(0, 1, 2)), (slice(2, 3, 1), slice(2, 3, 2))]
+        """
+        return self.view.transform.as_basic_selection()
+
+    @property
+    def chunk_local_selection(self) -> BasicSelection:
+        """The same read as `source_selection`, relative to the part's grid cell.
+
+        Lowered from `projection.chunk_transform`, so coordinate 0 per axis is
+        `projection.chunk_domain`'s origin. For a consumer that caches decoded
+        cells, this is the selection to apply to a cached cell: with `cell`
+        holding `view.array[projection.chunk_domain]` — the domain is global,
+        so that read is the same whatever narrowed the view —
+        `cell[part.chunk_local_selection]` yields the same values as
+        `view.array[part.source_selection]`, and both land at `out_selection`
+        in the request buffer. `base_coords` keys such a cache only for a view
+        partitioning the whole source; see its own note.
+
+        Defined exactly when `source_selection` is: the two lower the same
+        maps, so a part that refuses one spelling refuses both.
+
+        Examples
+        --------
+        >>> import numpy as np
+        >>> view = LazyArray.from_numpy(np.arange(12).reshape(3, 4)).with_parts((2, 2))
+        >>> part = next(view.lazy[1:, :2].parts())
+        >>> (part.base_coords, part.source_selection, part.chunk_local_selection)
+        ((0, 0), (slice(1, 2, 1), slice(0, 2, 1)), (slice(1, 2, 1), slice(0, 2, 1)))
+        >>> part = next(view.lazy[2:, :2].parts())
+        >>> (part.base_coords, part.source_selection, part.chunk_local_selection)
+        ((1, 0), (slice(2, 3, 1), slice(0, 2, 1)), (slice(0, 1, 1), slice(0, 2, 1)))
+        """
+        return self.projection.chunk_transform.as_basic_selection()
 
 
 def _validate_prepared_parts(parts: Sequence[Partition], out_shape: tuple[int, ...]) -> None:
@@ -629,7 +783,15 @@ class LazyArray:
            [ 8, 10]])
     """
 
-    __slots__ = ("_array", "_part_owner", "_parts", "_reader", "_transform", "_window")
+    __slots__ = (
+        "_array",
+        "_part_owner",
+        "_parts",
+        "_projection",
+        "_reader",
+        "_transform",
+        "_window",
+    )
 
     def __init__(self, array: _WrappedArray) -> None:
         """Wrap `array` without reading it; parameters are documented on the class.
@@ -653,6 +815,7 @@ class LazyArray:
         self._transform = IndexTransform.from_shape(shape)
         self._parts = _discover_parts(array, shape)
         self._reader = basic_reader
+        self._projection: ChunkProjection | None = None
         self._part_owner = _PartOwner()
 
     @classmethod
@@ -672,8 +835,16 @@ class LazyArray:
         parts: tuple[DimensionGrid, ...] | None,
         window: tuple[slice, ...] | None,
         reader: Reader,
+        projection: ChunkProjection | None = None,
     ) -> LazyArray:
-        """Build a wrapper sharing `array` but carrying a new transform or partitioning."""
+        """Build a wrapper sharing `array` but carrying a new transform or partitioning.
+
+        `projection` is the paired partition plan when the wrapper is a
+        `Partition.view`; it rides along so an unpartitioned `result()` hands
+        the reader the same `ReadContext` the parent's partitioned read would.
+        A new selection describes a different read, so `_select` leaves it at
+        the default `None`.
+        """
         view = cls.__new__(cls)
         view._array = array
         # Views re-zero their coordinate system: the positional dialect means a
@@ -682,6 +853,7 @@ class LazyArray:
         view._parts = parts
         view._window = window
         view._reader = reader
+        view._projection = projection
         view._part_owner = _PartOwner()
         return view
 
@@ -752,6 +924,7 @@ class LazyArray:
             self._parts,
             self._window,
             reader,
+            self._projection,
         )
 
     # -- shape of the selection ---------------------------------------------
@@ -1009,7 +1182,9 @@ class LazyArray:
         return self._with_grids(None)
 
     def _with_grids(self, grids: tuple[DimensionGrid, ...] | None) -> LazyArray:
-        return LazyArray._derive(self._array, self._transform, grids, self._window, self._reader)
+        return LazyArray._derive(
+            self._array, self._transform, grids, self._window, self._reader, self._projection
+        )
 
     def parts(self) -> Iterator[Partition]:
         """Iterate the base partitioning, projected through this view.
@@ -1050,9 +1225,9 @@ class LazyArray:
         else:
             plan_transform = self._transform.translate(tuple(-item.start for item in self._window))
 
-        for projection in plan_chunks(plan_transform, grids):
-            base_coords = projection.chunk_coords
-            local = projection.chunk_transform
+        for planned in plan_chunks(plan_transform, grids):
+            base_coords = planned.chunk_coords
+            local = planned.chunk_transform
             origin = tuple(grid.chunk_offset(c) for grid, c in zip(grids, base_coords, strict=True))
             extent = tuple(grid.data_size(c) for grid, c in zip(grids, base_coords, strict=True))
             if origin == (0,) * rank and extent == base_shape:
@@ -1070,8 +1245,17 @@ class LazyArray:
             # `window`: a part covering the whole base carries no window (so
             # nothing is pre-materialized) but still sits somewhere concrete.
             if self._window is None:
+                projection = planned
                 global_origin = origin
             else:
+                # A windowed view partitions its window, so the walk names the
+                # cell in window coordinates. `chunk_domain` promises global
+                # storage coordinates, and `chunk_local_selection` is only the
+                # cell's own read if the cell it names is the one the source
+                # holds, so translate it back onto the source.
+                projection = replace(
+                    planned, chunk_domain=_translated_domain(planned.chunk_domain, self._window)
+                )
                 global_origin = tuple(
                     w.start + o for w, o in zip(self._window, origin, strict=True)
                 )
@@ -1084,6 +1268,12 @@ class LazyArray:
                     None,
                     window,
                     self._reader,
+                    # `chunk_coords` addresses this view's own grid, which is
+                    # the source's own only when nothing narrowed the base.
+                    # Handing a reader that keys on it a cell coordinate of a
+                    # grid over a window would fetch the wrong chunk, so a
+                    # part of a part pairs with no projection at all.
+                    projection if self._window is None else None,
                 ),
                 out_selection=_partition_out_selection(projection.cell_transform),
                 _owner=self._part_owner,
@@ -1133,7 +1323,9 @@ class LazyArray:
         Every result starts as a fresh system-memory buffer. Each touched
         partition is read through the selected reader directly into its
         rectangular destination, or into an owned dense temporary before fancy
-        placement. Empty views allocate without reading the source.
+        placement. Empty views allocate without reading the source. To fill a
+        buffer the caller already owns instead, use
+        [`result_into`][zarr_indexing.lazy_array.LazyArray.result_into].
 
         Parameters
         ----------
@@ -1159,6 +1351,123 @@ class LazyArray:
             If this library's own partition walk fails to cover the view — a
             bug in zarr-indexing, never a consequence of the caller's input.
         """
+        prepared_parts = self._prepared_parts(parts)
+        return self._read_into_buffer(self._output_buffer(self.shape), prepared_parts)
+
+    def result_into(
+        self, out: np.ndarray[Any, Any], *, parts: Sequence[Partition] | None = None
+    ) -> Any:
+        """Materialize this view into a buffer the caller owns.
+
+        The non-allocating form of
+        [`result`][zarr_indexing.lazy_array.LazyArray.result]: `out` is
+        validated, filled in place, and returned, and no output buffer is
+        allocated here — a consumer assembling many views into one array, or
+        holding a pool of reusable tile buffers, decides where results live.
+        (A part whose placement is fancy still gathers through an owned dense
+        temporary before scattering, exactly as `result()` does.)
+
+        Every cell of `out` is overwritten exactly once. If a reader raises
+        midway, `out` is left partially written.
+
+        Parameters
+        ----------
+        out
+            A writable `numpy.ndarray` of exactly `self.shape` and this view's
+            dtype, with distinct storage for its logical cells and not
+            overlapping the wrapped array. A view into a larger array
+            qualifies, so a part's result can land directly in its slot:
+
+            ```python
+            if all(isinstance(s, slice) for s in part.out_selection):
+                part.view.result_into(final[part.out_selection])
+            else:
+                final[part.out_selection] = part.view.result()
+            ```
+
+            The branch is the whole contract: `final[part.out_selection]` is a
+            writable view only while every selector is a slice, and NumPy hands
+            back a *copy* for a fancy `out_selection` — which this method would
+            dutifully fill and return, leaving `final` untouched. It cannot
+            tell the two apart; only the caller knows what `final` was.
+
+            A masked source requires a `numpy.ma` buffer — what `result()`
+            would allocate for it — since a plain one drops the mask.
+        parts
+            A reusable sequence previously returned by this exact view's
+            `parts()` method, exactly as for `result`.
+
+        Returns
+        -------
+        numpy.ndarray
+            The `out` object that was passed in, filled.
+
+        Raises
+        ------
+        TypeError
+            If `out` is not a `numpy.ndarray`.
+        ValueError
+            If `out` has the wrong shape or dtype, is read-only, has an
+            internally overlapping memory layout, is unmasked for a masked
+            source, or shares memory with the wrapped array; or if supplied
+            parts were prepared by another view or do not tile this view
+            exactly.
+        AssertionError
+            If this library's own partition walk fails to cover the view — a
+            bug in zarr-indexing, never a consequence of the caller's input.
+
+        Examples
+        --------
+        >>> import numpy as np
+        >>> source = np.arange(12).reshape(3, 4)
+        >>> view = LazyArray.from_numpy(source).lazy[1:, ::2]
+        >>> out = np.empty(view.shape, dtype=view.dtype)
+        >>> returned = view.result_into(out)
+        >>> returned is out
+        True
+        >>> out
+        array([[ 4,  6],
+               [ 8, 10]])
+        """
+        out_shape = self.shape
+        if not isinstance(cast(object, out), np.ndarray):
+            raise TypeError(f"out must be a numpy.ndarray, got {type(out).__name__}")
+        if tuple(out.shape) != out_shape:
+            raise ValueError(
+                f"out has shape {tuple(out.shape)}, but this view has shape {out_shape}"
+            )
+        if out.dtype != np.dtype(self.dtype):
+            raise ValueError(
+                f"out has dtype {out.dtype}, but this view has dtype {np.dtype(self.dtype)}"
+            )
+        if not out.flags.writeable:
+            raise ValueError("out is read-only; result_into writes every cell of it")
+        if _has_internal_overlap(out):
+            raise ValueError(
+                "out has overlapping elements; distinct cells of this view need "
+                "distinct destination storage"
+            )
+        if isinstance(self._array, np.ma.MaskedArray) and not isinstance(out, np.ma.MaskedArray):
+            # dtypes match, so nothing above rejects a plain buffer, and the
+            # reader would write the values under the mask into it as if they
+            # were data.
+            raise ValueError(  # noqa: TRY004 - an ndarray, just not one this view fits
+                "out must be a numpy.ma.MaskedArray for a masked source; a plain "
+                "ndarray cannot carry the mask, and the values beneath it are not data"
+            )
+        if _overlaps(out, self._array):
+            # Parts are read in walk order, so a destination overlapping the
+            # source is read after earlier parts have already overwritten the
+            # cells it covers — silently, and differently per partitioning.
+            raise ValueError(
+                "out shares memory with the wrapped array; reading a view into "
+                "the array it reads from would overwrite cells later parts read"
+            )
+        prepared_parts = self._prepared_parts(parts)
+        return self._read_into_buffer(out, prepared_parts)
+
+    def _prepared_parts(self, parts: Sequence[Partition] | None) -> tuple[Partition, ...] | None:
+        """Validate a caller-supplied partition plan against this view."""
         prepared_parts = None if parts is None else tuple(parts)
         if prepared_parts is not None and any(
             # Module-private provenance deliberately crosses the two public
@@ -1168,16 +1477,27 @@ class LazyArray:
         ):
             raise ValueError("prepared parts do not belong to this view")
 
-        out_shape = self.shape
         if prepared_parts is not None:
-            _validate_prepared_parts(prepared_parts, out_shape)
-        out = self._output_buffer(out_shape)
+            _validate_prepared_parts(prepared_parts, self.shape)
+        return prepared_parts
+
+    def _read_into_buffer(self, out: Any, prepared_parts: tuple[Partition, ...] | None) -> Any:
+        """Read this view into `out`, part by part, and return `out`."""
+        out_shape = self.shape
         size = math.prod(out_shape)
         if size == 0:
             return out
 
-        if prepared_parts is None and self._parts is None:
-            _invoke_reader(self._reader, self._array, ReadContext(self._transform), out)
+        if self._parts is None:
+            # An unpartitioned view's walk is the single part that is the view
+            # itself, so reading it directly is the same read — and the only
+            # one that keeps the projection this view was paired with. Going
+            # through the loop would hand the reader the walk's freshly
+            # synthesized whole-base projection instead, making a supplied
+            # `parts=` plan read differently from the plain call.
+            _invoke_reader(
+                self._reader, self._array, ReadContext(self._transform, self._projection), out
+            )
             return out
 
         written = 0
@@ -1195,7 +1515,12 @@ class LazyArray:
             _invoke_reader(
                 self._reader,
                 self._array,
-                ReadContext(part.view.transform, part.projection),
+                # The part view's own pairing, not `part.projection`: the two
+                # agree wherever the projection describes a read of the source
+                # itself, and taking it from the view is what makes resolving
+                # the part here and resolving it alone the same read by
+                # construction rather than by coincidence.
+                ReadContext(part.view.transform, part.view._projection),
                 destination,
             )
             if not direct:

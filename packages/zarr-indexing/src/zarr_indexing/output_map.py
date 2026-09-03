@@ -130,6 +130,30 @@ class DimensionMap:
     stride: int = 1
     """The output-coordinate step per unit input step; negative walks backward, zero repeats `offset`."""
 
+    def endpoints(self, inclusive_min: int, exclusive_max: int) -> tuple[int, int] | None:
+        """The first and last output coordinates reached over a domain interval.
+
+        `None` for an empty interval, which reaches no coordinate at all — the
+        one case with nothing to name, and the reason this is not two calls to
+        `checked_affine` at each site that needs the pair. A descending map
+        reports them in the order it walks them, so `first` may exceed `last`.
+
+        Examples
+        --------
+        >>> DimensionMap(input_dimension=0, offset=2, stride=3).endpoints(0, 4)
+        (2, 11)
+        >>> DimensionMap(input_dimension=0, offset=9, stride=-2).endpoints(0, 3)
+        (9, 5)
+        >>> DimensionMap(input_dimension=0).endpoints(4, 4) is None
+        True
+        """
+        if exclusive_max <= inclusive_min:
+            return None
+        return (
+            checked_affine(self.offset, self.stride, inclusive_min),
+            checked_affine(self.offset, self.stride, exclusive_max - 1),
+        )
+
     def to_json(self) -> OutputIndexMapJSON:
         """Convert to the canonical wire form: the `single_input_dimension` map.
 

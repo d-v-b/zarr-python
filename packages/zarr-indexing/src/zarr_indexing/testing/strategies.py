@@ -37,6 +37,7 @@ __all__ = [
     "basic_selections",
     "empty_masks",
     "masks",
+    "newaxis_selections",
     "orthogonal_selections",
     "slice_selections",
     "vectorized_selections",
@@ -136,6 +137,27 @@ def basic_selections(shape: tuple[int, ...]) -> st.SearchStrategy[tuple[Any, ...
     is off the front of the axis.
     """
     return _entries(shape, _basic_entry)
+
+
+@st.composite
+def newaxis_selections(draw: st.DrawFn, shape: tuple[int, ...]) -> tuple[Any, ...]:
+    """Basic selections carrying `None`, the selector that fabricates an axis.
+
+    NumPy's `None` belongs to basic indexing and `LazyArray` admits it, but it
+    is the one basic selector that adds an axis of the view no axis of the
+    source backs — a domain axis no output map reads, which everything
+    downstream must then produce out of nothing. `basic_selections` promises
+    one entry per axis, so the spelling that breaks that count is drawn here
+    instead of widening it.
+
+    A selection carries one or two of them, in any position: leading, between
+    two axes, or trailing, each of which lands the fabricated axis somewhere
+    different in the result.
+    """
+    entries = list(draw(basic_selections(shape)))
+    for _ in range(draw(st.integers(1, 2))):
+        entries.insert(draw(st.integers(0, len(entries))), None)
+    return tuple(entries)
 
 
 def orthogonal_selections(shape: tuple[int, ...]) -> st.SearchStrategy[tuple[Any, ...]]:
