@@ -656,9 +656,27 @@ def blocking_problems(
     return tuple(problem for problem in problems if problem.kind != "unknown_key")
 
 
+def is_valid_known_codec_name(value: object) -> str | None:
+    """The codec name of `value` if it is a valid known codec, else None.
+
+    The single primitive behind the `TypeIs` guards in
+    `zarr_metadata.v3.codec.kind`: a non-None answer certifies that
+    `value` is an instance of the named codec's canonical metadata type.
+    `TypeIs` narrowing is two-sided, so the shape verdict must be exact:
+    a value carrying an extra member is not an instance of a closed
+    TypedDict, and is refused here even though the rules layer reports it
+    as a non-blocking `unknown_key`.
+    """
+    problems = validate_known_codec_metadata(value)
+    if problems is None or len(problems) != 0:
+        return None
+    return entity_name(value)
+
+
 __all__ = [
     "blocking_problems",
     "entity_name",
+    "is_valid_known_codec_name",
     "modelled_entities",
     "validate_known_chunk_grid_metadata",
     "validate_known_codec_metadata",

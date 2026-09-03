@@ -5,10 +5,14 @@ document TypedDict: required keys and value types are checked statically
 at literal-keyword call sites, and the runtime pass normalizes the input
 and applies structural and composition validation, raising one
 `MetadataValidationError` carrying every problem.
+`ZarrV3ArrayMetadataBuilder` supports incremental v3 array construction,
+running applicable composition rules after each update and checking
+completeness at `build()`.
 
 Use `zarr_metadata.rules` to validate documents read from storage.
 """
 
+from zarr_metadata.builder._array_v3 import ZarrV3ArrayMetadataBuilder
 from zarr_metadata.builder._create import (
     create_zarr_v2_array_metadata_json,
     create_zarr_v2_consolidated_metadata_json,
@@ -21,6 +25,7 @@ from zarr_metadata.builder._create import (
 )
 
 __all__ = [
+    "ZarrV3ArrayMetadataBuilder",
     "create_zarr_v2_array_metadata_json",
     "create_zarr_v2_consolidated_metadata_json",
     "create_zarr_v2_group_metadata_json",

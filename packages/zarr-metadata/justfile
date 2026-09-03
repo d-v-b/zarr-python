@@ -21,7 +21,7 @@ pyright_version := "1.1.404"
 # stdlib it cannot parse, so pin the interpreter to match CI.
 # Type-check the package sources
 typecheck:
-    uv run --python 3.11 --group test --with 'pyright=={{ pyright_version }}' pyright src
+    uv run --python 3.11 --group test --with 'pyright=={{ pyright_version }}' pyright src examples
 
 # Run everything CI runs for this package
 check: lint typecheck test docs-check
