@@ -1284,6 +1284,7 @@ def test_shard_reader_to_dict_vectorized(chunks_per_shard: tuple[int, ...]) -> N
         pytest.param(
             (np.array([3, 1, 2]), np.array([0, 2]), np.array([1, 3])), id="3d-arr-arr-arr"
         ),
+        pytest.param((np.array([3]), np.array([0, 2]), 1), id="3d-arr1-arr-int"),
     ],
 )
 def test_sharding_orthogonal_set_multiple_array_dims(
@@ -1336,3 +1337,47 @@ def test_sharding_orthogonal_set_multiple_array_dims(
         expected[ix] = value.reshape(expected[ix].shape)
         assert np.array_equal(a[:], expected)
         assert np.array_equal(a.oindex[selection], value)
+
+
+@pytest.mark.parametrize(
+    "pipeline_path",
+    [
+        "zarr.core.codec_pipeline.FusedCodecPipeline",
+        "zarr.core.codec_pipeline.BatchedCodecPipeline",
+    ],
+)
+@pytest.mark.parametrize(
+    ("kind", "selection", "value_shape"),
+    [
+        pytest.param("vindex", np.eye(4, dtype=bool), (2, 2), id="mask-2d-value"),
+        pytest.param(
+            "oindex", (np.array([3, 1, 2]), np.array([0, 2])), (3, 2, 1), id="oindex-extra-axis"
+        ),
+    ],
+)
+def test_sharding_set_rejects_value_with_wrong_rank(
+    kind: str, selection: Any, value_shape: tuple[int, ...], pipeline_path: str
+) -> None:
+    """A value whose rank does not fit the selection fails on sharded arrays too.
+
+    The sharding codec ravels a multi-dimensional value for a coordinate
+    selection only when that value is the selection's broadcast shape minus
+    integer-indexed axes. A 2-D value for a mask, or an orthogonal value with
+    an axis the selection lacks, is rejected on an unsharded array and must not
+    be silently accepted on a sharded one just because the element count
+    matches.
+    """
+    value = np.arange(math.prod(value_shape), dtype="int32").reshape(value_shape)
+    with zarr.config.set({"codec_pipeline.path": pipeline_path}):
+        a = zarr.create_array(
+            MemoryStore(),
+            shape=(4, 4),
+            chunks=(4, 4),
+            dtype="int32",
+            serializer=ShardingCodec(chunk_shape=(2, 2), codecs=(BytesCodec(),)),
+            compressors=None,
+            fill_value=0,
+        )
+        with pytest.raises(ValueError, match="shape mismatch"):
+            getattr(a, kind)[selection] = value
+        assert np.all(a[:] == 0)

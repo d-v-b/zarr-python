@@ -400,6 +400,25 @@ class _ShardReader(ShardMapping):
         return result
 
 
+def _drops_only_unit_axes(shape: tuple[int, ...], full: tuple[int, ...]) -> bool:
+    """Return whether ``shape`` is ``full`` with zero or more length-1 axes removed.
+
+    ``(2, 2)`` is ``(2, 1, 2)`` minus its unit axis, and ``(1, 2)`` is
+    ``(1, 2, 1)`` minus its last; ``(2, 2)`` is not ``(4,)``, and
+    ``(3, 2, 1)`` is not ``(3, 2)`` because it adds an axis.
+    """
+    remaining = iter(full)
+    for size in shape:
+        for full_size in remaining:
+            if full_size == size:
+                break
+            if full_size != 1:
+                return False
+        else:
+            return False
+    return all(full_size == 1 for full_size in remaining)
+
+
 @dataclass(frozen=True)
 class ShardingCodec(
     ArrayBytesCodec, ArrayBytesCodecPartialDecodeMixin, ArrayBytesCodecPartialEncodeMixin
@@ -1416,12 +1435,20 @@ class ShardingCodec(
 
         ``get_indexer`` classifies a tuple of integer arrays as a coordinate
         selection, and a ``CoordinateIndexer`` addresses the value buffer as
-        1-D. The caller shaped ``value`` like the selection it came from: an
-        ``OrthogonalIndexer`` hands down an ``np.ix_`` tuple with a value of
-        the broadcast shape, minus any integer-indexed axes it dropped. So the
-        value can have any number of dimensions but the same element count and
-        C order as the coordinate indexer's flattened projections; ravel it.
-        Scalars pass through and are broadcast downstream.
+        1-D. An ``OrthogonalIndexer`` with two or more array-indexed axes hands
+        down an ``np.ix_`` tuple, so ``sel_shape`` is N-D, while the caller
+        shaped ``value`` like the orthogonal result: the broadcast shape minus
+        the integer-indexed axes, which ``np.ix_`` keeps as length-1 axes. That
+        value has the element count and C order of the flattened projections,
+        so ravel it.
+
+        Only that value shape is ravelled. A mask or coordinate selection
+        arrives with a 1-D ``sel_shape`` and a value that must already be flat,
+        and an orthogonal value with an axis the selection does not have is
+        invalid. Both are left alone so the write fails the same way it does
+        on an unsharded array; the shard-level selection alone cannot tell
+        orthogonal from mask indexing, the value shape can. Scalars pass
+        through and are broadcast downstream.
 
         The partial-decode paths apply the inverse reshape, to
         ``indexer.sel_shape``, on the way out.
@@ -1432,7 +1459,11 @@ class ShardingCodec(
             shape=shard_shape,
             chunk_grid=ChunkGrid.from_sizes(shard_shape, self.chunk_shape),
         )
-        if isinstance(indexer, CoordinateIndexer) and len(value.shape) > 1:
+        if (
+            isinstance(indexer, CoordinateIndexer)
+            and len(value.shape) > 1
+            and _drops_only_unit_axes(value.shape, indexer.sel_shape)
+        ):
             value = value.reshape(indexer.shape)
         return list(indexer), value
 
