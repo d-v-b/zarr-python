@@ -14,8 +14,9 @@ For the field-level "any codec entry" alias (used in array metadata's
 `codecs` list and in sharding's inner pipelines), import `ZarrV3MetadataFieldJSON`
 from `zarr_metadata.v3`.
 
-The `kind` submodule sorts the known codec names into the spec's three
-pipeline kinds (`array -> array`, `array -> bytes`, `bytes -> bytes`).
+The `kind` submodule sorts the known codecs into the spec's three pipeline
+kinds (`array -> array`, `array -> bytes`, `bytes -> bytes`); its kind
+unions and `TypeIs` classification guards are re-exported here.
 
 See https://zarr-specs.readthedocs.io/en/latest/v3/codecs/index.html
 """
@@ -29,8 +30,14 @@ from zarr_metadata.v3.codec.kind import (
     ARRAY_ARRAY_CODEC_NAMES,
     ARRAY_BYTES_CODEC_NAMES,
     BYTES_BYTES_CODEC_NAMES,
-    CodecKind,
-    codec_kind_of_name,
+    ArrayArrayCodecMetadata,
+    ArrayBytesCodecMetadata,
+    BytesBytesCodecMetadata,
+    KnownCodecMetadata,
+    is_array_array_codec,
+    is_array_bytes_codec,
+    is_bytes_bytes_codec,
+    is_known_codec,
 )
 from zarr_metadata.v3.codec.scale_offset import ScaleOffsetCodecMetadata
 from zarr_metadata.v3.codec.sharding_indexed import ShardingIndexedCodecMetadata
@@ -41,15 +48,21 @@ __all__ = [
     "ARRAY_ARRAY_CODEC_NAMES",
     "ARRAY_BYTES_CODEC_NAMES",
     "BYTES_BYTES_CODEC_NAMES",
+    "ArrayArrayCodecMetadata",
+    "ArrayBytesCodecMetadata",
     "BloscCodecMetadata",
+    "BytesBytesCodecMetadata",
     "BytesCodecMetadata",
     "CastValueCodecMetadata",
-    "CodecKind",
     "Crc32cCodecMetadata",
     "GzipCodecMetadata",
+    "KnownCodecMetadata",
     "ScaleOffsetCodecMetadata",
     "ShardingIndexedCodecMetadata",
     "TransposeCodecMetadata",
     "ZstdCodecMetadata",
-    "codec_kind_of_name",
+    "is_array_array_codec",
+    "is_array_bytes_codec",
+    "is_bytes_bytes_codec",
+    "is_known_codec",
 ]
