@@ -57,6 +57,7 @@ from zarr.core.dtype.npy.structured import Struct
 from zarr.core.indexing import (
     BasicIndexer,
     ChunkProjection,
+    CoordinateIndexer,
     SelectorTuple,
     SliceDimIndexer,
     _lexicographic_order,
@@ -791,23 +792,11 @@ class ShardingCodec(
         Loads the existing shard, merges the written region into the affected
         inner chunks, and rewrites the whole shard.
         """
-        shard_shape = shard_spec.shape
         chunks_per_shard = self._get_chunks_per_shard(shard_spec)
         chunk_spec = self._get_chunk_spec(shard_spec)
         inner_transform = self._get_inner_chunk_transform(shard_spec)
 
-        shard_indexer = get_indexer(
-            selection,
-            shape=shard_shape,
-            chunk_grid=ChunkGrid.from_sizes(shard_shape, self.chunk_shape),
-        )
-        # A coordinate indexer flattens the selection, so its projections address
-        # `value` as 1-D while the caller shaped it like `sel_shape`. Mirrors the
-        # reshape `_encode_partial_single` applies on the async path.
-        sel_shape = getattr(shard_indexer, "sel_shape", None)
-        if sel_shape is not None and value.shape == sel_shape:
-            value = value.reshape(shard_indexer.shape)
-        indexer = list(shard_indexer)
+        indexer, value = self._get_shard_indexer_and_value(selection, shard_spec, value)
 
         is_complete = self._is_complete_shard_write(indexer, chunks_per_shard)
 
@@ -1359,23 +1348,10 @@ class ShardingCodec(
         selection: SelectorTuple,
         shard_spec: ArraySpec,
     ) -> None:
-        shard_shape = shard_spec.shape
-        chunk_shape = self.chunk_shape
         chunks_per_shard = self._get_chunks_per_shard(shard_spec)
         chunk_spec = self._get_chunk_spec(shard_spec)
 
-        shard_indexer = get_indexer(
-            selection,
-            shape=shard_shape,
-            chunk_grid=ChunkGrid.from_sizes(shard_shape, chunk_shape),
-        )
-        # A coordinate indexer flattens the selection, so its projections address
-        # `shard_array` as 1-D while the caller shaped it like `sel_shape`. This
-        # mirrors the reshape `_decode_partial_single` applies on the way out.
-        sel_shape = getattr(shard_indexer, "sel_shape", None)
-        if sel_shape is not None and shard_array.shape == sel_shape:
-            shard_array = shard_array.reshape(shard_indexer.shape)
-        indexer = list(shard_indexer)
+        indexer, shard_array = self._get_shard_indexer_and_value(selection, shard_spec, shard_array)
 
         if self._is_complete_shard_write(indexer, chunks_per_shard):
             shard_dict = dict.fromkeys(lexicographic_order_coords(chunks_per_shard))
@@ -1432,6 +1408,33 @@ class ShardingCodec(
         return self._assemble_shard(
             index_bytes, buffers, buffer_prototype, chunks_per_shard=chunks_per_shard
         )
+
+    def _get_shard_indexer_and_value(
+        self, selection: SelectorTuple, shard_spec: ArraySpec, value: NDBuffer
+    ) -> tuple[list[ChunkProjection], NDBuffer]:
+        """Index ``selection`` over the inner chunk grid, flattening ``value`` to match.
+
+        ``get_indexer`` classifies a tuple of integer arrays as a coordinate
+        selection, and a ``CoordinateIndexer`` addresses the value buffer as
+        1-D. The caller shaped ``value`` like the selection it came from: an
+        ``OrthogonalIndexer`` hands down an ``np.ix_`` tuple with a value of
+        the broadcast shape, minus any integer-indexed axes it dropped. So the
+        value can have any number of dimensions but the same element count and
+        C order as the coordinate indexer's flattened projections; ravel it.
+        Scalars pass through and are broadcast downstream.
+
+        The partial-decode paths apply the inverse reshape, to
+        ``indexer.sel_shape``, on the way out.
+        """
+        shard_shape = shard_spec.shape
+        indexer = get_indexer(
+            selection,
+            shape=shard_shape,
+            chunk_grid=ChunkGrid.from_sizes(shard_shape, self.chunk_shape),
+        )
+        if isinstance(indexer, CoordinateIndexer) and len(value.shape) > 1:
+            value = value.reshape(indexer.shape)
+        return list(indexer), value
 
     def _is_total_shard(
         self, all_chunk_coords: set[tuple[int, ...]], chunks_per_shard: tuple[int, ...]
