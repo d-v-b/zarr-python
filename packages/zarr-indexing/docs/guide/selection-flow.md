@@ -100,9 +100,7 @@ product into one coordinate tuple per requested value during preparation.
 
 `ChunkPlan.partition()` memoizes the factored `GridPartition`. Its tables include
 strided sets, indexed sets, and joint sets for connected index-array components.
-Plan iteration builds paired projections from those tables. Affine diagonals
-use a separate intersection path because the per-storage-axis table form cannot
-represent them; see [the current limitations](../design-notes.md#current-scope).
+Plan iteration builds paired projections from those tables. Affine diagonals (two slice maps reading one request axis) are rejected with `ValueError`; see [the current limitations](../design-notes.md#current-scope).
 
 An empty request produces no chunk operations. Repeated coordinates remain
 repeated request positions for reads: the selection is an ordered mapping, not

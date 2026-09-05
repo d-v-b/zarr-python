@@ -501,17 +501,16 @@ class TestTouchedOnlyCandidateEnumeration:
         assert [projection.chunk_coords for projection in projections] == [(0,), (999,)]
 
     @pytest.mark.parametrize(
-        ("mode", "expected_coords", "expected_calls"),
+        ("mode", "expected_coords"),
         [
-            ("orthogonal", [(0, 0), (0, 999), (999, 0), (999, 999)], 0),
-            ("correlated", [(0, 0), (999, 999)], 0),
+            ("orthogonal", [(0, 0), (0, 999), (999, 0), (999, 999)]),
+            ("correlated", [(0, 0), (999, 999)]),
         ],
     )
     def test_sparse_two_dimensional_selection_uses_only_touched_combinations(
         self,
         mode: str,
         expected_coords: list[tuple[int, int]],
-        expected_calls: int,
     ) -> None:
         """Orthogonal points use their outer product; correlated points remain paired."""
         base = IndexTransform.from_shape((4000, 4000))
@@ -719,13 +718,34 @@ def test_partition_rejects_correlated_residual_diagonal() -> None:
     grids = dimension_grids_from_chunks((2, 2, 2, 2), shape=(3, 3, 3, 3))
     with pytest.raises(ValueError, match="read input axis 1"):
         plan_chunks(transform, grids).partition()
+    with pytest.raises(ValueError, match="read input axis 1"):
+        list(plan_chunks(transform, grids))
 
 
-def test_partition_is_memoized_on_the_plan() -> None:
-    plan = plan_chunks(
-        IndexTransform.from_shape((6,)), dimension_grids_from_chunks((2,), shape=(6,))
-    )
-    assert plan.partition() is plan.partition()
+def test_correlated_plan_checks_storage_bounds_with_any_grid() -> None:
+    """Out-of-range coordinates raise even on grids whose vectorized lookup does not check."""
+
+    class UncheckedGrid:  # like zarr's FixedDimension: only the scalar lookup validates
+        def __init__(self, size: int, extent: int) -> None:
+            self.size, self.extent = size, extent
+
+        def index_to_chunk(self, index: int) -> int:
+            if not 0 <= index < self.extent:
+                raise IndexError(f"index {index} is out of bounds for extent {self.extent}")
+            return index // self.size
+
+        def chunk_offset(self, chunk: int) -> int:
+            return chunk * self.size
+
+        def chunk_size(self, chunk: int) -> int:
+            return self.size
+
+        def indices_to_chunks(self, indices: Any) -> Any:
+            return indices // self.size
+
+    transform = IndexTransform.from_shape((10, 10)).vindex[np.array([1, 9]), np.array([2, 9])]
+    with pytest.raises(IndexError, match="out of bounds"):
+        list(plan_chunks(transform, (UncheckedGrid(2, 5), UncheckedGrid(2, 5))))
 
 
 def test_wide_request_extent_is_preserved() -> None:
@@ -739,105 +759,6 @@ def test_wide_request_extent_is_preserved() -> None:
     assert projection.chunk_coords == (1,)
     assert projection.chunk_transform.domain.shape == (width,)
     assert projection.coverage == "partial"
-
-
-def test_partition_len_is_exact() -> None:
-    """Row counts multiply as Python ints; a huge factored plan is never silently empty."""
-    plan = plan_chunks(
-        IndexTransform.from_shape((6,)), dimension_grids_from_chunks((2,), shape=(6,))
-    )
-    partition = plan.partition()
-    huge = chunk_resolution.GridPartition(
-        transform=partition.transform,
-        dimension_grids=partition.dimension_grids,
-        sets=(),
-        joint_sets=(),
-        row_shape=(2**32, 2**32),
-    )
-    assert huge.n_rows == 2**64
-    with pytest.raises(OverflowError):
-        len(huge)
-
-
-def test_partition_columns_are_read_only() -> None:
-    """A memoized partition's tables cannot be changed under a later walk."""
-    transform = IndexTransform.from_shape((7, 9)).oindex[np.array([6, 0, 0, 2]), 5:]
-    partition = plan_chunks(
-        transform, dimension_grids_from_chunks((3, 4), shape=(7, 9))
-    ).partition()
-    indexed, strided = partition.sets
-    for column in (
-        strided.chunk,
-        strided.local_start,
-        strided.origin,
-        indexed.index,
-        indexed.positions,
-    ):
-        with pytest.raises(ValueError, match="read-only"):
-            column[0] = 0
-
-
-@pytest.mark.parametrize("stride", [-2, -1, 0, 1, 2])
-@pytest.mark.parametrize("origin", [0, 5])
-def test_diagonal_plan_preserves_request_cells(stride: int, origin: int) -> None:
-    transform = IndexTransform(
-        domain=IndexDomain((origin, 0), (origin + 6, 3)),
-        output=(
-            DimensionMap(0, offset=-origin),
-            DimensionMap(0, offset=12 - stride * origin, stride=stride),
-            ArrayMap(np.array([[3, 0, 3]])),
-        ),
-    )
-    grids = dimension_grids_from_chunks((2, 3, 2), shape=(6, 24, 4))
-    plan = plan_chunks(transform, grids)
-    rows = list(plan)
-    assert rows == list(plan)
-    _check_projections(transform, rows)
-
-
-@pytest.mark.parametrize("chunk_size", [1, 2, 3])
-def test_affine_diagonal_coverage(chunk_size: int) -> None:
-    transform = IndexTransform(
-        domain=IndexDomain.from_shape((6,)),
-        output=(DimensionMap(0), DimensionMap(0, offset=5, stride=-1)),
-    )
-    grids = dimension_grids_from_chunks((chunk_size, chunk_size), shape=(6, 6))
-    _check_projections(transform, list(plan_chunks(transform, grids)))
-
-
-@pytest.mark.parametrize("correlated", [False, True])
-def test_local_columns_are_reused_and_read_only(correlated: bool) -> None:
-    base = IndexTransform.from_shape((7, 9))
-    indices = np.array([6, 0, 6, 1])
-    transform = base.vindex[indices, indices] if correlated else base.oindex[indices, :]
-    partition = plan_chunks(transform, dimension_grids_from_chunks((3, 4), (7, 9))).partition()
-    table = partition.joint_sets[0] if correlated else partition.sets[0]
-    assert table is not None
-    local = table.local
-    assert table.local is local
-    assert not local.flags.writeable
-    for row in range(len(table)):
-        assert np.shares_memory(local[table.run(row)], local)
-
-
-@pytest.mark.parametrize("case", _partition_cases(), ids=lambda case: case[0])
-@pytest.mark.parametrize("batch_size", [1, 3, 100])
-def test_chunk_coordinate_batches(
-    case: tuple[str, IndexTransform, tuple[Any, ...]], batch_size: int
-) -> None:
-    _, transform, grids = case
-    partition = plan_chunks(transform, grids).partition()
-    batches = list(partition.chunk_coord_batches(batch_size))
-    assert all(0 < len(batch) <= batch_size for batch in batches)
-    actual = np.concatenate(batches) if batches else np.empty((0, transform.output_rank))
-    assert actual.tolist() == [list(p.chunk_coords) for p in partition]
-
-
-@pytest.mark.parametrize("batch_size", [0, -1])
-def test_chunk_coordinate_batches_reject_nonpositive_size(batch_size: int) -> None:
-    partition = plan_chunks(IndexTransform.from_shape(()), ()).partition()
-    with pytest.raises(ValueError, match="positive"):
-        list(partition.chunk_coord_batches(batch_size))
 
 
 @pytest.mark.parametrize("width", [3, 10_000])
@@ -855,45 +776,36 @@ def test_correlated_projection_keeps_residual_slices_compact(width: int) -> None
     assert coordinate_bytes <= indices.nbytes
 
 
-def test_diagonal_iteration_preserves_lexicographic_chunk_order() -> None:
-    transform = IndexTransform(
-        IndexDomain.from_shape((4, 2)), (DimensionMap(0), DimensionMap(1), DimensionMap(0))
-    )
-    grids = dimension_grids_from_chunks((4, 1, 2), shape=(4, 2, 4))
-    assert [p.chunk_coords for p in plan_chunks(transform, grids)] == [
-        (0, 0, 0),
-        (0, 0, 1),
-        (0, 1, 0),
-        (0, 1, 1),
-    ]
-
-
-def test_diagonal_iteration_rejects_mixed_affine_array_dependency() -> None:
+def test_mixed_affine_array_dependency_is_rejected() -> None:
+    """A slice map and an index array reading one input axis is a diagonal too."""
     transform = IndexTransform(
         IndexDomain.from_shape((4,)), (DimensionMap(0), ArrayMap(np.array([3, 2, 1, 0])))
     )
     grids = dimension_grids_from_chunks((2, 2), shape=(4, 4))
-    with pytest.raises(NotImplementedError, match="also bound"):
+    with pytest.raises(ValueError, match="read input axis 0"):
         list(plan_chunks(transform, grids))
 
 
-@pytest.mark.parametrize("correlated", [False, True])
-def test_coordinate_batches_do_not_expand_a_huge_product(correlated: bool) -> None:
-    shape = (100,) * 10
-    transform = IndexTransform.from_shape(shape)
-    if correlated:
-        maps = tuple(
-            ArrayMap(np.arange(100).reshape((1,) * axis + (100,) + (1,) * (9 - axis)))
-            for axis in range(10)
-        )
-        transform = IndexTransform(transform.domain, (maps[0], *maps))
-    output_rank = transform.output_rank
-    partition = plan_chunks(
-        transform, dimension_grids_from_chunks((1,) * output_rank, (100,) * output_rank)
-    ).partition()
-    assert partition.n_rows == 100**10
-    batch = next(partition.chunk_coord_batches(4))
-    assert batch.tolist() == [[0] * (output_rank - 1) + [last] for last in range(4)]
+def test_partition_tables_are_memoized_and_immutable() -> None:
+    """The plan builds its tables once, and nothing a consumer does to a column can change them."""
+    base = IndexTransform.from_shape((7, 9))
+    indices = np.array([6, 0, 6, 1])
+    for transform in (base.oindex[indices, 5:], base.vindex[indices, indices]):
+        plan = plan_chunks(transform, dimension_grids_from_chunks((3, 4), (7, 9)))
+        partition = plan.partition()
+        assert plan.partition() is partition
+        tables: list[Any] = [*partition.sets, *partition.joint_sets]
+        for table in tables:
+            columns = [table.chunk, table.chunk_start, table.chunk_extent]
+            if hasattr(table, "pointer"):
+                assert table.local is table.local
+                columns += [table.local, table.pointer, table.index, table.positions]
+            else:
+                columns += [table.origin, table.extent]
+            for column in columns:
+                assert not column.flags.writeable
+                with pytest.raises(ValueError):
+                    column.setflags(write=True)
 
 
 def test_independent_correlated_groups_stay_compact() -> None:
@@ -936,10 +848,6 @@ def test_component_projections_preserve_request_cells(origin: int, transpose: bo
     rows = list(partition)
     _check_projections(transform, rows)
     assert partition.chunk_coords().tolist() == [list(p.chunk_coords) for p in rows]
-    assert (
-        np.concatenate(list(partition.chunk_coord_batches(3))).tolist()
-        == partition.chunk_coords().tolist()
-    )
 
 
 @pytest.mark.parametrize("origin", [0, 5])
@@ -1023,13 +931,9 @@ def test_component_dependency_graph_matches_pointwise_oracle(data: st.DataObject
 
 
 @pytest.mark.parametrize("stride", [0, 1, 2, -2])
-@pytest.mark.parametrize("diagonal", [False, True])
 @pytest.mark.parametrize("count", [1, 2])
-def test_singleton_coverage(stride: int, diagonal: bool, count: int) -> None:
-    transform = IndexTransform(
-        IndexDomain.from_shape((count,)),
-        (DimensionMap(0, stride=stride),) * (2 if diagonal else 1),
-    )
+def test_singleton_coverage(stride: int, count: int) -> None:
+    transform = IndexTransform(IndexDomain.from_shape((count,)), (DimensionMap(0, stride=stride),))
     shape = (5,) * transform.output_rank
 
     class SingletonGrid:
@@ -1048,6 +952,5 @@ def test_singleton_coverage(stride: int, diagonal: bool, count: int) -> None:
     grids = (SingletonGrid(),) * len(shape)
     expected = "partial" if stride == 0 and count > 1 else "full"
     assert all(p.coverage == expected for p in plan_chunks(transform, grids))
-    if not diagonal:
-        partition = plan_chunks(transform, grids).partition()
-        assert all(bool(full) == (expected == "full") for full in partition.sets[0].full)
+    partition = plan_chunks(transform, grids).partition()
+    assert all(bool(full) == (expected == "full") for full in partition.sets[0].full)

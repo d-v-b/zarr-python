@@ -90,10 +90,6 @@ def main() -> None:
         dimension_grids_from_chunks((1, 1, 1), shape=(100, 100, 100)),
     ).partition()
     results["all_coordinates"] = measure(part.chunk_coords, args.repeats)
-    if hasattr(part, "chunk_coord_batches"):
-        results["batched_coordinates"] = measure(
-            lambda: consume(part.chunk_coord_batches(1024)), args.repeats
-        )
 
     # TensorStore factors connected components in the input/grid dependency
     # graph. Here outputs 0 and 1 depend on u, while output 2 depends on v.

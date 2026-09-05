@@ -464,7 +464,8 @@ projection (0, 1) = axis-0 row 0 x axis-1 row 1 -> chunk (0, 1), local (1, 0:2),
 ```
 
 `ChunkPlan.partition()` returns this factored form, a `GridPartition`. Its
-`sets` hold one table per source axis, in axis order; `row_shape` is the
+`sets` hold one table per source axis the request reads independently, in
+axis order, and `joint_sets` one table per connected group of index arrays; `row_shape` is the
 number of rows in each; and the plan walks the rows in row-major order over
 it. The executable example reads the two tables above off the plan, checks
 that the plan's projections are exactly the partition's rows, and evaluates
@@ -495,8 +496,8 @@ Building independent strided tables costs the *sum* of touched chunks per
 axis. Index-array grouping also scales with the selected point count; the
 planner flattens each connected component separately. Independent components
 do not expand into their Cartesian product until their rows are iterated. And projections are derived from rows only when asked for:
-`chunk_coords()` allocates every chunk coordinate without building projections;
-`chunk_coord_batches(batch_size)` bounds that allocation, and a consumer can read the columns directly, as
+`chunk_coords()` lists every chunk the plan touches without materializing a
+row, and a consumer can read the columns directly, as
 [Integration boundaries](integrations.md#reading-the-tables-directly) shows.
 For example, `(u, v) -> (a[u], b[u], c[v])` has two independent components.
 The first two storage axes share `u`; the third reads `v`. With 1,000 values
@@ -508,11 +509,9 @@ by residual request axes, including axes no output reads.
 --8<-- "snippets/grid_partition.py:components"
 ```
 
-A hand-built affine diagonal — two `DimensionMap`s reading one request axis —
-requires a set spanning several storage axes. `partition()` rejects this
-with `ValueError`; iterating the plan preserves support for these transforms,
-walking shared input axes to their next grid boundary without enumerating
-unreachable chunk combinations.
+A hand-built affine diagonal — two `DimensionMap`s reading one request axis,
+which no selection produces — would need a table spanning several storage
+axes; the plan rejects it with `ValueError`.
 
 ---
 

@@ -47,9 +47,9 @@ about the deliberately matching semantics:
   components within a mixed request. Both derive the per-chunk transforms
   from the partition ([the guide](guide/index.md#a-plan-is-a-product-of-per-axis-tables)
   shows the tables). TensorStore keeps strided sets implicit, while this
-  library materializes their per-axis rows for vectorized consumers. Plan
-  iteration supports affine diagonals through connected input-axis walks;
-  the per-output-axis table API still cannot represent them.
+  library materializes their per-axis rows for vectorized consumers. Diagonals are rejected here; supporting them needs a strided set per
+  *input* dimension spanning every storage axis that reads it, TensorStore's
+  representation.
 
 Four deliberate differences:
 
@@ -281,14 +281,13 @@ broadcast singletons to retain those dependencies.
 
 Three limits remain, all intentional and all expected to be lifted:
 
-- **Affine diagonals.** A hand-built transform in which an *index array* and a
-  *slice map* bind the same input dimension is rejected at resolution with
-  `NotImplementedError`; one in which two slice maps share an input dimension
-  is supported by plan iteration, but `partition()` raises `ValueError`.
-  No selection dialect produces either. Supporting the first means lowering
-  the slice map into the joint block; exposing the second as tables needs a
-  strided set per *input* dimension spanning all dependent storage axes.
-  TensorStore uses that connected-component representation.
+- **Affine diagonals.** A hand-built transform in which two output maps read
+  one input dimension — two slice maps, or a slice map and an orthogonal index
+  array — is rejected at planning with `ValueError`; a correlated index array
+  varying over a dimension a slice map also reads is rejected with
+  `NotImplementedError`. No selection dialect produces either. Supporting them
+  needs a strided set per *input* dimension spanning all dependent storage
+  axes, TensorStore's connected-component representation. *Planned.*
 - **Finite explicit bounds only.** `IndexDomain` has no implicit or unbounded
   dimensions; the message layer will normalize a body with `"-inf"`/`"+inf"`
   bounds, but the engine layer refuses to lower one into a transform.

@@ -37,9 +37,8 @@ prefetcher — does not need a `ChunkProjection` object per chunk. The plan's
 [factored form](index.md#a-plan-is-a-product-of-per-axis-tables) is a few
 NumPy arrays per axis, and everything a chunk copy needs is a row of each:
 the chunk index, the chunk-local start and extent, and where the cells land
-in the request. `chunk_coords()` answers "which chunks?" by allocating their coordinate
-array. For a large prefetch, iterate `chunk_coord_batches(batch_size=1024)`
-instead; each array has at most 1,024 rows and no projections are constructed.
+in the request. `chunk_coords()` alone answers "which chunks?" for a prefetch, without
+materializing anything.
 
 The example assembles a strided box from its `StridedSet` tables, one slice
 per chunk. Three things a real consumer also has to get right are checked at
