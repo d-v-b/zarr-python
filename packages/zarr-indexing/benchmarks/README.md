@@ -79,10 +79,39 @@ The production partition result is close to the independent-component probe
 (0.056 ms / 0.072 MiB), while also constructing the public partition and usable
 paired projections. These gains apply when dependencies are independent;
 a genuinely connected multidimensional index block still requires storing
-its selected points. The generalized projection assembler adds about 12% in
-this small single-component walk benchmark. Basic/orthogonal paths retain
+its selected points. The initial generalized projection assembler added about 12% in
+this small single-component walk benchmark; the follow-up below removes that
+regression. Basic/orthogonal paths retain
 their existing implementations. End-to-end NumPy/basic-reader scatter tests
 verify values and placement; the timing table does not measure storage I/O.
+
+### Single-component follow-up
+
+A direct iterator now handles requests whose input axes and output dimensions
+all belong to a single index-array component. It avoids per-chunk product
+bookkeeping and combines chunk-coordinate and map construction in one loop.
+Residual slices, unread axes, constants, and multiple components continue to
+use the general assembler.
+
+Three sequential comparison rounds, each with 31 timing repetitions per
+operation, compared `59c0041c4` (before components), `9e8a2986c` (components),
+and this follow-up. Values below are the median of the three run medians;
+traced peak memory is measured separately. No test jobs ran during these rounds.
+
+| Operation | Before components | Components | Direct iterator |
+| --- | ---: | ---: | ---: |
+| Ordinary correlated walk | 7.71 ms | 8.54 ms | 7.25 ms |
+| Correlated slab walk | 0.071 ms | 0.074 ms | 0.072 ms |
+| Independent-component partition | 24.35 ms | 0.067 ms | 0.065 ms |
+| Independent-component walk | 29.17 ms | 0.091 ms | 0.091 ms |
+| Independent-component `vindex` compilation | 1.968 ms | 0.021 ms | 0.021 ms |
+
+The ordinary walk's three medians were 7.18–7.26 ms, versus 7.67–7.86 ms
+before components and 8.48–8.56 ms with components. The direct iterator removes
+the observed slowdown and is about 6% faster than the original baseline in
+this case. Its traced peak remains 0.142 MiB; independent-component partition
+and walk peaks remain 0.081 and 0.098 MiB. The slab uses the unchanged general
+assembler; its small timing differences do not establish a speedup.
 
 Remaining experiments:
 

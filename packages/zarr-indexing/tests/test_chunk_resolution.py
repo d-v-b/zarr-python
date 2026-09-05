@@ -942,6 +942,29 @@ def test_component_projections_preserve_request_cells(origin: int, transpose: bo
     )
 
 
+@pytest.mark.parametrize("origin", [0, 5])
+@pytest.mark.parametrize("shape", [(6,), (2, 3)])
+@pytest.mark.parametrize("reverse_outputs", [False, True])
+def test_single_component_projection_coordinates(
+    origin: int, shape: tuple[int, ...], reverse_outputs: bool
+) -> None:
+    """A sole component preserves repeated points, affine maps, and input origins."""
+    values = np.array([4, 0, 4, 2, 1, 3]).reshape(shape)
+    maps = (ArrayMap(values, offset=1, stride=2), ArrayMap(values, offset=9, stride=-2))
+    transform = IndexTransform(
+        IndexDomain((origin,) * len(shape), tuple(origin + size for size in shape)),
+        maps[::-1] if reverse_outputs else maps,
+    )
+    partition = plan_chunks(
+        transform, dimension_grids_from_chunks(((2, 3, 5), (4, 6)), (10, 10))
+    ).partition()
+    assert len(partition.joint_sets) == 1
+    assert not partition.sets
+    projections = list(partition)
+    _check_projections(transform, projections)
+    assert partition.chunk_coords().tolist() == [list(p.chunk_coords) for p in projections]
+
+
 def test_index_array_components_merge_transitively() -> None:
     transform = IndexTransform(
         IndexDomain.from_shape((2, 3, 4)),

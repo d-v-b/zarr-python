@@ -1016,6 +1016,9 @@ class GridPartition:
 
     def _iter_correlated(self) -> Iterator[ChunkProjection]:
         component_slots, slot_of = self._slots()
+        if len(self.joint_sets) == 1 and not self.sets and not slot_of:
+            yield from self._iter_single_component()
+            return
         lo_all = self.transform.domain.inclusive_min
         pieces_per_set = [
             [
@@ -1032,6 +1035,51 @@ class GridPartition:
         for residual in itertools.product(*pieces_per_set):
             for rows in itertools.product(*(range(len(joint)) for joint in self.joint_sets)):
                 yield self._correlated_projection(list(residual), rows, component_slots, slot_of)
+
+    def _iter_single_component(self) -> Iterator[ChunkProjection]:
+        """Walk a sole component without assembling a product for every chunk.
+
+        All output dimensions and input axes belong to this component. Residual
+        and unread input axes use the general assembler instead.
+        """
+        (joint,) = self.joint_sets
+        origins = self.transform.domain.inclusive_min
+        has_points_axis = bool(joint.broadcast_axes)
+        synthetic_origin = (0,) if has_points_axis else ()
+        for row in range(len(joint)):
+            run = joint.run(row)
+            shape = (run.stop - run.start,) if has_points_axis else ()
+            coords: list[int] = []
+            starts: list[int] = []
+            stops: list[int] = []
+            chunk_maps: list[OutputIndexMap] = []
+            for column in range(len(joint.output_dimensions)):
+                start = int(joint.chunk_start[row, column])
+                coords.append(int(joint.chunk[row, column]))
+                starts.append(start)
+                stops.append(start + int(joint.chunk_extent[row, column]))
+                chunk_maps.append(
+                    ArrayMap(
+                        index_array=joint.index[run, column].reshape(shape),
+                        offset=joint.offsets[column] - start,
+                        stride=joint.strides[column],
+                    )
+                )
+            cell_maps = tuple(
+                ArrayMap(
+                    index_array=joint.block_coordinates[run, column].reshape(shape),
+                    offset=origin,
+                )
+                for column, origin in enumerate(origins)
+            )
+            synthetic = IndexDomain._unchecked(synthetic_origin, shape)  # pyright: ignore[reportPrivateUsage]
+            yield ChunkProjection(
+                chunk_coords=tuple(coords),
+                chunk_domain=IndexDomain._unchecked(tuple(starts), tuple(stops)),  # pyright: ignore[reportPrivateUsage]
+                chunk_transform=IndexTransform._unchecked(synthetic, tuple(chunk_maps)),  # pyright: ignore[reportPrivateUsage]
+                cell_transform=IndexTransform._unchecked(synthetic, cell_maps),  # pyright: ignore[reportPrivateUsage]
+                coverage="unknown",
+            )
 
     def _correlated_projection(
         self,
