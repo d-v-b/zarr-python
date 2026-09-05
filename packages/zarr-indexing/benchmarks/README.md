@@ -132,3 +132,96 @@ Remaining experiments:
    Preserve clipped data extents separately from codec buffer extents, and
    skip reads only for proven complete writes. This branch does not change
    Zarr's codec or shard execution paths.
+
+## Immediate selector execution prototype
+
+`_execution.py` is an internal, opt-in prototype. `execute_selection` takes
+literal-coordinate selections, a storage shape, and dimension grids;
+`execute_transform` lowers an existing immutable transform. Both return a
+reusable `ExecutionPlan` with a zero-origin output shape and rows containing
+chunk coordinates, chunk selectors, output selectors, and a complete-codec-buffer
+flag. Zarr's default indexers and the existing declarative API are unchanged.
+
+Basic selections use the existing normalization and slice-resolution helpers,
+then generate selectors directly. Dense sorted native-`intp` coordinates use a
+monotonicity check and `searchsorted` on internal chunk boundaries. Neither path
+constructs transform pairs for each chunk. Other selections currently lower the
+existing projections to broadcast NumPy coordinates; their additional conversion
+cost is included below. Immediate setup for this fallback is lazy, so compare
+complete walks rather than constructor times alone.
+
+The immediate sorted path borrows its array: it must remain unchanged for every
+use of the plan and any outstanding iterator. Immutable declarative transforms
+retain their snapshot semantics. The prototype shares transform semantics,
+including literal bounds; it is not a replacement for Zarr's user-facing NumPy
+normalization. Unread request axes longer than one are explicitly rejected until
+repeated-write ordering has a defined policy.
+
+### Measurements against the existing Zarr indexers
+
+Run from the root Hatch environment with this checkout's `src` and
+`packages/zarr-indexing/src` on `PYTHONPATH` (and package metadata installed):
+
+```sh
+hatch run test.py3.12-minimal:python packages/zarr-indexing/benchmarks/execution.py
+```
+
+The benchmark checks chunk-coordinate equality and declarative selected-cell
+counts. It runs three rounds of 31 repetitions, reversing operation order in the
+middle round. Each row below reports the median of the three timing medians.
+Input selections and grids are prepared before measurement; selection compilation,
+planning, and streaming consumption are timed together. Peak allocations are
+measured separately. These measurements exclude data reads, writes, codec work,
+and the optional sharding adapter.
+
+Measured on 2026-09-05, Python 3.12 / NumPy 2.0, against the existing Zarr indexers
+in the PR checkout (`src/zarr/core/indexing.py` is unchanged by this branch):
+
+| Complete walk | Zarr | Declarative projections | Immediate selectors |
+| --- | ---: | ---: | ---: |
+| Basic slice, 10,000 chunks | 7.991 ms | 21.794 ms | 7.415 ms |
+| Sorted orthogonal selection, 1M points / 10 chunks | 5.019 ms | 5.008 ms | 0.332 ms |
+| Sorted coordinate selection, 1M points / 10 chunks | 0.350 ms | 4.759 ms | 0.331 ms |
+| Correlated points, 100 chunks | 0.269 ms | 0.909 ms | 1.282 ms |
+| Sparse correlated points, 900 chunks | 5.366 ms | 7.326 ms | 10.671 ms |
+| Independent components, one chunk / 1M points | 12.181 ms | 0.128 ms | 0.141 ms |
+| Independent components, 100 chunks / 1M points | 27.879 ms | 1.474 ms | 2.062 ms |
+
+| Peak allocation during complete walk | Zarr | Declarative projections | Immediate selectors |
+| --- | ---: | ---: | ---: |
+| Basic slice | 0.049 MiB | 0.048 MiB | 0.034 MiB |
+| Sorted coordinate selection | 1.529 MiB | 30.529 MiB | 1.528 MiB |
+| Independent components, 100 chunks | 83.950 MiB | 0.107 MiB | 0.107 MiB |
+
+Basic walking now meets the baseline, and sorted coordinate walking and allocation
+are close to Zarr's specialized path. Basic constructor time is still higher:
+6.1 µs versus 2.5 µs, with both near 0.9 KiB peak allocation. The sorted constructor
+is 0.121 ms versus Zarr's 0.130 ms. Constructor and first-result latency deserve
+separate attention for tiny requests. Basic multidimensional iteration still
+uses `itertools.product`, which retains per-axis selector pieces; it is not yet
+a fully implicit Cartesian walk.
+
+The generic fallback is slower than the existing projection walk because it
+also materializes execution selectors. In particular, ordinary correlated
+selections remain substantially slower than Zarr. This prototype should not be
+installed as a universal replacement. Direct lowering of component-table rows
+is the next step for removing that overhead while keeping the independent-
+component gains.
+
+### Codec verification and the sharding boundary
+
+`tests/test_indexing_execution.py` exercises real reads and writes through both
+BatchedCodecPipeline and FusedCodecPipeline, for v2, v3, and sharded v3 arrays.
+It checks basic slices, integer-axis drops, reverse slices, sorted coordinates,
+and independent components, including partial boundary writes and preservation
+of untouched values. Unit tests also cover irregular grids, duplicates, empty
+selections, singleton newaxes, bounds errors, and immutable snapshots.
+
+The current sharding codec's internal indexer rejects negative slices and returns
+flat coordinate results. `for_shard_indexer` adapts those selections per shard;
+positive basic selectors pass through. This can materialize the selected points
+within one shard, so the compact planning gains above must not be read as sharded
+I/O speedups. A future sharding consumer should accept the compact execution
+representation directly. The prototype only marks complete writes when direct
+basic selectors cover the declared codec buffer, not merely the clipped data
+extent of a boundary chunk.
