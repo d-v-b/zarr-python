@@ -104,8 +104,15 @@ def main() -> None:
         (ArrayMap(i[:, None]), ArrayMap(i[:, None]), ArrayMap(i[None, :])),
     )
     grids = dimension_grids_from_chunks((1000, 1000, 1000), shape=(1000, 1000, 1000))
-    results["one_joint_set"] = measure(
+    results["component_partition"] = measure(
         lambda: plan_chunks(transform, grids).partition(), args.repeats
+    )
+    results["component_walk"] = measure(
+        lambda: consume(plan_chunks(transform, grids)), args.repeats
+    )
+    base = IndexTransform.from_shape((1000, 1000, 1000))
+    results["component_vindex_compile"] = measure(
+        lambda: base.vindex[i[:, None], i[:, None], i[None, :]], args.repeats
     )
     left = IndexTransform(IndexDomain.from_shape((1000,)), (ArrayMap(i), ArrayMap(i)))
     right = IndexTransform(IndexDomain.from_shape((1000,)), (ArrayMap(i),))

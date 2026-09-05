@@ -60,24 +60,40 @@ array sets retain compact input-coordinate arrays per component. See
 and
 [grid_partition_impl.h](https://github.com/google/tensorstore/blob/master/tensorstore/internal/grid_partition_impl.h).
 
-1. **Multiple independent index-array components are the largest remaining opportunity.**
-   For `(u, v) -> (a[u], b[u], c[v])` with 1,000 values on each input axis,
-   the source index arrays occupy 24 KB. The current single joint table expands
-   to 1M points: about 25 ms and 122 MiB peak. A probe that partitions the two
-   independent components separately uses about 0.053 ms and 0.072 MiB.
-   The probe deliberately does not assemble their projections, so these numbers
-   demonstrate the avoidable planning expansion, not a complete new planner.
-   Production adoption needs a component-based row representation, agreement on
-   the public `joint` accessor, and scatter/oracle tests for products of components.
+The follow-up implements connected index-array components in production and
+preserves singleton axes during vectorized compilation. The API now exposes
+`joint_sets`; `row_shape` lists `sets` followed by all component tables.
+This is an intentional pre-1.0 API change, with no singular `joint` accessor.
 
-2. **Keep regular strided sets implicit until columns are requested.**
+Compared with the previous commit (`59c0041c4`), again using nine sequential
+runs and the same interpreter:
+
+| Operation | Previous | Components | Peak before → after |
+| --- | ---: | ---: | ---: |
+| Partition `(u,v) -> (a[u],b[u],c[v])`, 1,000 positions per axis | 19.38 ms | 0.070 ms | 122.07 → 0.081 MiB |
+| Complete projection walk, same request | 24.33 ms | 0.094 ms | 122.07 → 0.098 MiB |
+| Compile that request through `vindex` | 1.62 ms | 0.022 ms | 22.91 → 0.049 MiB |
+| Walk 1,000 ordinary correlated points | 7.54 ms | 8.47 ms | 0.141 → 0.142 MiB |
+
+The production partition result is close to the independent-component probe
+(0.056 ms / 0.072 MiB), while also constructing the public partition and usable
+paired projections. These gains apply when dependencies are independent;
+a genuinely connected multidimensional index block still requires storing
+its selected points. The generalized projection assembler adds about 12% in
+this small single-component walk benchmark. Basic/orthogonal paths retain
+their existing implementations. End-to-end NumPy/basic-reader scatter tests
+verify values and placement; the timing table does not measure storage I/O.
+
+Remaining experiments:
+
+1. **Keep regular strided sets implicit until columns are requested.**
    TensorStore's strided set stores the input dimension and dependent grid
    dimensions, not one record per touched chunk. A range/batch interface could
    reduce first-result latency and memory for very long axes while retaining
    materialized columns for vectorized consumers. The present batch API bounds
    Cartesian expansion, but per-axis tables are still eager.
 
-3. **Benchmark a real codec consumer before changing Zarr's indexers.**
+2. **Benchmark a real codec consumer before changing Zarr's indexers.**
    Zarr's `BasicIndexer` and `OrthogonalIndexer` already form products of
    per-axis projections; its coordinate indexer already groups points by chunk.
    The gain from this package requires consuming its tables, not adding a pair

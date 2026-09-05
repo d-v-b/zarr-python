@@ -45,7 +45,7 @@ assert rows.positions.tolist() == [1, 2, 0]  # the request positions those entri
 assert rows.local.tolist() == [1, 1, 1]  # chunk-local: 1 - 0, 1 - 0, 4 - 3
 
 points = IndexTransform.from_shape((6, 8)).vindex[np.array([0, 5, 5]), np.array([7, 0, 1])]
-joint = plan_chunks(points, grids).partition().joint
+joint = plan_chunks(points, grids).partition().joint_sets[0]
 assert joint is not None
 assert joint.chunk.tolist() == [[0, 1], [1, 0]]  # touched chunks, lexicographic
 assert joint.pointer.tolist() == [0, 1, 3]  # point 0 alone; points 1 and 2 share a chunk
@@ -118,3 +118,20 @@ transposed = IndexTransform(
 )
 np.testing.assert_array_equal(read_box_through_tables(image, (3, 4), transposed)[0], image.T)
 # --8<-- [end:table-consumer]
+
+
+# --8<-- [start:components]
+i = np.arange(1000)
+transform = IndexTransform.from_shape((1000, 1000, 1000)).vindex[
+    i[:, None], i[:, None], i[None, :]
+]
+partition = plan_chunks(
+    transform, dimension_grids_from_chunks((1000, 1000, 1000), shape=(1000, 1000, 1000))
+).partition()
+assert [group.output_dimensions for group in partition.joint_sets] == [(0, 1), (2,)]
+assert sum(group.index.size for group in partition.joint_sets) == 3000
+assert partition.row_shape == (1, 1)
+(projection,) = partition
+assert projection.chunk_transform.apply((5, 9)) == (5, 5, 9)
+assert projection.cell_transform.apply((5, 9)) == (5, 9)
+# --8<-- [end:components]

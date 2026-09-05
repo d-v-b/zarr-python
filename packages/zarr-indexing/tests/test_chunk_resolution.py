@@ -697,7 +697,7 @@ def test_joint_set_groups_points_by_chunk() -> None:
         np.array([0, 6, 6, 1]), np.array([8, 0, 1, 8])
     ]
     grids = dimension_grids_from_chunks((3, 4), shape=(7, 9))
-    joint = plan_chunks(transform, grids).partition().joint
+    joint = plan_chunks(transform, grids).partition().joint_sets[0]
     assert joint is not None
     assert joint.chunk.tolist() == [[0, 2], [2, 0]]
     assert joint.pointer.tolist() == [0, 2, 4]
@@ -751,7 +751,7 @@ def test_partition_len_is_exact() -> None:
         transform=partition.transform,
         dimension_grids=partition.dimension_grids,
         sets=(),
-        joint=None,
+        joint_sets=(),
         row_shape=(2**32, 2**32),
     )
     assert huge.n_rows == 2**64
@@ -811,7 +811,7 @@ def test_local_columns_are_reused_and_read_only(correlated: bool) -> None:
     indices = np.array([6, 0, 6, 1])
     transform = base.vindex[indices, indices] if correlated else base.oindex[indices, :]
     partition = plan_chunks(transform, dimension_grids_from_chunks((3, 4), (7, 9))).partition()
-    table = partition.joint if correlated else partition.sets[0]
+    table = partition.joint_sets[0] if correlated else partition.sets[0]
     assert table is not None
     local = table.local
     assert table.local is local
@@ -877,11 +877,123 @@ def test_diagonal_iteration_rejects_mixed_affine_array_dependency() -> None:
         list(plan_chunks(transform, grids))
 
 
-def test_coordinate_batches_do_not_expand_a_huge_product() -> None:
+@pytest.mark.parametrize("correlated", [False, True])
+def test_coordinate_batches_do_not_expand_a_huge_product(correlated: bool) -> None:
     shape = (100,) * 10
+    transform = IndexTransform.from_shape(shape)
+    if correlated:
+        maps = tuple(
+            ArrayMap(np.arange(100).reshape((1,) * axis + (100,) + (1,) * (9 - axis)))
+            for axis in range(10)
+        )
+        transform = IndexTransform(transform.domain, (maps[0], *maps))
+    output_rank = transform.output_rank
     partition = plan_chunks(
-        IndexTransform.from_shape(shape), dimension_grids_from_chunks((1,) * 10, shape)
+        transform, dimension_grids_from_chunks((1,) * output_rank, (100,) * output_rank)
     ).partition()
     assert partition.n_rows == 100**10
     batch = next(partition.chunk_coord_batches(4))
-    assert batch.tolist() == [[0] * 9 + [last] for last in range(4)]
+    assert batch.tolist() == [[0] * (output_rank - 1) + [last] for last in range(4)]
+
+
+def test_independent_correlated_groups_stay_compact() -> None:
+    n = 1000
+    indices = np.arange(n)
+    transform = IndexTransform.from_shape((n, n, n)).vindex[
+        indices[:, None], indices[:, None], indices[None, :]
+    ]
+    assert sum(m.index_array.size for m in transform.output if isinstance(m, ArrayMap)) == 3 * n
+    partition = plan_chunks(
+        transform, dimension_grids_from_chunks((n, n, n), (n, n, n))
+    ).partition()
+    assert [j.output_dimensions for j in partition.joint_sets] == [(0, 1), (2,)]
+    assert sum(j.index.size for j in partition.joint_sets) == 3 * n
+    assert partition.row_shape == (1, 1)
+    (projection,) = partition
+    assert projection.chunk_transform.domain.shape == (n, n)
+    assert projection.chunk_transform.apply((5, 9)) == (5, 5, 9)
+    assert projection.cell_transform.apply((5, 9)) == (5, 9)
+
+
+@pytest.mark.parametrize("origin", [0, 5])
+@pytest.mark.parametrize("transpose", [False, True])
+def test_component_projections_preserve_request_cells(origin: int, transpose: bool) -> None:
+    maps = (
+        ArrayMap(np.array([2, 0, 2]).reshape(3, 1, 1, 1)),
+        ArrayMap(np.array([0, 3, 1]).reshape(3, 1, 1, 1)),
+        ArrayMap(np.array([4, 0, 4, 2]).reshape(1, 4, 1, 1)),
+        DimensionMap(2, offset=-origin),
+    )
+    transform = IndexTransform(
+        IndexDomain((origin,) * 4, (origin + 3, origin + 4, origin + 2, origin + 1)), maps
+    )
+    if transpose:
+        transform = IndexTransform(transform.domain, (maps[2], maps[0], maps[3], maps[1]))
+    shape = (5, 3, 2, 4) if transpose else (3, 4, 5, 2)
+    grids = dimension_grids_from_chunks((2, 2, 2, 2), shape)
+    partition = plan_chunks(transform, grids).partition()
+    assert len(partition.joint_sets) == 2
+    rows = list(partition)
+    _check_projections(transform, rows)
+    assert partition.chunk_coords().tolist() == [list(p.chunk_coords) for p in rows]
+    assert (
+        np.concatenate(list(partition.chunk_coord_batches(3))).tolist()
+        == partition.chunk_coords().tolist()
+    )
+
+
+def test_index_array_components_merge_transitively() -> None:
+    transform = IndexTransform(
+        IndexDomain.from_shape((2, 3, 4)),
+        (
+            ArrayMap(np.zeros((2, 1, 1), dtype=np.intp)),
+            ArrayMap(np.zeros((1, 1, 4), dtype=np.intp)),
+            ArrayMap(np.zeros((2, 3, 1), dtype=np.intp)),
+            ArrayMap(np.zeros((1, 3, 4), dtype=np.intp)),
+        ),
+    )
+    partition = plan_chunks(transform, dimension_grids_from_chunks((1,) * 4, (1,) * 4)).partition()
+    assert len(partition.joint_sets) == 1
+    _check_projections(transform, list(partition))
+
+
+@pytest.mark.parametrize("reader_kind", ["basic", "numpy"])
+def test_independent_components_scatter_through_lazy_array(reader_kind: str) -> None:
+    from zarr_indexing import LazyArray
+
+    source = np.arange(5 * 6 * 7 * 3).reshape(5, 6, 7, 3)
+    a = np.array([4, 0, 4])[:, None]
+    b = np.array([5, 1, 3])[:, None]
+    c = np.array([6, 0, 6, 2])[None, :]
+    wrapped = LazyArray.from_numpy(source) if reader_kind == "numpy" else LazyArray(source)
+    view = wrapped.with_parts((2, 3, 2, 2)).lazy.vindex[a, b, c, ...]
+    assert (
+        len(
+            plan_chunks(view.transform, dimension_grids_from_chunks((2, 3, 2, 2), source.shape))
+            .partition()
+            .joint_sets
+        )
+        == 2
+    )
+    np.testing.assert_array_equal(view.result(), source[a, b, c, :])
+
+
+@given(data=st.data())
+def test_component_dependency_graph_matches_pointwise_oracle(data: st.DataObject) -> None:
+    shape = tuple(data.draw(st.lists(st.integers(1, 3), min_size=0, max_size=3)))
+    output_rank = data.draw(st.integers(1, 5))
+    maps = []
+    for _ in range(output_rank):
+        dependencies = data.draw(st.lists(st.booleans(), min_size=len(shape), max_size=len(shape)))
+        array_shape = tuple(
+            size if dependent else 1 for size, dependent in zip(shape, dependencies, strict=True)
+        )
+        count = int(np.prod(array_shape))
+        values = data.draw(st.lists(st.integers(0, 3), min_size=count, max_size=count))
+        maps.append(ArrayMap(np.array(values, dtype=np.intp).reshape(array_shape)))
+    transform = IndexTransform(IndexDomain.from_shape(shape), tuple(maps))
+    grids = dimension_grids_from_chunks((2,) * output_rank, (4,) * output_rank)
+    partition = plan_chunks(transform, grids).partition()
+    rows = list(partition)
+    _check_projections(transform, rows)
+    assert partition.chunk_coords().tolist() == [list(row.chunk_coords) for row in rows]

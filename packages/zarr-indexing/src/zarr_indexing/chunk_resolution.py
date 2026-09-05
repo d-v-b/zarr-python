@@ -23,9 +23,8 @@ so each axis is resolved once against its grid into a table:
   the first cell, and whether the row covers its chunk exactly once.
 - `IndexedSet` — an orthogonal `ArrayMap` axis: its coordinates grouped by
   chunk in CSR form, with the request positions they fill.
-- `JointSet` — the correlated (`vindex`) index arrays, which read the same
-  input axes and so do not distribute: their points are sorted into chunks
-  together, once.
+- `JointSet` — one connected index-array component. Arrays sharing input
+  axes are grouped together; independent components remain separate tables.
 
 A projection is one row of each table combined. Building the tables costs the
 sum of the touched chunks per axis rather than their product, rows are
@@ -158,7 +157,7 @@ class ChunkPlan:
     _partition: GridPartition | None = field(default=None, init=False, repr=False, compare=False)
 
     def partition(self) -> GridPartition:
-        """The plan in factored, columnar form: one table per axis plus a joint table.
+        """The plan in factored, columnar form: one table per axis plus connected index-array tables.
 
         Built once per plan and memoized. Raises `ValueError` if two
         `DimensionMap`s read one input axis (a diagonal, which no selection
@@ -453,14 +452,14 @@ class IndexedSet:
 
 @dataclass(frozen=True, slots=True)
 class JointSet:
-    """The correlated index arrays of a transform, grouped by the chunk each point lands in.
+    """One connected component of index arrays, grouped by the chunk each point lands in.
 
-    Correlated (`vindex`) arrays read the same input axes, so a chunk
-    constrains all of them at once; they are sorted into chunks together.
+    Arrays connected by shared input axes, possibly transitively, constrain
+    each other and are sorted into chunks together.
     Row ``i`` is one touched chunk, `chunk[i]` its coordinates on the
     `output_dimensions`, and CSR range ``pointer[i]:pointer[i + 1]`` its
     points: `index` holds their index-array values per output dimension,
-    `positions` their flat positions in the request's broadcast block, and
+    `positions` their flat positions in this component's input block, and
     `block_coordinates` those positions unravelled over the block. Columns are
     read-only NumPy arrays.
 
@@ -473,7 +472,7 @@ class JointSet:
     >>> transform = IndexTransform.from_shape((7, 9)).vindex[
     ...     np.array([0, 6, 6, 1]), np.array([8, 0, 1, 8])
     ... ]
-    >>> joint = plan_chunks(transform, grids).partition().joint
+    >>> (joint,) = plan_chunks(transform, grids).partition().joint_sets
     >>> joint.chunk.tolist(), joint.pointer.tolist(), joint.positions.tolist()
     ([[0, 2], [2, 0]], [0, 2, 4], [0, 3, 1, 2])
     """
@@ -685,8 +684,16 @@ def _chunk_keys(
     return keys
 
 
-def _joint_set(transform: IndexTransform, dim_grids: Sequence[DimensionGridLike]) -> JointSet:
-    block = _prepare_correlated(transform)
+def _joint_set(
+    transform: IndexTransform,
+    dim_grids: Sequence[DimensionGridLike],
+    *,
+    output_dimensions: tuple[int, ...] | None = None,
+    input_dimensions: tuple[int, ...] | None = None,
+) -> JointSet:
+    block = _prepare_correlated(
+        transform, output_dimensions=output_dimensions, input_dimensions=input_dimensions
+    )
     dims = block.correlated_dims
     chunk_ids = [dim_grids[d].indices_to_chunks(block.flat_storage[d]) for d in dims]
     n_points = int(chunk_ids[0].size)
@@ -793,10 +800,10 @@ class GridPartition:
     """A plan in factored form: per-axis tables whose product is the chunk walk.
 
     `sets` holds one `StridedSet` or `IndexedSet` per output dimension the
-    transform reads independently, in output-dimension order; `joint` holds
-    the correlated index arrays, if any. A projection is one row of each
+    transform reads independently, in output-dimension order; `joint_sets`
+    holds the connected index-array components. A projection is one row of each
     table, so the partition has `n_rows` ``== prod(row_shape)`` rows, walked
-    in row-major order over `row_shape` (the joint table last). Rows are materialized into
+    in row-major order over `row_shape` (the component tables after `sets`). Rows are materialized into
     `ChunkProjection` objects only on request; a vectorized consumer can read
     the tables directly.
 
@@ -828,11 +835,11 @@ class GridPartition:
     sets: tuple[StridedSet | IndexedSet, ...]
     """Independent per-axis tables, in output-dimension order."""
 
-    joint: JointSet | None
-    """The correlated index arrays' table, or `None` when there are none."""
+    joint_sets: tuple[JointSet, ...]
+    """Connected index-array components, ordered by their first output dimension."""
 
     row_shape: tuple[int, ...]
-    """Rows per table, `joint` last; the partition is walked in row-major order over it."""
+    """Rows per table: `sets` followed by `joint_sets`, in row-major iteration order."""
 
     @property
     def n_rows(self) -> int:
@@ -883,8 +890,8 @@ class GridPartition:
             indices = np.unravel_index(np.arange(start, stop, dtype=np.intp), self.row_shape)
             for axis, rows in zip(self.sets, indices, strict=False):
                 out[:, axis.output_dimension] = axis.chunk[rows]
-            if self.joint is not None:
-                out[:, list(self.joint.output_dimensions)] = self.joint.chunk[indices[-1]]
+            for joint, rows in zip(self.joint_sets, indices[len(self.sets) :], strict=True):
+                out[:, list(joint.output_dimensions)] = joint.chunk[rows]
             return out
         # Unlike unravel_index, mixed-radix division does not require the
         # product of the table lengths to fit np.intp.
@@ -898,15 +905,15 @@ class GridPartition:
                 axis = self.sets[dimension]
                 out[:, axis.output_dimension] = axis.chunk[rows]
             else:
-                assert self.joint is not None
-                out[:, list(self.joint.output_dimensions)] = self.joint.chunk[rows]
+                joint = self.joint_sets[dimension - len(self.sets)]
+                out[:, list(joint.output_dimensions)] = joint.chunk[rows]
         return out
 
     def __iter__(self) -> Iterator[ChunkProjection]:
         """Materialize every row in order."""
         if self.n_rows == 0:
             return
-        if self.joint is None:
+        if not self.joint_sets:
             yield from self._iter_factorized()
         else:
             yield from self._iter_correlated()
@@ -993,25 +1000,22 @@ class GridPartition:
 
     # -- correlated assembly ------------------------------------------------
 
-    def _slots(self) -> tuple[int, dict[int, int]]:
-        """Where each residual slice axis sits in the restricted domain.
-
-        The restricted domain is the collapsed points axis (if the broadcast
-        block has any axis) followed by the residual slice axes in
-        input-dimension order.
-        """
-        joint = self.joint
-        assert joint is not None
-        n_lead = 1 if len(joint.broadcast_shape) > 0 else 0
-        slice_axes = sorted(
-            m.input_dimension for m in self.transform.output if isinstance(m, DimensionMap)
-        )
-        return n_lead, {axis: n_lead + slot for slot, axis in enumerate(slice_axes)}
+    def _slots(self) -> tuple[tuple[int | None, ...], dict[int, int]]:
+        """One synthetic axis per nonconstant component, followed by residual axes."""
+        component_slots: list[int | None] = []
+        bound: set[int] = set()
+        n_lead = 0
+        for joint in self.joint_sets:
+            bound.update(joint.broadcast_axes)
+            component_slots.append(n_lead if joint.broadcast_axes else None)
+            n_lead += bool(joint.broadcast_axes)
+        residual_axes = [axis for axis in range(self.transform.input_rank) if axis not in bound]
+        return tuple(component_slots), {
+            axis: n_lead + slot for slot, axis in enumerate(residual_axes)
+        }
 
     def _iter_correlated(self) -> Iterator[ChunkProjection]:
-        joint = self.joint
-        assert joint is not None
-        n_lead, slot_of = self._slots()
+        component_slots, slot_of = self._slots()
         lo_all = self.transform.domain.inclusive_min
         pieces_per_set = [
             [
@@ -1019,42 +1023,45 @@ class GridPartition:
                     cast("StridedSet", axis),
                     row,
                     0 if axis.input_dimension is None else lo_all[axis.input_dimension],
-                    None if axis.input_dimension is None else slot_of.get(axis.input_dimension),
+                    None if axis.input_dimension is None else slot_of[axis.input_dimension],
                 )
                 for row in range(len(axis))
             ]
             for axis in self.sets
         ]
         for residual in itertools.product(*pieces_per_set):
-            for row in range(len(joint)):
-                yield self._correlated_projection(list(residual), row, n_lead, slot_of)
+            for rows in itertools.product(*(range(len(joint)) for joint in self.joint_sets)):
+                yield self._correlated_projection(list(residual), rows, component_slots, slot_of)
 
     def _correlated_projection(
         self,
         residual: list[_AxisPiece],
-        row: int,
-        n_lead: int,
+        rows: tuple[int, ...],
+        component_slots: tuple[int | None, ...],
         slot_of: dict[int, int],
     ) -> ChunkProjection:
-        joint = self.joint
-        assert joint is not None
         transform = self.transform
         domain = transform.domain
-        rank = domain.ndim
         lo_all = domain.inclusive_min
         output_rank = transform.output_rank
-        n_slice = len(slot_of)
-        run = joint.run(row)
-        n_points = run.stop - run.start
-        points_shape = (n_points,) if n_lead else ()
-        corr_shape = points_shape + (1,) * n_slice
-
+        runs = tuple(joint.run(row) for joint, row in zip(self.joint_sets, rows, strict=True))
+        points_shape = tuple(
+            run.stop - run.start
+            for run, slot in zip(runs, component_slots, strict=True)
+            if slot is not None
+        )
+        n_lead = len(points_shape)
+        rank = n_lead + len(slot_of)
         chunk_coords = [0] * output_rank
         chunk_min = [0] * output_rank
         chunk_max = [0] * output_rank
         chunk_maps: list[OutputIndexMap | None] = [None] * output_rank
-        extents = [0] * n_slice
-        slice_origin = [0] * n_slice
+        cell_maps: list[OutputIndexMap | None] = [None] * domain.ndim
+        # Unread input axes are independent repetitions, not part of an index
+        # array component. Retain their extent without expanding any arrays.
+        extents = [domain.shape[axis] for axis in slot_of]
+        for axis, slot in slot_of.items():
+            cell_maps[axis] = DimensionMap(input_dimension=slot, offset=lo_all[axis])
         for out_dim, (c, c_start, c_extent, k, extent, chunk_map, cell_map, _full) in zip(
             (axis.output_dimension for axis in self.sets), residual, strict=True
         ):
@@ -1063,45 +1070,79 @@ class GridPartition:
             chunk_max[out_dim] = c_start + c_extent
             chunk_maps[out_dim] = chunk_map
             if k is not None:
-                slot = slot_of[k] - n_lead
-                extents[slot] = extent
-                slice_origin[slot] = cast("DimensionMap", cell_map).offset
-        for column, out_dim in enumerate(joint.output_dimensions):
-            c_start = int(joint.chunk_start[row, column])
-            chunk_coords[out_dim] = int(joint.chunk[row, column])
-            chunk_min[out_dim] = c_start
-            chunk_max[out_dim] = c_start + int(joint.chunk_extent[row, column])
-            chunk_maps[out_dim] = ArrayMap(
-                index_array=joint.index[run, column].reshape(corr_shape),
-                offset=joint.offsets[column] - c_start,
-                stride=joint.strides[column],
-            )
-        shape = points_shape + tuple(extents)
-        synthetic = IndexDomain._unchecked((0,) * (n_lead + n_slice), shape)  # pyright: ignore[reportPrivateUsage]
-
-        # Keep independent axes symbolic: broadcasting the point coordinates
-        # across residual slices makes ArrayMap copy the entire requested slab.
-        cell_maps: list[OutputIndexMap] = []
-        for axis in range(rank):
-            slot_index = slot_of.get(axis)
-            if slot_index is None:
-                column = joint.broadcast_axes.index(axis)
-                values = joint.block_coordinates[run, column].reshape(corr_shape)
-                cell_maps.append(ArrayMap(index_array=values, offset=lo_all[axis]))
-            else:
-                slot = slot_index - n_lead
-                cell_maps.append(
-                    DimensionMap(input_dimension=slot_index, offset=slice_origin[slot])
+                slot = slot_of[k]
+                extents[slot - n_lead] = extent
+                cell_maps[k] = DimensionMap(
+                    input_dimension=slot, offset=cast("DimensionMap", cell_map).offset
                 )
+        for joint, row, run, slot in zip(self.joint_sets, rows, runs, component_slots, strict=True):
+            component_shape = [1] * rank
+            if slot is not None:
+                component_shape[slot] = run.stop - run.start
+            for column, out_dim in enumerate(joint.output_dimensions):
+                c_start = int(joint.chunk_start[row, column])
+                chunk_coords[out_dim] = int(joint.chunk[row, column])
+                chunk_min[out_dim] = c_start
+                chunk_max[out_dim] = c_start + int(joint.chunk_extent[row, column])
+                chunk_maps[out_dim] = ArrayMap(
+                    index_array=joint.index[run, column].reshape(component_shape),
+                    offset=joint.offsets[column] - c_start,
+                    stride=joint.strides[column],
+                )
+            for column, axis in enumerate(joint.broadcast_axes):
+                cell_maps[axis] = ArrayMap(
+                    index_array=joint.block_coordinates[run, column].reshape(component_shape),
+                    offset=lo_all[axis],
+                )
+        synthetic = IndexDomain._unchecked((0,) * rank, points_shape + tuple(extents))  # pyright: ignore[reportPrivateUsage]
         return ChunkProjection(
             chunk_coords=tuple(chunk_coords),
             chunk_domain=IndexDomain._unchecked(tuple(chunk_min), tuple(chunk_max)),  # pyright: ignore[reportPrivateUsage]
             chunk_transform=IndexTransform._unchecked(  # pyright: ignore[reportPrivateUsage]
                 synthetic, tuple(cast("list[OutputIndexMap]", chunk_maps))
             ),
-            cell_transform=IndexTransform._unchecked(synthetic, tuple(cell_maps)),  # pyright: ignore[reportPrivateUsage]
+            cell_transform=IndexTransform._unchecked(  # pyright: ignore[reportPrivateUsage]
+                synthetic, tuple(cast("list[OutputIndexMap]", cell_maps))
+            ),
             coverage="unknown",
         )
+
+
+def _component_joint_sets(
+    transform: IndexTransform, grids: tuple[DimensionGridLike, ...]
+) -> tuple[JointSet, ...]:
+    """Partition the input/index-array dependency graph into connected components."""
+    affine_axes = {m.input_dimension for m in transform.output if isinstance(m, DimensionMap)}
+    # Accumulated components have disjoint input axes. A new map can bridge
+    # several of them; merging every overlap maintains that invariant.
+    components: list[tuple[set[int], list[int]]] = []
+    for dimension, m in enumerate(transform.output):
+        if not isinstance(m, ArrayMap):
+            continue
+        axes = set(m.dependency_axes)
+        if axes.intersection(affine_axes):
+            raise NotImplementedError(
+                "index array varies over an input dimension also bound by a slice map"
+            )
+        dimensions = [dimension]
+        separate = []
+        for other_axes, other_dimensions in components:
+            if axes.intersection(other_axes):
+                axes.update(other_axes)
+                dimensions.extend(other_dimensions)
+            else:
+                separate.append((other_axes, other_dimensions))
+        separate.append((axes, sorted(dimensions)))
+        components = separate
+    return tuple(
+        _joint_set(
+            transform,
+            grids,
+            output_dimensions=tuple(dimensions),
+            input_dimensions=tuple(sorted(axes)),
+        )
+        for axes, dimensions in sorted(components, key=lambda component: component[1][0])
+    )
 
 
 def _shared_input_axis(transform: IndexTransform) -> int | None:
@@ -1142,7 +1183,7 @@ def _partition_transform(
         )
     if any(size == 0 for size in transform.domain.shape):
         return GridPartition(
-            transform=transform, dimension_grids=grids, sets=(), joint=None, row_shape=(0,)
+            transform=transform, dimension_grids=grids, sets=(), joint_sets=(), row_shape=(0,)
         )
     correlated = transform.index_array_structure == "general"
     sets: list[StridedSet | IndexedSet] = []
@@ -1153,13 +1194,13 @@ def _partition_transform(
             sets.append(_indexed_set(out_dim, m, grids[out_dim]))
         else:
             sets.append(_strided_set(transform, out_dim, m, grids[out_dim]))
-    joint = _joint_set(transform, grids) if correlated else None
-    row_shape = tuple(len(axis) for axis in sets) + ((len(joint),) if joint is not None else ())
+    joint_sets = _component_joint_sets(transform, grids) if correlated else ()
+    row_shape = tuple(len(axis) for axis in sets) + tuple(len(joint) for joint in joint_sets)
     return GridPartition(
         transform=transform,
         dimension_grids=grids,
         sets=tuple(sets),
-        joint=joint,
+        joint_sets=joint_sets,
         row_shape=row_shape,
     )
 

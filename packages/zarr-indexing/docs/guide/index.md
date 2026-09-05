@@ -477,10 +477,9 @@ the second row on both of its transforms:
 There are three kinds of table, matching the three map kinds and the one
 arrangement that does not factor. A `StridedSet` holds a `ConstantMap` or
 `DimensionMap` axis; an `IndexedSet` holds an orthogonal `ArrayMap` axis
-(`.oindex`) with its coordinates grouped by chunk; and a `JointSet` holds the
-correlated arrays of a `.vindex` selection, which read the same request axes
-and so do not distribute — a chunk constrains all of them at once, so their
-points are sorted into chunks together, once. The
+(`.oindex`) with its coordinates grouped by chunk; and each `JointSet` holds one connected group of index arrays. Arrays
+sharing request axes are sorted together; independent groups are separate
+tables in `joint_sets`. Singleton broadcast axes retain this independence. The
 [API reference](../api/chunk_resolution.md) documents every column.
 
 The gather from the previous section, `oindex[[4, 1, 1], 2:6]` over 3-by-4
@@ -494,11 +493,21 @@ its points paired in the joint table:
 
 Building independent strided tables costs the *sum* of touched chunks per
 axis. Index-array grouping also scales with the selected point count; the
-current joint table broadcasts all correlated arrays into one block, which
-can expand independent dependency groups into their Cartesian product. And projections are derived from rows only when asked for:
+planner flattens each connected component separately. Independent components
+do not expand into their Cartesian product until their rows are iterated. And projections are derived from rows only when asked for:
 `chunk_coords()` allocates every chunk coordinate without building projections;
 `chunk_coord_batches(batch_size)` bounds that allocation, and a consumer can read the columns directly, as
 [Integration boundaries](integrations.md#reading-the-tables-directly) shows.
+For example, `(u, v) -> (a[u], b[u], c[v])` has two independent components.
+The first two storage axes share `u`; the third reads `v`. With 1,000 values
+per input axis, planning stores 3,000 index values rather than 3,000,000.
+Each projection has one synthetic axis per nonconstant component, followed
+by residual request axes, including axes no output reads.
+
+```python
+--8<-- "snippets/grid_partition.py:components"
+```
+
 A hand-built affine diagonal — two `DimensionMap`s reading one request axis —
 requires a set spanning several storage axes. `partition()` rejects this
 with `ValueError`; iterating the plan preserves support for these transforms,

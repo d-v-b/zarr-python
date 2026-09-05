@@ -39,12 +39,12 @@ about the deliberately matching semantics:
   any cell, rather than intersecting the whole transform with each chunk.
   TensorStore's `IndexTransformGridPartition` holds strided sets and index
   array sets and derives a per-cell transform on iteration;
-  [`GridPartition`](api/chunk_resolution.md) has the same shape with two
-  simplifications. Its `StridedSet` is per storage axis, where TensorStore's
+  [`GridPartition`](api/chunk_resolution.md) also partitions index-array
+  dependency components. Its `StridedSet` is per storage axis, where TensorStore's
   is per input dimension and spans every grid axis reading it (which is how
-  TensorStore factors diagonals), and it keeps one
-  `JointSet` for all correlated arrays where TensorStore keeps one index
-  array set per connected component. Both derive the per-chunk transforms
+  TensorStore factors diagonals). `joint_sets` holds one `JointSet` per
+  connected index-array component, including independent single-array
+  components within a mixed request. Both derive the per-chunk transforms
   from the partition ([the guide](guide/index.md#a-plan-is-a-product-of-per-axis-tables)
   shows the tables). TensorStore keeps strided sets implicit, while this
   library materializes their per-axis rows for vectorized consumers. Plan
@@ -274,7 +274,10 @@ rewritten in place. Resolution classifies the result by structure
 (`index_array_structure`): pure per-axis outer products keep the orthogonal
 resolvers, and everything else — correlated maps, mixtures, index arrays
 sharing an input axis (a diagonal gather, reachable only by hand-building a
-transform) — takes the pointwise path that collapses the joint block.
+transform) — takes the general reader/intersection path. Chunk planning
+factors index arrays into connected dependency components before flattening,
+so independent groups do not expand one another. Vectorized selection preserves
+broadcast singletons to retain those dependencies.
 
 Three limits remain, all intentional and all expected to be lifted:
 
