@@ -61,6 +61,21 @@ class DimensionGridLike(Protocol):
         ...
 
 
+@runtime_checkable
+class RegularDimensionGridLike(DimensionGridLike, Protocol):
+    """A regular-grid capability, implemented structurally across packages.
+
+    Chunk k starts at k * size and declares size elements; extent clips only
+    the final chunk's valid data. Implementations must obey these invariants.
+    """
+
+    @property
+    def size(self) -> int: ...
+
+    @property
+    def extent(self) -> int: ...
+
+
 def _bounded_indices(indices: npt.NDArray[np.intp], extent: int) -> npt.NDArray[np.intp]:
     """Normalize a vector lookup and enforce the scalar grid bounds."""
     arr = np.asarray(indices, dtype=np.intp)
