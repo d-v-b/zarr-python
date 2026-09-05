@@ -42,11 +42,14 @@ about the deliberately matching semantics:
   [`GridPartition`](api/chunk_resolution.md) has the same shape with two
   simplifications. Its `StridedSet` is per storage axis, where TensorStore's
   is per input dimension and spans every grid axis reading it (which is how
-  TensorStore serves the diagonal this library rejects), and it keeps one
+  TensorStore factors diagonals), and it keeps one
   `JointSet` for all correlated arrays where TensorStore keeps one index
   array set per connected component. Both derive the per-chunk transforms
   from the partition ([the guide](guide/index.md#a-plan-is-a-product-of-per-axis-tables)
-  shows the tables).
+  shows the tables). TensorStore keeps strided sets implicit, while this
+  library materializes their per-axis rows for vectorized consumers. Plan
+  iteration supports affine diagonals through connected input-axis walks;
+  the per-output-axis table API still cannot represent them.
 
 Four deliberate differences:
 
@@ -76,8 +79,8 @@ safe, `partial` proves it is not, and `unknown` conservatively covers fancy
 selections whose duplicates would require additional work to classify.
 
 The comparison also runs the other way. TensorStore is a mature, heavily
-optimized C++ system whose performance this library cannot approach. Planning
-here is per axis, never per chunk, but each materialized `ChunkProjection` is
+optimized C++ system whose performance this library cannot approach. Independent strided planning
+here is per axis, but each materialized `ChunkProjection` is
 Python-level bookkeeping over NumPy — two domains, two transforms and the
 projection itself — so the per-part overhead of the object view is
 significant; a consumer that reads the partition's tables directly pays no
@@ -278,11 +281,11 @@ Three limits remain, all intentional and all expected to be lifted:
 - **Affine diagonals.** A hand-built transform in which an *index array* and a
   *slice map* bind the same input dimension is rejected at resolution with
   `NotImplementedError`; one in which two slice maps share an input dimension
-  is rejected with `ValueError`, since it has no factored form. No selection
-  dialect produces either. Supporting the first means lowering the slice map
-  into the joint block; supporting the second means a strided table per
-  *input* dimension spanning every storage axis that reads it, as
-  TensorStore's does. *Planned.*
+  is supported by plan iteration, but `partition()` raises `ValueError`.
+  No selection dialect produces either. Supporting the first means lowering
+  the slice map into the joint block; exposing the second as tables needs a
+  strided set per *input* dimension spanning all dependent storage axes.
+  TensorStore uses that connected-component representation.
 - **Finite explicit bounds only.** `IndexDomain` has no implicit or unbounded
   dimensions; the message layer will normalize a body with `"-inf"`/`"+inf"`
   bounds, but the engine layer refuses to lower one into a transform.

@@ -34,8 +34,9 @@ prefetcher — does not need a `ChunkProjection` object per chunk. The plan's
 [factored form](index.md#a-plan-is-a-product-of-per-axis-tables) is a few
 NumPy arrays per axis, and everything a chunk copy needs is a row of each:
 the chunk index, the chunk-local start and extent, and where the cells land
-in the request. `chunk_coords()` alone answers "which chunks?" for a prefetch,
-without materializing anything.
+in the request. `chunk_coords()` answers "which chunks?" by allocating their coordinate
+array. For a large prefetch, iterate `chunk_coord_batches(batch_size=1024)`
+instead; each array has at most 1,024 rows and no projections are constructed.
 
 The example assembles a strided box from its `StridedSet` tables, one slice
 per chunk. Three things a real consumer also has to get right are checked at
@@ -52,7 +53,9 @@ The four reads are the four chunks the two axis tables multiply out to, and no
 intermediate transform, domain, or projection was built. A gather reads its
 `IndexedSet` rows the same way — `index[pointer[i]:pointer[i + 1]]` and the
 matching `positions` — and a `vindex` selection its `JointSet` rows, whose
-`local` coordinates already have the chunk origin subtracted.
+`local` coordinates already have the chunk origin subtracted. Both tables
+compute `local` once on first access and return the same read-only array
+afterward, so accessing a row does not recalculate every point.
 
 ## One slab read or many part reads
 

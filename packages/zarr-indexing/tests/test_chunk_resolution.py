@@ -131,8 +131,8 @@ def test_coverage_classification(transform: IndexTransform, expected: list[str])
     assert [projection.coverage for projection in plan_chunks(transform, grids)] == expected
 
 
-def test_repeated_input_dependency_is_rejected() -> None:
-    """Two maps reading one input axis (a diagonal) have no factored form."""
+def test_repeated_input_dependency_partition_is_rejected() -> None:
+    """The per-output-axis table API cannot represent a diagonal."""
     transform = IndexTransform(
         domain=IndexDomain.from_shape((2,)),
         output=(DimensionMap(input_dimension=0), DimensionMap(input_dimension=0)),
@@ -140,7 +140,7 @@ def test_repeated_input_dependency_is_rejected() -> None:
     grids = dimension_grids_from_chunks((2, 2), (2, 2))
 
     with pytest.raises(ValueError, match="read input axis 0"):
-        list(plan_chunks(transform, grids))
+        plan_chunks(transform, grids).partition()
 
 
 def test_unused_input_axis_is_not_full_coverage() -> None:
@@ -775,3 +775,113 @@ def test_partition_columns_are_read_only() -> None:
     ):
         with pytest.raises(ValueError, match="read-only"):
             column[0] = 0
+
+
+@pytest.mark.parametrize("stride", [-2, -1, 0, 1, 2])
+@pytest.mark.parametrize("origin", [0, 5])
+def test_diagonal_plan_preserves_request_cells(stride: int, origin: int) -> None:
+    transform = IndexTransform(
+        domain=IndexDomain((origin, 0), (origin + 6, 3)),
+        output=(
+            DimensionMap(0, offset=-origin),
+            DimensionMap(0, offset=12 - stride * origin, stride=stride),
+            ArrayMap(np.array([[3, 0, 3]])),
+        ),
+    )
+    grids = dimension_grids_from_chunks((2, 3, 2), shape=(6, 24, 4))
+    plan = plan_chunks(transform, grids)
+    rows = list(plan)
+    assert rows == list(plan)
+    _check_projections(transform, rows)
+
+
+@pytest.mark.parametrize("chunk_size", [1, 2, 3])
+def test_affine_diagonal_coverage(chunk_size: int) -> None:
+    transform = IndexTransform(
+        domain=IndexDomain.from_shape((6,)),
+        output=(DimensionMap(0), DimensionMap(0, offset=5, stride=-1)),
+    )
+    grids = dimension_grids_from_chunks((chunk_size, chunk_size), shape=(6, 6))
+    _check_projections(transform, list(plan_chunks(transform, grids)))
+
+
+@pytest.mark.parametrize("correlated", [False, True])
+def test_local_columns_are_reused_and_read_only(correlated: bool) -> None:
+    base = IndexTransform.from_shape((7, 9))
+    indices = np.array([6, 0, 6, 1])
+    transform = base.vindex[indices, indices] if correlated else base.oindex[indices, :]
+    partition = plan_chunks(transform, dimension_grids_from_chunks((3, 4), (7, 9))).partition()
+    table = partition.joint if correlated else partition.sets[0]
+    assert table is not None
+    local = table.local
+    assert table.local is local
+    assert not local.flags.writeable
+    for row in range(len(table)):
+        assert np.shares_memory(local[table.run(row)], local)
+
+
+@pytest.mark.parametrize("case", _partition_cases(), ids=lambda case: case[0])
+@pytest.mark.parametrize("batch_size", [1, 3, 100])
+def test_chunk_coordinate_batches(
+    case: tuple[str, IndexTransform, tuple[Any, ...]], batch_size: int
+) -> None:
+    _, transform, grids = case
+    partition = plan_chunks(transform, grids).partition()
+    batches = list(partition.chunk_coord_batches(batch_size))
+    assert all(0 < len(batch) <= batch_size for batch in batches)
+    actual = np.concatenate(batches) if batches else np.empty((0, transform.output_rank))
+    assert actual.tolist() == [list(p.chunk_coords) for p in partition]
+
+
+@pytest.mark.parametrize("batch_size", [0, -1])
+def test_chunk_coordinate_batches_reject_nonpositive_size(batch_size: int) -> None:
+    partition = plan_chunks(IndexTransform.from_shape(()), ()).partition()
+    with pytest.raises(ValueError, match="positive"):
+        list(partition.chunk_coord_batches(batch_size))
+
+
+@pytest.mark.parametrize("width", [3, 10_000])
+def test_correlated_projection_keeps_residual_slices_compact(width: int) -> None:
+    indices = np.array([0, 2, 1])
+    transform = IndexTransform.from_shape((3, 3, width)).vindex[indices, indices, :]
+    grids = dimension_grids_from_chunks((3, 3, width), shape=(3, 3, width))
+    (projection,) = plan_chunks(transform, grids)
+    assert projection.cell_transform.apply((2, width - 1)) == (2, width - 1)
+    assert projection.chunk_transform.apply((2, width - 1)) == (1, 1, width - 1)
+    coordinate_bytes = sum(
+        m.index_array.nbytes for m in projection.cell_transform.output if isinstance(m, ArrayMap)
+    )
+    # Request placement needs only the three point positions, regardless of slab width.
+    assert coordinate_bytes <= indices.nbytes
+
+
+def test_diagonal_iteration_preserves_lexicographic_chunk_order() -> None:
+    transform = IndexTransform(
+        IndexDomain.from_shape((4, 2)), (DimensionMap(0), DimensionMap(1), DimensionMap(0))
+    )
+    grids = dimension_grids_from_chunks((4, 1, 2), shape=(4, 2, 4))
+    assert [p.chunk_coords for p in plan_chunks(transform, grids)] == [
+        (0, 0, 0),
+        (0, 0, 1),
+        (0, 1, 0),
+        (0, 1, 1),
+    ]
+
+
+def test_diagonal_iteration_rejects_mixed_affine_array_dependency() -> None:
+    transform = IndexTransform(
+        IndexDomain.from_shape((4,)), (DimensionMap(0), ArrayMap(np.array([3, 2, 1, 0])))
+    )
+    grids = dimension_grids_from_chunks((2, 2), shape=(4, 4))
+    with pytest.raises(NotImplementedError, match="also bound"):
+        list(plan_chunks(transform, grids))
+
+
+def test_coordinate_batches_do_not_expand_a_huge_product() -> None:
+    shape = (100,) * 10
+    partition = plan_chunks(
+        IndexTransform.from_shape(shape), dimension_grids_from_chunks((1,) * 10, shape)
+    ).partition()
+    assert partition.n_rows == 100**10
+    batch = next(partition.chunk_coord_batches(4))
+    assert batch.tolist() == [[0] * 9 + [last] for last in range(4)]

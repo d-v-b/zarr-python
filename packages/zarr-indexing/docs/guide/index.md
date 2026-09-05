@@ -492,15 +492,18 @@ its points paired in the joint table:
 --8<-- "snippets/grid_partition.py:indexed-and-joint"
 ```
 
-Two properties follow from the factoring. Building the tables costs the *sum*
-of the chunks touched per axis, never their product, and correlated points
-cost one sort. And projections are derived from rows only when asked for:
-`chunk_coords()` lists every chunk the plan touches without materializing a
-row, and a consumer can read the columns directly, as
+Building independent strided tables costs the *sum* of touched chunks per
+axis. Index-array grouping also scales with the selected point count; the
+current joint table broadcasts all correlated arrays into one block, which
+can expand independent dependency groups into their Cartesian product. And projections are derived from rows only when asked for:
+`chunk_coords()` allocates every chunk coordinate without building projections;
+`chunk_coord_batches(batch_size)` bounds that allocation, and a consumer can read the columns directly, as
 [Integration boundaries](integrations.md#reading-the-tables-directly) shows.
-The one shape with no factored form is a hand-built diagonal — two
-`DimensionMap`s reading one request axis, which no selection produces — and
-the plan rejects it with `ValueError`.
+A hand-built affine diagonal — two `DimensionMap`s reading one request axis —
+requires a set spanning several storage axes. `partition()` rejects this
+with `ValueError`; iterating the plan preserves support for these transforms,
+walking shared input axes to their next grid boundary without enumerating
+unreachable chunk combinations.
 
 ---
 
