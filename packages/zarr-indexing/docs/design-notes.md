@@ -297,3 +297,61 @@ Three limits remain, all intentional and all expected to be lifted:
   dimension labels and the wire format round-trips them, but indexing
   operations build new domains without them, so a label does not survive a
   slice. *Planned.*
+
+## Prepared execution and explicit consumer lowering
+
+The internal `_execution` module is an opt-in implementation experiment, not
+Zarr's default indexing engine. It prepares semantic work and exposes two ways
+to consume it: direct codec rows through iteration, or explicit
+`plan.lower("numpy" | "shard").operations()` records containing selectors,
+selected-value shape, and selector interpretation. The legacy four-field codec
+row is an adapter at this boundary rather than the semantic plan itself.
+
+Basic work consists of implicit affine-axis descriptions. The shared
+`_axis_plan.axis_runs` kernel supplies both declarative `StridedSet` tables and
+immediate selectors, preserving exact affine arithmetic and distinguishing valid
+data extents from declared codec-buffer extents. Small axes cache at most 128
+pieces; larger axes stay implicit, including before the first result. This bounds
+planner caching, not consumers that retain all emitted rows.
+
+Sorted work retains coordinate runs located with `searchsorted`. Uniform grids
+are recognized through `RegularDimensionGridLike`, a structural capability
+implemented by both the package's grids and Zarr's existing grids. No grid-class
+conversion is needed for that fast path. General work retains a prepared
+`ChunkPlan`; pure connected-component tables lower directly from their checked,
+read-only local columns. Mixed selections and diagonals retain the shared
+projection fallback. Preparation preserves supported diagonal-plus-gather cases.
+
+Ownership and access are explicit:
+
+- `ownership="snapshot"` is the default, independent of optimizer dispatch.
+  `ownership="borrow"` permits borrowing and requires the caller to keep arrays
+  unchanged for every use of the plan and outstanding iterators. Borrowing may
+  still require internal copies; it does not promise zero allocation.
+- `access="read"` permits repeated input positions, including unread axes.
+  Writers prepare with `access="write"`. The default `conflicts="error"`
+  validates injectivity, using independent axes or connected components rather
+  than expanding their Cartesian product.
+- `conflicts="last"` orders selections by row-major request position, removes
+  duplicate destinations, and sends only the final value for each destination
+  to the backend. It therefore does not depend on backend advanced-assignment
+  ordering. This policy can materialize per-chunk coordinates and is intentionally
+  more expensive. Write plans that discard overwritten values are not read plans.
+
+Generic storage bounds and affine arithmetic are checked during preparation;
+selector arithmetic uses the same checked evaluator. Cancellation of large
+intermediate integers therefore does not introduce a new overflow after earlier
+chunks have been yielded. These checks do not provide transactional I/O: store,
+codec, allocation, and external mutation failures are outside that guarantee.
+
+The current shard consumer preserves scalar and already-flat selections. For
+other coordinate layouts it materializes paired coordinates per shard, exposing
+the flat selected-value shape. This remains a materialization cost of the current
+consumer. A future shard indexer should accept compact components directly.
+
+`benchmarks/execution.py` measures actual Zarr grid objects, streaming and retained
+rows, explicit borrowed inputs, snapshots, and shard lowering.
+`benchmarks/execution_io.py` also measures real MemoryStore reads and writes,
+including plan creation, using the same arrays and codec pipeline for both paths.
+These measurements distinguish kernel costs from consumer materialization and
+codec costs; none establishes a general cloud-storage speedup.

@@ -14,7 +14,6 @@ if TYPE_CHECKING:
     from zarr.core.indexing import Indexer
 
 execution = pytest.importorskip("zarr_indexing._execution")
-grid_module = pytest.importorskip("zarr_indexing.grid")
 
 
 @pytest.mark.parametrize("pipeline", ["BatchedCodecPipeline", "FusedCodecPipeline"])
@@ -53,16 +52,21 @@ async def test_execution_codec_read_write(pipeline: str, layout: str, case: str)
         array[:] = source
         async_array = array._async_array
         # The pipeline processes shard-sized buffers for sharded arrays.
-        grids = grid_module.dimension_grids_from_chunks(array.shards or array.chunks, shape)
+        grids = async_array._chunk_grid._dimensions
         plan = execution.execute_selection(selection, shape, grids, mode=mode)
         if layout == "sharded":
-            plan = execution.for_shard_indexer(plan, grids)
+            plan = plan.lower("shard")
         indexer = cast("Indexer", plan)
         prototype = default_buffer_prototype()
         result = await async_array._get_selection(indexer, prototype=prototype)
         np.testing.assert_array_equal(result, source[selection])
         replacement = np.arange(np.prod(plan.shape)).reshape(plan.shape) + 10000
-        await async_array._set_selection(indexer, replacement, prototype=prototype)
+        write_plan = execution.execute_selection(selection, shape, grids, mode=mode, access="write")
+        if layout == "sharded":
+            write_plan = write_plan.lower("shard")
+        await async_array._set_selection(
+            cast("Indexer", write_plan), replacement, prototype=prototype
+        )
         expected = source.copy()
         expected[selection] = replacement
         np.testing.assert_array_equal(await async_array.getitem(Ellipsis), expected)

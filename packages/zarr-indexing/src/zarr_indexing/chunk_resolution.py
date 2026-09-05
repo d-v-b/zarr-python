@@ -45,6 +45,8 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 import numpy as np
 
 from zarr_indexing._affine import checked_affine
+from zarr_indexing._axis_plan import axis_runs
+from zarr_indexing._axis_plan import data_size as _data_size
 from zarr_indexing.domain import IndexDomain
 from zarr_indexing.output_map import ArrayMap, ConstantMap, DimensionMap, OutputIndexMap
 from zarr_indexing.transform import (
@@ -59,14 +61,6 @@ if TYPE_CHECKING:
     from zarr_indexing.grid import DimensionGridLike
 
 type ChunkCoverage = Literal["full", "partial", "unknown"]
-
-
-def _data_size(dim_grid: DimensionGridLike, chunk_ix: int) -> int:
-    """Return a chunk's data extent, falling back for narrow-protocol grids."""
-    data_size = getattr(dim_grid, "data_size", None)
-    if data_size is None:
-        return dim_grid.chunk_size(chunk_ix)
-    return int(data_size(chunk_ix))
 
 
 @dataclass(frozen=True, slots=True)
@@ -230,31 +224,6 @@ def plan_chunks(
 # --------------------------------------------------------------------------- #
 # Grid partition: the factored form of a plan
 # --------------------------------------------------------------------------- #
-
-
-def _dimension_map_candidates(
-    m: DimensionMap, dim_lo: int, dim_hi: int, dg: DimensionGridLike
-) -> Sequence[tuple[int, ...]]:
-    """The chunks a nonempty `DimensionMap` over input `[dim_lo, dim_hi)` can touch, ascending."""
-    first_storage = checked_affine(m.offset, m.stride, dim_lo)
-    if m.stride > 0:
-        s_min = first_storage
-        s_max = checked_affine(m.offset, m.stride, dim_hi - 1)
-    elif m.stride < 0:
-        s_min = checked_affine(m.offset, m.stride, dim_hi - 1)
-        s_max = first_storage
-    else:
-        s_min = s_max = first_storage
-    first = dg.index_to_chunk(s_min)
-    last = dg.index_to_chunk(s_max)
-    point_count = dim_hi - dim_lo
-    chunk_count = last - first + 1
-    if point_count < chunk_count:
-        steps = np.arange(point_count, dtype=np.intp)
-        storage = checked_affine(first_storage, m.stride, steps)
-        chunk_ids = dg.indices_to_chunks(storage)
-        return [(int(c),) for c in np.unique(chunk_ids)]
-    return [(c,) for c in range(first, last + 1)]
 
 
 def _freeze(*columns: np.ndarray[Any, Any]) -> None:
@@ -587,28 +556,27 @@ def _strided_set(
     stride = m.stride
     unit = abs(stride) == 1
     rows: list[tuple[int, int, int, int, int, int, bool]] = []
-    # Exact Python-int arithmetic per touched chunk: the request's literal
-    # coordinates can exceed np.intp before cancellation, and the number of
-    # touched chunks along one axis is a sum, not a product. Chunk-local
-    # columns fit np.intp; `extent` and `origin` scale with the request
-    # domain, which has arbitrary Python-int bounds, so they keep exact ints
-    # when they must (`_wide_column`).
-    for (c,) in _dimension_map_candidates(m, lo, hi, dg):
-        c_start = dg.chunk_offset(c)
-        c_extent = _data_size(dg, c)
-        narrowed = _intersect_dimension_map(m, lo, hi, c_start, c_start + c_extent)
-        if narrowed is None:
-            continue
-        nlo, nhi = narrowed
-        extent = nhi - nlo
-        # Chunk-local, then re-based to a zero-origin input axis.
-        local_start = m.offset - c_start + stride * nlo
-        if unit:
-            last = local_start + stride * (extent - 1)
-            full = min(local_start, last) == 0 and max(local_start, last) == c_extent - 1
-        else:
-            full = False
-        rows.append((c, c_start, c_extent, local_start, extent, nlo - lo, full))
+    start = checked_affine(m.offset, stride, lo)
+    for run in axis_runs(start, stride, hi - lo, dg):
+        last = run.local_start + stride * (run.nitems - 1)
+        full = (
+            unit
+            and min(run.local_start, last) == 0
+            and max(run.local_start, last) == run.data_extent - 1
+        )
+        rows.append(
+            (
+                run.chunk,
+                run.chunk_start,
+                run.data_extent,
+                run.local_start,
+                run.nitems,
+                run.position,
+                full,
+            )
+        )
+    if stride < 0:
+        rows.reverse()
     columns = list(zip(*rows, strict=True)) if rows else [()] * 7
     return StridedSet(
         output_dimension=out_dim,

@@ -133,7 +133,11 @@ Remaining experiments:
    skip reads only for proven complete writes. This branch does not change
    Zarr's codec or shard execution paths.
 
-## Immediate selector execution prototype
+## Initial immediate selector execution prototype (15256a27d)
+
+This section records the initial prototype and its measurements. The revised
+contracts and consumer measurements are described in the later section below;
+the old `for_shard_indexer` adapter has been replaced by explicit plan lowering.
 
 `_execution.py` is an internal, opt-in prototype. `execute_selection` takes
 literal-coordinate selections, a storage shape, and dimension grids;
@@ -225,3 +229,65 @@ I/O speedups. A future sharding consumer should accept the compact execution
 representation directly. The prototype only marks complete writes when direct
 basic selectors cover the declared codec buffer, not merely the clipped data
 extent of a boundary chunk.
+
+## Revised prepared execution plans
+
+The revised implementation shares affine-axis planning with declarative chunk
+resolution and prepares component tables once. Execution lowers those tables
+straight to consumer selectors when supported. Ownership defaults to an immutable
+snapshot; borrowing requires `ownership="borrow"`. Read/write intent and duplicate
+write policy are explicit. NumPy and shard consumers use `plan.lower(...)`.
+
+The following measurements supersede the initial prototype results above. They
+use actual Zarr grid objects and retain every row, matching the current codec
+consumer's `list(indexer)` behavior. Times include preparation and consumption;
+allocations exclude pre-existing input arrays. Python 3.12 / NumPy 2.0,
+2026-09-05, three rounds of 31 repetitions:
+
+| Retained selectors | Zarr time / peak MiB | Borrowed execution time / peak MiB | Snapshot execution time / peak MiB |
+| --- | ---: | ---: | ---: |
+| Basic slice, 10,000 chunks | 9.065 ms / 2.495 | 8.546 ms / 2.480 | 8.510 ms / 2.480 |
+| Sorted orthogonal, 1M points / 10 chunks | 5.108 ms / 16.213 | 1.134 ms / 7.633 | 1.497 ms / 15.263 |
+| Sorted coordinate, 1M points / 10 chunks | 1.144 ms / 7.636 | 1.140 ms / 7.633 | 1.425 ms / 15.263 |
+| Correlated points, 100 chunks | 0.287 ms / 0.180 | 0.345 ms / 0.112 | 0.341 ms / 0.112 |
+| Sparse correlated points, 900 chunks | 5.682 ms / 15.305 | 2.397 ms / 0.544 | 2.396 ms / 0.544 |
+| Independent components, one chunk / 1M points | 12.364 ms / 62.015 | 0.137 ms / 0.128 | 0.136 ms / 0.128 |
+| Independent components, 100 chunks / 1M points | 26.837 ms / 83.950 | 0.430 ms / 0.176 | 0.430 ms / 0.176 |
+
+Snapshot ownership adds a copy for the sorted fast path. Borrowing is a lifetime
+contract, not a guarantee that every planning path avoids copying. Dense
+correlated selection remains slower than Zarr's specialized indexer. The largest
+gains come from preserving independent components instead of broadcasting all
+requested coordinates. General mixed transforms still use projection lowering.
+
+Large basic axes now iterate implicitly, with a bounded cache for small axes.
+This bounds planning before the first result, but Zarr's consumer still retains
+all resulting rows. Shard lowering can also expand compact component selectors:
+the independent 100-chunk case takes 8.775 ms and 38.395 MiB when retained by the
+shard consumer, compared with 0.430 ms and 0.176 MiB for the NumPy consumer.
+
+### Real codec reads and writes
+
+`execution_io.py` exercises MemoryStore v3 arrays, with and without sharding,
+using existing indexers and borrowed execution plans through the same codec
+pipeline. It verifies reads and full-array contents after partial writes. These
+are small in-memory workloads, not storage-throughput measurements. Each run
+uses nine repetitions after warmup; allocation measurement is separate.
+
+Ranges below show the medians from two complete runs, in milliseconds:
+
+| Workload | Zarr read | Execution read | Zarr write | Execution write |
+| --- | ---: | ---: | ---: | ---: |
+| Basic | 4.30–4.45 | 4.34–4.51 | 7.72–8.46 | 7.90–8.03 |
+| Basic, sharded | 4.90–4.98 | 4.92–4.92 | 7.50–7.70 | 7.79–7.86 |
+| Sorted coordinates | 1.06–1.24 | 1.00–3.08 | 1.91–2.16 | 1.98–3.37 |
+| Sorted coordinates, sharded | 1.72–1.92 | 1.71–1.72 | 2.60–2.69 | 2.68–2.69 |
+| Independent components | 1.47–1.49 | 1.53–1.63 | 2.86–2.92 | 2.97–3.05 |
+| Independent components, sharded | 2.01–2.05 | 2.10–2.11 | 3.11–3.20 | 3.37–3.41 |
+
+The sorted unsharded timings vary substantially between runs; they do not support
+a stable speedup or regression estimate. Other cases show small differences,
+including persistent overhead for sharded component writes. Planning gains are
+not equivalent to I/O gains. Execution remains opt-in; the next integration work
+is compact selector support in sharding and bounded consumption in codecs,
+followed by stronger end-to-end measurements before considering default dispatch.
