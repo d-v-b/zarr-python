@@ -1020,3 +1020,34 @@ def test_component_dependency_graph_matches_pointwise_oracle(data: st.DataObject
     rows = list(partition)
     _check_projections(transform, rows)
     assert partition.chunk_coords().tolist() == [list(row.chunk_coords) for row in rows]
+
+
+@pytest.mark.parametrize("stride", [0, 1, 2, -2])
+@pytest.mark.parametrize("diagonal", [False, True])
+@pytest.mark.parametrize("count", [1, 2])
+def test_singleton_coverage(stride: int, diagonal: bool, count: int) -> None:
+    transform = IndexTransform(
+        IndexDomain.from_shape((count,)),
+        (DimensionMap(0, stride=stride),) * (2 if diagonal else 1),
+    )
+    shape = (5,) * transform.output_rank
+
+    class SingletonGrid:
+        def index_to_chunk(self, index: int) -> int:
+            return index
+
+        def chunk_offset(self, chunk: int) -> int:
+            return chunk
+
+        def chunk_size(self, chunk: int) -> int:
+            return 1
+
+        def indices_to_chunks(self, indices: Any) -> Any:
+            return indices
+
+    grids = (SingletonGrid(),) * len(shape)
+    expected = "partial" if stride == 0 and count > 1 else "full"
+    assert all(p.coverage == expected for p in plan_chunks(transform, grids))
+    if not diagonal:
+        partition = plan_chunks(transform, grids).partition()
+        assert all(bool(full) == (expected == "full") for full in partition.sets[0].full)

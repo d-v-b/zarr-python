@@ -16,12 +16,6 @@ become `VaryingDimension` instances. `DimensionGridLike` remains the narrow
 protocol used by the chunk planner, while `EdgeDimensionGrid` is kept for
 explicit edge-based and coordinate-origin examples.
 
-`RegularDimensionGridLike` is an optional structural capability for fast paths.
-It adds `size` and `extent` to the grid protocol: chunk `k` must start at
-`k * size` and declare `size` elements, with `extent` clipping only the valid
-data in the last chunk. Zarr's existing uniform dimensions satisfy this
-capability without conversion to this package's concrete classes.
-
 Zarr's array implementation can later import these compact grid types from
 `zarr_indexing`; this package intentionally has no import dependency on Zarr.
 

@@ -5,9 +5,9 @@ which values to select inside its decoded buffer, and where those values belong
 in the result. This page follows that conversion through the current planner and
 explains where the proposed sharding integration would fit.
 
-The public declarative API is `plan_chunks(transform, grids)`. The internal
-`_execution` module is an opt-in experiment that produces selectors for existing
-codec consumers. Zarr's default indexers have not been replaced.
+The public planning API is `plan_chunks(transform, grids)`. The plan describes
+coordinate mappings; a consumer decides how to turn them into selectors for its
+buffer implementation. Zarr's default indexers have not been replaced.
 
 ## The flow
 
@@ -35,10 +35,9 @@ selection + source domain + indexing dialect
              gathers/scatters, encodes
 ```
 
-This is a semantic flow, not a requirement to allocate every intermediate object.
-For a basic slice, `execute_selection` prepares affine axes directly. For sorted
-one-dimensional coordinates, it locates runs without creating a transform pair
-for every chunk. Both use the same selection semantics as the transform path.
+The right-hand branch describes consumer responsibilities, not a second public
+planning API. A consumer can lower table rows directly without first allocating
+a transform pair for every chunk.
 
 ## 1. Interpret the selection
 
@@ -46,7 +45,7 @@ The indexing boundary chooses the dialect before chunk planning begins:
 
 - A positional boundary, such as `LazyArray`, interprets NumPy-style negative
   indices and slice clipping against the current view.
-- `IndexTransform` and the experimental `execute_selection` frontend use literal
+- `IndexTransform` uses literal
   coordinates. Bounds are addresses; they do not wrap or clip like NumPy bounds.
 - Basic, orthogonal, and vectorized indexing specify different mappings.
   Orthogonal arrays form an outer product; vectorized arrays select paired,
@@ -79,20 +78,19 @@ assuming that all chunks have the same size.
 
 A declarative `cell_transform` returns **request-domain coordinates**, not
 necessarily zero-based buffer positions. A consumer placing values into a NumPy
-result subtracts the request domain origin. Execution `out_selection` already
-uses zero-based buffer positions.
+result subtracts the request domain origin. An execution consumer must translate these into zero-based buffer positions.
 
 ## 3. Partition without expanding the entire request
 
 Planning groups selected values by the chunks that contain them, retaining the
 mapping back to their original request positions.
 
-For affine selections, the shared `axis_runs` kernel finds each run that falls
+For affine selections, the planner finds each run that falls
 inside one chunk. A run records the chunk coordinate, chunk origin, local start,
 number of selected values, and starting request position. For a rectangular
 request, the multidimensional chunk operations are products of these axis runs.
-Declarative `StridedSet` tables materialize per-axis rows; basic execution keeps
-large axes implicit and caches only small axes.
+`StridedSet` tables materialize these per-axis rows, without materializing
+their full Cartesian product.
 
 For index arrays, planning groups coordinates by chunk while retaining their
 request positions. Arrays that share request axes must be grouped together:
@@ -131,18 +129,17 @@ request_transform(cell_transform(p))
 A consumer can evaluate these transforms, consume the factored tables directly,
 or lower them to its own selection vocabulary.
 
-The experimental execution path emits `ExecutionChunk` rows. For a NumPy read,
-their meaning is:
+For a NumPy reader, the eventual operation has this meaning:
 
 ```text
-result[row.out_selection] = decoded_chunk[row.chunk_selection]
+result[result_selection] = decoded_chunk[chunk_selection]
 ```
 
-`chunk_coords` tells the consumer which decoded chunk to obtain. For writes,
-values flow in the opposite direction, using a plan prepared with `access="write"`.
-`plan.lower("numpy").operations()` additionally exposes `value_shape` and
-`selector_kind`: basic selectors use slice/integer semantics, while paired
-coordinate arrays broadcast together. Consumers must preserve that distinction.
+The chunk coordinates identify which decoded chunk to obtain. For writes,
+values flow in the opposite direction. Basic selectors use slice/integer
+semantics; coordinate selectors are paired arrays that broadcast together.
+The consumer must preserve both the selected-value shape and the coordinate
+correspondence when choosing between these representations.
 
 ### A strided rectangle crossing four chunks
 
@@ -158,8 +155,9 @@ shown clipped to each chunk's extent, so equivalent generated stops may differ.
 | `(1, 1)` | `(4, 4)` | `[1:2:2, 0:2]` | `[2:3, 2:4]` |
 
 This executable example checks both the touched chunks and the assembled values.
-The array slicing used to obtain each decoded chunk stands in for storage and
-codec work:
+The example enumerates the small synthetic domains to make both projection
+directions explicit. Production consumers can instead lower the factored tables
+to slices and coordinate arrays. Array slicing stands in for storage and codecs:
 
 ```python
 --8<-- "snippets/selection_flow.py:basic"
@@ -183,54 +181,42 @@ restores the requested arrangement.
 --8<-- "snippets/selection_flow.py:gather"
 ```
 
-## 5. Apply ownership, write, and coverage contracts
+## 5. Coverage and execution
 
-Execution defaults to snapshot ownership. Explicit borrowing permits retaining
-caller arrays and requires them to remain unchanged throughout the plan's use.
-A reader may repeat a source coordinate. A writer defaults to rejecting repeated
-destinations; `conflicts="last"` explicitly keeps the final value in row-major
-request order before dispatch. Grouping by chunk must not change that policy.
+`StridedSet.full` and `ChunkProjection.coverage` describe coverage of the valid
+**data extent** of a grid cell, including a clipped boundary cell. A singleton
+cell selected once is full even when the request stride has magnitude greater
+than one. Repeated coverage is not full; fancy coverage remains conservative.
 
-Coverage is relative to a grid and a consumer. Declarative coverage describes
-the grid cell's data domain. The execution `is_complete_chunk` flag conservatively
-proves coverage of the declared codec buffer, which may extend beyond the valid
-data in a boundary chunk. Neither "this chunk was touched" nor "every chunk was
-touched" proves that a write can skip reading existing contents.
+Zarr's merge operation can skip a read for a full data-extent write and allocate
+a fill-valued codec buffer when the selected data is smaller than that buffer.
+Touching every chunk alone does not prove full coverage of each chunk.
 
-Planning does not fetch bytes, decode buffers, choose concurrency, or guarantee
-transactional writes. Those responsibilities begin at the consumer boundary.
-Retaining every emitted row also costs memory even when the planner is compact.
+Planning does not fetch bytes, decode buffers, choose concurrency, or define
+write-conflict handling. Consumers must preserve request ordering where their
+write API requires it, and account for memory retained by emitted operations.
 
-## 6. Cross the sharding boundary
+## 6. Applying the flow to sharding
 
-A sharded array has two relevant grids: outer shards and inner codec chunks.
-The same logical request can be partitioned at either level, but their chunk
-coordinates and origins differ.
-
-**Current implementation:** the experimental shard lowering adapts selectors to
-what the existing sharding indexer accepts. Some compact selections become flat
-paired coordinate arrays. The sharding codec then calls `get_indexer` against
-its inner grid, collects touched inner chunks for byte retrieval, and dispatches
-inner chunk selections. This can expand and re-plan a selection.
-
-**Proposed integration, not implemented:** pass the structured request mapping
-into sharding, partition it against the inner grid, and lower selectors only
-when the inner consumer needs them. Conceptually:
+A sharded array has an outer shard grid and an inner codec-chunk grid. A consumer
+can partition the request first by outer shard, then map each contribution into
+the shard's coordinate frame and partition against the inner grid:
 
 ```text
 request -> global storage
-        -> selected outer shard + request-to-shard-local mapping
-        -> selected inner chunk + request-to-inner-local mapping
-        -> inner chunk selection + destination in the result
+        -> outer shard + request-to-shard-local mapping
+        -> inner chunk + request-to-inner-local mapping
+        -> inner selection + destination in the result
 ```
 
-Touched inner chunk coordinates can support shard-index lookup and byte-range
-coalescing without retaining every expanded value selector. Direct scattering
-into the final result would additionally require the surrounding pipeline to
-pass the output buffer and destination mapping through the shard boundary.
-These are execution-interface changes; they do not require an on-disk format
-change. Missing chunks, fill values, duplicate writes, and partial-write coverage
-must retain their existing meaning across both partitioning levels.
+This is a proposed integration, not implemented by this PR. The existing
+sharding codec receives selectors and calls its own indexer against the inner
+grid. A future consumer could retain compact transforms through both levels,
+collect touched chunk coordinates for byte-range retrieval, and lower value
+selectors only when needed. Direct scattering into the final result would also
+require a pipeline interface carrying that buffer and its destination mapping.
+No on-disk format change is needed. Fill values, missing chunks, partial-write
+coverage, and the consumer's duplicate-write policy must survive both levels.
 
-For further details, see [Integration boundaries](integrations.md) and
-[Prepared execution and explicit consumer lowering](../design-notes.md#prepared-execution-and-explicit-consumer-lowering).
+See [Integration boundaries](integrations.md) for consumers of projections and
+tables, and [Design notes](../design-notes.md) for implementation constraints.
