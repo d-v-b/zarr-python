@@ -300,6 +300,9 @@ Three limits remain, all intentional and all expected to be lifted:
 
 ## Prepared execution and explicit consumer lowering
 
+[From a selection to chunk operations](guide/selection-flow.md) traces the full
+flow with worked slice and gather examples, including the sharding boundary.
+
 The internal `_execution` module is an opt-in implementation experiment, not
 Zarr's default indexing engine. It prepares semantic work and exposes two ways
 to consume it: direct codec rows through iteration, or explicit

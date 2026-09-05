@@ -1,5 +1,8 @@
 # Integration boundaries
 
+For the complete path from indexing syntax to chunk coordinates, local selectors,
+and result positions, start with [From a selection to chunk operations](selection-flow.md).
+
 This package supplies indexing plans. It does **not** supply scheduling,
 caching, codecs, or async orchestration. A consumer decides when projections
 run, how decoded chunks are obtained, and where completed values are retained.
