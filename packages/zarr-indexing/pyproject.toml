@@ -48,10 +48,9 @@ Changelog = "https://github.com/zarr-developers/zarr-python/blob/main/packages/z
 Documentation = "https://zarr-indexing.readthedocs.io/"
 
 [dependency-groups]
-# The package and its tests import nothing from `zarr`: chunk resolution
-# consumes the `DimensionGridLike` protocol and the tests use this package's
-# own grids (`zarr_indexing.grid`). The suite is nevertheless run from the
-# repo-root environment (`just test`, the invocation CI uses) so that it sees
+# The package imports nothing from `zarr`: chunk resolution consumes the
+# `DimensionGridLike` protocol. Codec integration tests optionally import Zarr.
+# The suite runs from the repo-root environment (`just test`, as in CI), providing
 # the same pinned toolchain — hypothesis, ruff, pyright — as the parent
 # project; the repo is not a uv workspace, so this package is layered in as an
 # editable overlay. `hypothesis` arrives via the `testing` extra, which is
