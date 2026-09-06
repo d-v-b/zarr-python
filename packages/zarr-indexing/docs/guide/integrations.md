@@ -1,5 +1,8 @@
 # Integration boundaries
 
+For incoming chunks that do not align with the destination's independently
+writable units, see [Conflict-free write batches](write-batches.md).
+
 For the complete path from indexing syntax to chunk coordinates, local selectors,
 and result positions, start with [From a selection to chunk operations](selection-flow.md).
 
