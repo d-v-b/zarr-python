@@ -234,17 +234,17 @@ def test_scalar_coordinate_consumer_preserves_value_shape(consumer: Any) -> None
 
 
 @pytest.mark.parametrize("access", ["read", "write"])
-def test_diagonal_with_independent_gather_is_preparable(access: Any) -> None:
+def test_diagonal_is_rejected_before_iteration(access: Any) -> None:
     from zarr_indexing import ArrayMap
 
     transform = IndexTransform(
         IndexDomain.from_shape((3, 2)),
         (DimensionMap(0), DimensionMap(0), ArrayMap(np.array([[1, 0]]))),
     )
-    plan = execute_transform(
-        transform, dimension_grids_from_chunks((2, 2, 2), (3, 3, 2)), access=access
-    )
-    assert len(list(plan)) == 2
+    with pytest.raises(ValueError, match="diagonal"):
+        execute_transform(
+            transform, dimension_grids_from_chunks((2, 2, 2), (3, 3, 2)), access=access
+        )
 
 
 def test_last_write_lowering_removes_duplicate_destinations() -> None:

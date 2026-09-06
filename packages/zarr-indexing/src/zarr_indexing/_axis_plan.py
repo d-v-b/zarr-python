@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, NamedTuple
 
 from zarr_indexing._affine import checked_affine
+from zarr_indexing.chunk_resolution import _data_size  # pyright: ignore[reportPrivateUsage]
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -19,11 +20,6 @@ class AxisRun(NamedTuple):
     local_start: int
     nitems: int
     position: int
-
-
-def data_size(grid: DimensionGridLike, chunk: int) -> int:
-    method = getattr(grid, "data_size", None)
-    return grid.chunk_size(chunk) if method is None else int(method(chunk))
 
 
 def axis_runs(start: int, stride: int, nitems: int, grid: DimensionGridLike) -> Iterator[AxisRun]:
@@ -43,7 +39,7 @@ def axis_runs(start: int, stride: int, nitems: int, grid: DimensionGridLike) -> 
         chunk = grid.index_to_chunk(coordinate)
         offset = grid.chunk_offset(chunk)
         local = coordinate - offset
-        extent = data_size(grid, chunk)
+        extent = _data_size(grid, chunk)
         if stride == 0:
             count = nitems
         else:

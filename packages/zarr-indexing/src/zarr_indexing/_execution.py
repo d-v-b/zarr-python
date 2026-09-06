@@ -18,12 +18,7 @@ from zarr_indexing._affine import checked_affine
 from zarr_indexing._axis_plan import axis_runs
 from zarr_indexing._selector import as_scalar_index
 from zarr_indexing.boundary import split_scalar_axes
-from zarr_indexing.chunk_resolution import (
-    ChunkPlan,
-    IndexedSet,
-    _shared_input_axis,  # pyright: ignore[reportPrivateUsage]
-    plan_chunks,
-)
+from zarr_indexing.chunk_resolution import ChunkPlan, IndexedSet, plan_chunks
 from zarr_indexing.errors import BoundsCheckError
 from zarr_indexing.grid import DimensionGridLike, RegularDimensionGridLike
 from zarr_indexing.output_map import ArrayMap, ConstantMap, DimensionMap
@@ -375,20 +370,18 @@ def execute_transform(
                 return _with_policy(sorted_plan, access, "snapshot", conflicts)
     _validate_storage_bounds(transform, grids)
     plan = plan_chunks(transform, grids)
-    # Prepare factored array grouping once. Affine diagonals intentionally use
-    # ChunkPlan's shared projection path rather than per-output-axis tables.
+    # Factor the plan once, up front: a transform the planner cannot factor
+    # (a diagonal) is rejected here rather than on first iteration.
+    partition = plan.partition()
     if (
         any(isinstance(m, ArrayMap) for m in transform.output)
-        and _shared_input_axis(transform) is None
+        and not partition.sets
+        and all(bool((joint.chunk_start >= 0).all()) for joint in partition.joint_sets)
     ):
-        partition = plan.partition()
-        if not partition.sets and all(
-            bool((joint.chunk_start >= 0).all()) for joint in partition.joint_sets
-        ):
-            # Column arithmetic is checked once by JointSet.local; nonnegative
-            # chunk origins make its final local subtraction safe in intp.
-            work = _ComponentWork(plan, tuple(joint.local for joint in partition.joint_sets))
-            return _with_policy(ExecutionPlan(domain.shape, work), access, "snapshot", conflicts)
+        # Column arithmetic is checked once by JointSet.local; nonnegative
+        # chunk origins make its final local subtraction safe in intp.
+        work = _ComponentWork(plan, tuple(joint.local for joint in partition.joint_sets))
+        return _with_policy(ExecutionPlan(domain.shape, work), access, "snapshot", conflicts)
     return _with_policy(ExecutionPlan(domain.shape, plan), access, "snapshot", conflicts)
 
 
