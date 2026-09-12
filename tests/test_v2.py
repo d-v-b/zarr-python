@@ -11,6 +11,7 @@ from numcodecs.zstd import Zstd
 import zarr
 import zarr.core.buffer
 import zarr.storage
+from tests.conftest import MEMORY_STORE
 from zarr import config
 from zarr.abc.store import Store
 from zarr.core.buffer.core import default_buffer_prototype
@@ -135,7 +136,7 @@ def test_v2_filters_codecs(filters: Any, order: Literal["C", "F"]) -> None:
 
 
 @pytest.mark.filterwarnings("ignore")
-@pytest.mark.parametrize("store", ["memory"], indirect=True)
+@pytest.mark.parametrize("store", MEMORY_STORE, indirect=True)
 def test_create_array_defaults(store: Store) -> None:
     """
     Test that passing compressor=None results in no compressor. Also test that the default value of the compressor

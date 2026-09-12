@@ -14,7 +14,6 @@ if TYPE_CHECKING:
     from zarr.types import AnyArray
 
 
-@pytest.mark.parametrize("zarr_format", [2, 3])
 @pytest.mark.parametrize(
     "data", [{"inf": np.inf, "-inf": -np.inf, "nan": np.nan}, {"a": 3, "c": 4}]
 )

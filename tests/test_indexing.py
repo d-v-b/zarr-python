@@ -11,7 +11,7 @@ import pytest
 from numpy.testing import assert_array_equal
 
 import zarr
-from tests.conftest import Expect, ExpectFail
+from tests.conftest import LOCAL_MEMORY_STORES, Expect, ExpectFail
 from zarr import Array
 from zarr.core.buffer import default_buffer_prototype
 from zarr.core.chunk_grids import ChunkGrid
@@ -950,7 +950,6 @@ def test_unsorted_index_unsigned_dtype(store: StorePath, dtype: str) -> None:
     assert_array_equal(a[[3, 0], [1, 0]], z.vindex[rows, np.array([1, 0], dtype=dtype)])
 
 
-@pytest.mark.parametrize("zarr_format", [2, 3])
 @pytest.mark.parametrize("indexer", ["oindex", "vindex"])
 @pytest.mark.parametrize("operation", ["read", "write"])
 @pytest.mark.parametrize("index", [4, 2**63, 2**64 - 4, 2**64 - 1])
@@ -973,7 +972,6 @@ def test_unsigned_index_out_of_bounds(
     assert_array_equal(arr[:], data)
 
 
-@pytest.mark.parametrize("zarr_format", [2, 3])
 @pytest.mark.parametrize("indexer", ["oindex", "vindex"])
 @pytest.mark.parametrize("dtype", ["uint8", "uint16", "uint32", "uint64"])
 @pytest.mark.parametrize("indices", [[], [3, 0], [0, 3], [0] * 16 + [3] * 16])
@@ -992,7 +990,6 @@ def test_unsigned_index_roundtrip(
     assert_array_equal(arr[:], expected)
 
 
-@pytest.mark.parametrize("zarr_format", [2, 3])
 @pytest.mark.parametrize("indexer", ["oindex", "vindex"])
 @pytest.mark.parametrize("readonly", [False, True])
 @pytest.mark.parametrize("indices", [[-1, 0], [0, 3]])
@@ -2193,7 +2190,7 @@ def test_indexing_with_zarr_array(store: StorePath) -> None:
     assert_array_equal(a[ii], za.oindex[zii])
 
 
-@pytest.mark.parametrize("store", ["local", "memory"], indirect=["store"])
+@pytest.mark.parametrize("store", LOCAL_MEMORY_STORES, indirect=True)
 @pytest.mark.parametrize("shape", [(0, 2, 3), (0,), (3, 0)])
 def test_zero_sized_chunks(store: StorePath, shape: list[int]) -> None:
     """Arrays with zero-extent dimensions can be created and indexed without error; reading back returns the fill value."""

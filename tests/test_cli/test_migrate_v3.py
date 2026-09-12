@@ -552,7 +552,6 @@ def test_migrate_incorrect_compressor(local_store: LocalStore) -> None:
     )
 
 
-@pytest.mark.parametrize("zarr_format", [2, 3])
 def test_remove_metadata_fails_without_force(
     local_store: LocalStore, zarr_format: ZarrFormat
 ) -> None:
@@ -566,7 +565,6 @@ def test_remove_metadata_fails_without_force(
     assert str(result.exception).startswith(f"Cannot remove v{zarr_format} metadata at file")
 
 
-@pytest.mark.parametrize("zarr_format", [2, 3])
 def test_remove_metadata_succeeds_with_force(
     local_store: LocalStore, zarr_format: ZarrFormat, expected_paths_no_metadata: list[Path]
 ) -> None:

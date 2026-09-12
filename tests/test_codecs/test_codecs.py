@@ -11,14 +11,23 @@ import pytest
 import zarr
 import zarr.api
 import zarr.api.asynchronous
+from tests.conftest import LOCAL_MEMORY_STORES
 from zarr import Array, AsyncArray, config
+from zarr.abc.codec import SupportsSyncCodec
 from zarr.codecs import (
+    BloscCodec,
     BytesCodec,
+    Crc32cCodec,
     GzipCodec,
     ShardingCodec,
     TransposeCodec,
+    VLenBytesCodec,
+    VLenUTF8Codec,
+    ZstdCodec,
 )
+from zarr.core.array_spec import ArrayConfig, ArraySpec
 from zarr.core.buffer import default_buffer_prototype
+from zarr.core.dtype import get_data_type_from_native_dtype
 from zarr.core.indexing import BasicSelection, decode_morton, morton_order_coords
 from zarr.core.metadata.v3 import ArrayV3Metadata
 from zarr.dtype import UInt8
@@ -28,7 +37,7 @@ from zarr.storage import MemoryStore, StorePath
 if TYPE_CHECKING:
     from zarr.abc.codec import Codec
     from zarr.abc.store import Store
-    from zarr.core.buffer.core import NDArrayLikeOrScalar
+    from zarr.core.buffer.core import Buffer, NDArrayLikeOrScalar
     from zarr.core.common import MemoryOrder
     from zarr.types import AnyAsyncArray
 
@@ -66,7 +75,7 @@ def test_sharding_pickle() -> None:
     """
 
 
-@pytest.mark.parametrize("store", ["local", "memory"], indirect=["store"])
+@pytest.mark.parametrize("store", LOCAL_MEMORY_STORES, indirect=True)
 @pytest.mark.parametrize("input_order", ["F", "C"])
 @pytest.mark.parametrize("store_order", ["F", "C"])
 @pytest.mark.parametrize("runtime_write_order", ["F", "C"])
@@ -116,7 +125,7 @@ async def test_order(
         assert read_data.flags["C_CONTIGUOUS"]
 
 
-@pytest.mark.parametrize("store", ["local", "memory"], indirect=["store"])
+@pytest.mark.parametrize("store", LOCAL_MEMORY_STORES, indirect=True)
 @pytest.mark.parametrize("input_order", ["F", "C"])
 @pytest.mark.parametrize("runtime_write_order", ["F", "C"])
 @pytest.mark.parametrize("runtime_read_order", ["F", "C"])
@@ -158,7 +167,7 @@ def test_order_implicit(
         assert read_data.flags["C_CONTIGUOUS"]
 
 
-@pytest.mark.parametrize("store", ["local", "memory"], indirect=["store"])
+@pytest.mark.parametrize("store", LOCAL_MEMORY_STORES, indirect=True)
 def test_open(store: Store) -> None:
     spath = StorePath(store)
     a = zarr.create_array(
@@ -263,7 +272,7 @@ def test_morton_ordering(shape: tuple[int, ...]) -> None:
         assert coord == decode_morton(i, shape)
 
 
-@pytest.mark.parametrize("store", ["local", "memory"], indirect=["store"])
+@pytest.mark.parametrize("store", LOCAL_MEMORY_STORES, indirect=True)
 def test_write_partial_chunks(store: Store) -> None:
     data = np.arange(0, 256, dtype="uint16").reshape((16, 16))
     spath = StorePath(store)
@@ -278,7 +287,7 @@ def test_write_partial_chunks(store: Store) -> None:
     assert np.array_equal(a[0:16, 0:16], data)
 
 
-@pytest.mark.parametrize("store", ["local", "memory"], indirect=["store"])
+@pytest.mark.parametrize("store", LOCAL_MEMORY_STORES, indirect=True)
 async def test_delete_empty_chunks(store: Store) -> None:
     data = np.ones((16, 16))
     path = "delete_empty_chunks"
@@ -296,7 +305,7 @@ async def test_delete_empty_chunks(store: Store) -> None:
     assert await store.get(f"{path}/c0/0", prototype=default_buffer_prototype()) is None
 
 
-@pytest.mark.parametrize("store", ["local", "memory"], indirect=["store"])
+@pytest.mark.parametrize("store", LOCAL_MEMORY_STORES, indirect=True)
 async def test_dimension_names(store: Store) -> None:
     data = np.arange(0, 256, dtype="uint16").reshape((16, 16))
     path = "dimension_names"
@@ -419,7 +428,7 @@ def test_sharding_warning_fires_once_per_open(pipeline_path: str) -> None:
         assert len(matches) == 1
 
 
-@pytest.mark.parametrize("store", ["local", "memory"], indirect=["store"])
+@pytest.mark.parametrize("store", LOCAL_MEMORY_STORES, indirect=True)
 async def test_resize(store: Store) -> None:
     data = np.zeros((16, 18), dtype="uint16")
     path = "resize"
@@ -484,3 +493,53 @@ def test_resolve_metadata_only_mutates_shape(codec: Codec) -> None:
     assert spec_out.dtype == spec_in.dtype, f"{name} changed dtype"
     assert spec_out.fill_value == spec_in.fill_value, f"{name} changed fill_value"
     assert spec_out.config == spec_in.config, f"{name} changed config"
+
+
+# Consolidated codec sync-support tests. These replace the per-codec
+# ``test_*_codec_supports_sync`` and ``test_*_codec_sync_roundtrip`` duplicates that were
+# byte-identical (apart from the codec instance) across the individual codec test modules.
+@pytest.mark.parametrize(
+    "codec",
+    [
+        ZstdCodec(),
+        Crc32cCodec(),
+        GzipCodec(),
+        BytesCodec(),
+        BloscCodec(),
+        TransposeCodec(order=(0, 1)),
+        VLenUTF8Codec(),
+        VLenBytesCodec(),
+    ],
+    ids=lambda codec: type(codec).__name__,
+)
+def test_codec_supports_sync(codec: Codec) -> None:
+    assert isinstance(codec, SupportsSyncCodec)
+
+
+@pytest.mark.parametrize(
+    "codec",
+    [
+        ZstdCodec(level=1),
+        Crc32cCodec(),
+        GzipCodec(level=1),
+        BloscCodec(typesize=8),
+    ],
+    ids=lambda codec: type(codec).__name__,
+)
+def test_bytes_to_bytes_codec_sync_roundtrip(codec: SupportsSyncCodec[Buffer, Buffer]) -> None:
+    arr = np.arange(100, dtype="float64")
+    zdtype = get_data_type_from_native_dtype(arr.dtype)
+    spec = ArraySpec(
+        shape=arr.shape,
+        dtype=zdtype,
+        fill_value=zdtype.cast_scalar(0),
+        config=ArrayConfig(order="C", write_empty_chunks=True),
+        prototype=default_buffer_prototype(),
+    )
+    buf = default_buffer_prototype().buffer.from_array_like(arr.view("B"))
+
+    encoded = codec._encode_sync(buf, spec)
+    assert encoded is not None
+    decoded = codec._decode_sync(encoded, spec)
+    result = np.frombuffer(decoded.as_numpy_array(), dtype="float64")
+    np.testing.assert_array_equal(arr, result)

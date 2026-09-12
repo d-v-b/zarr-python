@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 import zarr
+from tests.conftest import LOCAL_MEMORY_STORES
 from zarr import zeros
 from zarr.abc.codec import CodecPipeline
 from zarr.abc.store import ByteSetter, Store
@@ -152,7 +153,7 @@ def test_fully_qualified_name() -> None:
     )
 
 
-@pytest.mark.parametrize("store", ["local", "memory"], indirect=["store"])
+@pytest.mark.parametrize("store", LOCAL_MEMORY_STORES, indirect=True)
 def test_config_codec_pipeline_class(store: Store) -> None:
     # has default value
     assert get_pipeline_class().__name__ != ""
@@ -204,7 +205,7 @@ def test_config_codec_pipeline_class(store: Store) -> None:
 
 
 @pytest.mark.filterwarnings("error")
-@pytest.mark.parametrize("store", ["local", "memory"], indirect=["store"])
+@pytest.mark.parametrize("store", LOCAL_MEMORY_STORES, indirect=True)
 def test_config_codec_implementation(store: Store) -> None:
     # has default value
     assert fully_qualified_name(get_codec_class("blosc")) == config.defaults[0]["codecs"]["blosc"]
@@ -250,7 +251,7 @@ def test_config_codec_implementation(store: Store) -> None:
         assert get_codec_class("blosc", reload_config=True) == NewBloscCodec
 
 
-@pytest.mark.parametrize("store", ["local", "memory"], indirect=["store"])
+@pytest.mark.parametrize("store", LOCAL_MEMORY_STORES, indirect=True)
 def test_config_ndbuffer_implementation(store: Store) -> None:
     # set custom ndbuffer with TestNDArrayLike implementation
     register_ndbuffer(NDBufferUsingTestNDArrayLike)
@@ -353,7 +354,7 @@ def test_warning_on_missing_codec_config() -> None:
         get_codec_class("new_codec")
 
 
-@pytest.mark.parametrize("store", ["local", "memory"], indirect=["store"])
+@pytest.mark.parametrize("store", LOCAL_MEMORY_STORES, indirect=True)
 @pytest.mark.parametrize(
     "kwargs",
     [
@@ -388,7 +389,7 @@ def test_config_read_missing_chunks(store: Store, kwargs: dict[str, Any]) -> Non
         assert np.array_equal(result, np.arange(16, dtype="int32").reshape(4, 4))
 
 
-@pytest.mark.parametrize("store", ["local", "memory"], indirect=["store"])
+@pytest.mark.parametrize("store", LOCAL_MEMORY_STORES, indirect=True)
 def test_config_read_missing_chunks_sharded_inner(store: Store) -> None:
     """Because the shard index and inner chunks should be stored
     together in a single storage object (read: a file or blob),
@@ -426,7 +427,7 @@ def test_config_read_missing_chunks_sharded_inner(store: Store) -> None:
             a[4:]
 
 
-@pytest.mark.parametrize("store", ["local", "memory"], indirect=["store"])
+@pytest.mark.parametrize("store", LOCAL_MEMORY_STORES, indirect=True)
 def test_config_read_missing_chunks_write_empty_chunks(store: Store) -> None:
     """write_empty_chunks=False drops chunks equal to fill_value, which then
     appear missing to read_missing_chunks=False."""

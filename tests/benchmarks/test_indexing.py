@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from tests.conftest import MEMORY_STORE
+
 if TYPE_CHECKING:
     from pytest_benchmark.fixture import BenchmarkFixture
 
@@ -60,7 +62,7 @@ morton_shards = (
 )
 
 
-@pytest.mark.parametrize("store", ["memory"], indirect=["store"])
+@pytest.mark.parametrize("store", MEMORY_STORE, indirect=True)
 @pytest.mark.parametrize("shards", morton_shards, ids=str)
 def test_sharded_morton_indexing(
     store: Store,
@@ -113,7 +115,7 @@ large_morton_shards = (
 )
 
 
-@pytest.mark.parametrize("store", ["memory"], indirect=["store"])
+@pytest.mark.parametrize("store", MEMORY_STORE, indirect=True)
 @pytest.mark.parametrize("shards", large_morton_shards, ids=str)
 def test_sharded_morton_indexing_large(
     store: Store,
@@ -155,7 +157,7 @@ def test_sharded_morton_indexing_large(
     benchmark(read_with_cache_clear)
 
 
-@pytest.mark.parametrize("store", ["memory"], indirect=["store"])
+@pytest.mark.parametrize("store", MEMORY_STORE, indirect=True)
 @pytest.mark.parametrize("shards", large_morton_shards, ids=str)
 def test_sharded_morton_single_chunk(
     store: Store,
@@ -232,7 +234,7 @@ def test_morton_order(
     benchmark(compute_morton_order)
 
 
-@pytest.mark.parametrize("store", ["memory"], indirect=["store"])
+@pytest.mark.parametrize("store", MEMORY_STORE, indirect=True)
 @pytest.mark.parametrize("shards", large_morton_shards, ids=str)
 def test_sharded_morton_write_single_chunk(
     store: Store,
@@ -290,7 +292,7 @@ def test_sharded_morton_write_single_chunk(
     benchmark(write_with_cache_clear)
 
 
-@pytest.mark.parametrize("store", ["memory"], indirect=["store"])
+@pytest.mark.parametrize("store", MEMORY_STORE, indirect=True)
 @pytest.mark.parametrize("shards", large_morton_shards, ids=str)
 def test_sharded_morton_write_single_chunk_warm_cache(
     store: Store,

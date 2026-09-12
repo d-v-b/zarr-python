@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, TypedDict
 import pytest
 
 import zarr
+from tests.conftest import ALL_STORES
 from zarr.core.buffer import Buffer, cpu, default_buffer_prototype
 from zarr.storage import LocalStore, LoggingStore
 from zarr.testing.store import StoreTests
@@ -127,7 +128,7 @@ class TestLoggingStore(StoreTests[LoggingStore[LocalStore], cpu.Buffer]):
             await wrapped_ro.set("bar", buf)
 
 
-@pytest.mark.parametrize("store", ["local", "memory", "zip"], indirect=["store"])
+@pytest.mark.parametrize("store", ALL_STORES, indirect=True)
 async def test_logging_store(store: Store, caplog: pytest.LogCaptureFixture) -> None:
     wrapped = LoggingStore(store=store, log_level="DEBUG")
     buffer = default_buffer_prototype().buffer
@@ -151,7 +152,7 @@ async def test_logging_store(store: Store, caplog: pytest.LogCaptureFixture) -> 
     assert f"Finished {type(store).__name__}.list" in caplog.record_tuples[1][2]
 
 
-@pytest.mark.parametrize("store", ["local", "memory", "zip"], indirect=["store"])
+@pytest.mark.parametrize("store", ALL_STORES, indirect=True)
 async def test_logging_store_counter(store: Store) -> None:
     wrapped = LoggingStore(store=store, log_level="DEBUG")
 

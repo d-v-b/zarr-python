@@ -11,8 +11,7 @@ import numpy as np
 import pytest
 
 import zarr
-from tests.conftest import Expect, ExpectFail
-from zarr.abc.codec import SupportsSyncCodec
+from tests.conftest import LOCAL_MEMORY_STORES, Expect, ExpectFail
 from zarr.codecs.bytes import (
     ENDIAN,
     BytesCodec,
@@ -32,7 +31,7 @@ if TYPE_CHECKING:
     from zarr.abc.store import Store
 
 
-@pytest.mark.parametrize("store", ["local", "memory"], indirect=["store"])
+@pytest.mark.parametrize("store", LOCAL_MEMORY_STORES, indirect=True)
 @pytest.mark.parametrize(
     "input_dtype",
     [
@@ -92,10 +91,6 @@ async def test_endian(
     # ... and the data reads back to the original values.
     readback_data = await _AsyncArrayProxy(a)[:, :].get()
     assert np.array_equal(data, readback_data)
-
-
-def test_bytes_codec_supports_sync() -> None:
-    assert isinstance(BytesCodec(), SupportsSyncCodec)
 
 
 @pytest.mark.parametrize("endian", ENDIAN)

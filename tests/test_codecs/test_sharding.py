@@ -12,6 +12,7 @@ import pytest
 import zarr
 import zarr.api
 import zarr.api.asynchronous
+from tests.conftest import ALL_STORES, LOCAL_MEMORY_STORES, LOCAL_STORE
 from zarr import Array
 from zarr.abc.store import Store
 from zarr.codecs import (
@@ -97,7 +98,7 @@ def _fail_chunk_reads(
         store_mock.get_ranges = fail_async
 
 
-@pytest.mark.parametrize("store", ["local", "memory", "zip"], indirect=["store"])
+@pytest.mark.parametrize("store", ALL_STORES, indirect=True)
 @pytest.mark.parametrize("index_location", ["start", "end"])
 @pytest.mark.parametrize(
     "array_fixture",
@@ -145,7 +146,7 @@ def test_sharding(
     assert np.array_equal(data, read_data)
 
 
-@pytest.mark.parametrize("store", ["local", "memory", "zip"], indirect=["store"])
+@pytest.mark.parametrize("store", ALL_STORES, indirect=True)
 @pytest.mark.parametrize("index_location", ["start", "end"])
 @pytest.mark.parametrize("offset", [0, 10])
 def test_sharding_scalar(
@@ -175,7 +176,7 @@ def test_sharding_scalar(
 
 
 @pytest.mark.parametrize("index_location", ["start", "end"])
-@pytest.mark.parametrize("store", ["local", "memory", "zip"], indirect=["store"])
+@pytest.mark.parametrize("store", ALL_STORES, indirect=True)
 @pytest.mark.parametrize(
     "array_fixture",
     [
@@ -211,7 +212,7 @@ def test_sharding_partial(
 
 
 @pytest.mark.parametrize("index_location", ["start", "end"])
-@pytest.mark.parametrize("store", ["local", "memory", "zip"], indirect=["store"])
+@pytest.mark.parametrize("store", ALL_STORES, indirect=True)
 @pytest.mark.parametrize(
     "array_fixture",
     [
@@ -250,7 +251,7 @@ def test_sharding_partial_readwrite(
     indirect=["array_fixture"],
 )
 @pytest.mark.parametrize("index_location", ["start", "end"])
-@pytest.mark.parametrize("store", ["local", "memory", "zip"], indirect=["store"])
+@pytest.mark.parametrize("store", ALL_STORES, indirect=True)
 def test_sharding_partial_read(
     store: Store, array_fixture: npt.NDArray[Any], index_location: IndexLocation
 ) -> None:
@@ -272,7 +273,7 @@ def test_sharding_partial_read(
 
 
 @pytest.mark.parametrize("index_location", ["start", "end"])
-@pytest.mark.parametrize("store", ["local", "memory", "zip"], indirect=["store"])
+@pytest.mark.parametrize("store", ALL_STORES, indirect=True)
 def test_sharding_multiple_chunks_partial_shard_read(
     store: Store,
     index_location: IndexLocation,
@@ -315,7 +316,7 @@ def test_sharding_multiple_chunks_partial_shard_read(
 
 
 @pytest.mark.parametrize("index_location", ["start", "end"])
-@pytest.mark.parametrize("store", ["local", "memory", "zip"], indirect=["store"])
+@pytest.mark.parametrize("store", ALL_STORES, indirect=True)
 def test_sharding_duplicate_read_indexes(
     store: Store,
     index_location: IndexLocation,
@@ -353,7 +354,7 @@ def test_sharding_duplicate_read_indexes(
 
 
 @pytest.mark.parametrize("index_location", ["start", "end"])
-@pytest.mark.parametrize("store", ["local", "memory", "zip"], indirect=["store"])
+@pytest.mark.parametrize("store", ALL_STORES, indirect=True)
 def test_sharding_read_empty_chunks_within_non_empty_shard_write_empty_false(
     store: Store, index_location: IndexLocation
 ) -> None:
@@ -392,7 +393,7 @@ def test_sharding_read_empty_chunks_within_non_empty_shard_write_empty_false(
 
 
 @pytest.mark.parametrize("index_location", ["start", "end"])
-@pytest.mark.parametrize("store", ["local", "memory", "zip"], indirect=["store"])
+@pytest.mark.parametrize("store", ALL_STORES, indirect=True)
 def test_sharding_read_empty_chunks_within_empty_shard_write_empty_false(
     store: Store, index_location: IndexLocation
 ) -> None:
@@ -426,7 +427,7 @@ def test_sharding_read_empty_chunks_within_empty_shard_write_empty_false(
 
 
 @pytest.mark.parametrize("index_location", ["start", "end"])
-@pytest.mark.parametrize("store", ["local", "memory", "zip"], indirect=["store"])
+@pytest.mark.parametrize("store", ALL_STORES, indirect=True)
 def test_sharding_partial_shard_read__index_load_fails(
     store: Store, index_location: IndexLocation
 ) -> None:
@@ -460,7 +461,7 @@ def test_sharding_partial_shard_read__index_load_fails(
 
 
 @pytest.mark.parametrize("index_location", ["start", "end"])
-@pytest.mark.parametrize("store", ["local", "memory", "zip"], indirect=["store"])
+@pytest.mark.parametrize("store", ALL_STORES, indirect=True)
 def test_sharding_partial_shard_read__index_chunk_slice_fails(
     store: Store,
     index_location: IndexLocation,
@@ -495,7 +496,7 @@ def test_sharding_partial_shard_read__index_chunk_slice_fails(
 
 
 @pytest.mark.parametrize("index_location", ["start", "end"])
-@pytest.mark.parametrize("store", ["local", "memory", "zip"], indirect=["store"])
+@pytest.mark.parametrize("store", ALL_STORES, indirect=True)
 def test_sharding_partial_shard_read__chunk_load_fails(
     store: Store, index_location: IndexLocation
 ) -> None:
@@ -540,7 +541,7 @@ def test_sharding_partial_shard_read__chunk_load_fails(
     indirect=["array_fixture"],
 )
 @pytest.mark.parametrize("index_location", ["start", "end"])
-@pytest.mark.parametrize("store", ["local", "memory", "zip"], indirect=["store"])
+@pytest.mark.parametrize("store", ALL_STORES, indirect=True)
 def test_sharding_partial_overwrite(
     store: Store, array_fixture: npt.NDArray[Any], index_location: IndexLocation
 ) -> None:
@@ -589,7 +590,7 @@ def test_sharding_partial_overwrite(
     "inner_index_location",
     ["start", "end"],
 )
-@pytest.mark.parametrize("store", ["local", "memory", "zip"], indirect=["store"])
+@pytest.mark.parametrize("store", ALL_STORES, indirect=True)
 def test_nested_sharding(
     store: Store,
     array_fixture: npt.NDArray[Any],
@@ -637,7 +638,7 @@ def test_nested_sharding(
     "inner_index_location",
     ["start", "end"],
 )
-@pytest.mark.parametrize("store", ["local", "memory", "zip"], indirect=["store"])
+@pytest.mark.parametrize("store", ALL_STORES, indirect=True)
 def test_nested_sharding_create_array(
     store: Store,
     array_fixture: npt.NDArray[Any],
@@ -667,7 +668,7 @@ def test_nested_sharding_create_array(
     assert np.array_equal(data, read_data)
 
 
-@pytest.mark.parametrize("store", ["local", "memory", "zip"], indirect=["store"])
+@pytest.mark.parametrize("store", ALL_STORES, indirect=True)
 def test_open_sharding(store: Store) -> None:
     path = "open_sharding"
     spath = StorePath(store, path)
@@ -685,7 +686,7 @@ def test_open_sharding(store: Store) -> None:
     assert a.metadata == b.metadata
 
 
-@pytest.mark.parametrize("store", ["local", "memory", "zip"], indirect=["store"])
+@pytest.mark.parametrize("store", ALL_STORES, indirect=True)
 def test_write_partial_sharded_chunks(store: Store) -> None:
     data = np.arange(0, 16 * 16, dtype="uint16").reshape((16, 16))
     spath = StorePath(store)
@@ -702,7 +703,7 @@ def test_write_partial_sharded_chunks(store: Store) -> None:
     assert np.array_equal(a[0:16, 0:16], data)
 
 
-@pytest.mark.parametrize("store", ["local", "memory", "zip"], indirect=["store"])
+@pytest.mark.parametrize("store", ALL_STORES, indirect=True)
 async def test_delete_empty_shards(store: Store) -> None:
     if not store.supports_deletes:
         pytest.skip("store does not support deletes")
@@ -771,7 +772,7 @@ def test_pickle() -> None:
     assert restored.subchunk_write_order == "lexicographic"
 
 
-@pytest.mark.parametrize("store", ["local", "memory"], indirect=["store"])
+@pytest.mark.parametrize("store", LOCAL_MEMORY_STORES, indirect=True)
 @pytest.mark.parametrize("index_location", ["start", "end"])
 async def test_sharding_with_empty_inner_chunk(store: Store, index_location: IndexLocation) -> None:
     data = np.arange(0, 16 * 16, dtype="uint32").reshape((16, 16))
@@ -794,7 +795,7 @@ async def test_sharding_with_empty_inner_chunk(store: Store, index_location: Ind
     assert np.array_equal(data_read, data)
 
 
-@pytest.mark.parametrize("store", ["local", "memory"], indirect=["store"])
+@pytest.mark.parametrize("store", LOCAL_MEMORY_STORES, indirect=True)
 @pytest.mark.parametrize("index_location", ["start", "end"])
 @pytest.mark.parametrize("chunks_per_shard", [(5, 2), (2, 5), (5, 5)])
 async def test_sharding_with_chunks_per_shard(
@@ -820,7 +821,7 @@ async def test_sharding_with_chunks_per_shard(
     assert np.array_equal(data_read, data)
 
 
-@pytest.mark.parametrize("store", ["local", "memory"], indirect=["store"])
+@pytest.mark.parametrize("store", LOCAL_MEMORY_STORES, indirect=True)
 def test_invalid_metadata(store: Store) -> None:
     spath1 = StorePath(store, "invalid_inner_chunk_shape")
     with pytest.raises(ValueError):
@@ -862,7 +863,7 @@ def test_invalid_shard_shape() -> None:
         )
 
 
-@pytest.mark.parametrize("store", ["local"], indirect=["store"])
+@pytest.mark.parametrize("store", LOCAL_STORE, indirect=True)
 def test_sharding_mixed_integer_list_indexing(store: Store) -> None:
     """Regression test for https://github.com/zarr-developers/zarr-python/issues/3691.
 

@@ -546,7 +546,6 @@ class TestConsolidated:
         }
         assert result == expected
 
-    @pytest.mark.parametrize("zarr_format", [2, 3])
     async def test_to_dict_order(
         self, memory_store: zarr.storage.MemoryStore, zarr_format: ZarrFormat
     ) -> None:
@@ -583,7 +582,6 @@ class TestConsolidated:
                 "c/e",
             ]
 
-    @pytest.mark.parametrize("zarr_format", [2, 3])
     async def test_open_consolidated_raises_async(self, zarr_format: ZarrFormat) -> None:
         store = zarr.storage.MemoryStore()
         await AsyncGroup.from_store(store, zarr_format=zarr_format)
@@ -663,7 +661,6 @@ class TestConsolidated:
         )
         assert result.metadata == expected
 
-    @pytest.mark.parametrize("zarr_format", [2, 3])
     async def test_use_consolidated_false(
         self, memory_store: zarr.storage.MemoryStore, zarr_format: ZarrFormat
     ) -> None:

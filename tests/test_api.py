@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 import zarr.codecs
 import zarr.storage
+from tests.conftest import ALL_STORES, MEMORY_STORE
 from zarr.core.array import AsyncArray, init_array
 from zarr.storage import LocalStore, ZipStore
 from zarr.storage._common import StorePath
@@ -216,7 +217,7 @@ async def test_open_like_default_mode_rejects_read_only_store(
 
 
 # TODO: parametrize over everything this function takes
-@pytest.mark.parametrize("store", ["memory"], indirect=True)
+@pytest.mark.parametrize("store", MEMORY_STORE, indirect=True)
 def test_create_array(store: Store, zarr_format: ZarrFormat) -> None:
     attrs: dict[str, JSON] = {"foo": 100}  # explicit type annotation to avoid mypy error
     shape = (10, 10)
@@ -261,7 +262,6 @@ def test_write_empty_chunks_warns(write_empty_chunks: bool, zarr_format: ZarrFor
         )
 
 
-@pytest.mark.parametrize("zarr_format", [2, 3])
 def test_open_array_respects_write_empty_chunks_config(zarr_format: ZarrFormat) -> None:
     """Test that zarr.open() respects write_empty_chunks config."""
     store = MemoryStore()
@@ -365,7 +365,7 @@ def test_v2_and_v3_exist_at_same_path(store: Store) -> None:
         zarr.open(store=store)
 
 
-@pytest.mark.parametrize("store", ["memory"], indirect=True)
+@pytest.mark.parametrize("store", MEMORY_STORE, indirect=True)
 async def test_create_group(store: Store, zarr_format: ZarrFormat) -> None:
     attrs = {"foo": 100}
     path = "node"
@@ -415,7 +415,7 @@ async def test_open_group_unspecified_version(tmp_path: Path, zarr_format: ZarrF
         assert g2.metadata.zarr_format == zarr_format
 
 
-@pytest.mark.parametrize("store", ["local", "memory", "zip"], indirect=["store"])
+@pytest.mark.parametrize("store", ALL_STORES, indirect=True)
 @pytest.mark.parametrize("n_args", [10, 1, 0])
 @pytest.mark.parametrize("n_kwargs", [10, 1, 0])
 @pytest.mark.parametrize("path", [None, "some_path"])

@@ -4,11 +4,11 @@ import numpy as np
 import pytest
 
 import zarr
+from tests.conftest import MEMORY_STORE
 from zarr import Array
-from zarr.abc.codec import Codec, SupportsSyncCodec
+from zarr.abc.codec import Codec
 from zarr.abc.store import Store
 from zarr.codecs import ZstdCodec
-from zarr.codecs.vlen_utf8 import VLenBytesCodec, VLenUTF8Codec
 from zarr.core.dtype import get_data_type_from_native_dtype
 from zarr.core.metadata.v3 import ArrayV3Metadata
 from zarr.storage import StorePath
@@ -70,7 +70,7 @@ def test_vlen_string(
 
 
 @pytest.mark.filterwarnings("ignore::zarr.core.dtype.common.UnstableSpecificationWarning")
-@pytest.mark.parametrize("store", ["memory"], indirect=["store"])
+@pytest.mark.parametrize("store", MEMORY_STORE, indirect=True)
 @pytest.mark.parametrize(
     ("dtype", "fill_value", "elements"),
     [
@@ -95,11 +95,3 @@ def test_vlen_f_contiguous(
     )
     a[:, :] = data
     assert np.array_equal(data, np.asarray(a[:, :], dtype=object))
-
-
-def test_vlen_utf8_codec_supports_sync() -> None:
-    assert isinstance(VLenUTF8Codec(), SupportsSyncCodec)
-
-
-def test_vlen_bytes_codec_supports_sync() -> None:
-    assert isinstance(VLenBytesCodec(), SupportsSyncCodec)
