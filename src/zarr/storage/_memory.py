@@ -131,10 +131,7 @@ class MemoryStore(Store):
         if not self._is_open:
             self._is_open = True
         assert isinstance(key, str)
-        if not isinstance(value, Buffer):
-            raise TypeError(
-                f"MemoryStore.set(): `value` must be a Buffer instance. Got an instance of {type(value)} instead."
-            )
+        self._check_value(value)
         self._store_dict[key] = _copy_buffer(value)
 
     def delete_sync(self, key: str) -> None:
@@ -187,10 +184,7 @@ class MemoryStore(Store):
         self._check_writable()
         await self._ensure_open()
         assert isinstance(key, str)
-        if not isinstance(value, Buffer):
-            raise TypeError(
-                f"MemoryStore.set(): `value` must be a Buffer instance. Got an instance of {type(value)} instead."
-            )
+        self._check_value(value)
         if byte_range is not None:
             buf = self._store_dict[key]
             buf[byte_range[0] : byte_range[1]] = value
@@ -306,10 +300,7 @@ class GpuMemoryStore(MemoryStore):
         # docstring inherited
         self._check_writable()
         assert isinstance(key, str)
-        if not isinstance(value, Buffer):
-            raise TypeError(
-                f"GpuMemoryStore.set(): `value` must be a Buffer instance. Got an instance of {type(value)} instead."
-            )
+        self._check_value(value)
         # Convert to gpu.Buffer
         gpu_value = value if isinstance(value, gpu.Buffer) else gpu.Buffer.from_buffer(value)
         await super().set(key, gpu_value, byte_range=byte_range)

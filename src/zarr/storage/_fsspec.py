@@ -13,7 +13,6 @@ from zarr.abc.store import (
     Store,
     SuffixByteRequest,
 )
-from zarr.core.buffer import Buffer
 from zarr.errors import ZarrUserWarning
 from zarr.storage._utils import _dereference_path
 
@@ -24,7 +23,7 @@ if TYPE_CHECKING:
     from fsspec.asyn import AsyncFileSystem
     from fsspec.mapping import FSMap
 
-    from zarr.core.buffer import BufferPrototype
+    from zarr.core.buffer import Buffer, BufferPrototype
 
 
 ALLOWED_EXCEPTIONS: tuple[type[Exception], ...] = (
@@ -337,10 +336,7 @@ class FsspecStore(Store):
         if not self._is_open:
             await self._open()
         self._check_writable()
-        if not isinstance(value, Buffer):
-            raise TypeError(
-                f"FsspecStore.set(): `value` must be a Buffer instance. Got an instance of {type(value)} instead."
-            )
+        self._check_value(value)
         path = _dereference_path(self.path, key)
         # write data
         if byte_range:
