@@ -2115,6 +2115,16 @@ def test_index_array_out_of_bounds() -> None:
         array.lazy.oindex[[0, 99], :, :]
 
 
+@pytest.mark.parametrize("mode", ["oindex", "vindex"])
+def test_unsigned_index_array_beyond_intp_is_out_of_bounds(mode: str) -> None:
+    """A uint64 value past the intp range must not wrap to a negative index."""
+    array = make_source("numpy-uniform-parts")
+    index = np.array([2**64 - 1], dtype=np.uint64)
+    selection = (index, 0, 0) if mode == "vindex" else (index, slice(None), slice(None))
+    with pytest.raises(IndexError, match=f"index {2**64 - 1} is out of bounds for axis 0"):
+        getattr(array.lazy, mode)[selection]
+
+
 def test_too_many_indices() -> None:
     with pytest.raises(IndexError, match="too many indices"):
         make_source("numpy-uniform-parts").lazy[0, 0, 0, 0]
@@ -2927,3 +2937,49 @@ def test_result_into_rejects_foreign_parts() -> None:
     out = np.empty(view.shape, dtype=view.dtype)
     with pytest.raises(ValueError, match="do not belong"):
         view.result_into(out, parts=tuple(other.parts()))
+
+
+@pytest.mark.parametrize("source_buffer", ["data", "mask"])
+@pytest.mark.parametrize("output_buffer", ["data", "mask"])
+def test_result_into_rejects_shared_masked_storage(source_buffer: str, output_buffer: str) -> None:
+    source = np.ma.array([False, True, False, True], mask=[True, False, False, False])
+    shared = getattr(source, source_buffer)
+    out = np.ma.array(
+        shared if output_buffer == "data" else np.empty(4, dtype=bool),
+        mask=shared if output_buffer == "mask" else np.zeros(4, dtype=bool),
+        copy=False,
+    )
+    original = source.copy()
+    view = LazyArray.from_numpy(source).with_parts((2,)).lazy[::-1]
+    with pytest.raises(ValueError, match="shares memory"):
+        view.result_into(out)
+    np.testing.assert_array_equal(source.data, original.data)
+    np.testing.assert_array_equal(source.mask, original.mask)
+
+
+def test_result_into_rejects_an_internally_overlapping_mask() -> None:
+    source = np.ma.array(np.arange(4), mask=[True, False, False, False])
+    mask = np.lib.stride_tricks.as_strided(
+        np.zeros(1, dtype=bool), shape=(4,), strides=(0,), writeable=True
+    )
+    out = np.ma.array(np.empty(4, dtype=source.dtype), mask=mask, copy=False)
+    with pytest.raises(ValueError, match="overlapping elements"):
+        LazyArray.from_numpy(source).with_parts((2,)).result_into(out)
+
+
+def test_result_into_rejects_a_read_only_mask_before_writing() -> None:
+    source = np.ma.array(np.arange(4), mask=[True, False, False, False])
+    mask = np.zeros(4, dtype=bool)
+    mask.flags.writeable = False
+    out = np.ma.array(np.full(4, -1), mask=mask, copy=False)
+    with pytest.raises(ValueError, match="read-only"):
+        LazyArray.from_numpy(source).result_into(out)
+    np.testing.assert_array_equal(out.data, np.full(4, -1))
+
+
+def test_result_into_rejects_data_sharing_its_own_mask() -> None:
+    source = np.ma.array([False, True, False, True], mask=[True, False, False, False])
+    buffer = np.zeros(4, dtype=bool)
+    out = np.ma.array(buffer, mask=buffer, copy=False)
+    with pytest.raises(ValueError, match="overlapping elements"):
+        LazyArray.from_numpy(source).result_into(out)

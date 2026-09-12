@@ -301,6 +301,16 @@ class _PartOwner:
     """Opaque identity shared only by one view and the parts it prepared."""
 
 
+def _array_buffers(array: np.ndarray[Any, Any]) -> tuple[np.ndarray[Any, Any], ...]:
+    """Data and any materialized mask are separate readable/writable buffers."""
+    if isinstance(array, np.ma.MaskedArray):
+        mask = array.mask
+        if isinstance(mask, np.ndarray):
+            return array.data, mask
+        return (array.data,)
+    return (array,)
+
+
 def _overlaps(out: np.ndarray[Any, Any], array: Any) -> bool:
     """Whether `out` and `array` can be writing and reading the same memory.
 
@@ -312,7 +322,12 @@ def _overlaps(out: np.ndarray[Any, Any], array: Any) -> bool:
         return False
     # The cheap bounds test first: an exact answer can cost real work, and it
     # is only needed once the two are known to occupy overlapping memory.
-    return bool(np.may_share_memory(out, array)) and bool(np.shares_memory(out, array))
+    return any(
+        bool(np.may_share_memory(destination, source))
+        and bool(np.shares_memory(destination, source))
+        for destination in _array_buffers(out)
+        for source in _array_buffers(array)
+    )
 
 
 def _has_internal_overlap(out: np.ndarray[Any, Any]) -> bool:
@@ -364,11 +379,23 @@ def _partition_out_selection(
 ) -> tuple[Any, ...]:
     """Lower ``cell_transform`` to NumPy selectors on the request buffer."""
     domain = cell_transform.domain
-    if _is_correlated(cell_transform):
+    # A compact cell transform may permute a slice axis and a gather axis.
+    # NumPy's mixed basic/advanced selectors would place the gathered block
+    # differently from the synthetic domain; broadcast coordinate selectors
+    # retain that domain's axis order for scatter.
+    dependencies = [
+        m.input_dimension if isinstance(m, DimensionMap) else m.dependent_axis
+        for m in cell_transform.output
+        if not isinstance(m, ConstantMap)
+    ]
+    permuted = all(d is not None for d in dependencies) and dependencies != sorted(
+        d for d in dependencies if d is not None
+    )
+    if _is_correlated(cell_transform) or permuted:
         correlated_selectors: list[np.ndarray[Any, np.dtype[np.intp]]] = []
         for output_map in cell_transform.output:
             if isinstance(output_map, ConstantMap):
-                coordinates = np.full(domain.shape, output_map.offset, dtype=np.intp)
+                coordinates = np.full((1,) * domain.ndim, output_map.offset, dtype=np.intp)
             elif isinstance(output_map, DimensionMap):
                 input_dimension = output_map.input_dimension
                 axis = np.arange(
@@ -381,12 +408,9 @@ def _partition_out_selection(
                     + (axis.size,)
                     + ((1,) * (domain.ndim - input_dimension - 1))
                 )
-                coordinates = np.broadcast_to(axis.reshape(shape), domain.shape)
-                coordinates = output_map.offset + output_map.stride * coordinates
+                coordinates = output_map.offset + output_map.stride * axis.reshape(shape)
             else:
-                coordinates = output_map.offset + output_map.stride * np.broadcast_to(
-                    output_map.index_array, domain.shape
-                )
+                coordinates = output_map.offset + output_map.stride * output_map.index_array
             correlated_selectors.append(np.asarray(coordinates, dtype=np.intp))
         return tuple(correlated_selectors)
 
@@ -1392,7 +1416,9 @@ class LazyArray:
             tell the two apart; only the caller knows what `final` was.
 
             A masked source requires a `numpy.ma` buffer — what `result()`
-            would allocate for it — since a plain one drops the mask.
+            would allocate for it — since a plain one drops the mask. Its mask
+            must also be writable, have distinct storage for each cell, and
+            share no storage with its data or either source buffer.
         parts
             A reusable sequence previously returned by this exact view's
             `parts()` method, exactly as for `result`.
@@ -1440,11 +1466,16 @@ class LazyArray:
             raise ValueError(
                 f"out has dtype {out.dtype}, but this view has dtype {np.dtype(self.dtype)}"
             )
-        if not out.flags.writeable:
-            raise ValueError("out is read-only; result_into writes every cell of it")
-        if _has_internal_overlap(out):
+        buffers = _array_buffers(out)
+        if any(not buffer.flags.writeable for buffer in buffers):
+            raise ValueError("out data or mask is read-only; result_into writes every cell of it")
+        if any(_has_internal_overlap(buffer) for buffer in buffers) or any(
+            _overlaps(buffer, other)
+            for i, buffer in enumerate(buffers)
+            for other in buffers[i + 1 :]
+        ):
             raise ValueError(
-                "out has overlapping elements; distinct cells of this view need "
+                "out has overlapping elements in its data or mask; distinct cells need "
                 "distinct destination storage"
             )
         if isinstance(self._array, np.ma.MaskedArray) and not isinstance(out, np.ma.MaskedArray):
