@@ -13,6 +13,14 @@ from jsonschema import Draft202012Validator
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 import zarr_metadata.pydantic as zmp
+from tests.model._cases import (
+    V2_ARRAY_DOC,
+    V2_CONSOLIDATED_DOC,
+    V2_GROUP_DOC,
+    V3_ARRAY_DOC,
+    V3_CONSOLIDATED_DOC,
+    V3_GROUP_DOC,
+)
 from zarr_metadata.model import (
     ZarrV2ArrayMetadata,
     ZarrV2ConsolidatedMetadata,
@@ -22,20 +30,6 @@ from zarr_metadata.model import (
     ZarrV3GroupMetadata,
     ZarrV3NamedConfig,
 )
-
-V3_ARRAY_DOC = dict(ZarrV3ArrayMetadata.create_default(shape=(4,)).to_json())
-V2_ARRAY_DOC = dict(ZarrV2ArrayMetadata.create_default(shape=(4,), chunks=(2,)).to_json())
-V3_GROUP_DOC = {"zarr_format": 3, "node_type": "group", "attributes": {"a": 1}}
-V2_GROUP_DOC = {"zarr_format": 2, "attributes": {"a": 1}}
-V3_CONSOLIDATED_DOC = {
-    "kind": "inline",
-    "must_understand": False,
-    "metadata": {"a": dict(V3_ARRAY_DOC)},
-}
-V2_CONSOLIDATED_DOC = {
-    "zarr_consolidated_format": 1,
-    "metadata": {".zgroup": {"zarr_format": 2}},
-}
 
 FIELD_CASES = [
     pytest.param(zmp.ZarrV3ArrayMetadata, ZarrV3ArrayMetadata, V3_ARRAY_DOC, id="array-v3"),

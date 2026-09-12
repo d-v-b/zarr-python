@@ -10,6 +10,8 @@ The package is organized to mirror the structure of the Zarr specifications:
   structural validators, loc-aware parsers, and the `UNSET` sentinel
 - [`zarr_metadata.pydantic`](pydantic.md) — optional Pydantic field types
   over the models
+- [`zarr_metadata.msgspec`](msgspec.md) — optional msgspec field types and
+  decode hook over the models
 - [`zarr_metadata.v2`](v2.md) — `TypedDict` shapes for Zarr v2 documents
   (`.zarray`, `.zgroup`, `.zattrs`, `.zmetadata`)
 - [`zarr_metadata.v3`](v3/index.md) — `TypedDict` shapes for Zarr v3
