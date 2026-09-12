@@ -60,9 +60,34 @@ def test_reader_set_deduplicates_by_identity_without_hashing() -> None:
     readers = stateful._reader_set(LazyArray(np.arange(3)), (first, first, second))
 
     assert readers[0] is basic_reader
-    assert readers[1] is first
-    assert readers[2] is second
-    assert len(readers) == 3
+    assert readers[1] is stateful.projection_reader
+    assert readers[2] is first
+    assert readers[3] is second
+    assert len(readers) == 4
+
+
+def test_only_per_axis_partitionings_still_leave_a_descent_something_to_draw() -> None:
+    """A narrowed base can fit none of them, and drawing from nothing raises."""
+
+    class PerAxisOnly(ChainedIndexingStateMachine):
+        data = np.arange(30, dtype=np.int64)
+        partitionings: ClassVar[tuple[Any, ...]] = (((7, 8, 15),),)
+
+    machine = PerAxisOnly()
+    assert machine._fitting_partitionings() == [((7, 8, 15),)]
+    machine.view = stateful.repartition(machine.view, ((7, 8, 15),))
+    machine.view = next(machine.view.parts()).view
+    assert machine.view.base_shape == (7,)
+    assert machine._fitting_partitionings() == [None]
+
+
+def test_reader_set_keeps_a_declared_projection_reader() -> None:
+    """The universal pair is added, not duplicated over a subclass's own."""
+    declared = stateful.ProjectionReader()
+
+    readers = stateful._reader_set(LazyArray(np.arange(3)), (declared,))
+
+    assert readers == (basic_reader, declared)
 
 
 class OneDimensionalIndexing(ChainedIndexingStateMachine):

@@ -38,9 +38,23 @@ only that `result()` is self-consistent.
 
 The `choose_reader` rule draws a reader and applies it to the view, so the
 execution strategy becomes part of the chain. Every reader listed by a subclass
-must preserve the NumPy model for its source. The universal `basic_reader` is
-always exercised, even when a subclass lists only specialized readers; with no
-declared readers it is the sole strategy drawn.
+must preserve the NumPy model for its source. Two universal readers are always
+exercised, even when a subclass lists only specialized ones: `basic_reader`,
+which answers from the read's transform, and `ProjectionReader`, which answers
+from its projection instead — fetching whole grid cells and gathering out of
+them, the way a decoded-chunk cache does. Between them both halves of a
+`ReadContext` are checked against the model. A projection describing a
+different read than the transform it arrives with is invisible to every reader
+that ignores it, which is how such a pairing can be wrong while every value
+assertion passes.
+
+`descend_into_a_part` continues the chain from one part's view and boxes it
+again. A part's view is documented as resolvable on its own, so it must satisfy
+everything a view satisfies; and because it bases its boxes on its own window
+rather than on the source, following one reaches the part-of-a-part — where a
+projection's cell coordinates and its view's transform are counted from
+different origins, and where a cell named relative to the wrong one still reads
+plausible values.
 
 Requires the `testing` extra (`pip install zarr-indexing[testing]`).
 """
@@ -56,10 +70,13 @@ from hypothesis import HealthCheck, settings
 from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, initialize, invariant, precondition, rule
 
+from zarr_indexing.errors import NoBasicSelectionError
 from zarr_indexing.lazy_array import LazyArray
-from zarr_indexing.reader import Reader, basic_reader
+from zarr_indexing.output_map import DimensionMap
+from zarr_indexing.reader import ReadContext, Reader, basic_reader
 from zarr_indexing.testing.strategies import (
     basic_selections,
+    newaxis_selections,
     orthogonal_selections,
     slice_selections,
     vectorized_selections,
@@ -67,14 +84,18 @@ from zarr_indexing.testing.strategies import (
 
 if TYPE_CHECKING:
     from zarr_indexing.boundary import SelectionMode
+    from zarr_indexing.domain import IndexDomain
+    from zarr_indexing.transform import IndexTransform
 
 __all__ = [
     "DEFAULT_DATA",
     "DEFAULT_PARTITIONINGS",
     "DEFAULT_SETTINGS",
     "ChainedIndexingStateMachine",
+    "ProjectionReader",
     "apply_selection",
     "outer_selection",
+    "projection_reader",
     "repartition",
     "state_machine_test",
 ]
@@ -208,8 +229,10 @@ class ChainedIndexingStateMachine(RuleBasedStateMachine):
         mid-chain does, and spends the whole step budget on indexing.
     readers
         Execution strategies `choose_reader` may draw. Every listed reader must
-        preserve the model for the source. `basic_reader` is always included;
-        `None` means the reader already carried by the constructed view.
+        preserve the model for the source. `basic_reader` and
+        `projection_reader` are always included, since between them they check
+        both halves of a `ReadContext`; `None` means the reader already carried
+        by the constructed view.
     """
 
     data: ClassVar[Any] = DEFAULT_DATA
@@ -248,6 +271,30 @@ class ChainedIndexingStateMachine(RuleBasedStateMachine):
         too — so the chain ends there, and the invariants keep checking.
         """
         return self.model.ndim > 0 and self.model.size > 0
+
+    def _fitting_partitionings(self) -> list[Any]:
+        """The declared partitionings that describe this view's own base.
+
+        `partitionings` is written against the source's shape, and a part
+        views its own window as its base, so the explicit per-axis spelling —
+        whose sizes must sum to each extent — does not survive a descent. The
+        uniform spellings do: a box wider than the extent is one box.
+        """
+        base = self.view.base_shape
+        fitting = [
+            boxes
+            for boxes in type(self).partitionings
+            if boxes is None
+            or not any(isinstance(entry, Sequence) for entry in boxes)
+            or (
+                len(boxes) == len(base)
+                and all(sum(sizes) == extent for sizes, extent in zip(boxes, base, strict=True))
+            )
+        ]
+        # A subclass may declare nothing but per-axis sizes, none of which can
+        # fit a narrowed base. Leaving the view boxed as it already is says so,
+        # where drawing from nothing would raise from inside Hypothesis.
+        return fitting or [None]
 
     def _step(self, mode: SelectionMode, selection: tuple[Any, ...]) -> None:
         self.chain.append((mode, selection))
@@ -295,6 +342,47 @@ class ChainedIndexingStateMachine(RuleBasedStateMachine):
         """
         self._step("orthogonal", data.draw(slice_selections(self.model.shape)))
 
+    @precondition(lambda self: self._indexable())
+    @rule(data=st.data())
+    def fabricates_an_axis(self, data: st.DataObject) -> None:
+        """A basic step carrying `None`, which adds an axis no source axis backs.
+
+        Its own rule for the reason `slices_only` is: a domain axis that no
+        output map reads is a distinct shape for everything downstream — the
+        lowering to a basic selection most of all, which has to produce that
+        axis without reading one — and folding the spelling into `basic` would
+        leave it drawn a fraction of the time.
+        """
+        self._step("basic", data.draw(newaxis_selections(self.model.shape)))
+
+    @precondition(lambda self: self.model.size > 0)
+    @rule(data=st.data())
+    def descend_into_a_part(self, data: st.DataObject) -> None:
+        """Continue the chain from one part's view, then re-box it.
+
+        `Partition.view` is documented as resolvable on its own — in another
+        thread, in another order, or not at all — so everything this machine
+        checks of a view has to hold of one. Following a part also re-bases
+        the partitioning: the new view boxes its own window rather than the
+        source, and boxing it again reaches the part-of-a-part, whose cell
+        coordinates and whose transform are counted from different origins.
+        Nothing else here reaches that state, which is why the re-boxing is
+        part of this rule rather than left to `repartition` — that one waits
+        for a chain to run out of axes, and the state is most interesting
+        while there are axes left.
+
+        The model follows by the documented assembly: a part's values are the
+        model's at the part's `out_selection`.
+        """
+        parts = list(self.view.parts())
+        part = parts[data.draw(st.integers(0, len(parts) - 1))]
+        self.model = self.model[part.out_selection]
+        self.view = part.view
+        self.chain.append(("part", part.base_coords))
+        boxes = data.draw(st.sampled_from(self._fitting_partitionings()))
+        self.view = repartition(self.view, boxes)
+        self.chain.append(("parts", boxes))
+
     @rule(data=st.data())
     def choose_reader(self, data: st.DataObject) -> None:
         """Read the rest of the chain through another conforming strategy."""
@@ -313,7 +401,7 @@ class ChainedIndexingStateMachine(RuleBasedStateMachine):
         a rank-0 view read through every partitioning is exactly the state a
         collapsed correlated selection reaches.
         """
-        parts = data.draw(st.sampled_from(list(type(self).partitionings)))
+        parts = data.draw(st.sampled_from(self._fitting_partitionings()))
         self.view = repartition(self.view, parts)
         self.chain.append(("parts", parts))
 
@@ -367,12 +455,165 @@ class ChainedIndexingStateMachine(RuleBasedStateMachine):
             hits, np.ones(self.view.shape, dtype=np.int64), err_msg=str(self.chain)
         )
 
+    @invariant()
+    def box_parts_lower_to_basic_selections(self) -> None:
+        """The consumer-owned-I/O assembly, run literally.
+
+        [`Partition`][zarr_indexing.lazy_array.Partition] documents
+        `out[part.out_selection] = source[part.source_selection]` as the
+        assembly for a consumer fetching box parts through its own I/O layer,
+        and `cell[part.chunk_local_selection]` as the equivalent read from a
+        cached grid cell. Both selections are applied here under plain NumPy
+        semantics to the values the source holds and checked against the
+        model; a query part must refuse to lower instead of guessing a slab.
+
+        Every part — query parts included — must also satisfy the
+        factorization law: `transform.decompose()` yields a cover and a
+        residual whose resolution against `data[cover]` reproduces the model,
+        the read a consumer performs when it fetches a bounding slab through
+        its own I/O layer and finishes the gather in memory.
+
+        Apart from resolving that residual, no reader runs in this invariant:
+        it proves the lowered selections alone carry the read, which is
+        exactly what a consumer that plans here but fetches elsewhere relies
+        on.
+        """
+        data = np.asarray(type(self).data)
+        for part in self.view.parts():
+            expected_block = self.model[part.out_selection]
+            cover, residual = part.view.transform.decompose()
+            decomposed = np.empty(expected_block.shape, dtype=data.dtype)
+            basic_reader.read_into(data[cover], ReadContext(residual), decomposed)
+            np.testing.assert_array_equal(decomposed, expected_block, err_msg=str(self.chain))
+            try:
+                source_selection = part.source_selection
+            except NoBasicSelectionError:
+                # Refusal is the documented answer for a query part and for
+                # the two degenerate boxes: an axis restored by repetition
+                # (gathering a collapsed constant with duplicates) and an axis
+                # broadcast from one cell. Every other box must lower — an
+                # integer-indexed one included, which is the shape a laxer
+                # check would quietly excuse.
+                assert not part.view.is_box or _is_degenerate_box(part.view.transform), (
+                    f"a plain box part refused to lower: {self.chain}"
+                )
+                # The paired spellings lower the same maps, so refusing one
+                # and answering the other would leave a consumer holding a
+                # cell selection that no source selection matches.
+                cell_lowered = True
+                try:
+                    _ = part.chunk_local_selection
+                except NoBasicSelectionError:
+                    cell_lowered = False
+                assert not cell_lowered, (
+                    f"chunk_local_selection lowered a part whose source_selection "
+                    f"refused to: {self.chain}"
+                )
+                continue
+            slab = data[source_selection]
+            np.testing.assert_array_equal(slab, expected_block, err_msg=str(self.chain))
+            cell = data[
+                tuple(
+                    slice(lo, hi)
+                    for lo, hi in zip(
+                        part.projection.chunk_domain.inclusive_min,
+                        part.projection.chunk_domain.exclusive_max,
+                        strict=True,
+                    )
+                )
+            ]
+            np.testing.assert_array_equal(
+                cell[part.chunk_local_selection], expected_block, err_msg=str(self.chain)
+            )
+
+
+def _is_degenerate_box(transform: IndexTransform) -> bool:
+    """Whether `transform` is one of the boxes with no basic-selection spelling.
+
+    Either an axis no output map reads but that a length-1 slice or a newaxis
+    cannot produce because its extent is not 1 — an axis restored by
+    repetition — or an axis broadcast from a single source cell by a stride-0
+    map. Both name more values than the cells they read, which no slab does.
+    """
+    referenced = {m.input_dimension for m in transform.output if isinstance(m, DimensionMap)}
+    return any(
+        axis not in referenced and extent != 1 for axis, extent in enumerate(transform.domain.shape)
+    ) or any(isinstance(m, DimensionMap) and m.stride == 0 for m in transform.output)
+
+
+def _domain_points(domain: IndexDomain) -> np.ndarray[Any, np.dtype[np.intp]]:
+    """Every coordinate in `domain`, one row per point, in C order."""
+    axes = [
+        np.arange(lo, hi, dtype=np.intp)
+        for lo, hi in zip(domain.inclusive_min, domain.exclusive_max, strict=True)
+    ]
+    if not axes:
+        # A rank-zero domain holds exactly one point, which has no coordinates.
+        return np.zeros((1, 0), dtype=np.intp)
+    mesh = np.meshgrid(*axes, indexing="ij")
+    return np.stack([axis.ravel() for axis in mesh], axis=1)
+
+
+class ProjectionReader:
+    """Read each part by gathering it out of the whole grid cell it lives in.
+
+    Every other reader answers from `context.transform` alone, so a projection
+    describing a different read than the transform it arrives with cannot
+    change what they return, and no assertion about values can see it. This
+    one fetches the cell `projection.chunk_domain` names and gathers the
+    request out of it with `projection.chunk_transform` — what a decoded-chunk
+    cache does — which puts the pairing of the two under the same NumPy model
+    as everything else.
+
+    Deliberately naive: whole cells, gathered pointwise. It is a contract
+    check, not a strategy to copy for performance.
+    """
+
+    def read_into(self, source: Any, context: ReadContext, out: np.ndarray[Any, Any], /) -> None:
+        """Fill `out` through the projection rather than the transform."""
+        projection = context.projection
+        if projection is None:
+            # An unpartitioned read is paired with no cell, so there is
+            # nothing here that `basic_reader` does not already check.
+            basic_reader.read_into(source, context, out)
+            return
+        domain = projection.chunk_domain
+        cell = np.asanyarray(
+            source[
+                tuple(
+                    slice(lo, hi)
+                    for lo, hi in zip(domain.inclusive_min, domain.exclusive_max, strict=True)
+                )
+            ]
+        )
+        chunk_points = projection.chunk_transform.apply_many(
+            _domain_points(projection.chunk_transform.domain)
+        )
+        values = cell[tuple(chunk_points.T)]
+        # The projection's synthetic domain and the buffer's domain enumerate
+        # the same cells in the same order and at the same shape, which is the
+        # pairing `ChunkProjection` documents; a reshape that fails has caught
+        # that promise breaking.
+        out[...] = values.reshape(out.shape)
+
+
+projection_reader = ProjectionReader()
+"""The shared `ProjectionReader`; readers are stateless, so one serves every view."""
+
 
 def _reader_set(view: LazyArray, declared: Sequence[Reader] | None) -> tuple[Reader, ...]:
-    """The readers `choose_reader` draws from, `basic_reader` always among them."""
+    """The readers `choose_reader` draws from.
+
+    `basic_reader` and `projection_reader` are always among them: neither
+    knows anything about a particular source beyond the slab reads every
+    source already serves, and between them they check both halves of a
+    `ReadContext` against the model.
+    """
     readers = list(declared) if declared is not None else [view.reader]
     if all(reader is not basic_reader for reader in readers):
         readers.insert(0, basic_reader)
+    if all(not isinstance(reader, ProjectionReader) for reader in readers):
+        readers.insert(1, projection_reader)
     unique: list[Reader] = []
     for reader in readers:
         if all(reader is not existing for existing in unique):
