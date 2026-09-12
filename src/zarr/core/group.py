@@ -1257,17 +1257,16 @@ class AsyncGroup:
             if shape != ds.shape:
                 raise TypeError(f"Incompatible shape ({ds.shape} vs {shape})")
 
-            # `np.dtype(None)` used to resolve to float64 here; keep that default.
-            dtype = parse_data_type(
-                "float64" if dtype is None else dtype,
-                zarr_format=self.metadata.zarr_format,
-            ).to_native_dtype()
-            if exact:
-                if ds.dtype != dtype:
-                    raise TypeError(f"Incompatible dtype ({ds.dtype} vs {dtype})")
-            else:
-                if not np.can_cast(ds.dtype, dtype):
-                    raise TypeError(f"Incompatible dtype ({ds.dtype} vs {dtype})")
+            if dtype is not None:
+                dtype = parse_data_type(
+                    dtype, zarr_format=self.metadata.zarr_format
+                ).to_native_dtype()
+                if exact:
+                    if ds.dtype != dtype:
+                        raise TypeError(f"Incompatible dtype ({ds.dtype} vs {dtype})")
+                else:
+                    if not np.can_cast(ds.dtype, dtype):
+                        raise TypeError(f"Incompatible dtype ({ds.dtype} vs {dtype})")
         except KeyError:
             ds = await self.create_array(name, shape=shape, dtype=dtype, **kwargs)
 
@@ -2086,20 +2085,25 @@ class Group(SyncMixin):
     async def update_attributes_async(self, new_attributes: dict[str, Any]) -> Group:
         """Update the attributes of this group.
 
+        Existing attributes are preserved; ``new_attributes`` are merged on top
+        of them (same semantics as `Group.update_attributes`).
+
         Examples
         --------
         >>> async def example():
         ...     import zarr
         ...
         ...     group = zarr.group()
-        ...     new_group = await group.update_attributes_async({"foo": "bar"})
+        ...     group = group.update_attributes({"foo": "bar"})
+        ...     new_group = await group.update_attributes_async({"baz": "qux"})
         ...     return new_group.attrs.asdict()
 
         >>> import asyncio
         >>> asyncio.run(example())
-        {'foo': 'bar'}
+        {'foo': 'bar', 'baz': 'qux'}
         """
-        new_metadata = replace(self.metadata, attributes=new_attributes)
+        merged = {**self.metadata.attributes, **new_attributes}
+        new_metadata = replace(self.metadata, attributes=merged)
 
         # Write new metadata
         to_save = new_metadata.to_buffer_dict(default_buffer_prototype())
@@ -2249,7 +2253,12 @@ class Group(SyncMixin):
         value: AsyncArray or AsyncGroup
             The AsyncArray or AsyncGroup that is a child of ``self``.
         """
-        _members = self._sync_iter(self._async_group.members(max_depth=max_depth))
+        _members = self._sync_iter(
+            self._async_group.members(
+                max_depth=max_depth,
+                use_consolidated_for_children=use_consolidated_for_children,
+            )
+        )
 
         return tuple((kv[0], _parse_async_node(kv[1])) for kv in _members)
 
@@ -3478,7 +3487,11 @@ async def _iter_members_deep(
         if is_group and do_recursion:
             node = cast("AsyncGroup", node)
             to_recurse[name] = _iter_members_deep(
-                node, max_depth=new_depth, skip_keys=skip_keys, semaphore=semaphore
+                node,
+                max_depth=new_depth,
+                skip_keys=skip_keys,
+                semaphore=semaphore,
+                use_consolidated_for_children=use_consolidated_for_children,
             )
 
     for prefix, subgroup_iter in to_recurse.items():

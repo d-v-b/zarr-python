@@ -770,6 +770,10 @@ def test_group_update_attributes(store: Store, zarr_format: ZarrFormat) -> None:
 async def test_group_update_attributes_async(store: Store, zarr_format: ZarrFormat) -> None:
     """
     Test the behavior of `Group.update_attributes_async`
+
+    update_attributes_async must *merge* new attributes with existing ones,
+    matching the semantics of the synchronous update_attributes path.
+    Regression test for B12.
     """
     attrs = {"foo": 100}
     group = Group.from_store(store, zarr_format=zarr_format, attributes=attrs)
@@ -780,7 +784,9 @@ async def test_group_update_attributes_async(store: Store, zarr_format: ZarrForm
             new_group = await group.update_attributes_async(new_attrs)
     else:
         new_group = await group.update_attributes_async(new_attrs)
-    assert new_group.attrs == new_attrs
+    # Both the original and the new key must be present (merge, not overwrite).
+    expected_attrs = {**attrs, **new_attrs}
+    assert new_group.attrs == expected_attrs
 
 
 @pytest.mark.parametrize("name", ["a", "/a"])
@@ -2378,3 +2384,121 @@ def test_open_array_as_group():
     z = zarr.create_array(shape=(40, 50), chunks=(10, 10), dtype="f8", store={})
     with pytest.raises(ContainsArrayError):
         zarr.open_group(z.store)
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for B11-B15 (bugs identified in 2026-06)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.filterwarnings("ignore:Consolidated metadata")
+@pytest.mark.parametrize("root_consolidated", [False, True])
+@pytest.mark.parametrize("use_children", [False, True])
+@pytest.mark.parametrize("sync_api", [False, True])
+async def test_iter_members_deep_use_consolidated_flag_propagates(
+    zarr_format: ZarrFormat, root_consolidated: bool, use_children: bool, sync_api: bool
+) -> None:
+    """Only child metadata obeys the flag; an existing root snapshot stays authoritative."""
+    store = MemoryStore()
+    root = zarr.group(store=store, zarr_format=zarr_format)
+    root.create_group("a/b/c")
+    zarr.consolidate_metadata(store, path="a/b")
+    if root_consolidated:
+        zarr.consolidate_metadata(store)
+    root = zarr.open_group(store, use_consolidated=root_consolidated)
+    fresh = zarr.open_group(store, path="a/b", use_consolidated=False)
+    fresh.create_group("later")
+
+    expected_warning = (
+        pytest.warns(ZarrUserWarning, match="Object at 'later' not found")
+        if not root_consolidated and use_children and zarr_format == 3
+        else contextlib.nullcontext()
+    )
+    with expected_warning:
+        if sync_api:
+            names = {
+                name
+                for name, _ in root.members(
+                    max_depth=None, use_consolidated_for_children=use_children
+                )
+            }
+        else:
+            names = {
+                name
+                async for name, _ in root._async_group.members(
+                    max_depth=None, use_consolidated_for_children=use_children
+                )
+            }
+    expected = {"a", "a/b", "a/b/c"}
+    # V2 child groups do not load their own .zmetadata during ordinary traversal.
+    if not root_consolidated and (not use_children or zarr_format == 2):
+        expected.add("a/b/later")
+    assert names == expected
+
+
+async def test_update_attributes_async_merges(store: Store, zarr_format: ZarrFormat) -> None:
+    """B12 — Group.update_attributes_async must merge, not overwrite.
+
+    Both the synchronous update_attributes and the async variant must
+    preserve keys that are not in the new_attributes dict.
+    """
+    initial_attrs: dict[str, Any] = {"existing_key": 42}
+    grp = zarr.group(store=store, zarr_format=zarr_format, attributes=initial_attrs)
+
+    # Synchronous path already merged; verify for completeness.
+    if isinstance(store, ZipStore):
+        with pytest.warns(UserWarning, match="Duplicate name"):
+            grp_after_sync = grp.update_attributes({"sync_key": 1})
+    else:
+        grp_after_sync = grp.update_attributes({"sync_key": 1})
+    assert grp_after_sync.attrs["existing_key"] == 42
+    assert grp_after_sync.attrs["sync_key"] == 1
+
+    # Async path — this was the buggy path (B12).
+    if isinstance(store, ZipStore):
+        with pytest.warns(UserWarning, match="Duplicate name"):
+            grp_after_async = await grp_after_sync.update_attributes_async({"async_key": 2})
+    else:
+        grp_after_async = await grp_after_sync.update_attributes_async({"async_key": 2})
+    assert grp_after_async.attrs["existing_key"] == 42, (
+        "existing_key must survive update_attributes_async (B12)"
+    )
+    assert grp_after_async.attrs["sync_key"] == 1, (
+        "sync_key must survive update_attributes_async (B12)"
+    )
+    assert grp_after_async.attrs["async_key"] == 2
+
+
+async def test_require_array_no_dtype_accepts_any(store: Store, zarr_format: ZarrFormat) -> None:
+    """B13 — require_array with dtype=None must not reject existing arrays.
+
+    np.dtype(None) resolves to float64, causing can_cast to fail for types
+    like complex128 when no dtype argument is actually supplied.
+    """
+    root = await AsyncGroup.from_store(store=store, zarr_format=zarr_format)
+    # Create a complex128 array — not castable to float64.
+    _ = await root.create_array("data", shape=(5,), dtype="complex128")
+
+    # Calling require_array without a dtype must return the existing array (B13).
+    arr = await root.require_array("data", shape=(5,))
+    assert arr.dtype == np.dtype("complex128"), (
+        "require_array without dtype must accept any existing array dtype (B13)"
+    )
+
+    # Calling with an *explicit* incompatible dtype must still raise.
+    with pytest.raises(TypeError, match="Incompatible dtype"):
+        await root.require_array("data", shape=(5,), dtype="float32")
+
+
+async def test_require_array_no_dtype_exact_accepts_any(
+    store: Store, zarr_format: ZarrFormat
+) -> None:
+    """B13 (exact=True branch) — require_array(dtype=None, exact=True) must not raise."""
+    root = await AsyncGroup.from_store(store=store, zarr_format=zarr_format)
+    _ = await root.create_array("data", shape=(3,), dtype="int16")
+
+    # Must succeed — no dtype provided, so no check should be performed.
+    arr = await root.require_array("data", shape=(3,), exact=True)
+    assert arr.dtype == np.dtype("int16"), (
+        "require_array(dtype=None, exact=True) must skip dtype check (B13)"
+    )
