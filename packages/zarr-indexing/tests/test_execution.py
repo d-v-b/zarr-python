@@ -4,6 +4,8 @@ from typing import Any
 
 import numpy as np
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from zarr_indexing import DimensionMap, IndexDomain, IndexTransform
 from zarr_indexing._execution import execute_selection, execute_transform
@@ -301,3 +303,46 @@ def test_orthogonal_scalar_rejects_negative_literal_coordinate() -> None:
         execute_selection(
             (-1, [1, 2]), (4, 4), dimension_grids_from_chunks((2, 2), (4, 4)), mode="orthogonal"
         )
+
+
+@given(
+    points=st.lists(st.tuples(st.integers(0, 4), st.integers(0, 6)), max_size=40),
+    chunk_sizes=st.tuples(st.integers(1, 5), st.integers(1, 7)),
+)
+def test_execution_coordinate_roundtrip_and_last_write(
+    points: list[tuple[int, int]], chunk_sizes: tuple[int, int]
+) -> None:
+    """Both consumers preserve request order and last writes for arbitrary gathers."""
+    shape = (5, 7)
+    source = np.arange(35).reshape(shape)
+    coordinates = np.array(points, dtype=np.intp).reshape(-1, 2)
+    selection = (coordinates[:, 0], coordinates[:, 1])
+    grids = dimension_grids_from_chunks(chunk_sizes, shape)
+    values = np.arange(len(points)) + 100
+    expected = source.copy()
+    for point, value in zip(points, values, strict=True):
+        expected[point] = value
+    for consumer in ("numpy", "shard"):
+        plan = execute_selection(selection, shape, grids, mode="vectorized")
+        result = np.empty(len(points), dtype=source.dtype)
+        covered = np.zeros(len(points), dtype=np.intp)
+        for row in plan.lower(consumer):
+            bounds = tuple(
+                slice(g.chunk_offset(c), g.chunk_offset(c) + g.data_size(c))
+                for g, c in zip(grids, row.chunk_coords, strict=True)
+            )
+            result[row.out_selection] = source[bounds][row.chunk_selection]
+            covered[row.out_selection] += 1
+        np.testing.assert_array_equal(result, source[selection])
+        np.testing.assert_array_equal(covered, np.ones(len(points), dtype=np.intp))
+        written = source.copy()
+        plan = execute_selection(
+            selection, shape, grids, mode="vectorized", access="write", conflicts="last"
+        )
+        for row in plan.lower(consumer):
+            bounds = tuple(
+                slice(g.chunk_offset(c), g.chunk_offset(c) + g.data_size(c))
+                for g, c in zip(grids, row.chunk_coords, strict=True)
+            )
+            written[bounds][row.chunk_selection] = values[row.out_selection]
+        np.testing.assert_array_equal(written, expected)

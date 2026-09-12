@@ -7,11 +7,9 @@ from typing import TYPE_CHECKING, Any, cast
 import numpy as np
 import pytest
 
-zarr = pytest.importorskip("zarr")
-
-from zarr.core.buffer.core import default_buffer_prototype
-
 from zarr_indexing import _execution as execution
+
+zarr = pytest.importorskip("zarr")
 
 if TYPE_CHECKING:
     from zarr.core.indexing import Indexer
@@ -25,6 +23,8 @@ pytestmark = pytest.mark.asyncio
     "case", ["basic", "integer", "reverse", "sorted", "components", "orthogonal"]
 )
 async def test_execution_codec_read_write(pipeline: str, layout: str, case: str) -> None:
+    from zarr.core.buffer.core import default_buffer_prototype
+
     shape: tuple[int, ...]
     chunks: tuple[int, ...]
     selection: Any
@@ -81,6 +81,8 @@ async def test_execution_codec_read_write(pipeline: str, layout: str, case: str)
 @pytest.mark.parametrize("pipeline", ["BatchedCodecPipeline", "FusedCodecPipeline"])
 @pytest.mark.parametrize("step", [1, 2])
 async def test_boundary_complete_write_skips_read(pipeline: str, step: int) -> None:
+    from zarr.core.buffer.core import default_buffer_prototype
+
     store = zarr.storage.LoggingStore(zarr.storage.MemoryStore())
     with zarr.config.set({"codec_pipeline.path": "zarr.core.codec_pipeline." + pipeline}):
         array = zarr.create_array(store=store, shape=(7,), chunks=(3,), dtype="int64")
