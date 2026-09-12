@@ -8,8 +8,8 @@ from typing import Any
 
 import pytest
 
-from zarr.abc.store import RangeByteRequest, Store, SuffixByteRequest
-from zarr.core.buffer.core import Buffer, default_buffer_prototype
+from zarr.abc.store import ByteRequest, RangeByteRequest, Store, SuffixByteRequest
+from zarr.core.buffer.core import Buffer, BufferPrototype, default_buffer_prototype
 from zarr.core.buffer.cpu import Buffer as CPUBuffer
 from zarr.experimental.cache_store import CacheStore
 from zarr.storage import MemoryStore
@@ -1392,3 +1392,87 @@ async def test_cache_coherent_after_fused_pipeline_write() -> None:
         # must observe the overwrite, not a cached copy of the first write.
         arr[:] = np.arange(100, 108, dtype="int32")
         np.testing.assert_array_equal(arr[:], np.arange(100, 108))
+
+
+@pytest.mark.parametrize("operation", ["set", "_set_many", "delete", "delete_dir", "clear"])
+@pytest.mark.parametrize("byte_range", [None, RangeByteRequest(0, 2), SuffixByteRequest(2)])
+@pytest.mark.parametrize("cache_set_data", [False, True])
+async def test_inflight_read_cannot_repopulate_invalidated_cache(
+    operation: str, byte_range: ByteRequest | None, cache_set_data: bool
+) -> None:
+    """A source read started before a mutation must not poison later cache reads."""
+    fetched = asyncio.Event()
+    release = asyncio.Event()
+
+    class DelayedReadStore(MemoryStore):
+        async def get(
+            self,
+            key: str,
+            prototype: BufferPrototype | None = None,
+            byte_range: ByteRequest | None = None,
+        ) -> Buffer | None:
+            result = await super().get(key, prototype, byte_range)
+            fetched.set()
+            await release.wait()
+            return result
+
+    source = DelayedReadStore()
+    await source.set("p/k", CPUBuffer.from_bytes(b"old"))
+    cached = CacheStore(source, cache_store=MemoryStore(), cache_set_data=cache_set_data)
+    proto = default_buffer_prototype()
+    reading = asyncio.create_task(cached.get("p/k", proto, byte_range))
+    try:
+        await asyncio.wait_for(fetched.wait(), timeout=5)
+        if operation == "set":
+            await cached.set("p/k", CPUBuffer.from_bytes(b"new"))
+        elif operation == "_set_many":
+            await cached._set_many([("p/k", CPUBuffer.from_bytes(b"new"))])
+        elif operation == "delete":
+            await cached.delete("p/k")
+        elif operation == "delete_dir":
+            await cached.delete_dir("p")
+        else:
+            await cached.clear()
+    finally:
+        release.set()
+        await reading
+    expected = await source.get("p/k", proto, byte_range)
+    actual = await cached.get("p/k", proto, byte_range)
+    assert (actual.to_bytes() if actual is not None else None) == (
+        expected.to_bytes() if expected is not None else None
+    )
+
+
+async def test_concurrent_sets_leave_cache_agreeing_with_source() -> None:
+    """A delayed source-write return cannot publish its value after a later write."""
+    written = asyncio.Event()
+    release = asyncio.Event()
+
+    class DelayedWriteStore(MemoryStore):
+        async def set(
+            self, key: str, value: Buffer, byte_range: tuple[int, int] | None = None
+        ) -> None:
+            await super().set(key, value, byte_range)
+            if value.to_bytes() == b"first":
+                written.set()
+                await release.wait()
+
+    source = DelayedWriteStore()
+    cached = CacheStore(source, cache_store=MemoryStore())
+    first = asyncio.create_task(cached.set("k", CPUBuffer.from_bytes(b"first")))
+    second = None
+    try:
+        await asyncio.wait_for(written.wait(), timeout=5)
+        second = asyncio.create_task(cached.set("k", CPUBuffer.from_bytes(b"second")))
+        await asyncio.sleep(0)
+    finally:
+        release.set()
+        await first
+        if second is not None:
+            await second
+    proto = default_buffer_prototype()
+    expected = await source.get("k", proto)
+    actual = await cached.get("k", proto)
+    assert expected is not None
+    assert actual is not None
+    assert actual.to_bytes() == expected.to_bytes() == b"second"

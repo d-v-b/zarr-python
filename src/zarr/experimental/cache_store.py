@@ -34,6 +34,8 @@ class _CacheState:
     evictions: int = 0
     key_insert_times: dict[_CacheEntryKey, float] = field(default_factory=dict)
     range_cache: dict[str, dict[ByteRequest, Buffer]] = field(default_factory=dict)
+    # A source read may finish after a mutation invalidates its result.
+    generation: int = 0
 
 
 class CacheStore(WrapperStore[Store]):
@@ -284,7 +286,7 @@ class CacheStore(WrapperStore[Store]):
     # ------------------------------------------------------------------
 
     async def _cache_miss(
-        self, key: str, byte_range: ByteRequest | None, result: Buffer | None
+        self, key: str, byte_range: ByteRequest | None, result: Buffer | None, generation: int
     ) -> None:
         """Handle a cache miss by storing or cleaning up after a source-store fetch.
 
@@ -295,14 +297,20 @@ class CacheStore(WrapperStore[Store]):
         if result is None:
             if byte_range is None:
                 async with self._state.lock:
+                    if generation != self._state.generation:
+                        return
                     await self._cache.delete(key)
                     self._remove_from_tracking(key)
             else:
                 async with self._state.lock:
+                    if generation != self._state.generation:
+                        return
                     self._drop_range(key, byte_range)
         else:
             if byte_range is None:
                 async with self._state.lock:
+                    if generation != self._state.generation:
+                        return
                     await self._cache.set(key, result)
                     if not await self._track_entry(key, result):
                         # Value too large for the cache — roll back so the backing
@@ -310,6 +318,8 @@ class CacheStore(WrapperStore[Store]):
                         await self._cache.delete(key)
             else:
                 async with self._state.lock:
+                    if generation != self._state.generation:
+                        return
                     self._state.range_cache.setdefault(key, {})[byte_range] = result
                     if not await self._track_entry((key, byte_range), result):
                         # Value too large for the cache — roll back the insertion
@@ -339,8 +349,9 @@ class CacheStore(WrapperStore[Store]):
 
         # Cache miss — fetch from source store
         self._state.misses += 1
+        generation = self._state.generation
         result = await super().get(key, prototype, byte_range)
-        await self._cache_miss(key, byte_range, result)
+        await self._cache_miss(key, byte_range, result, generation)
         return result
 
     async def _get_no_cache(
@@ -348,8 +359,9 @@ class CacheStore(WrapperStore[Store]):
     ) -> Buffer | None:
         """Get data directly from source store and update cache."""
         self._state.misses += 1
+        generation = self._state.generation
         result = await super().get(key, prototype, byte_range)
-        await self._cache_miss(key, byte_range, result)
+        await self._cache_miss(key, byte_range, result, generation)
         return result
 
     @property
@@ -402,8 +414,10 @@ class CacheStore(WrapperStore[Store]):
         value : Buffer
             The data to store
         """
-        await super().set(key, value)
         async with self._state.lock:
+            # Keep source writes and cache publication in the same order.
+            await super().set(key, value)
+            self._state.generation += 1
             # The value just written supersedes any cached byte ranges for the key.
             self._invalidate_range_entries(key)
             if self.cache_set_data:
@@ -434,6 +448,7 @@ class CacheStore(WrapperStore[Store]):
         # unconditionally is always safe. We do not populate the cache here: there
         # is no guaranteed-fresh value to store (the write may have been a no-op).
         async with self._state.lock:
+            self._state.generation += 1
             self._invalidate_range_entries(key)
             await self._cache.delete(key)
             self._remove_from_tracking(key)
@@ -457,6 +472,7 @@ class CacheStore(WrapperStore[Store]):
         """
         await super().delete(key)
         async with self._state.lock:
+            self._state.generation += 1
             self._invalidate_range_entries(key)
             await self._cache.delete(key)
             self._remove_from_tracking(key)
@@ -474,6 +490,7 @@ class CacheStore(WrapperStore[Store]):
         if prefix != "" and not prefix.endswith("/"):
             prefix += "/"
         async with self._state.lock:
+            self._state.generation += 1
             await self._cache.delete_dir(prefix)
             for base_key in [k for k in self._state.range_cache if k.startswith(prefix)]:
                 self._invalidate_range_entries(base_key)
@@ -525,6 +542,7 @@ class CacheStore(WrapperStore[Store]):
         # backing cache with no tracking entry — uncounted against ``max_size``,
         # never eviction-eligible, and served as a hit indefinitely.
         async with self._state.lock:
+            self._state.generation += 1
             await self._cache.clear()
             self._state.key_insert_times.clear()
             self._state.cache_order.clear()
