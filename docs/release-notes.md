@@ -29,10 +29,11 @@
   `endian` configuration as `endian=None` (matching what `BytesCodec.to_dict`
   emits), instead of falling back to the system's native byte order. As a
   consequence, Zarr V3 array metadata that omits the `endian` configuration for
-  a multi-byte data type — which is spec-noncompliant, and only producible by
-  third-party writers, since zarr-python has always written the field —
+  a non-structured multi-byte data type
   previously opened and decoded assuming machine-native byte order, and now
-  fails at open time with an informative `ValueError`. ([#3417](https://github.com/zarr-developers/zarr-python/issues/3417))
+  fails at open time with an informative `ValueError`. Structured data with
+  multi-byte fields retain a legacy compatibility path: a missing `endian`
+  emits a warning and assumes little-endian. ([#3417](https://github.com/zarr-developers/zarr-python/issues/3417))
 - Fixed `save_array`, `Group.__setitem__`, and `load` for 0-dimensional arrays. ([#3469](https://github.com/zarr-developers/zarr-python/issues/3469))
 - Fixed inner-codec spec evolution for sharded arrays. The sharding codec now threads the array spec through its inner codec chain when evolving codecs, so a codec that changes the dtype upstream of `BytesCodec` no longer leaves the inner chain evolved against the wrong spec (which previously failed at decode time). This runs on the default `BatchedCodecPipeline` as well. Standard inner chains (`[BytesCodec]`, `[BytesCodec, ZstdCodec]`, transpose + bytes) are byte-identical to before. Restores the behavior of #2179. ([#3885](https://github.com/zarr-developers/zarr-python/issues/3885))
 - Make chunk normalization properly handle `-1` as a compact representation of the
