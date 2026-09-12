@@ -1476,3 +1476,75 @@ async def test_concurrent_sets_leave_cache_agreeing_with_source() -> None:
     assert expected is not None
     assert actual is not None
     assert actual.to_bytes() == expected.to_bytes() == b"second"
+
+
+@pytest.mark.parametrize("cache_set_data", [False, True])
+async def test_distinct_key_writes_run_concurrently(cache_set_data: bool) -> None:
+    """Independent chunk writes must reach the source without waiting on each other."""
+    started: set[str] = set()
+    both_started = asyncio.Event()
+    release = asyncio.Event()
+
+    class DelayedWriteStore(MemoryStore):
+        async def set(
+            self, key: str, value: Buffer, byte_range: tuple[int, int] | None = None
+        ) -> None:
+            started.add(key)
+            if len(started) == 2:
+                both_started.set()
+            await release.wait()
+            await super().set(key, value, byte_range)
+
+    cached = CacheStore(
+        DelayedWriteStore(), cache_store=MemoryStore(), cache_set_data=cache_set_data
+    )
+    values = [(key, CPUBuffer.from_bytes(key.encode())) for key in ("a", "b")]
+    writing = asyncio.create_task(cached._set_many(values))
+    try:
+        await asyncio.wait_for(both_started.wait(), timeout=5)
+    finally:
+        release.set()
+        await writing
+    for key, expected in values:
+        actual = await cached.get(key, default_buffer_prototype())
+        assert actual is not None
+        assert actual.to_bytes() == expected.to_bytes()
+
+
+@pytest.mark.parametrize("operation", ["delete", "delete_dir", "clear", "clear_cache"])
+async def test_delayed_set_cannot_undo_cache_invalidation(operation: str) -> None:
+    """A write's delayed return must not publish a value invalidated meanwhile."""
+    written = asyncio.Event()
+    release = asyncio.Event()
+
+    class DelayedWriteStore(MemoryStore):
+        async def set(
+            self, key: str, value: Buffer, byte_range: tuple[int, int] | None = None
+        ) -> None:
+            await super().set(key, value, byte_range)
+            written.set()
+            await release.wait()
+
+    cached = CacheStore(DelayedWriteStore(), cache_store=MemoryStore())
+    writing = asyncio.create_task(cached.set("p/k", CPUBuffer.from_bytes(b"new")))
+    try:
+        await asyncio.wait_for(written.wait(), timeout=5)
+        if operation == "delete":
+            await cached.delete("p/k")
+        elif operation == "delete_dir":
+            await cached.delete_dir("p")
+        elif operation == "clear":
+            await cached.clear()
+        else:
+            await cached.clear_cache()
+    finally:
+        release.set()
+        await writing
+    proto = default_buffer_prototype()
+    assert await cached._cache.get("p/k", proto) is None
+    actual = await cached.get("p/k", proto)
+    if operation == "clear_cache":
+        assert actual is not None
+        assert actual.to_bytes() == b"new"
+    else:
+        assert actual is None

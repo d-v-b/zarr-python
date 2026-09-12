@@ -29,6 +29,7 @@ class _CacheState:
     current_size: int = 0
     key_sizes: dict[_CacheEntryKey, int] = field(default_factory=dict)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    write_locks: dict[str, tuple[asyncio.Lock, int]] = field(default_factory=dict)
     hits: int = 0
     misses: int = 0
     evictions: int = 0
@@ -414,21 +415,37 @@ class CacheStore(WrapperStore[Store]):
         value : Buffer
             The data to store
         """
-        async with self._state.lock:
-            # Keep source writes and cache publication in the same order.
-            await super().set(key, value)
-            self._state.generation += 1
-            # The value just written supersedes any cached byte ranges for the key.
-            self._invalidate_range_entries(key)
-            if self.cache_set_data:
-                await self._cache.set(key, value)
-                if not await self._track_entry(key, value):
-                    # Value too large for the cache — roll back so the backing cache
-                    # holds no untracked (uncounted, unevictable) orphan.
-                    await self._cache.delete(key)
+        # Order writes to each key without serializing independent source writes.
+        # Count holders and waiters so idle locks do not accumulate for every key.
+        write_lock, users = self._state.write_locks.setdefault(key, (asyncio.Lock(), 0))
+        self._state.write_locks[key] = (write_lock, users + 1)
+        try:
+            async with write_lock:
+                generation = self._state.generation
+                await super().set(key, value)
+                async with self._state.lock:
+                    # Another mutation may have invalidated this write while its
+                    # source-store call was pending. In that case the value is not
+                    # guaranteed current, so invalidate instead of publishing it.
+                    may_cache = self.cache_set_data and generation == self._state.generation
+                    self._state.generation += 1
+                    # The value just written supersedes any cached byte ranges for the key.
+                    self._invalidate_range_entries(key)
+                    if may_cache:
+                        await self._cache.set(key, value)
+                        if not await self._track_entry(key, value):
+                            # Value too large for the cache — roll back so the backing cache
+                            # holds no untracked (uncounted, unevictable) orphan.
+                            await self._cache.delete(key)
+                    else:
+                        await self._cache.delete(key)
+                        self._remove_from_tracking(key)
+        finally:
+            _, users = self._state.write_locks[key]
+            if users == 1:
+                del self._state.write_locks[key]
             else:
-                await self._cache.delete(key)
-                self._remove_from_tracking(key)
+                self._state.write_locks[key] = (write_lock, users - 1)
 
     async def set_if_not_exists(self, key: str, value: Buffer) -> None:
         """
