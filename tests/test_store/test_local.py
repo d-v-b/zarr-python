@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import pathlib
 import re
+import shutil
+import threading
 
 import numpy as np
 import pytest
@@ -13,6 +16,27 @@ from zarr.storage import LocalStore
 from zarr.storage._local import _atomic_write
 from zarr.testing.store import StoreTests
 from zarr.testing.utils import assert_bytes_equal
+
+
+async def test_move_keeps_event_loop_responsive(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = await LocalStore.open(tmp_path / "source")
+    await store.set("key", cpu.Buffer.from_bytes(b"value"))
+    loop = asyncio.get_running_loop()
+    progressed = threading.Event()
+    original_move = shutil.move
+
+    def slow_move(source: pathlib.Path, destination: pathlib.Path) -> str:
+        loop.call_soon_threadsafe(progressed.set)
+        assert progressed.wait(timeout=2), "filesystem move blocked the event loop"
+        return original_move(source, str(destination))
+
+    monkeypatch.setattr(shutil, "move", slow_move)
+    await store.move(tmp_path / "destination")
+    result = await store.get("key")
+    assert result is not None
+    assert result.to_bytes() == b"value"
 
 
 class TestLocalStore(StoreTests[LocalStore, cpu.Buffer]):
@@ -29,8 +53,8 @@ class TestLocalStore(StoreTests[LocalStore, cpu.Buffer]):
         (store.root / key).write_bytes(value.to_bytes())
 
     @pytest.fixture
-    def store_kwargs(self, tmpdir: str) -> dict[str, str]:
-        return {"root": str(tmpdir)}
+    def store_kwargs(self, tmp_path: pathlib.Path) -> dict[str, str]:
+        return {"root": str(tmp_path)}
 
     def test_store_repr(self, store: LocalStore) -> None:
         assert str(store) == f"file://{store.root.as_posix()}"
@@ -45,6 +69,20 @@ class TestLocalStore(StoreTests[LocalStore, cpu.Buffer]):
         assert await store.is_empty("")
         (store.root / "foo/bar").mkdir(parents=True)
         assert await store.is_empty("")
+
+    def test_delete_sync_directory(self, store: LocalStore) -> None:
+        """`delete_sync` on a key that is a directory must remove the whole tree.
+
+        Mirrors the async `delete_dir` behavior: deleting `"foo"` where
+        `"foo"` is a directory containing further nested paths should remove
+        everything under it, not just fail or delete a single file.
+        """
+        (store.root / "foo" / "bar").mkdir(parents=True)
+        (store.root / "foo" / "bar" / "baz").write_bytes(b"data")
+
+        store.delete_sync("foo")
+
+        assert not (store.root / "foo").exists()
 
     def test_creates_new_directory(self, tmp_path: pathlib.Path) -> None:
         target = tmp_path.joinpath("a", "b", "c")
@@ -98,7 +136,7 @@ class TestLocalStore(StoreTests[LocalStore, cpu.Buffer]):
         await store.move(destination)
 
         assert store.root == pathlib.Path(destination)
-        assert pathlib.Path(destination).exists()  # noqa: ASYNC240 — sync check in test is fine
+        assert pathlib.Path(destination).exists()  # noqa: ASYNC240 - local test assertion
         assert not origin.exists()
         assert np.array_equal(array[...], data)
 
