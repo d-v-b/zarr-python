@@ -4,7 +4,7 @@ Rectilinear chunk grid (zarr-extensions).
 See https://github.com/zarr-developers/zarr-extensions/tree/main/chunk-grids/rectilinear
 """
 
-from typing import Final, Literal
+from typing import Final, Literal, NotRequired
 
 from typing_extensions import TypedDict
 
@@ -23,18 +23,19 @@ pairs.
 """
 
 
-class RectilinearChunkGridConfiguration(TypedDict):
+class RectilinearChunkGridConfiguration(TypedDict, closed=True):
     """Configuration for the rectilinear chunk grid."""
 
     kind: Literal["inline"]
     chunk_shapes: tuple[RectilinearDimSpec, ...]
 
 
-class RectilinearChunkGridObject(TypedDict):
+class RectilinearChunkGridObject(TypedDict, closed=True):
     """Rectilinear chunk grid metadata in object form."""
 
     name: RectilinearChunkGridName
     configuration: RectilinearChunkGridConfiguration
+    must_understand: NotRequired[bool]
 
 
 RectilinearChunkGridMetadata = RectilinearChunkGridObject
