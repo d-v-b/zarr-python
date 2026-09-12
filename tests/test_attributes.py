@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -8,9 +10,11 @@ import zarr.core
 import zarr.core.attributes
 import zarr.storage
 from tests.conftest import deep_nan_equal
-from zarr.core.common import ZarrFormat
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from zarr.core.common import ZarrFormat
     from zarr.types import AnyArray
 
 
@@ -74,6 +78,94 @@ def test_update_no_changes() -> None:
     assert dict(z.attrs) == {"a": [], "b": 3}
 
 
+def _make_node(
+    store: zarr.storage.MemoryStore,
+    *,
+    group: bool,
+    attributes: dict[str, Any] | None = None,
+) -> zarr.Group | AnyArray:
+    """Create a fresh sync group or array with the given attributes."""
+    if group:
+        return zarr.create_group(store, attributes=attributes)
+    return zarr.create_array(
+        store=store, shape=10, dtype=int, attributes=attributes, overwrite=True
+    )
+
+
+@pytest.mark.parametrize("group", [True, False])
+def test_update_attributes_merges(group: bool) -> None:
+    """`update_attributes` merges into existing attributes; pre-existing keys survive."""
+    store = zarr.storage.MemoryStore()
+    z = _make_node(store, group=group, attributes={"a": 1})
+    z.update_attributes({"b": 2})
+    assert dict(z.attrs) == {"a": 1, "b": 2}
+
+
+@pytest.mark.parametrize("group", [True, False])
+def test_update_attributes_no_mutation(group: bool) -> None:
+    """`update_attributes` must not mutate the original frozen metadata object."""
+    store = zarr.storage.MemoryStore()
+    z = _make_node(store, group=group, attributes={"a": 1})
+    old_metadata = z.metadata
+    snapshot = dict(old_metadata.attributes)
+    z.update_attributes({"b": 2})
+    assert dict(old_metadata.attributes) == snapshot
+
+
+@pytest.mark.parametrize("group", [True, False])
+def test_replace_attributes_replaces_sync(group: bool) -> None:
+    """`replace_attributes` drops keys absent from the new dict (sync)."""
+    store = zarr.storage.MemoryStore()
+    z = _make_node(store, group=group, attributes={"a": 1, "b": 2})
+    z.replace_attributes({"a": 3, "c": 4})
+    assert dict(z.attrs) == {"a": 3, "c": 4}
+
+
+@pytest.mark.parametrize("group", [True, False])
+async def test_replace_attributes_replaces_async(group: bool) -> None:
+    """`replace_attributes` drops keys absent from the new dict (async)."""
+    store = zarr.storage.MemoryStore()
+    z = _make_node(store, group=group, attributes={"a": 1, "b": 2})
+    async_obj = z._async_group if isinstance(z, zarr.Group) else z.async_array
+    await async_obj.replace_attributes({"a": 3, "c": 4})
+    assert dict(async_obj.metadata.attributes) == {"a": 3, "c": 4}
+
+
+@pytest.mark.parametrize("group", [True, False])
+def test_replace_attributes_no_mutation(group: bool) -> None:
+    """`replace_attributes` must not mutate the original frozen metadata object."""
+    store = zarr.storage.MemoryStore()
+    z = _make_node(store, group=group, attributes={"a": 1, "b": 2})
+    old_metadata = z.metadata
+    snapshot = dict(old_metadata.attributes)
+    z.replace_attributes({"a": 3, "c": 4})
+    assert dict(old_metadata.attributes) == snapshot
+
+
+@pytest.mark.parametrize("group", [True, False])
+def test_put_replaces(group: bool) -> None:
+    """`attrs.put` replaces all attributes, dropping absent keys."""
+    store = zarr.storage.MemoryStore()
+    z = _make_node(store, group=group, attributes={"a": 1, "b": 2})
+    z.attrs.put({"a": 3, "c": 4})
+    assert dict(z.attrs) == {"a": 3, "c": 4}
+
+
+@pytest.mark.parametrize("group", [True, False])
+def test_replace_attributes_persists(group: bool) -> None:
+    """After replace, reopening from the store reflects the dropped keys."""
+    store = zarr.storage.MemoryStore()
+    z = _make_node(store, group=group, attributes={"a": 1, "b": 2})
+    z.replace_attributes({"a": 3, "c": 4})
+
+    z2: zarr.Group | AnyArray
+    if group:
+        z2 = zarr.open_group(store)
+    else:
+        z2 = zarr.open_array(store)
+    assert dict(z2.attrs) == {"a": 3, "c": 4}
+
+
 @pytest.mark.parametrize("group", [True, False])
 def test_del_works(group: bool) -> None:
     store = zarr.storage.MemoryStore()
@@ -93,3 +185,34 @@ def test_del_works(group: bool) -> None:
     else:
         z2 = zarr.open_array(store)
     assert dict(z2.attrs) == {"c": 4}
+
+
+@pytest.mark.parametrize("group", [False, True])
+@pytest.mark.parametrize("zarr_format", [2, 3])
+@pytest.mark.parametrize("operation", ["update", "replace", "put", "delete"])
+def test_failed_attribute_write_preserves_state(
+    group: bool, zarr_format: ZarrFormat, operation: str
+) -> None:
+    """A rejected store write must not change either the handle or persisted attributes."""
+    store = zarr.storage.MemoryStore()
+    initial: dict[str, Any] = {"a": 1, "b": 2}
+    node: zarr.Group | AnyArray
+    if group:
+        zarr.create_group(store, attributes=initial, zarr_format=zarr_format)
+        node = zarr.open_group(store.with_read_only(True), mode="r")
+    else:
+        zarr.create_array(store, shape=2, dtype="i4", attributes=initial, zarr_format=zarr_format)
+        node = zarr.open_array(store.with_read_only(True), mode="r")
+    old_metadata = node.metadata
+    operations: dict[str, Callable[[], object]] = {
+        "update": lambda: node.update_attributes({"c": 3}),
+        "replace": lambda: node.replace_attributes({"c": 3}),
+        "put": lambda: node.attrs.put({"c": 3}),
+        "delete": lambda: node.attrs.pop("a"),
+    }
+    with pytest.raises(ValueError, match="read-only"):
+        operations[operation]()
+    assert node.metadata.attributes == initial
+    assert old_metadata.attributes == initial
+    reopened = zarr.open_group(store) if group else zarr.open_array(store)
+    assert reopened.metadata.attributes == initial
