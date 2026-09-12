@@ -70,6 +70,7 @@ from zarr.core.metadata.v3 import (
     ChunkGridMetadata,
     RectilinearChunkGridMetadata,
     RegularChunkGridMetadata,
+    evolve_and_validate_codecs,
     parse_codecs,
 )
 from zarr.registry import get_ndbuffer_class, get_pipeline_class
@@ -576,10 +577,13 @@ class ShardingCodec(
         -------
             This codec with the evolved code chain.
         """
-        from zarr.core.chunk_utils import evolve_codecs
-
-        shard_spec = self._get_chunk_spec(array_spec)
-        evolved_codecs = evolve_codecs(self.codecs, shard_spec)
+        chunk_spec = self._get_chunk_spec(array_spec)
+        evolved_codecs = evolve_and_validate_codecs(
+            self.codecs,
+            shape=self.chunk_shape,
+            chunk_grid=RegularChunkGridMetadata(chunk_shape=self.chunk_shape),
+            chunk_spec=chunk_spec,
+        )
         if evolved_codecs != self.codecs:
             return replace(self, codecs=evolved_codecs)
         return self
