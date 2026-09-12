@@ -31,33 +31,20 @@ filter of a stride layout and ``unordered`` promises nothing, so neither is
 checked here (they are covered by ``test_sharding.py``).
 
 PyCuTe is a test-only dependency (installed only in the ``optional`` hatch test
-matrix from a pinned commit); the module is skipped where it is absent. It must
-never be imported at runtime.
+matrix from a pinned commit); absence is an error in that matrix and a skip
+elsewhere. It must never be imported at runtime.
 """
 
 from __future__ import annotations
 
 import itertools
+import os
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
 import pytest
-
-pytest.importorskip(
-    "pycute",
-    reason="PyCuTe (https://github.com/NVlabs/CuTe) is only installed in the "
-    "'optional' hatch test matrix",
-)
-
-from pycute import (
-    Layout,
-    blocked_product,
-    idx2crd,
-    logical_divide,
-    make_ordered_layout,
-    shape,
-    size,
-)
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 import zarr
 from zarr.codecs import BytesCodec, ShardingCodec, TransposeCodec
@@ -71,18 +58,37 @@ from zarr.storage import MemoryStore, StorePath
 if TYPE_CHECKING:
     from zarr.codecs.sharding import IndexLocation
 
+try:
+    from pycute import (
+        Layout,
+        blocked_product,
+        idx2crd,
+        logical_divide,
+        make_ordered_layout,
+        shape,
+        size,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name != "pycute" or os.environ.get("HATCH_ENV_ACTIVE", "").endswith("-optional"):
+        raise
+    pytest.skip("PyCuTe is installed in the optional Hatch test matrix", allow_module_level=True)
+
 MemOrder = Literal["C", "F"]
 WriteOrder = Literal["lexicographic", "colexicographic", "morton"]
 
 # uint32 keeps a non-trivial item size in play so element/byte confusions show up.
 DTYPE = "uint32"
 ITEMSIZE = 4
+# Label zero must not be omitted as an all-fill singleton chunk.
+FILL_VALUE = 2**32 - 1
 
 # (shard_shape, chunk_shape). The first is the worked example from the task
 # statement (a 24-long shard of 4-long chunks); the rest cover 1-3 dimensions,
 # non-square grids, a unit grid extent, and power-of-two grids for morton.
 CASES: tuple[tuple[tuple[int, ...], tuple[int, ...]], ...] = (
     ((24,), (4,)),
+    ((4,), (1,)),
+    ((1, 1), (1, 1)),
     ((8, 6), (4, 3)),
     ((6, 4), (3, 4)),
     ((16, 8), (4, 2)),
@@ -227,7 +233,7 @@ def _shard_spec(shard_shape: tuple[int, ...], mem_order: MemOrder) -> ArraySpec:
     return ArraySpec(
         shape=shard_shape,
         dtype=parse_dtype(DTYPE, zarr_format=3),
-        fill_value=0,
+        fill_value=FILL_VALUE,
         config=ArrayConfig(order=mem_order, write_empty_chunks=False),
         prototype=default_buffer_prototype(),
     )
@@ -248,7 +254,7 @@ def _write_one_shard(
         serializer=codec,
         filters=None,
         compressors=None,
-        fill_value=0,
+        fill_value=FILL_VALUE,
         config={"order": mem_order},
     )
     arr[:] = _labels(shard_shape, mem_order)
@@ -425,7 +431,7 @@ def test_decode_of_oracle_built_shard(
         serializer=codec,
         filters=None,
         compressors=None,
-        fill_value=0,
+        fill_value=FILL_VALUE,
         config={"order": mem_order},
     )
     sync(store.set(_chunk_key(ndim), default_buffer_prototype().buffer.from_bytes(blob)))
@@ -495,3 +501,26 @@ def test_grid_layouts_match_zarr_iteration_order() -> None:
         grid = _grid_layout(cps, write_order)
         ranks = [grid(c) for c in codec._subchunk_order_iter(cps, write_order)]
         assert ranks == list(range(int(np.prod(cps)))), (cps, write_order)
+
+
+@given(data=st.data())
+@settings(max_examples=60, deadline=None)
+def test_generated_shard_layouts(data: st.DataObject) -> None:
+    """Independent encode/decode oracles cover arbitrary tilings and order combinations."""
+    ndim = data.draw(st.integers(1, 3), label="rank")
+    chunk_shape = tuple(data.draw(st.lists(st.integers(1, 4), min_size=ndim, max_size=ndim)))
+    write_order: WriteOrder = data.draw(
+        st.sampled_from(("lexicographic", "colexicographic", "morton"))
+    )
+    grid_sizes = st.sampled_from((1, 2, 4)) if write_order == "morton" else st.integers(1, 4)
+    cps = data.draw(st.lists(grid_sizes, min_size=ndim, max_size=ndim))
+    shard_shape = tuple(c * n for c, n in zip(chunk_shape, cps, strict=True))
+    inner_order: MemOrder = data.draw(st.sampled_from(("C", "F")))
+    memory_order: MemOrder = data.draw(st.sampled_from(("C", "F")))
+    index_location: IndexLocation = data.draw(st.sampled_from(("start", "end")))
+    test_encoded_shard_matches_layout_oracle(
+        shard_shape, chunk_shape, inner_order, write_order, index_location, memory_order
+    )
+    test_decode_of_oracle_built_shard(
+        shard_shape, chunk_shape, inner_order, write_order, index_location, memory_order
+    )
