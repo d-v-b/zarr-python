@@ -12,6 +12,8 @@ import zarr.storage
 from tests.conftest import deep_nan_equal
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from zarr.core.common import ZarrFormat
     from zarr.types import AnyArray
 
@@ -183,3 +185,34 @@ def test_del_works(group: bool) -> None:
     else:
         z2 = zarr.open_array(store)
     assert dict(z2.attrs) == {"c": 4}
+
+
+@pytest.mark.parametrize("group", [False, True])
+@pytest.mark.parametrize("zarr_format", [2, 3])
+@pytest.mark.parametrize("operation", ["update", "replace", "put", "delete"])
+def test_failed_attribute_write_preserves_state(
+    group: bool, zarr_format: ZarrFormat, operation: str
+) -> None:
+    """A rejected store write must not change either the handle or persisted attributes."""
+    store = zarr.storage.MemoryStore()
+    initial: dict[str, Any] = {"a": 1, "b": 2}
+    node: zarr.Group | AnyArray
+    if group:
+        zarr.create_group(store, attributes=initial, zarr_format=zarr_format)
+        node = zarr.open_group(store.with_read_only(True), mode="r")
+    else:
+        zarr.create_array(store, shape=2, dtype="i4", attributes=initial, zarr_format=zarr_format)
+        node = zarr.open_array(store.with_read_only(True), mode="r")
+    old_metadata = node.metadata
+    operations: dict[str, Callable[[], object]] = {
+        "update": lambda: node.update_attributes({"c": 3}),
+        "replace": lambda: node.replace_attributes({"c": 3}),
+        "put": lambda: node.attrs.put({"c": 3}),
+        "delete": lambda: node.attrs.pop("a"),
+    }
+    with pytest.raises(ValueError, match="read-only"):
+        operations[operation]()
+    assert node.metadata.attributes == initial
+    assert old_metadata.attributes == initial
+    reopened = zarr.open_group(store) if group else zarr.open_array(store)
+    assert reopened.metadata.attributes == initial
