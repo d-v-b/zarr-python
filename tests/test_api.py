@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 import zarr.codecs
 import zarr.storage
 from zarr.core.array import AsyncArray, init_array
+from zarr.core.buffer import default_buffer_prototype
 from zarr.storage import LocalStore, ZipStore
 from zarr.storage._common import StorePath
 
@@ -16,9 +17,11 @@ if TYPE_CHECKING:
     from pathlib import Path
     from typing import Self
 
+    import numpy.typing as npt
+
     from zarr.abc.store import ByteRequest
     from zarr.core.buffer import Buffer, BufferPrototype
-    from zarr.core.common import JSON, MemoryOrder, ZarrFormat
+    from zarr.core.common import JSON, AccessModeLiteral, MemoryOrder, ZarrFormat
     from zarr.types import AnyArray
 
 import contextlib
@@ -80,11 +83,11 @@ def test_create(memory_store: Store) -> None:
     assert z.chunks == (40,)
 
     # create array with float shape
-    with pytest.raises(TypeError):
+    with pytest.raises(TypeError, match="Expected an iterable of integers"):
         z = create(shape=(400.5, 100), store=store, overwrite=True)  # type: ignore[arg-type]
 
     # create array with float chunk shape
-    with pytest.raises(TypeError):
+    with pytest.raises(TypeError, match="Chunk specification must be an integer or an iterable"):
         z = create(shape=(400, 100), chunks=(16, 16.5), store=store, overwrite=True)  # type: ignore[arg-type]
 
 
@@ -173,6 +176,53 @@ async def test_array_like_creation(
     assert np.all(Array(new_arr)[:] == expect_fill)
 
 
+@pytest.mark.parametrize("mode_kwargs", [{}, {"mode": None}])
+async def test_open_like_creates_array_by_default(
+    zarr_format: ZarrFormat, mode_kwargs: dict[str, None]
+) -> None:
+    ref_arr = zarr.create_array(
+        store={},
+        shape=(11, 12),
+        dtype="uint8",
+        chunks=(11, 12),
+        zarr_format=zarr_format,
+        fill_value=100,
+    )
+
+    new_arr = await zarr.api.asynchronous.open_like(
+        ref_arr,
+        path="foo",
+        store={},
+        zarr_format=zarr_format,
+        **mode_kwargs,
+    )
+
+    assert new_arr.shape == ref_arr.shape
+    assert new_arr.chunks == ref_arr.chunks
+    assert new_arr.dtype == ref_arr.dtype
+    assert np.all(Array(new_arr)[:] == ref_arr.fill_value)
+
+
+async def test_open_like_default_mode_rejects_read_only_store(
+    zarr_format: ZarrFormat,
+) -> None:
+    ref_arr = zarr.create_array(
+        store={},
+        shape=(11, 12),
+        dtype="uint8",
+        chunks=(11, 12),
+        zarr_format=zarr_format,
+    )
+
+    with pytest.raises(ValueError, match="Store is read-only but mode is 'a'"):
+        await zarr.api.asynchronous.open_like(
+            ref_arr,
+            path="foo",
+            store=MemoryStore(read_only=True),
+            zarr_format=zarr_format,
+        )
+
+
 # TODO: parametrize over everything this function takes
 @pytest.mark.parametrize("store", ["memory"], indirect=True)
 def test_create_array(store: Store, zarr_format: ZarrFormat) -> None:
@@ -192,7 +242,7 @@ def test_create_array(store: Store, zarr_format: ZarrFormat) -> None:
     array_w[:] = data_val
     assert array_w.shape == shape
     assert array_w.attrs == attrs
-    assert np.array_equal(array_w[:], np.zeros(shape, dtype=array_w.dtype) + data_val)  # type: ignore[unreachable]
+    assert np.array_equal(array_w[:], np.zeros(shape, dtype=array_w.dtype) + data_val)
 
 
 @pytest.mark.parametrize("write_empty_chunks", [True, False])
@@ -298,7 +348,6 @@ def test_open_array_rectilinear_chunks(tmp_path: Path) -> None:
     assert z.read_chunk_sizes == ((3, 3, 4), (5, 5))
 
 
-@pytest.mark.asyncio
 async def test_async_array_open_array_not_found() -> None:
     """Test that AsyncArray.open raises ArrayNotFoundError when array doesn't exist"""
     store = MemoryStore()
@@ -331,7 +380,7 @@ async def test_create_group(store: Store, zarr_format: ZarrFormat) -> None:
     node = create_group(store, path=path, attributes=attrs, zarr_format=zarr_format)
     assert isinstance(node, Group)
     assert node.attrs == attrs
-    assert node.metadata.zarr_format == zarr_format  # type: ignore[unreachable]
+    assert node.metadata.zarr_format == zarr_format
 
 
 async def test_open_group(memory_store: MemoryStore) -> None:
@@ -357,16 +406,16 @@ async def test_open_group(memory_store: MemoryStore) -> None:
 
 
 @pytest.mark.parametrize("zarr_format", [None, 2, 3])
-async def test_open_group_unspecified_version(tmpdir: Path, zarr_format: ZarrFormat) -> None:
+async def test_open_group_unspecified_version(tmp_path: Path, zarr_format: ZarrFormat) -> None:
     """Regression test for https://github.com/zarr-developers/zarr-python/issues/2175"""
 
     # create a group with specified zarr format (could be 2, 3, or None)
     _ = await zarr.api.asynchronous.open_group(
-        store=str(tmpdir), mode="w", zarr_format=zarr_format, attributes={"foo": "bar"}
+        store=str(tmp_path), mode="w", zarr_format=zarr_format, attributes={"foo": "bar"}
     )
 
     # now open that group without specifying the format
-    g2 = await zarr.api.asynchronous.open_group(store=str(tmpdir), mode="r")
+    g2 = await zarr.api.asynchronous.open_group(store=str(tmp_path), mode="r")
 
     assert g2.attrs == {"foo": "bar"}
 
@@ -378,13 +427,13 @@ async def test_open_group_unspecified_version(tmpdir: Path, zarr_format: ZarrFor
 @pytest.mark.parametrize("n_args", [10, 1, 0])
 @pytest.mark.parametrize("n_kwargs", [10, 1, 0])
 @pytest.mark.parametrize("path", [None, "some_path"])
-def test_save(store: Store, n_args: int, n_kwargs: int, path: None | str) -> None:
+def test_save(store: Store, n_args: int, n_kwargs: int, path: str | None) -> None:
     data = np.arange(10)
     args = [np.arange(10) for _ in range(n_args)]
     kwargs = {f"arg_{i}": data for i in range(n_kwargs)}
 
     if n_kwargs == 0 and n_args == 0:
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="at least one array must be provided"):
             save(store, path=path)
     elif n_args == 1 and n_kwargs == 0:
         save(store, *args, path=path)
@@ -402,18 +451,38 @@ def test_save(store: Store, n_args: int, n_kwargs: int, path: None | str) -> Non
         assert group.nmembers() == n_args + n_kwargs
 
 
+@pytest.mark.parametrize(
+    "data",
+    [
+        np.array(42, dtype=np.int64),
+        np.array("teststr", dtype=np.bytes_),
+    ],
+)
+@pytest.mark.filterwarnings("ignore::zarr.errors.UnstableSpecificationWarning")
+def test_group_setitem_loads_scalar_arrays(sync_store: Store, data: np.ndarray) -> None:
+    root = zarr.open_group(store=sync_store)
+    root["test"] = data
+
+    array = root["test"]
+    assert isinstance(array, Array)
+    assert_array_equal(array[...], data)
+    assert_array_equal(zarr.load(store=sync_store, path="test"), data)
+
+
 def test_save_errors() -> None:
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="at least one array must be provided"):
         # no arrays provided
         save_group("data/group.zarr")
-    with pytest.raises(TypeError):
+    with pytest.raises(TypeError, match="missing 1 required positional argument: 'arr'"):
         # no array provided
         save_array("data/group.zarr")  # type: ignore[call-arg]
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="at least one array must be provided"):
         # no arrays provided
         save("data/group.zarr")
     a = np.arange(10)
-    with pytest.raises(TypeError):
+    with pytest.raises(
+        TypeError, match="Keyword argument 'mode' must be a numpy or other NDArrayLike array"
+    ):
         # mode is no valid argument and would get handled as an array
         zarr.save("data/example.zarr", a, mode="w")
 
@@ -588,7 +657,7 @@ def test_load_array(sync_store: Store) -> None:
 @pytest.mark.parametrize("load_read_only", [True, False, None])
 def test_load_zip(tmp_path: Path, path: str | None, load_read_only: bool | None) -> None:
     file = tmp_path / "test.zip"
-    data = np.arange(100).reshape(10, 10)
+    data: npt.NDArray[np.int_] = np.arange(100).reshape(10, 10)
 
     with ZipStore(file, mode="w", read_only=False) as zs:
         save(zs, data, path=path)
@@ -606,7 +675,7 @@ def test_load_zip(tmp_path: Path, path: str | None, load_read_only: bool | None)
 @pytest.mark.parametrize("load_read_only", [True, False])
 def test_load_local(tmp_path: Path, path: str | None, load_read_only: bool) -> None:
     file = tmp_path / "test.zip"
-    data = np.arange(100).reshape(10, 10)
+    data: npt.NDArray[np.int_] = np.arange(100).reshape(10, 10)
 
     with LocalStore(file, read_only=False) as zs:
         save(zs, data, path=path)
@@ -1346,31 +1415,41 @@ class _CountingStore(WrapperStore[Store]):
         return await self._store.get(key, prototype, byte_range)
 
 
-@pytest.mark.parametrize("zarr_format", [2, 3])
-async def test_open_group_no_duplicate_fetches(zarr_format: ZarrFormat) -> None:
-    """``zarr.open`` on a group path must not fetch any metadata key twice.
-
-    Regression test for the array-then-group double probe: ``open`` used to call
-    ``get_array_metadata`` (fetching zarr.json + .zattrs) and then re-fetch those
-    same keys via ``open_group``.
-    """
+@pytest.mark.filterwarnings("ignore:Consolidated metadata")
+@pytest.mark.parametrize(
+    ("zarr_format", "use_consolidated"),
+    [(2, False), (2, True), (2, "custom"), (3, False), (3, True)],
+)
+@pytest.mark.parametrize("mode", ["r", "r+", "a"])
+@pytest.mark.parametrize("path", ["", "parent/child"])
+async def test_open_group_no_duplicate_fetches(
+    zarr_format: ZarrFormat, use_consolidated: bool | str, mode: AccessModeLiteral, path: str
+) -> None:
+    """The single probe preserves mode, path, attributes, and consolidated-key selection."""
     store = _CountingStore(MemoryStore())
     await zarr.api.asynchronous.open_group(
-        store, attributes={"key": "value"}, zarr_format=zarr_format
+        store, path=path, attributes={"key": "value"}, zarr_format=zarr_format
     )
+    if use_consolidated:
+        await zarr.api.asynchronous.consolidate_metadata(store, path=path)
+        if isinstance(use_consolidated, str):
+            prefix = f"{path}/" if path else ""
+            metadata = await store.get(prefix + ".zmetadata", default_buffer_prototype())
+            assert metadata is not None
+            await store.set(prefix + use_consolidated, metadata)
+            await store.delete(prefix + ".zmetadata")
 
     store.get_counts.clear()
-    group = await zarr.api.asynchronous.open(store=store)
+    group = await zarr.api.asynchronous.open(
+        store=store, path=path, mode=mode, use_consolidated=use_consolidated
+    )
     assert isinstance(group, zarr.core.group.AsyncGroup)
     assert group.metadata.zarr_format == zarr_format
+    assert group.path == path
     assert group.attrs == {"key": "value"}
-
-    duplicates = {key: count for key, count in store.get_counts.items() if count > 1}
-    assert duplicates == {}, f"duplicate metadata fetches: {duplicates}"
-    # Each relevant key is fetched at most once: zarr.json, .zarray, .zattrs,
-    # .zgroup, and the consolidated key .zmetadata. Before the refactor, open()
-    # fetched 7 keys (zarr.json and .zattrs twice). Now it is 5 with no
-    # duplicates -- the two overlapping keys are no longer re-fetched.
+    assert group.store.read_only == (mode == "r")
+    assert (group.metadata.consolidated_metadata is not None) == bool(use_consolidated)
+    assert all(count == 1 for count in store.get_counts.values())
     assert sum(store.get_counts.values()) <= 5
 
 
