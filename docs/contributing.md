@@ -338,7 +338,7 @@ This section documents the processes that core developers follow to maintain the
 
 Pull requests submitted by an external contributor should be reviewed and approved by at least one core developer before being merged. Ideally, pull requests submitted by a core developer should be reviewed and approved by at least one other core developer before being merged.
 
-Pull requests should not be merged until all CI checks have passed (GitHub Actions, Codecov) against code that has had the latest main merged in.
+Pull requests are merged through GitHub's merge queue. Once a pull request is approved and its CI checks are green, add it to the queue (the "Merge when ready" button) instead of merging directly. The queue merges the pull request onto the latest `main`, re-runs the required checks against that result, and merges it only if they pass, so there is no need to manually update a branch before merging. If the queue rejects a pull request because a check failed, fix the problem and add it to the queue again.
 
 Before merging, the milestone must be set to decide whether a PR will be in the next patch, minor, or major release. The next section explains which types of changes go in each release.
 
