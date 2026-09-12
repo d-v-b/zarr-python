@@ -29,5 +29,19 @@ updates:
       python-dependencies:
         patterns:
           - "*"
+    # pyproject.toml deliberately leaves the runtime/integration deps floating
+    # (fsspec, obstore, s3fs, botocore, numcodecs, universal-pathlib): the
+    # `optional` test matrix exercises their latest releases, and their floor
+    # and bleeding edge are covered by the min_deps and upstream hatch envs.
+    # Dependabot must not try to pin or bump them: resolving a botocore bump
+    # against s3fs/aiobotocore's tight caps is unsatisfiable and fails the
+    # whole update job.
+    ignore:
+      - dependency-name: "botocore"
+      - dependency-name: "s3fs"
+      - dependency-name: "fsspec"
+      - dependency-name: "obstore"
+      - dependency-name: "numcodecs"
+      - dependency-name: "universal-pathlib"
     cooldown:
       default-days: 7
