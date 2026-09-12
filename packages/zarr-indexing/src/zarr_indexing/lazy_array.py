@@ -667,7 +667,7 @@ class LazyArray:
     @classmethod
     def from_numpy(cls, array: np.ndarray[Any, Any]) -> LazyArray:
         """Wrap a NumPy array with its explicitly selected optimized reader."""
-        if not isinstance(cast(object, array), np.ndarray):
+        if not isinstance(cast("object", array), np.ndarray):
             raise TypeError(
                 f"LazyArray.from_numpy requires a numpy.ndarray, got {type(array).__name__}"
             )

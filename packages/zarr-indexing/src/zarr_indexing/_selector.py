@@ -33,7 +33,7 @@ def as_scalar_index(value: Any) -> int | None:
             return None
     if not isinstance(value, SupportsIndex):
         return None
-    return operator.index(cast(SupportsIndex, value))
+    return operator.index(cast("SupportsIndex", value))
 
 
 def require_index(value: Any) -> int:

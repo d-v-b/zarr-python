@@ -804,7 +804,7 @@ def test_partition_tables_are_memoized_and_immutable() -> None:
                 columns += [table.origin, table.extent]
             for column in columns:
                 assert not column.flags.writeable
-                with pytest.raises(ValueError):
+                with pytest.raises(ValueError, match="WRITEABLE"):
                     column.setflags(write=True)
 
 
