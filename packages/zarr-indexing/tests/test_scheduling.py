@@ -133,12 +133,13 @@ def test_order_preserves_last_write() -> None:
     assert schedule.batches == ((0,), (1,), (2,), (3,))
 
 
-def test_affine_diagonal_and_gather() -> None:
+def test_unsupported_affine_diagonal() -> None:
     domain = IndexDomain.from_shape((3,))
     diagonal = IndexTransform(domain, (DimensionMap(0), DimensionMap(0)))
     point = IndexTransform.from_shape((3, 3))[1, 1]
     grids = dimension_grids_from_chunks((1, 1), (3, 3))
-    assert plan_write_batches([diagonal, point], grids).batches == ((0,), (1,))
+    with pytest.raises(ValueError, match="input axis"):
+        plan_write_batches([diagonal, point], grids)
 
 
 def test_invalid_order() -> None:
@@ -195,5 +196,38 @@ def test_unsupported_mixed_transform() -> None:
     transform = IndexTransform(
         IndexDomain.from_shape((2,)), (DimensionMap(0), ArrayMap(np.array([1, 0])))
     )
-    with pytest.raises(NotImplementedError, match="input axis"):
+    with pytest.raises(ValueError, match="input axis"):
         plan_write_batches([transform], dimension_grids_from_chunks((1, 1), (2, 2)))
+
+
+@given(
+    requests=st.lists(
+        st.lists(st.tuples(st.integers(0, 4), st.integers(0, 6)), max_size=15),
+        max_size=15,
+    ),
+    sizes=st.tuples(st.integers(1, 5), st.integers(1, 7)),
+)
+def test_coordinate_schedules_match_enumerated_footprints(
+    requests: list[list[tuple[int, int]]], sizes: tuple[int, int]
+) -> None:
+    """Paired multidimensional gathers schedule exactly their enumerated units."""
+    grids = dimension_grids_from_chunks(sizes, (5, 7))
+    base = IndexTransform.from_shape((5, 7))
+    writes = []
+    footprints = []
+    for points in requests:
+        coordinates = np.array(points, dtype=np.intp).reshape(-1, 2)
+        writes.append(base.vindex[coordinates[:, 0], coordinates[:, 1]])
+        footprints.append({(x // sizes[0], y // sizes[1]) for x, y in points})
+    for order in ("preserve", "reorder"):
+        schedule = plan_write_batches(writes, grids, order=order)
+        assignments = {task: b for b, batch in enumerate(schedule.batches) for task in batch}
+        assert sorted(assignments) == list(range(len(requests)))
+        for i, units in enumerate(footprints):
+            for j in range(i):
+                if units & footprints[j]:
+                    assert assignments[i] != assignments[j]
+                    if order == "preserve":
+                        assert assignments[j] < assignments[i]
+        assert schedule.n_memberships == sum(map(len, footprints))
+        assert schedule.n_write_units == len(set().union(*footprints))

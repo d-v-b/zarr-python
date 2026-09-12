@@ -81,9 +81,8 @@ writes, that can change the final values. `plan_rechunk` uses reorder because
 its identity-copy pieces are logically disjoint.
 
 Footprints come from the existing chunk planner, preserving its supported
-transform semantics. Pure affine diagonals use projection iteration; some
-mixed affine/index-array dependencies and correlated-array/residual-diagonal
-combinations remain unsupported and raise. Nonempty out-of-bounds transforms
+transform semantics. Affine diagonals and mixed affine/index-array maps sharing
+an input axis are unsupported by the factored planner and raise. Nonempty out-of-bounds transforms
 raise before a schedule is returned. See the [scheduling API](../api/scheduling.md).
 
 ## Costs and limits

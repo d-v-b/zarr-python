@@ -12,10 +12,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 from zarr_indexing._affine import checked_affine
-from zarr_indexing.chunk_resolution import (
-    _shared_input_axis,  # pyright: ignore[reportPrivateUsage]
-    plan_chunks,
-)
+from zarr_indexing.chunk_resolution import plan_chunks
 from zarr_indexing.domain import IndexDomain
 from zarr_indexing.output_map import ArrayMap, ConstantMap, DimensionMap
 from zarr_indexing.transform import IndexTransform
@@ -119,13 +116,7 @@ def _write_units(
     if 0 in transform.domain.shape:
         return set()
     plan = plan_chunks(transform, grids)
-    if _shared_input_axis(transform) is not None:
-        return {projection.chunk_coords for projection in plan}
-    return {
-        tuple(int(c) for c in row)
-        for batch in plan.partition().chunk_coord_batches()
-        for row in batch
-    }
+    return {tuple(int(c) for c in row) for row in plan.partition().chunk_coords()}
 
 
 def _schedule(
@@ -206,9 +197,9 @@ def plan_write_batches(
     IndexError
         If a nonempty write reaches outside a destination grid.
     NotImplementedError
-        For transform combinations unsupported by ``plan_chunks``, including
-        index-array and affine maps sharing an input axis. Pure affine
-        diagonals retain the projection-iteration compatibility path.
+        For correlated index-array and affine maps sharing an input axis.
+        Affine diagonals and orthogonal array/affine maps sharing an input
+        axis instead raise ``ValueError``, as in ``plan_chunks``.
 
     Examples
     --------
