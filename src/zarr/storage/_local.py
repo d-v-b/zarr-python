@@ -362,11 +362,15 @@ class LocalStore(Store):
         """
         if isinstance(dest_root, str):
             dest_root = Path(dest_root)
-        os.makedirs(dest_root.parent, exist_ok=True)
-        if dest_root.exists():
-            raise FileExistsError(f"Destination root {dest_root} already exists.")
-        shutil.move(self.root, dest_root)
+
+        def move() -> None:
+            os.makedirs(dest_root.parent, exist_ok=True)
+            if dest_root.exists():
+                raise FileExistsError(f"Destination root {dest_root} already exists.")
+            shutil.move(self.root, dest_root)
+
+        await asyncio.to_thread(move)
         self.root = dest_root
 
     async def getsize(self, key: str) -> int:
-        return (self.root / key).stat().st_size
+        return await asyncio.to_thread(lambda: (self.root / key).stat().st_size)

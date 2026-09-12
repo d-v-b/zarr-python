@@ -334,7 +334,7 @@ def test_v3_extra_fields_merged() -> None:
 
 def test_v3_extra_fields_overlapping_standard_field_rejected() -> None:
     """Constructing a V3 model with an extra field that collides with a standard key is rejected."""
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="Extra fields cannot overlap"):
         ZarrV3ArrayMetadata.create_default(extra_fields={"shape": {"must_understand": False}})
 
 

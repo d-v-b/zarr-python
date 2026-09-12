@@ -17,16 +17,18 @@ import json
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Final, Literal, NoReturn, cast
+from typing import TYPE_CHECKING, Any, Final, Literal, NoReturn, cast
 
 from typing_extensions import TypeIs
 
-from zarr_metadata._common import JSONValue
 from zarr_metadata.v2.array import ZarrV2ArrayMetadataJSON
 from zarr_metadata.v2.group import ZarrV2GroupMetadataJSON
-from zarr_metadata.v3._common import ZarrV3MetadataFieldJSON
 from zarr_metadata.v3.array import ZarrV3ArrayMetadataJSON
 from zarr_metadata.v3.group import ZarrV3GroupMetadataJSON
+
+if TYPE_CHECKING:
+    from zarr_metadata._common import JSONValue
+    from zarr_metadata.v3._common import ZarrV3MetadataFieldJSON
 
 ProblemKind = Literal["missing_key", "invalid_type", "invalid_value", "invalid_json"]
 """Machine-readable classification of a `ValidationProblem`.
@@ -128,7 +130,7 @@ def parse_json(value: object) -> JSONValue:
     problems = validate_json(normalized)
     if problems:
         raise MetadataValidationError(problems)
-    return cast(JSONValue, normalized)
+    return cast("JSONValue", normalized)
 
 
 # The standard top-level keys of a v3 array metadata document. Anything outside
@@ -312,7 +314,7 @@ def parse_metadata_field_v3(value: object) -> ZarrV3MetadataFieldJSON:
     problems = validate_metadata_field_v3(normalized)
     if problems:
         raise MetadataValidationError(problems)
-    return cast(ZarrV3MetadataFieldJSON, normalized)
+    return cast("ZarrV3MetadataFieldJSON", normalized)
 
 
 def _is_int_sequence(value: object) -> bool:
@@ -787,7 +789,7 @@ def parse_group_metadata_v3(value: object) -> ZarrV3GroupMetadataJSON:
     problems = validate_group_metadata_v3(normalized)
     if problems:
         raise MetadataValidationError(problems)
-    return cast(ZarrV3GroupMetadataJSON, normalized)
+    return cast("ZarrV3GroupMetadataJSON", normalized)
 
 
 def validate_group_metadata_v2(value: object) -> list[ValidationProblem]:
@@ -820,7 +822,7 @@ def parse_group_metadata_v2(value: object) -> ZarrV2GroupMetadataJSON:
     problems = validate_group_metadata_v2(normalized)
     if problems:
         raise MetadataValidationError(problems)
-    return cast(ZarrV2GroupMetadataJSON, normalized)
+    return cast("ZarrV2GroupMetadataJSON", normalized)
 
 
 def _reject_json_constant(constant: str) -> NoReturn:

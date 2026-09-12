@@ -240,7 +240,7 @@ def test_bytes_codec_init_with_enum_instance_warns() -> None:
         little = "little"
 
     with pytest.warns(DeprecationWarning, match=r"Passing an enum to BytesCodec"):
-        codec = BytesCodec(endian=cast(Endian, LegacyEndian.little))
+        codec = BytesCodec(endian=cast("Endian", LegacyEndian.little))
     assert codec.endian == "little"
 
 
@@ -257,7 +257,7 @@ def test_bytes_codec_init_with_deprecated_class_member() -> None:
     `EndianLiteral` parameter even though the runtime value does.
     """
     with pytest.warns(DeprecationWarning, match=r"Endian\.little"):
-        codec = BytesCodec(endian=cast(EndianLiteral, Endian.little))
+        codec = BytesCodec(endian=cast("EndianLiteral", Endian.little))
     assert codec.endian == "little"
 
 
@@ -308,7 +308,7 @@ def _make_array_spec(dtype: Any) -> ArraySpec:
         shape=(1,),
         dtype=dtype,
         fill_value=0,
-        config=cast(ArrayConfig, {}),
+        config=cast("ArrayConfig", {}),
         prototype=default_buffer_prototype(),
     )
 

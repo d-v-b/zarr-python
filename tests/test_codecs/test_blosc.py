@@ -87,7 +87,7 @@ def test_tunable_attrs_param(
     else:
         shuffle_arg = shuffle
 
-    codec = BloscCodec(typesize=typesize, shuffle=cast(BloscShuffleLiteral | None, shuffle_arg))
+    codec = BloscCodec(typesize=typesize, shuffle=cast("BloscShuffleLiteral | None", shuffle_arg))
 
     if shuffle_arg is None:
         assert codec.shuffle == "bitshuffle"  # default shuffle
@@ -102,7 +102,7 @@ def test_tunable_attrs_param(
         dtype=new_dtype,
         fill_value=1,
         prototype=default_buffer_prototype(),
-        config=cast(ArrayConfig, {}),
+        config=cast("ArrayConfig", {}),
     )
 
     evolved_codec = codec.evolve_from_array_spec(array_spec=array_spec)
@@ -244,8 +244,8 @@ def test_blosc_codec_init_with_enum_instance_warns() -> None:
 
     with pytest.warns(DeprecationWarning, match="enum"):
         codec = BloscCodec(
-            cname=cast(BloscCname, LegacyCname.zstd),
-            shuffle=cast(BloscShuffle, LegacyShuffle.bitshuffle),
+            cname=cast("BloscCname", LegacyCname.zstd),
+            shuffle=cast("BloscShuffle", LegacyShuffle.bitshuffle),
         )
     assert codec.cname == "zstd"
     assert codec.shuffle == "bitshuffle"

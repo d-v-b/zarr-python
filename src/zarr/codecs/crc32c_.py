@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Buffer as ABCBuffer
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
@@ -11,6 +10,7 @@ from zarr.abc.codec import BytesBytesCodec
 from zarr.core.common import JSON, parse_named_configuration
 
 if TYPE_CHECKING:
+    from collections.abc import Buffer as ABCBuffer
     from typing import Self
 
     from zarr.core.array_spec import ArraySpec
@@ -41,7 +41,7 @@ class Crc32cCodec(BytesBytesCodec):
         inner_bytes = data[:-4]
 
         # Need to do a manual cast until https://github.com/numpy/numpy/issues/26783 is resolved
-        computed_checksum = np.uint32(google_crc32c.value(cast(ABCBuffer, inner_bytes))).tobytes()
+        computed_checksum = np.uint32(google_crc32c.value(cast("ABCBuffer", inner_bytes))).tobytes()
         stored_checksum = bytes(crc32_bytes)
         if computed_checksum != stored_checksum:
             raise ValueError(
@@ -63,7 +63,7 @@ class Crc32cCodec(BytesBytesCodec):
     ) -> Buffer | None:
         data = chunk_bytes.as_numpy_array()
         # Calculate the checksum and "cast" it to a numpy array
-        checksum = np.array([google_crc32c.value(cast(ABCBuffer, data))], dtype=np.uint32)
+        checksum = np.array([google_crc32c.value(cast("ABCBuffer", data))], dtype=np.uint32)
         # Append the checksum (as bytes) to the data
         return chunk_spec.prototype.buffer.from_array_like(np.append(data, checksum.view("B")))
 

@@ -78,7 +78,7 @@ class TestArrayMap:
     def test_index_array_cannot_be_made_writeable(self) -> None:
         m = ArrayMap(index_array=np.array([1, 3, 5]))
 
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="WRITEABLE"):
             m.index_array.flags.writeable = True
 
     def test_equal_array_maps_have_equal_hashes_across_integer_dtypes(self) -> None:

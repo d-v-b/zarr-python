@@ -489,7 +489,7 @@ def test_open_with_mode_r(tmp_path: Path) -> None:
     result = z2[:]
     assert isinstance(result, NDArrayLike)
     assert (result == 1).all()
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="read-only"):
         z2[:] = 3
 
 

@@ -63,7 +63,7 @@ def with_frequency[F: Callable[..., Any]](frequency: float) -> Callable[[F], F]:
 
             return (current_count * frequency) % 1.0 >= (1.0 - frequency)
 
-        return cast(F, frequency_check(wrapper))
+        return cast("F", frequency_check(wrapper))
 
     return decorator
 

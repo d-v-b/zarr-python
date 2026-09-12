@@ -314,7 +314,7 @@ def test_codecs_from_list_outcome_matches_order_rules(labels: list[str]) -> None
         with pytest.raises(TypeError):
             codecs_from_list(codecs)
     elif expected == "ValueError":
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="ArrayBytesCodec"):
             codecs_from_list(codecs)
     else:
         # Valid ordering: must classify without raising.

@@ -108,7 +108,7 @@ def concurrent_iter[T: tuple[Any, ...], V](
     Tasks are returned in input order; callers that want completion order
     should wrap the result in `asyncio.as_completed`.
 
-    Every task is scheduled (via `ensure_future`) before this function
+    Every task is scheduled before this function
     returns, not on first iteration of the result. That matters for callers
     that await the returned tasks one at a time — without eager scheduling,
     each coroutine would only start when individually awaited, serializing
@@ -128,7 +128,7 @@ def concurrent_iter[T: tuple[Any, ...], V](
         async with sem:
             return await func(*item)
 
-    return [asyncio.ensure_future(run(item)) for item in items]
+    return [asyncio.create_task(run(item)) for item in items]
 
 
 async def concurrent_map[T: tuple[Any, ...], V](

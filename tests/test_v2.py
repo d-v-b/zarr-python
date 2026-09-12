@@ -152,7 +152,7 @@ def test_create_array_defaults(store: Store) -> None:
     arr = g.create_array("three", dtype="i8", shape=(1,), chunks=(1,), compressor=Zstd())
     assert arr.async_array.compressor is not None
     assert not (arr.filters)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"Cannot specify both `compressor` and `compressors`"):
         g.create_array(
             "four", dtype="i8", shape=(1,), chunks=(1,), compressor=None, compressors=None
         )

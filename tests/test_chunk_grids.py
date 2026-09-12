@@ -414,7 +414,7 @@ def test_create_zero_length_array_full_span_chunks(
     assert arr.shards == (expected_chunks if shards == "auto" else None)
 
     # The stored chunk grid must be the clamped shape, whichever format wrote it.
-    meta = cast(dict[str, Any], arr.metadata.to_dict())
+    meta = cast("dict[str, Any]", arr.metadata.to_dict())
     if zarr_format == 2:
         assert meta["chunks"] == expected_chunks
     else:

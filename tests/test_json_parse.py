@@ -35,12 +35,12 @@ class TestConvert:
 
     def test_bool_int_strictness(self) -> None:
         # bool is an int subclass, but the two must not be interchangeable.
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="Expected instance of int"):
             convert(True, int)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="Expected instance of bool"):
             convert(1, bool)
         # ... and True must not satisfy Literal[1].
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=r"Expected instance of Literal\[1\]"):
             convert(True, Literal[1])
 
 

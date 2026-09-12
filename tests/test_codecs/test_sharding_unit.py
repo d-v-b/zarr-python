@@ -823,7 +823,7 @@ def _trigger_partial_shard_read(array_config: ArrayConfigParams | None = None) -
     # Read a strict subset of chunks to take the partial-shard read path.
     _ = a[0:4]
 
-    return cast(AsyncMock, store_mock.get_ranges)
+    return cast("AsyncMock", store_mock.get_ranges)
 
 
 def test_load_partial_shard_forwards_global_config_to_get_ranges() -> None:

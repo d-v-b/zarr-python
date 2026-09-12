@@ -461,7 +461,7 @@ async def _async_write_fallback(
     ]
 
     if use_sync:
-        sync_transform = cast(FusedCodecPipeline, pipeline).sync_transform
+        sync_transform = cast("FusedCodecPipeline", pipeline).sync_transform
         assert sync_transform is not None
         await _encode_and_write_as_completed(
             [

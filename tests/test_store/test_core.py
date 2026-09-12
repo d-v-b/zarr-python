@@ -226,7 +226,7 @@ async def test_store_path_invalid_mode_raises(
     """
     Test that ValueErrors are raise for invalid mode.
     """
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="mode"):
         await StorePath.open(LocalStore(str(tmp_path), read_only=modes[0]), path="", mode=modes[1])  # type: ignore[arg-type]
 
 

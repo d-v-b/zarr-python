@@ -203,7 +203,7 @@ def test_get_numcodec_without_an_id_keeps_the_numcodecs_error() -> None:
     """With no codec id there is nothing to look up, so numcodecs' own error stands."""
     # Not asserting on numcodecs' exception class: it only gained a dedicated
     # `numcodecs.errors.UnknownCodecError` in 0.15.1, and zarr supports numcodecs >= 0.14.
-    with pytest.raises(ValueError) as excinfo:
+    with pytest.raises(ValueError, match="codec not available") as excinfo:
         get_numcodec({"level": 2})  # type: ignore[typeddict-item,typeddict-unknown-key]
     assert not isinstance(excinfo.value, UnknownCodecError)
 
@@ -214,7 +214,7 @@ def test_get_numcodec_does_not_relabel_a_bad_configuration() -> None:
     Telling the user to install a package they already have would be the same misleading
     error this module exists to remove, pointing the other way.
     """
-    with pytest.raises(ValueError) as excinfo:
+    with pytest.raises(ValueError, match="keepbits must be zero or positive") as excinfo:
         get_numcodec({"id": "bitround", "keepbits": -1})  # type: ignore[typeddict-unknown-key]
     assert not isinstance(excinfo.value, UnknownCodecError)
     assert str(excinfo.value) == "keepbits must be zero or positive"
@@ -249,7 +249,7 @@ def test_get_numcodec_does_not_relabel_a_missing_inner_codec(via: str) -> None:
 
     numcodecs.registry.register_codec(WrapperCodec, codec_id="test_wrapper")
     try:
-        with pytest.raises(ValueError) as excinfo:
+        with pytest.raises(ValueError, match="some-missing-inner-codec") as excinfo:
             get_numcodec({"id": "test_wrapper"})
         assert "some-missing-inner-codec" in str(excinfo.value)
         assert "test_wrapper" not in str(excinfo.value)
@@ -266,7 +266,7 @@ def test_get_numcodec_non_mapping_input_still_raises_value_error(data: object) -
     params end in a ValueError from numcodecs, by different routes: ``"abc"`` fails
     ``dict(config)`` coercion, while ``["ab"]`` coerces to ``{"a": "b"}`` and then has no id.
     """
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="dictionary update sequence|codec not available"):
         get_numcodec(data)  # type: ignore[arg-type]
 
 
