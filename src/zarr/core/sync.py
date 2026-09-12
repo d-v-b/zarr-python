@@ -8,8 +8,6 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, wait
 from typing import TYPE_CHECKING
 
-from typing_extensions import ParamSpec
-
 from zarr.core.config import config
 
 if TYPE_CHECKING:
@@ -18,8 +16,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-
-P = ParamSpec("P")
 
 # From https://github.com/fsspec/filesystem_spec/blob/master/fsspec/asyn.py
 
@@ -94,7 +90,9 @@ def reset_resources_after_fork() -> None:
     Ensure that global resources are reset after a fork. Without this function,
     forked processes will retain invalid references to the parent process's resources.
     """
-    global loop, iothread, _executor
+    # `loop` and `iothread` are mutated in place rather than rebound, so only
+    # `_executor` needs the global declaration.
+    global _executor
     # These lines are excluded from coverage because this function only runs in a child process,
     # which is not observed by the test coverage instrumentation. Despite the apparent lack of
     # test coverage, this function should be adequately tested by any test that uses Zarr IO with
@@ -116,7 +114,7 @@ async def _runner[T](coro: Coroutine[Any, Any, T]) -> T | BaseException:
     """
     try:
         return await coro
-    except Exception as ex:
+    except Exception as ex:  # noqa: BLE001 -- the caller re-raises the returned exception
         return ex
 
 

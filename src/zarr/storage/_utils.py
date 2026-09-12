@@ -6,7 +6,9 @@ from pathlib import Path, PureWindowsPath
 from urllib.parse import urlparse
 
 if importlib.util.find_spec("upath"):
-    from upath.core import UPath
+    # Re-exported for zarr.storage._common, which needs it to recognize UPath store_like values.
+    # The redundant-looking alias is the explicit re-export mypy requires under strict mode.
+    from upath.core import UPath as UPath  # noqa: PLC0414
 else:
 
     class UPath:  # type: ignore[no-redef]
@@ -153,7 +155,7 @@ def _normalize_byte_range_index(data: Buffer, byte_range: ByteRequest | None) ->
         start = byte_range.offset
         stop = len(data) + 1
     elif isinstance(byte_range, SuffixByteRequest):
-        start = len(data) - byte_range.suffix
+        start = max(0, len(data) - byte_range.suffix)
         stop = len(data) + 1
     else:
         raise ValueError(f"Unexpected byte_range, got {byte_range}.")
