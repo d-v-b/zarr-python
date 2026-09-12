@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import warnings
 from dataclasses import dataclass, field, replace
-from enum import Enum
 from functools import cached_property
 from typing import TYPE_CHECKING, ClassVar, Final, Literal, NotRequired, TypedDict
 
@@ -12,9 +10,11 @@ from numcodecs.blosc import Blosc
 from packaging.version import Version
 
 from zarr.abc.codec import BytesBytesCodec
+from zarr.codecs._deprecated_enum import _coerce_enum_input, _DeprecatedStrEnumMeta
 from zarr.core.buffer.cpu import as_numpy_array_wrapper
 from zarr.core.common import JSON, NamedRequiredConfig, parse_named_configuration
 from zarr.core.dtype.common import HasItemSize
+from zarr.core.json_parse import parse_field
 
 if TYPE_CHECKING:
     from typing import Self
@@ -57,27 +57,6 @@ class BloscJSON_V3(NamedRequiredConfig[Literal["blosc"], BloscConfigV3]):
     """
     The JSON form of the Blosc codec in Zarr V3.
     """
-
-
-class _DeprecatedStrEnumMeta(type):
-    """
-    Metaclass for the legacy `BloscShuffle` / `BloscCname` classes. Accessing
-    a member name (e.g. `BloscShuffle.bitshuffle`) emits a `DeprecationWarning`
-    and returns the equivalent string.
-    """
-
-    _members: dict[str, str]
-
-    def __getattr__(cls, name: str) -> str:
-        members: dict[str, str] = type.__getattribute__(cls, "_members")
-        if name in members:
-            warnings.warn(
-                f"{cls.__name__}.{name} is deprecated; pass the string {members[name]!r} instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            return members[name]
-        raise AttributeError(name)
 
 
 class BloscShuffle(metaclass=_DeprecatedStrEnumMeta):
@@ -126,43 +105,24 @@ numcodecs.blosc.use_threads = False
 
 
 def parse_typesize(data: JSON) -> int:
-    if isinstance(data, int):
-        if data > 0:
-            return data
-        else:
-            raise ValueError(
-                f"Value must be greater than 0. Got {data}, which is less or equal to 0."
-            )
-    raise TypeError(f"Value must be an int. Got {type(data)} instead.")
+    parsed: int = parse_field(data, int, "typesize", error=TypeError)
+    if parsed > 0:
+        return parsed
+    else:
+        raise ValueError(
+            f"Value must be greater than 0. Got {parsed}, which is less or equal to 0."
+        )
 
 
 # todo: real validation
 def parse_clevel(data: JSON) -> int:
-    if isinstance(data, int):
-        return data
-    raise TypeError(f"Value should be an int. Got {type(data)} instead.")
+    parsed: int = parse_field(data, int, "clevel", error=TypeError)
+    return parsed
 
 
 def parse_blocksize(data: JSON) -> int:
-    if isinstance(data, int):
-        return data
-    raise TypeError(f"Value should be an int. Got {type(data)} instead.")
-
-
-def _coerce_enum_input(value: object, param_name: str) -> object:
-    """
-    If `value` is a real `enum.Enum` instance, emit a deprecation warning
-    and return `value.value`. Otherwise return `value` unchanged.
-    """
-    if isinstance(value, Enum):
-        warnings.warn(
-            f"Passing an enum to BloscCodec(..., {param_name}=...) is deprecated; "
-            "pass the equivalent literal string instead.",
-            DeprecationWarning,
-            stacklevel=3,
-        )
-        return value.value
-    return value
+    parsed: int = parse_field(data, int, "blocksize", error=TypeError)
+    return parsed
 
 
 def _parse_cname(data: object) -> BloscCnameLiteral:
@@ -285,8 +245,8 @@ class BloscCodec(BytesBytesCodec):
             shuffle = "bitshuffle"
             self._tunable_attrs.update({"shuffle"})
 
-        cname = _coerce_enum_input(cname, "cname")  # type: ignore[assignment]
-        shuffle = _coerce_enum_input(shuffle, "shuffle")  # type: ignore[assignment]
+        cname = _coerce_enum_input(cname, "cname", "BloscCodec")  # type: ignore[assignment]
+        shuffle = _coerce_enum_input(shuffle, "shuffle", "BloscCodec")  # type: ignore[assignment]
 
         typesize_parsed = parse_typesize(typesize)
         cname_parsed = _parse_cname(cname)
