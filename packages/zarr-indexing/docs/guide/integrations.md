@@ -1,5 +1,8 @@
 # Integration boundaries
 
+For incoming chunks that do not align with the destination's independently
+writable units, see [Conflict-free write batches](write-batches.md).
+
 For the complete path from indexing syntax to chunk coordinates, local selectors,
 and result positions, start with [From a selection to chunk operations](selection-flow.md).
 
@@ -37,8 +40,8 @@ prefetcher — does not need a `ChunkProjection` object per chunk. The plan's
 [factored form](index.md#a-plan-is-a-product-of-per-axis-tables) is a few
 NumPy arrays per axis, and everything a chunk copy needs is a row of each:
 the chunk index, the chunk-local start and extent, and where the cells land
-in the request. `chunk_coords()` alone answers "which chunks?" for a prefetch, without
-materializing anything.
+in the request. `chunk_coords()` answers "which chunks?" by allocating their coordinate
+array without constructing projections.
 
 The example assembles a strided box from its `StridedSet` tables, one slice
 per chunk. Three things a real consumer also has to get right are checked at

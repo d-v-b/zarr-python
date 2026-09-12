@@ -34,6 +34,10 @@ and the wire format built on top of it.
 
 **Chunk resolution**
 
+- [`zarr_indexing.scheduling`](scheduling.md) — `plan_write_batches` and
+  `plan_rechunk`, metadata-only schedules for conflicting destination write units;
+  start with [Conflict-free write batches](../guide/write-batches.md).
+
 - [`zarr_indexing.chunk_resolution`](chunk_resolution.md) —
   `plan_chunks`, which lazily projects a request through a caller-selected grid,
   the reusable `ChunkPlan` and paired-transform `ChunkProjection` values, and

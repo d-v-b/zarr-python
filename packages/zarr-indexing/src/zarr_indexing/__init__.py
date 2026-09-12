@@ -74,6 +74,13 @@ from zarr_indexing.reader import (
     numpy_reader,
     unit_step_reader,
 )
+from zarr_indexing.scheduling import (
+    RechunkPiece,
+    RechunkPlan,
+    WriteSchedule,
+    plan_rechunk,
+    plan_write_batches,
+)
 from zarr_indexing.transform import (
     IndexTransform,
 )
@@ -110,10 +117,13 @@ __all__ = [
     "Partition",
     "ReadContext",
     "Reader",
+    "RechunkPiece",
+    "RechunkPlan",
     "StridedSet",
     "UnitStepReader",
     "VaryingDimension",
     "VindexInvalidSelectionError",
+    "WriteSchedule",
     "__version__",
     "basic_reader",
     "dimension_grids_from_chunks",
@@ -122,5 +132,7 @@ __all__ = [
     "output_index_map_from_json",
     "parse_ndsel",
     "plan_chunks",
+    "plan_rechunk",
+    "plan_write_batches",
     "unit_step_reader",
 ]
