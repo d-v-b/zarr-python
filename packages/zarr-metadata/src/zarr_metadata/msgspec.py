@@ -68,7 +68,7 @@ Three msgspec limits shape what this module can offer:
 from __future__ import annotations
 
 import abc
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Final
 
 # The import is unused by name: it makes the module fail fast where msgspec
 # is absent (everything exported here is inert without it), mirroring how
@@ -164,14 +164,14 @@ def _lookup(type: type) -> tuple[type, Callable[[object], object]] | None:
         return None
 
 
-def _decode(entry: tuple[type, Callable[[object], object]], obj: Any) -> Any:
+def _decode(entry: tuple[type, Callable[[object], object]], obj: object) -> object:
     core_cls, parse = entry
     if isinstance(obj, core_cls):
         return obj
     return parse(obj)
 
 
-def dec_hook(type: type, obj: Any) -> Any:
+def dec_hook(type: type, obj: object) -> object:
     """Decode `obj` for a field annotated with one of this module's field types.
 
     Pass as `dec_hook=` to `msgspec.json.decode`, `msgspec.convert`, or a
@@ -187,7 +187,9 @@ def dec_hook(type: type, obj: Any) -> Any:
     return _decode(entry, obj)
 
 
-def make_dec_hook(wrapped: Callable[[type, Any], Any] | None = None) -> Callable[[type, Any], Any]:
+def make_dec_hook(
+    wrapped: Callable[[type, object], object] | None = None,
+) -> Callable[[type, object], object]:
     """Return a decode hook that also delegates unknown types to `wrapped`.
 
     The returned hook handles this module's field types exactly like
@@ -198,7 +200,7 @@ def make_dec_hook(wrapped: Callable[[type, Any], Any] | None = None) -> Callable
     if wrapped is None:
         return dec_hook
 
-    def hook(type: type, obj: Any) -> Any:
+    def hook(type: type, obj: object) -> object:
         entry = _lookup(type)
         if entry is None:
             return wrapped(type, obj)
