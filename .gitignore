@@ -9,6 +9,8 @@ __pycache__/
 .Python
 env/
 .venv/
+# Per-version environments created by the packages' `just test-all`
+.venv-*/
 build/
 develop-eggs/
 dist/

@@ -1,13 +1,37 @@
 # Development verbs for the zarr-metadata package. Recipes run with this
 # directory as the working directory regardless of where `just` is invoked.
 
+# The python versions `test-all` covers. Mirrors the `Programming Language ::
+# Python` classifiers in pyproject.toml and the matrix in
+# .github/workflows/zarr-metadata.yml; update the three together.
+python_versions := "3.11 3.12 3.13 3.14"
+
+# Interpreter for `test`. Empty means "whatever the project environment already
+# holds"; set it to reproduce one CI leg, e.g. `just py=3.11 test`.
+py := ""
+
+# `uv run --python` does not merely select an interpreter: it deletes and
+# rebuilds a project environment whose interpreter does not match. So a pinned
+# version gets its own environment directory, rather than clobbering the
+# `.venv` the developer was using and stranding it on the pinned version.
+uv_run := if py == "" { "uv run" } else { "env UV_PROJECT_ENVIRONMENT=.venv-" + py + " uv run --python " + py }
+
 # List available recipes
 default:
     @just --list
 
 # Run the test suite; extra args are passed to pytest
 test *args:
-    uv run --group test pytest tests {{ args }}
+    {{ uv_run }} --group test pytest tests {{ args }}
+
+# Run the test suite on every supported python
+test-all *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for v in {{ python_versions }}; do
+        echo "=== python $v ==="
+        just py="$v" test {{ args }}
+    done
 
 # Lint with the same invocation CI uses
 lint:
