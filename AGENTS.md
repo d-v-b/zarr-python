@@ -24,7 +24,7 @@ Keep diffs small and reviewable.
 ## Related projects
 
 `zarr-python` depends on the contents of the Zarr [v2](https://zarr-specs.readthedocs.io/en/latest/v2/v2.0.html) and Zarr [v3](https://zarr-specs.readthedocs.io/en/latest/v3/core/index.html) storage specifications. We are committed to compliance with the specs, and also consistency with other Zarr implementations, namely:
--  [TensorStore](https://zarr-specs.readthedocs.io/en/latest/v3/core/index.html) (C++ / Python)
+- [TensorStore](https://google.github.io/tensorstore/) (C++ / Python)
 - [Zarrs](https://github.com/zarrs/zarrs) (Rust)
 - [Zarrita](https://github.com/manzt/zarrita.js/) (Javascript)
 ## Environment and common commands
@@ -35,7 +35,7 @@ Development uses **hatch** (with `uv` as the installer) for managed environments
 # Run the full test suite in a managed env (benchmarks excluded by default)
 hatch env run --env test.py3.12-optional run
 
-# Run with coverage (XML report); coverage must reach 100% for CI to pass
+# Run with coverage (XML report)
 hatch env run --env test.py3.12-optional run-coverage
 
 # Ad-hoc test runs with uv (faster iteration than spinning up a hatch env).
