@@ -15,8 +15,9 @@ an independent oracle:
 * ``blocked_product(chunk_layout, grid_layout)`` builds the layout of the shard's
   *data section*: a compact within-chunk layout (row- or column-major, i.e. plain
   ``BytesCodec`` or ``TransposeCodec + BytesCodec``) repeated over the chunk grid
-  in the codec's ``subchunk_write_order``. Its second-mode strides are the byte
-  offsets ``_build_shard_layout`` writes into the shard index.
+  in the codec's ``subchunk_write_order``. Its second-mode strides are element
+  offsets; multiplying by the item size and accounting for index placement gives
+  the byte offsets ``_build_shard_layout`` writes into the shard index.
 
 Both layouts share one hierarchical coordinate space, so evaluating them at the
 same integer coordinate ``i`` yields ``(where element i lives in the blob, which
