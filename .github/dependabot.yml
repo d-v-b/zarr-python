@@ -29,5 +29,18 @@ updates:
       python-dependencies:
         patterns:
           - "*"
+    # Exclude these runtime/integration dependencies as version-update targets.
+    # In particular, a botocore update can conflict with s3fs/aiobotocore caps.
+    # This does not freeze versions changed indirectly by other updates or
+    # guarantee that every grouped dependency resolution succeeds. Optional,
+    # minimum-dependency, and upstream test environments cover different
+    # dependency selections within their own constraints.
+    ignore:
+      - dependency-name: "botocore"
+      - dependency-name: "s3fs"
+      - dependency-name: "fsspec"
+      - dependency-name: "obstore"
+      - dependency-name: "numcodecs"
+      - dependency-name: "universal-pathlib"
     cooldown:
       default-days: 7
