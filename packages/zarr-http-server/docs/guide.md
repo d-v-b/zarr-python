@@ -155,11 +155,11 @@ while `serve` / `serve_background` only decide how it runs (`host`, `port`,
 
 Nothing here assumes the bytes came from a Zarr file. Both apps take a
 `zarr.abc.store.Store`, so any library that presents its own format through
-that interface can be served as-is — no conversion step, and no second copy of
-the data.
+that interface can be served without first writing a separate Zarr dataset.
+The backing library may still decode or copy data when serving a request.
 
 [`tifffile`](https://github.com/cgohlke/tifffile) is one such library. Its
-`imread(path, return_as="zarr")` returns a read-only `Store` whose keys are the
+`imread(path, return_as="zarr")` returns a `Store` opened read-only by default whose keys are the
 `zarr.json` documents and chunks a Zarr client expects, with the TIFF's own
 tiles as the chunks:
 
@@ -173,18 +173,18 @@ server = serve_background(store_app(store))
 # -> zarr.open_group(server.url, mode="r") from anywhere that can reach it
 ```
 
-Two things are worth knowing before pointing clients at one of these:
+For the tiled TIFF in this example:
 
 - **Chunks are read, and decoded, on demand.** A request for a chunk turns
   into a read of one TIFF tile, so the shape of the client's access pattern is
   the shape of the file I/O. Only the requested tiles are touched.
-- **Compression is a property of the file, not of the response.** `tifffile`
+- **TIFF compression is decoded before transfer.** `tifffile`
   decompresses each tile as it reads it and hands Zarr plain bytes — the served
   metadata lists no codec beyond `bytes` — so a compressed TIFF still goes over
   the wire uncompressed. Enable compression at the transport layer if that
   matters.
 
-Such a store reports `read_only=True`, which is the strong guarantee described
+The store opened above reports `read_only=True`, which is the strong guarantee described
 in [Read-only serving](#read-only-serving): the default method set already
 refuses writes, and asking for `READ_WRITE_HTTP_METHODS` on it raises
 `ValueError` rather than producing an app that could ever accept a `PUT`.

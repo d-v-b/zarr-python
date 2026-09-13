@@ -67,8 +67,8 @@ uv run examples/serve.py
 ```
 
 `examples/serve_tiff.py` serves a TIFF file instead: `tifffile` presents it as
-a read-only Zarr store, which `store_app` can serve directly, so the TIFF stays
-the only copy of the data while clients see a normal Zarr hierarchy.
+a Zarr store opened read-only, which `store_app` can serve directly without
+writing a separate Zarr dataset. Tiles are decoded and transferred on demand.
 
 ```bash
 uv run examples/serve_tiff.py

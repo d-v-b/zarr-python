@@ -14,15 +14,14 @@
 Serve a TIFF file over HTTP as a Zarr hierarchy.
 
 `tifffile` can present a TIFF as a zarr store: `imread(path,
-return_as="zarr")` returns a `ZarrTiffStore`, a read-only
+return_as="zarr")` returns a `ZarrTiffStore`, opened read-only by default, implementing the
 `zarr.abc.store.Store` whose keys are the `zarr.json` documents and chunks a
 zarr client expects. Chunks are the TIFF's own tiles, read from the file --
 and decoded -- only when a key is requested.
 
 Because it is an ordinary `Store`, `zarr-http-server` can serve it directly.
-Nothing is converted or copied: the TIFF on disk stays the only copy of the
-data, and clients on the other end of the HTTP connection see a normal zarr
-hierarchy.
+No separate Zarr dataset is written to disk. TIFF tiles are decoded into memory
+and transferred over HTTP; clients see a normal zarr hierarchy.
 
 This example writes a small pyramidal OME-TIFF, serves it, and reads it back
 both as raw HTTP responses and through a zarr client.
@@ -41,7 +40,7 @@ import zarr
 from zarr_http_server import serve_background, store_app
 
 # -- write a pyramidal OME-TIFF ---------------------------------------------
-# Any TIFF works; a pyramid is used here because it makes the store a *group*
+# A pyramid is used here because it makes the store a *group*
 # of arrays -- one per resolution level -- rather than a single array, which
 # is the more interesting thing to serve.
 with ExitStack() as resources:
@@ -95,7 +94,7 @@ with ExitStack() as resources:
         remote = zarr.open_group(server.url, mode="r")
         print("\nover HTTP, through zarr:")
         # The level names come from the group's own multiscales metadata rather
-        # than from `remote.arrays()`: HTTP exposes no directory listing, so a
+        # than from `remote.arrays()`: this store API exposes no key listing, so a
         # client reading over HTTP can only open keys it already knows about.
         for dataset in datasets:
             array = remote[dataset["path"]]
