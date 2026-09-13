@@ -165,3 +165,19 @@ assert all(
     for key in slab_source.keys
 )
 # --8<-- [end:dense-box-repartition]
+
+
+# --8<-- [start:consumer-owned-io]
+recorder = RecordingArray(np.arange(100).reshape(10, 10), chunks=(4, 4))
+planner = LazyArray(recorder)
+view = planner.lazy[1:9:2, 4:]
+
+consumer_io = np.arange(100).reshape(10, 10)  # stands in for the consumer's I/O layer
+out = np.empty(view.shape, dtype=view.dtype)
+for part in view.parts():
+    # Each box part lowers to a backend-native basic selection; nothing
+    # reads through the wrapper or its reader.
+    out[part.out_selection] = consumer_io[part.source_selection]
+assert (out == consumer_io[1:9:2, 4:]).all()
+assert recorder.keys == []  # the planner's own source was never read
+# --8<-- [end:consumer-owned-io]
