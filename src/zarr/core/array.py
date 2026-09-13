@@ -278,8 +278,8 @@ class ArrayMetadataProbe(TypedDict):
     reuse the ``zarr.json`` and ``.zattrs`` documents when falling back to a group
     open, instead of fetching them a second time. A key is present only if that
     document was actually fetched (a ``None`` value means fetched-but-absent). Only
-    the ``zarr_format=None`` probe overlaps with a group probe, so only that case
-    populates these keys.
+    the ``zarr_format=None`` probe currently retains buffers for reuse. Explicit
+    format probes can also fetch overlapping keys, but do not populate these keys.
     """
 
     zarr_json: NotRequired[Buffer | None]
@@ -307,10 +307,11 @@ async def _probe_array_metadata(
     """Fetch and parse array metadata without raising on "not an array".
 
     Returns an ``ArrayProbeResult`` whose ``metadata`` is set on success and whose
-    ``error`` is set (but not raised) when the path does not hold an array or the
-    request is invalid. ``probe`` always carries the reusable buffers fetched
-    during a ``zarr_format=None`` probe, even when ``error`` is set, which is
-    exactly when ``zarr.open`` needs to fall back to a group open.
+    ``error`` records missing-array, node-type, and format-selection errors.
+    Other failures, including invalid JSON and store errors, can propagate.
+    ``probe`` carries the reusable buffers retained
+    during a ``zarr_format=None`` probe, including missing-array and node-type
+    failures for which ``zarr.open`` falls back to opening a group.
     """
     probe: ArrayMetadataProbe = {}
     if zarr_format == 2:

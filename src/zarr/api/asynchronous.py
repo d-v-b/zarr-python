@@ -118,7 +118,7 @@ def _array_probe_to_group_prefetch(
     The ``zarr.json`` and ``.zattrs`` documents fetched while probing for an array
     are the same documents ``AsyncGroup.open`` would otherwise fetch, so they can
     be reused to avoid duplicate requests. Returns None if nothing reusable was
-    fetched (e.g. an explicit ``zarr_format`` probe, which does not overlap).
+    retained by the probe (e.g. when ``zarr_format`` is explicitly supplied).
     """
     pre_fetched: _PreFetchedGroupMetadata = {}
     if "zarr_json" in probe:
