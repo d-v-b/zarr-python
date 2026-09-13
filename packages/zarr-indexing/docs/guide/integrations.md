@@ -263,9 +263,9 @@ policy. A hook must describe the source's values or immutable version, and owns
 its determinism and any I/O it performs.
 
 For an opaque source such as a Zarr array, use
-`dask.array.from_array(view, chunks=..., name=False)` to request a fresh graph
+`dask.array.from_array(EagerArrayAdapter(view), chunks=..., name=False)` to request a fresh graph
 name without content tokenization. This opts out of content-based task sharing.
-See Dask's [from_array documentation](https://docs.dask.org/en/stable/generated/dask.array.from_array.html)
+Import `EagerArrayAdapter` from `zarr_indexing`: it materializes each indexed block while the wrapped view keeps lazy indexing. See Dask's [from_array documentation](https://docs.dask.org/en/stable/generated/dask.array.from_array.html)
 and [tokenization contract](https://docs.dask.org/en/stable/custom-collections.html#implementing-deterministic-hashing).
 
 Tokens describe values at tokenization time, not a snapshot. Mutating a source

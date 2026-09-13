@@ -2,7 +2,7 @@
 title: lazy_array
 ---
 
-`LazyArray.lazy[...]` is metadata-only: every derived view keeps the same
+`LazyArray[...]` is metadata-only: every derived view keeps the same
 reader and composes its transform without reading data. `result()` allocates
 owned system memory, then calls that reader once for each projected part.
 Rectangular parts write directly into their final slices; advanced placement
@@ -24,5 +24,17 @@ both frames in one `ReadContext`: the public global transform in `context.transf
 same local plan in `context.projection`. Use `part.result()` to execute a
 partition independently with both frames. Direct `part.view.result()` calls
 resolve the general view with no projection.
+
+`view[key]`, `view.oindex[key]`, and `view.vindex[key]` return lazy views,
+and iteration yields lazy first-axis views. `result()` and `numpy.asarray(view)`
+materialize values. `view.write(values)` synchronously writes to the original
+source through the composed transform and returns `None`; `view[key] = values`
+writes a selected sub-view. Writes require a writable source.
+
+For consumers requiring eager indexing, import `EagerArrayAdapter` from
+`zarr_indexing` and wrap the view. The adapter delegates shape, rank, dtype,
+NumPy conversion, and tokenization to the view, but materializes each
+`adapter[key]`. Use it with `dask.array.from_array`; direct lazy indexing
+is not a reliable Dask block-read interface.
 
 ::: zarr_indexing.lazy_array
