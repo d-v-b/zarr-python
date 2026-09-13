@@ -193,7 +193,7 @@ def test_del_works(group: bool) -> None:
 def test_failed_attribute_write_preserves_state(
     group: bool, zarr_format: ZarrFormat, operation: str
 ) -> None:
-    """A rejected store write must not change either the handle or persisted attributes."""
+    """Read-only rejection preserves the handle and persisted attributes."""
     store = zarr.storage.MemoryStore()
     initial: dict[str, Any] = {"a": 1, "b": 2}
     node: zarr.Group | AnyArray

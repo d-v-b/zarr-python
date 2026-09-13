@@ -1274,11 +1274,12 @@ class AsyncGroup:
         return ds
 
     async def _set_attributes(self, attributes: dict[str, Any]) -> AsyncGroup:
-        """Write `attributes` as the group's attributes, atomically.
+        """Persist `attributes` before replacing this handle's metadata.
 
         Builds new metadata without mutating the existing (frozen) metadata, writes
         it to the store first, and only swaps the in-memory metadata once the write
-        has succeeded.
+        has succeeded. This does not make the store writes transactional or
+        serialize concurrent attribute updates.
         """
         new_metadata = replace(self.metadata, attributes=attributes)
 
