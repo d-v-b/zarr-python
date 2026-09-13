@@ -73,11 +73,14 @@ def test_unmodelled_names_are_not_errors() -> None:
     assert identifier_of(DATA_TYPE, "float8_e4m3") is None
 
 
-def test_zstd_is_marked_proposed() -> None:
-    # Its specification is an open pull request, not merged text.
+def test_zstd_is_marked_registered() -> None:
+    # The former core proposal was closed after registration as an extension.
     entry = identifier_of(CODECS, "zstd")
-    assert entry.provenance is Provenance.PROPOSED
-    assert "pull" in entry.reference
+    assert entry.provenance is Provenance.REGISTERED
+    assert (
+        entry.reference
+        == "https://github.com/zarr-developers/zarr-extensions/tree/main/codecs/zstd"
+    )
 
 
 def test_must_understand_policy_matches_the_spec() -> None:

@@ -238,12 +238,10 @@ EXTENSION_POINTS: Final[Mapping[ExtensionPointField, ExtensionPoint]] = {
             ExtensionIdentifier(
                 SCALE_OFFSET_CODEC_NAME, Provenance.REGISTERED, f"{_EXTENSIONS}/codecs/scale_offset"
             ),
-            # The zstd codec's specification is an open pull request, not
-            # merged text: anything typed against it is typed against a draft.
             ExtensionIdentifier(
                 ZSTD_CODEC_NAME,
-                Provenance.PROPOSED,
-                "https://github.com/zarr-developers/zarr-specs/pull/256",
+                Provenance.REGISTERED,
+                f"{_EXTENSIONS}/codecs/zstd",
             ),
         ),
         must_understand_false_permitted=True,
