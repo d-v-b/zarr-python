@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import collections
 import inspect
 import re
 from typing import TYPE_CHECKING, Any
@@ -7,15 +8,20 @@ from typing import TYPE_CHECKING, Any
 import zarr.codecs
 import zarr.storage
 from zarr.core.array import AsyncArray, init_array
+from zarr.core.buffer import default_buffer_prototype
 from zarr.storage import LocalStore, ZipStore
 from zarr.storage._common import StorePath
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+    from typing import Self
 
-    from zarr.abc.store import Store
-    from zarr.core.common import JSON, MemoryOrder, ZarrFormat
+    import numpy.typing as npt
+
+    from zarr.abc.store import ByteRequest
+    from zarr.core.buffer import Buffer, BufferPrototype
+    from zarr.core.common import JSON, AccessModeLiteral, MemoryOrder, ZarrFormat
     from zarr.types import AnyArray
 
 import contextlib
@@ -30,6 +36,7 @@ import zarr.api.asynchronous
 import zarr.api.synchronous
 import zarr.core.group
 from zarr import Array, Group
+from zarr.abc.store import Store
 from zarr.api.synchronous import (
     create,
     create_array,
@@ -51,6 +58,7 @@ from zarr.errors import (
 )
 from zarr.storage import MemoryStore
 from zarr.storage._utils import normalize_path
+from zarr.storage._wrapper import WrapperStore
 from zarr.testing.utils import gpu_test
 
 
@@ -234,7 +242,7 @@ def test_create_array(store: Store, zarr_format: ZarrFormat) -> None:
     array_w[:] = data_val
     assert array_w.shape == shape
     assert array_w.attrs == attrs
-    assert np.array_equal(array_w[:], np.zeros(shape, dtype=array_w.dtype) + data_val)  # type: ignore[unreachable]
+    assert np.array_equal(array_w[:], np.zeros(shape, dtype=array_w.dtype) + data_val)
 
 
 @pytest.mark.parametrize("write_empty_chunks", [True, False])
@@ -372,7 +380,7 @@ async def test_create_group(store: Store, zarr_format: ZarrFormat) -> None:
     node = create_group(store, path=path, attributes=attrs, zarr_format=zarr_format)
     assert isinstance(node, Group)
     assert node.attrs == attrs
-    assert node.metadata.zarr_format == zarr_format  # type: ignore[unreachable]
+    assert node.metadata.zarr_format == zarr_format
 
 
 async def test_open_group(memory_store: MemoryStore) -> None:
@@ -455,7 +463,9 @@ def test_group_setitem_loads_scalar_arrays(sync_store: Store, data: np.ndarray) 
     root = zarr.open_group(store=sync_store)
     root["test"] = data
 
-    assert_array_equal(root["test"][...], data)
+    array = root["test"]
+    assert isinstance(array, Array)
+    assert_array_equal(array[...], data)
     assert_array_equal(zarr.load(store=sync_store, path="test"), data)
 
 
@@ -647,7 +657,7 @@ def test_load_array(sync_store: Store) -> None:
 @pytest.mark.parametrize("load_read_only", [True, False, None])
 def test_load_zip(tmp_path: Path, path: str | None, load_read_only: bool | None) -> None:
     file = tmp_path / "test.zip"
-    data = np.arange(100).reshape(10, 10)
+    data: npt.NDArray[np.int_] = np.arange(100).reshape(10, 10)
 
     with ZipStore(file, mode="w", read_only=False) as zs:
         save(zs, data, path=path)
@@ -665,7 +675,7 @@ def test_load_zip(tmp_path: Path, path: str | None, load_read_only: bool | None)
 @pytest.mark.parametrize("load_read_only", [True, False])
 def test_load_local(tmp_path: Path, path: str | None, load_read_only: bool) -> None:
     file = tmp_path / "test.zip"
-    data = np.arange(100).reshape(10, 10)
+    data: npt.NDArray[np.int_] = np.arange(100).reshape(10, 10)
 
     with LocalStore(file, read_only=False) as zs:
         save(zs, data, path=path)
@@ -1375,6 +1385,125 @@ async def test_open_falls_back_to_open_group_async(zarr_format: ZarrFormat) -> N
     assert isinstance(group, zarr.core.group.AsyncGroup)
     assert group.metadata.zarr_format == zarr_format
     assert group.attrs == {"key": "value"}
+
+
+class _CountingStore(WrapperStore[Store]):
+    """A wrapper store that records the key of every ``get`` request.
+
+    Used to assert that ``zarr.open`` does not fetch the same metadata key twice
+    when it falls back from an array probe to a group open.
+    """
+
+    get_counts: collections.Counter[str]
+
+    def __init__(self, store: Store) -> None:
+        super().__init__(store)
+        self.get_counts = collections.Counter()
+
+    def _with_store(self, store: Store) -> Self:
+        new = type(self)(store)
+        new.get_counts = self.get_counts
+        return new
+
+    async def get(
+        self,
+        key: str,
+        prototype: BufferPrototype,
+        byte_range: ByteRequest | None = None,
+    ) -> Buffer | None:
+        self.get_counts[key] += 1
+        return await self._store.get(key, prototype, byte_range)
+
+
+@pytest.mark.filterwarnings("ignore:Consolidated metadata")
+@pytest.mark.parametrize(
+    ("zarr_format", "use_consolidated"),
+    [(2, False), (2, True), (2, "custom"), (3, False), (3, True)],
+)
+@pytest.mark.parametrize("mode", ["r", "r+", "a"])
+@pytest.mark.parametrize("path", ["", "parent/child"])
+async def test_open_group_no_duplicate_fetches(
+    zarr_format: ZarrFormat, use_consolidated: bool | str, mode: AccessModeLiteral, path: str
+) -> None:
+    """The single probe preserves mode, path, attributes, and consolidated-key selection."""
+    store = _CountingStore(MemoryStore())
+    await zarr.api.asynchronous.open_group(
+        store, path=path, attributes={"key": "value"}, zarr_format=zarr_format
+    )
+    if use_consolidated:
+        await zarr.api.asynchronous.consolidate_metadata(store, path=path)
+        if isinstance(use_consolidated, str):
+            prefix = f"{path}/" if path else ""
+            metadata = await store.get(prefix + ".zmetadata", default_buffer_prototype())
+            assert metadata is not None
+            await store.set(prefix + use_consolidated, metadata)
+            await store.delete(prefix + ".zmetadata")
+
+    store.get_counts.clear()
+    group = await zarr.api.asynchronous.open(
+        store=store, path=path, mode=mode, use_consolidated=use_consolidated
+    )
+    assert isinstance(group, zarr.core.group.AsyncGroup)
+    assert group.metadata.zarr_format == zarr_format
+    assert group.path == path
+    assert group.attrs == {"key": "value"}
+    assert group.store.read_only == (mode == "r")
+    assert (group.metadata.consolidated_metadata is not None) == bool(use_consolidated)
+    assert all(count == 1 for count in store.get_counts.values())
+    assert sum(store.get_counts.values()) <= 5
+
+
+@pytest.mark.parametrize("zarr_format", [2, 3])
+async def test_open_array_via_open_unchanged(zarr_format: ZarrFormat) -> None:
+    """``zarr.open`` on an array path still returns the array (no group fallback)."""
+    store = MemoryStore()
+    await zarr.api.asynchronous.create_array(
+        store, shape=(10,), dtype="uint8", zarr_format=zarr_format, attributes={"k": "v"}
+    )
+    arr = await zarr.api.asynchronous.open(store=store)
+    assert isinstance(arr, AsyncArray)
+    assert arr.metadata.zarr_format == zarr_format
+    assert arr.attrs == {"k": "v"}
+
+
+async def test_open_both_formats_present_warns() -> None:
+    """The both-formats warning still fires through ``zarr.open``'s probe."""
+    store = MemoryStore()
+    zarr.create_array(store, shape=(10,), dtype="uint8", zarr_format=3)
+    zarr.create_array(store, shape=(10,), dtype="uint8", zarr_format=2)
+    msg = (
+        f"Both zarr.json (Zarr format 3) and .zarray (Zarr format 2) metadata "
+        f"objects exist at {store}. Zarr v3 will be used."
+    )
+    with pytest.warns(ZarrUserWarning, match=re.escape(msg)):
+        result = await zarr.api.asynchronous.open(store=store)
+    assert isinstance(result, AsyncArray)
+    assert result.metadata.zarr_format == 3
+
+
+async def test_open_missing_node_raises() -> None:
+    """``zarr.open`` on an empty store raises the same error as before."""
+    store = MemoryStore()
+    with pytest.raises(FileNotFoundError):
+        await zarr.api.asynchronous.open(store=store, mode="r")
+
+
+async def test_open_consolidated_via_open() -> None:
+    """``use_consolidated`` still works when passed through ``zarr.open``."""
+    store = MemoryStore()
+    root = await zarr.api.asynchronous.open_group(store, zarr_format=2)
+    await root.create_array(name="a", shape=(3,), dtype="uint8")
+    await zarr.api.asynchronous.consolidate_metadata(store, zarr_format=2)
+
+    group = await zarr.api.asynchronous.open(store=store, use_consolidated=True)
+    assert isinstance(group, zarr.core.group.AsyncGroup)
+    assert group.metadata.consolidated_metadata is not None
+    assert "a" in group.metadata.consolidated_metadata.metadata
+
+    # use_consolidated=False must discard consolidated metadata via open().
+    group_no_cons = await zarr.api.asynchronous.open(store=store, use_consolidated=False)
+    assert isinstance(group_no_cons, zarr.core.group.AsyncGroup)
+    assert group_no_cons.metadata.consolidated_metadata is None
 
 
 @pytest.mark.parametrize("mode", ["r", "r+", "w", "a"])
