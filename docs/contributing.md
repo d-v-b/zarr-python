@@ -56,15 +56,15 @@ Unlabeled text is a claim that you composed it. Where a block of text was compos
 
 That second clause is the one that carries information. Whether a tool or a person typed the words changes little; whether a person read them before they reached a reviewer changes everything. A reviewer who knows which they are looking at can spend their attention accordingly.
 
-Reading it is not enough — cut it. Machine-composed text runs long. It restates the diff, hedges, and pads a finding out to three paragraphs. If you post it under the endorsing label, you are saying you have not only read it but trimmed it to what a reviewer needs, and you are answerable for every sentence that survived. Text you have not edited is text you have not really read, so label it as unreviewed and say so plainly.
+Reading it is not enough — cut it. Machine-composed text can run long, restate the diff, and include material a reviewer does not need. If you post it under the endorsing label, you are saying you have not only read it but trimmed it to what a reviewer needs, and you are answerable for every sentence that survived. The endorsing label requires both review and editing; if you have not done both, use the unreviewed label.
 
-Labeling makes machine-composed text welcome rather than suspect. Once you have read a tool's summary, cut it down, agreed with what remains, and can defend it, posting it under a label costs a reviewer nothing and often communicates more thoroughly than prose written in a hurry.
+Labeling makes machine-composed text welcome under these guidelines. Read a tool's summary, cut it down, and ensure that you can defend what remains. The label tells reviewers how the text was prepared; it does not replace their review or remove your responsibility for its accuracy.
 
 We ask for labeling rather than a blanket disclosure of every use of a tool. Where a tool helped you think, or fixed your grammar, or you rewrote its output until it became yours, there is nothing to label and nothing to declare. The obligation attaches to text a reviewer might otherwise mistake for yours.
 
 Two limits on this:
 
-**A pull request opens with a sentence you wrote yourself.** Say why the change exists and why it deserves a reviewer's attention. Machine-composed detail can follow, labeled. This one sentence is the part that cannot be produced without having thought about the change, and it is what tells a maintainer whether to spend their afternoon on your diff. No agent may write it for you, or draft one for you to paste: a sentence you did not think of proves nothing, which is the only thing this rule is for.
+**A pull request opens with a sentence you wrote yourself.** Say why the change exists and why it deserves a reviewer's attention. Machine-composed detail can follow, labeled. This asks you to state the motivation directly, in your own words; it does not by itself demonstrate that the change has been understood or verified. No agent may write it for you, or draft one for you to paste.
 
 Automated dependency updates are exempt from this, and the reason is worth stating, because it explains the rule. A bot's identity fully supplies its motivation: "a dependency released a new version" is the whole story, and the bot's name tells you so. An agent does not supply the motivation for the work you asked it to do. That judgment is yours, a reader cannot infer it from the fact that an agent ran, and so you have to write it down.
 
