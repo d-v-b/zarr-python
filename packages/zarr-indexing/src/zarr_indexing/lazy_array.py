@@ -133,7 +133,7 @@ compute graph.
 Ownership
 ---------
 `result()` always allocates fresh system memory before reading through the
-selected reader. `result_into(out)` is the non-allocating form: the caller's
+selected reader. `result_into(out)` reuses the caller's result buffer: the caller's
 buffer is validated against the view's shape and dtype, filled in place, and
 returned. A `numpy.ma` source keeps its mask by receiving a masked output
 buffer; other source-specific array types do not survive materializing.
@@ -1383,13 +1383,16 @@ class LazyArray:
     ) -> Any:
         """Materialize this view into a buffer the caller owns.
 
-        The non-allocating form of
+        The caller-owned result-buffer form of
         [`result`][zarr_indexing.lazy_array.LazyArray.result]: `out` is
         validated, filled in place, and returned, and no output buffer is
         allocated here — a consumer assembling many views into one array, or
         holding a pool of reusable tile buffers, decides where results live.
         (A part whose placement is fancy still gathers through an owned dense
         temporary before scattering, exactly as `result()` does.)
+        Validation can also allocate temporary arrays, including a boolean
+        array with the output shape when `parts` is supplied. Readers may
+        allocate their own working buffers.
 
         Every cell of `out` is overwritten exactly once. If a reader raises
         midway, `out` is left partially written.
