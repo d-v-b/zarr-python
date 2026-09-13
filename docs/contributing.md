@@ -163,7 +163,7 @@ Zarr's tests are in the `tests` directory. We use [`pytest`](https://docs.pytest
 hatch env run --env test.py3.12-optional run
 ```
 
-All tests are automatically run via GitHub Actions for every pull request. Automated checks must pass before changes are accepted. Test coverage is also collected automatically via the Codecov service.
+GitHub Actions runs the configured test jobs for pull requests. Optional dependencies, platform requirements, workflow conditions, and explicit skips can exclude tests from a particular run. Required automated checks must pass before changes are accepted. Coverage reports from configured jobs are uploaded to Codecov.
 
 ### Code standards - using prek
 
