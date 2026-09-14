@@ -50,8 +50,7 @@ hatch run test.py3.12-minimal:python packages/zarr-indexing/benchmarks/execution
 ```
 
 `execution.py` compares Zarr indexers, declarative projections, and execution
-selectors, including retained rows, borrowed inputs, snapshots, and shard
-lowering. `execution_io.py` verifies and measures MemoryStore reads and writes
+selectors, including retained rows and shard lowering. `execution_io.py` verifies and measures MemoryStore reads and writes
 through real codec pipelines. Neither establishes filesystem or cloud throughput.
 The prototype remains opt-in; planning wins alone do not justify replacing the
 existing indexers.

@@ -1,8 +1,7 @@
 """Internal selector-execution prototype; not a public API.
 
 Prepared work shares literal-coordinate semantics with IndexTransform. Inputs
-are snapshotted by default; borrowing, access intent, and duplicate-write policy
-are explicit. NumPy and shard consumers lower the same work to their required
+are snapshotted; access intent and duplicate-write policy are explicit. NumPy and shard consumers lower the same work to their required
 selector layout. Neither path changes Zarr's default indexers.
 """
 
@@ -48,8 +47,7 @@ class ExecutionChunk(NamedTuple):
 class ExecutionPlan:
     """Prepared semantic work, independent of a consumer's selector layout.
 
-    Snapshot ownership is the default. Borrowing is an explicit caller promise
-    to leave arrays unchanged throughout every use of the plan and its iterators.
+    Input arrays are snapshotted, so a plan cannot drift under its caller.
     Writers must prepare with access='write'; duplicate coordinates are rejected
     unless conflicts='last' explicitly requests request-order last-write-wins.
     """
@@ -57,7 +55,6 @@ class ExecutionPlan:
     shape: tuple[int, ...]
     work: _BasicWork | _SortedWork | _ComponentWork | ChunkPlan
     access: Literal["read", "write"] = "read"
-    ownership: Literal["snapshot", "borrow"] = "snapshot"
     conflicts: Literal["error", "last"] = "error"
     drop_axes: tuple[int, ...] = ()
 
@@ -72,20 +69,6 @@ class ExecutionPlan:
 
 
 @dataclass(frozen=True, slots=True)
-class LoweredOperation:
-    """Selectors and their selected-value shape for one named consumer.
-
-    Coordinate selectors are paired and broadcast to value_shape. Basic
-    selectors use NumPy slice/integer semantics. row is the legacy four-field
-    tuple consumed by Zarr's current codec pipeline.
-    """
-
-    row: ExecutionChunk
-    value_shape: tuple[int, ...]
-    selector_kind: Literal["basic", "paired"]
-
-
-@dataclass(frozen=True, slots=True)
 class LoweredPlan:
     plan: ExecutionPlan
     consumer: Literal["numpy", "shard"]
@@ -97,9 +80,6 @@ class LoweredPlan:
     @property
     def drop_axes(self) -> tuple[int, ...]:
         return self.plan.drop_axes
-
-    def operations(self) -> Iterator[LoweredOperation]:
-        return _lower(self.plan, self.consumer)
 
     def __iter__(self) -> Iterator[ExecutionChunk]:
         return _consumer_rows(self.plan, self.consumer)
@@ -253,16 +233,13 @@ def execute_selection(
     dimension_grids: Sequence[DimensionGridLike],
     *,
     mode: str = "basic",
-    ownership: Literal["snapshot", "borrow"] = "snapshot",
     access: Literal["read", "write"] = "read",
     conflicts: Literal["error", "last"] = "error",
 ) -> ExecutionPlan:
     """Compile literal-coordinate selections directly to execution selectors.
 
-    Snapshot ownership is the default, independent of optimizer dispatch.
-    ownership='borrow' permits borrowing; callers must leave inputs unchanged
-    for every use of the plan. This is a literal-coordinate frontend, not a
-    NumPy/Zarr selection-normalization API.
+    Input arrays are snapshotted on every planning path. This is a
+    literal-coordinate frontend, not a NumPy/Zarr selection-normalization API.
     """
     grids = tuple(dimension_grids)
     if len(grids) != len(shape):
@@ -284,9 +261,7 @@ def execute_selection(
                     start, step, _origin, count = _resolve_slice_ts(sel, dim, 0, size)
                     axes.append(_BasicAxis(start, step, count, grid))
                     out_shape.append(count)
-            return _with_policy(
-                _basic_plan(tuple(out_shape), tuple(axes)), access, ownership, conflicts
-            )
+            return _with_policy(_basic_plan(tuple(out_shape), tuple(axes)), access, conflicts)
     elif mode in ("orthogonal", "vectorized"):
         items: tuple[Any, ...] = selection if isinstance(selection, tuple) else (selection,)
         if (
@@ -296,13 +271,11 @@ def execute_selection(
             and items[0].size > 0
             and 0 <= items[0][0] <= items[0][-1] < shape[0]
         ):
-            coordinates = items[0]
-            if ownership == "snapshot":
-                coordinates = coordinates.copy()
-                coordinates.setflags(write=False)
+            coordinates = items[0].copy()
+            coordinates.setflags(write=False)
             sorted_plan = _sorted_plan(coordinates, grids)
             if sorted_plan is not None:
-                return _with_policy(sorted_plan, access, ownership, conflicts)
+                return _with_policy(sorted_plan, access, conflicts)
     else:
         raise ValueError(f"unknown indexing mode: {mode}")
     base = IndexTransform.from_shape(shape)
@@ -325,7 +298,7 @@ def execute_selection(
         if mode == "orthogonal"
         else base.vindex[selection]
     )
-    return _with_policy(execute_transform(transform, grids), access, ownership, conflicts)
+    return _with_policy(execute_transform(transform, grids), access, conflicts)
 
 
 def execute_transform(
@@ -360,15 +333,13 @@ def execute_transform(
             break
     else:
         if input_axes == list(range(domain.ndim)):
-            return _with_policy(
-                _basic_plan(domain.shape, tuple(axes)), access, "snapshot", conflicts
-            )
+            return _with_policy(_basic_plan(domain.shape, tuple(axes)), access, conflicts)
     if transform.input_rank == transform.output_rank == 1:
         (m,) = transform.output
         if isinstance(m, ArrayMap) and m.offset == 0 and m.stride == 1:
             sorted_plan = _sorted_plan(m.index_array, grids)
             if sorted_plan is not None and sorted_plan.shape == domain.shape:
-                return _with_policy(sorted_plan, access, "snapshot", conflicts)
+                return _with_policy(sorted_plan, access, conflicts)
     _validate_storage_bounds(transform, grids)
     plan = plan_chunks(transform, grids)
     # Factor the plan once, up front: a transform the planner cannot factor
@@ -382,8 +353,8 @@ def execute_transform(
         # Column arithmetic is checked once by JointSet.local; nonnegative
         # chunk origins make its final local subtraction safe in intp.
         work = _ComponentWork(plan, tuple(joint.local for joint in partition.joint_sets))
-        return _with_policy(ExecutionPlan(domain.shape, work), access, "snapshot", conflicts)
-    return _with_policy(ExecutionPlan(domain.shape, plan), access, "snapshot", conflicts)
+        return _with_policy(ExecutionPlan(domain.shape, work), access, conflicts)
+    return _with_policy(ExecutionPlan(domain.shape, plan), access, conflicts)
 
 
 def _coordinates(transform: IndexTransform, origins: tuple[int, ...]) -> tuple[Selector, ...]:
@@ -509,19 +480,16 @@ def _validate_storage_bounds(
 def _with_policy(
     plan: ExecutionPlan,
     access: Literal["read", "write"],
-    ownership: Literal["snapshot", "borrow"],
     conflicts: Literal["error", "last"],
 ) -> ExecutionPlan:
     if access not in ("read", "write"):
         raise ValueError(f"unknown access intent: {access}")
-    if ownership not in ("snapshot", "borrow"):
-        raise ValueError(f"unknown ownership policy: {ownership}")
     if conflicts not in ("error", "last"):
         raise ValueError(f"unknown conflict policy: {conflicts}")
     result = (
         plan
-        if (plan.access, plan.ownership, plan.conflicts) == (access, ownership, conflicts)
-        else replace(plan, access=access, ownership=ownership, conflicts=conflicts)
+        if (plan.access, plan.conflicts) == (access, conflicts)
+        else replace(plan, access=access, conflicts=conflicts)
     )
     if access == "write" and conflicts == "error":
         _validate_unique_writes(result)
@@ -638,24 +606,6 @@ def _consumer_rows(
     ):
         rows = _ordered_write_rows(plan, rows)
     return _shard_rows(plan, rows) if consumer == "shard" else rows
-
-
-def _lower(plan: ExecutionPlan, consumer: Literal["numpy", "shard"]) -> Iterator[LoweredOperation]:
-    for row in _consumer_rows(plan, consumer):
-        if all(isinstance(sel, np.ndarray) for sel in row.out_selection) and row.out_selection:
-            shape = np.broadcast_shapes(
-                *(cast("np.ndarray[Any, Any]", sel).shape for sel in row.out_selection)
-            )
-        else:
-            shape = tuple(
-                len(range(*sel.indices(size)))
-                for sel, size in zip(row.out_selection, plan.shape, strict=True)
-                if isinstance(sel, slice)
-            )
-        kind: Literal["basic", "paired"] = (
-            "paired" if any(isinstance(sel, np.ndarray) for sel in row.chunk_selection) else "basic"
-        )
-        yield LoweredOperation(row, shape, kind)
 
 
 def _component_rows(work: _ComponentWork) -> Iterator[ExecutionChunk]:

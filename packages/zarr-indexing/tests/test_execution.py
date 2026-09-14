@@ -162,19 +162,12 @@ def test_lowering_preserves_exact_affine_cancellation(
     assert result[transform.apply((1,))[0]] == 20
 
 
-@pytest.mark.parametrize("ownership", ["snapshot", "borrow"])
-def test_explicit_ownership(ownership: Any) -> None:
+def test_immediate_execution_retains_snapshot() -> None:
     coordinates = np.arange(1000)
     plan = execute_selection(
-        coordinates,
-        (1000,),
-        dimension_grids_from_chunks((100,), (1000,)),
-        mode="vectorized",
-        ownership=ownership,
+        coordinates, (1000,), dimension_grids_from_chunks((100,), (1000,)), mode="vectorized"
     )
-    assert plan.ownership == ownership
-    if ownership == "snapshot":
-        coordinates[:] = 0
+    coordinates[:] = 0
     np.testing.assert_array_equal(next(iter(plan)).chunk_selection[0], np.arange(100))
 
 
@@ -188,8 +181,7 @@ def test_repeated_unread_axes_have_explicit_access_policy(access: Any, conflicts
     for consumer in ("numpy", "shard"):
         result = np.empty(plan.shape, dtype=np.int64)
         written = source.copy()
-        for op in plan.lower(consumer).operations():
-            row = op.row
+        for row in plan.lower(consumer):
             result[row.out_selection] = source[row.chunk_selection]
             if access == "write":
                 written[row.chunk_selection] = np.arange(6).reshape(2, 3)[row.out_selection]
@@ -228,11 +220,11 @@ def test_scalar_coordinate_consumer_preserves_value_shape(consumer: Any) -> None
 
     transform = IndexTransform(IndexDomain.from_shape(()), (ArrayMap(np.array(4)),))
     plan = execute_transform(transform, dimension_grids_from_chunks((1,), (8,)))
-    (operation,) = plan.lower(consumer).operations()
+    (row,) = plan.lower(consumer)
     result = np.empty((), dtype=np.int64)
-    result[operation.row.out_selection] = np.array([4])[operation.row.chunk_selection]
+    result[row.out_selection] = np.array([4])[row.chunk_selection]
     assert result == 4
-    assert operation.value_shape == ()
+    assert plan.shape == ()
 
 
 @pytest.mark.parametrize("access", ["read", "write"])
@@ -280,11 +272,6 @@ def test_empty_coordinate_plan_emits_no_io() -> None:
 def test_execution_rejects_unknown_access() -> None:
     with pytest.raises(ValueError, match="access intent"):
         execute_selection(Ellipsis, (1,), dimension_grids_from_chunks((1,), (1,)), access="bad")  # type: ignore[arg-type]
-
-
-def test_execution_rejects_unknown_ownership() -> None:
-    with pytest.raises(ValueError, match="ownership policy"):
-        execute_selection(Ellipsis, (1,), dimension_grids_from_chunks((1,), (1,)), ownership="bad")  # type: ignore[arg-type]
 
 
 def test_execution_rejects_unknown_conflicts() -> None:

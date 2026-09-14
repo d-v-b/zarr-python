@@ -32,17 +32,14 @@ Iterating a plan lowers it for the NumPy consumer. Each row has `chunk_coords`,
 result[out_selection] = decoded_chunk[chunk_selection]
 ```
 
-`plan.lower("numpy").operations()` also provides `value_shape` and
-`selector_kind`, distinguishing basic selectors from paired broadcast coordinate
-arrays. `plan.lower("shard")` adapts to the current shard indexer. That adaptation
+`plan.lower("shard")` adapts to the current shard indexer. That adaptation
 can expand compact selections into flat coordinates; passing compact plans
 through the shard boundary remains future work.
 
-## Ownership and writes
+## Writes
 
-`ownership="snapshot"` is the default. `ownership="borrow"` permits borrowing
-caller arrays, which must remain unchanged throughout every use of the plan and
-its iterators. It does not guarantee zero copies on every planning path.
+Input arrays are snapshotted on every planning path, so a plan cannot change
+under its caller.
 
 Writers prepare with `access="write"`. By default, repeated destinations raise;
 `conflicts="last"` explicitly retains the last value in row-major request order
@@ -58,7 +55,7 @@ merge shortcut can safely consume; reverse and general coordinate layouts stay
 conservative. Coverage alone does not prove the values are in codec-buffer order.
 
 Preparation validates supported bounds and write policies, but does not provide
-transactional I/O or protect against mutation of borrowed arrays.
+transactional I/O.
 
 ## Verification boundary
 

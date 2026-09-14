@@ -132,7 +132,6 @@ def compare_case(
             selection,
             shape,
             zg._dimensions,
-            ownership="borrow",
             mode={"basic": "basic", "orthogonal": "orthogonal", "coordinate": "vectorized"}[mode],
         )
 
@@ -145,17 +144,7 @@ def compare_case(
         "immediate_setup": immediate,
         "immediate_walk": lambda: consume(immediate()),
         "zarr_retained": lambda: list(baseline()),
-        "borrowed_retained": lambda: list(immediate()),
-        "snapshot_retained": lambda: list(
-            execute_selection(
-                selection,
-                shape,
-                zg._dimensions,
-                mode={"basic": "basic", "orthogonal": "orthogonal", "coordinate": "vectorized"}[
-                    mode
-                ],
-            )
-        ),
+        "immediate_retained": lambda: list(immediate()),
         "shard_retained": lambda: list(immediate().lower("shard")),
     }
     for round_id in range(3):

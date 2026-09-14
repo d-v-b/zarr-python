@@ -80,7 +80,7 @@ async def run_case(case: str, sharded: bool) -> dict[str, Any]:
         return np.asarray(result).reshape(expected.shape)
 
     async def new_read() -> Any:
-        plan = execute_selection(selection, shape, grids, mode=mode, ownership="borrow")
+        plan = execute_selection(selection, shape, grids, mode=mode)
         return await array._get_selection(
             cast("Indexer", plan.lower("shard" if sharded else "numpy")), prototype=prototype
         )
@@ -93,9 +93,7 @@ async def run_case(case: str, sharded: bool) -> dict[str, Any]:
         )
 
     async def new_write() -> None:
-        plan = execute_selection(
-            selection, shape, grids, mode=mode, ownership="borrow", access="write"
-        )
+        plan = execute_selection(selection, shape, grids, mode=mode, access="write")
         await array._set_selection(
             cast("Indexer", plan.lower("shard" if sharded else "numpy")),
             replacement,
