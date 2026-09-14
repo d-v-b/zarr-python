@@ -306,15 +306,16 @@ def execute_selection(
     else:
         raise ValueError(f"unknown indexing mode: {mode}")
     base = IndexTransform.from_shape(shape)
-    if mode == "orthogonal":
-        # Keep scalar-axis removal at the execution boundary; oindex's
-        # transform algebra intentionally retains scalar axes as length one.
+    if mode != "basic":
+        # Keep scalar-axis removal at the execution boundary: the transform
+        # algebra's oindex and vindex both retain a scalar axis as length one,
+        # where NumPy and Zarr's indexers drop it.
         items = selection if isinstance(selection, tuple) else (selection,)
         for item in items:
             scalar = as_scalar_index(item)
             if scalar is not None and scalar < 0:
                 raise BoundsCheckError("negative scalar is outside the literal source domain")
-        scalars, selection = split_scalar_axes(selection, base.domain, "orthogonal")
+        scalars, selection = split_scalar_axes(selection, base.domain, mode)
         if scalars is not None:
             base = base[scalars]
     transform = (
