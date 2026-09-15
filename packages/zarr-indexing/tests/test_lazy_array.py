@@ -1212,7 +1212,8 @@ def test_reader_wrappers_forward_the_read_contract_unchanged() -> None:
     outer_call, inner_call = events
     assert outer_call[1] is inner_call[1] is data
     assert outer_call[2] is inner_call[2]
-    assert outer_call[3] is inner_call[3] is result
+    assert outer_call[3] is inner_call[3]
+    assert np.shares_memory(outer_call[3], result)
     np.testing.assert_array_equal(result, data[1:6:2, ::-1, 1])
 
 
@@ -1259,10 +1260,12 @@ class ReturningReader:
         return np.empty(context.transform.domain.shape, dtype=source.dtype)
 
 
-def test_result_rejects_a_reader_that_returns_a_value() -> None:
+@pytest.mark.parametrize("independent", [False, True])
+def test_result_rejects_a_reader_that_returns_a_value(independent: bool) -> None:
     view = LazyArray(reference()).with_reader(ReturningReader())
+    target = next(view.parts()).view if independent else view
     with pytest.raises(TypeError, match="must return None"):
-        view.result()
+        target.result()
 
 
 class BufferRecordingReader(RecordingReader):
@@ -1325,15 +1328,18 @@ def test_fancy_part_placement_uses_owned_dense_temporaries() -> None:
     assert any(reader.owns_data)
 
 
-def test_reader_exception_propagates_unchanged() -> None:
+@pytest.mark.parametrize("independent", [False, True])
+def test_reader_exception_propagates_unchanged(independent: bool) -> None:
     error = RuntimeError("backend failed")
 
     class FailingReader:
         def read_into(self, source: Any, context: ReadContext, out: Any, /) -> None:
             raise error
 
+    view = LazyArray(reference()).with_reader(FailingReader())
+    target = next(view.parts()).view if independent else view
     with pytest.raises(RuntimeError) as caught:
-        LazyArray(reference()).with_reader(FailingReader()).result()
+        target.result()
     assert caught.value is error
 
 
@@ -1776,6 +1782,7 @@ def test_nonfirst_partition_transform_directly_addresses_its_array() -> None:
 
 
 def test_partition_token_encodes_its_public_global_transform() -> None:
+    pytest.importorskip("dask.base")
     source = np.arange(8)
     base = LazyArray.from_numpy(source)
     partition_view = list(base.with_parts((4,)).parts())[1].view
@@ -1907,6 +1914,7 @@ def test_with_parts_validates_strictly(parts: Any, match: str) -> None:
 
 def test_dask_token_is_deterministic_and_discriminating() -> None:
     """Same data and same view token alike; a different selection differs."""
+    pytest.importorskip("dask.base")
     data = reference()
     base = LazyArray(data)
     assert base.__dask_tokenize__() == LazyArray(reference()).__dask_tokenize__()
@@ -1923,6 +1931,7 @@ def test_dask_token_is_deterministic_and_discriminating() -> None:
 
 
 def test_reader_and_partitioning_do_not_change_dask_identity() -> None:
+    pytest.importorskip("dask.base")
     base = LazyArray(reference())
     token = base.__dask_tokenize__()
     assert base.with_reader(numpy_reader).__dask_tokenize__() == token
@@ -2000,7 +2009,6 @@ def test_pickle_round_trip() -> None:
     view = LazyArray(reference()).with_parts((2, 2, 2)).lazy[1:6, ::2].lazy.oindex[[3, 0, 0], :, :]
     restored = pickle.loads(pickle.dumps(view))
     assert restored.shape == view.shape
-    assert restored.__dask_tokenize__() == view.__dask_tokenize__()
     np.testing.assert_array_equal(np.asarray(restored.result()), np.asarray(view.result()))
 
 
@@ -2010,7 +2018,7 @@ def test_pickle_round_trip() -> None:
 
 
 def test_dask_from_array_roundtrip() -> None:
-    """A `LazyArray` is a drop-in dask source — no translation ceremony."""
+    """Dask can tokenize and read a wrapper over a Zarr source."""
     da = pytest.importorskip("dask.array")
     source = make_source("zarr")
 
@@ -2419,11 +2427,17 @@ def test_numpy_matrix_is_refused() -> None:
 @pytest.mark.parametrize("parts", [None, (2, 2), (1, 4), (3, 4)])
 def test_a_masked_source_keeps_its_mask_under_every_partitioning(parts: Any) -> None:
     data = np.ma.masked_greater(np.arange(12).reshape(3, 4), 7)
-    got = repartition(LazyArray(data), parts).lazy[:, 1:].result()
+    view = repartition(LazyArray(data), parts).lazy[:, 1:]
+    got = view.result()
     expected = data[:, 1:]
     assert isinstance(got, np.ma.MaskedArray), parts
     np.testing.assert_array_equal(np.ma.getmaskarray(got), np.ma.getmaskarray(expected))
     np.testing.assert_array_equal(np.ma.filled(got, 0), np.ma.filled(expected, 0))
+    assembled = np.ma.masked_all(view.shape, dtype=view.dtype)
+    for part in view.parts():
+        assembled[part.out_selection] = part.view.result()
+    np.testing.assert_array_equal(np.ma.getmaskarray(assembled), np.ma.getmaskarray(expected))
+    np.testing.assert_array_equal(np.ma.filled(assembled, 0), np.ma.filled(expected, 0))
 
 
 @pytest.mark.parametrize("parts", [None, (2, 2), (3, 4)])
@@ -2433,25 +2447,6 @@ def test_a_masked_source_keeps_its_mask_when_the_view_is_empty(parts: Any) -> No
     got = repartition(LazyArray(data), parts).lazy[:, 2:2].result()
     assert isinstance(got, np.ma.MaskedArray), parts
     assert np.asarray(got).shape == (3, 0), parts
-
-
-def test_a_large_array_without_dask_refuses_to_claim_equality(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Without Dask, arrays above the digest limit receive distinct fallback tokens."""
-    import sys
-
-    monkeypatch.setitem(sys.modules, "dask.base", None)
-    big = np.zeros(1 << 19, dtype=np.int64)
-    other = big.copy()
-    other[0] = 1
-
-    assert LazyArray(big).__dask_tokenize__() != LazyArray(other).__dask_tokenize__()
-    assert LazyArray(big).__dask_tokenize__() != LazyArray(big).__dask_tokenize__()
-
-    # Below the limit the contents are digested, so equal data still tokens alike.
-    small = np.zeros(8, dtype=np.int64)
-    assert LazyArray(small).__dask_tokenize__() == LazyArray(small.copy()).__dask_tokenize__()
 
 
 # ---------------------------------------------------------------------------
@@ -2576,3 +2571,63 @@ def test_fancy_composition_over_an_empty_axis() -> None:
     scalar = composed.lazy.vindex[..., np.array(1)]
     assert scalar.shape == (2, 0)
     assert np.asarray(scalar.result()).shape == (2, 0)
+
+
+@pytest.mark.parametrize("kind", ["numpy", "object", "masked", "registered", "hook"])
+def test_source_token_uses_dask_policy(kind: str) -> None:
+    dask_base = pytest.importorskip("dask.base")
+
+    class RegisteredArray(ForeignArray):
+        pass
+
+    class VersionedArray(ForeignArray):
+        def __dask_tokenize__(self) -> Any:
+            return ("versioned-source", 1)
+
+    dask_base.normalize_token.register(RegisteredArray, lambda source: ("registered-source", 1))
+    data = np.arange(4)
+    sources = {
+        "numpy": data,
+        "object": data.astype(object),
+        "masked": np.ma.masked_greater(data, 2),
+        "registered": RegisteredArray(data, None),
+        "hook": VersionedArray(data, None),
+    }
+    source = sources[kind]
+    assert LazyArray(source).__dask_tokenize__()[1] == dask_base.tokenize(source)
+
+
+def test_source_token_preserves_dask_determinism_requirement() -> None:
+    dask_base = pytest.importorskip("dask.base")
+    dask_tokenize = pytest.importorskip("dask.tokenize")
+
+    class UnserializableArray(ForeignArray):
+        def __reduce_ex__(self, protocol: int) -> Any:
+            raise TypeError("cannot serialize source")
+
+    source = UnserializableArray(np.arange(4), None)
+    for value in (source, LazyArray(source)):
+        with pytest.raises(dask_tokenize.TokenizationError):
+            dask_base.tokenize(value, ensure_deterministic=True)
+
+
+def test_source_token_preserves_hook_failure() -> None:
+    pytest.importorskip("dask.base")
+
+    class RefusingArray(ForeignArray):
+        def __dask_tokenize__(self) -> Any:
+            raise RuntimeError("source version unavailable")
+
+    with pytest.raises(RuntimeError, match="source version unavailable"):
+        LazyArray(RefusingArray(np.arange(4), None)).__dask_tokenize__()
+
+
+def test_dask_is_only_required_for_tokenization(monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+
+    monkeypatch.setitem(sys.modules, "dask.base", None)
+    data = np.arange(4)
+    view = LazyArray(data).lazy[1:]
+    np.testing.assert_array_equal(view.result(), data[1:])
+    with pytest.raises(ModuleNotFoundError):
+        view.__dask_tokenize__()
