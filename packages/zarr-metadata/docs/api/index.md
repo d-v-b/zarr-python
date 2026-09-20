@@ -8,6 +8,10 @@ The package is organized to mirror the structure of the Zarr specifications:
 
 - [`zarr_metadata.model`](model.md) — frozen-dataclass document models,
   structural validators, loc-aware parsers, and the `UNSET` sentinel
+- [`zarr_metadata.rules`](rules.md) — composition rules: cross-field
+  judgments over full documents (fill value vs. data type, codec pipeline
+  ordering, chunk geometry), plus whole-document `validate`/`parse`
+  entry points combining structure and composition
 - [`zarr_metadata.pydantic`](pydantic.md) — optional Pydantic field types
   over the models
 - [`zarr_metadata.v2`](v2.md) — `TypedDict` shapes for Zarr v2 documents

@@ -5,7 +5,7 @@ import dataclasses
 import json
 from collections import UserDict
 from collections.abc import Callable
-from typing import TYPE_CHECKING, get_args
+from typing import TYPE_CHECKING, cast, get_args
 
 import pytest
 from typing_extensions import Unpack
@@ -40,6 +40,8 @@ from zarr_metadata.model import (
 from zarr_metadata.model._validation import _prefix, arrays_to_tuples
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from zarr_metadata._common import JSONValue
     from zarr_metadata.v2 import ZarrV2CodecMetadata
 
@@ -977,7 +979,7 @@ def test_parse_metadata_field_materializes_abstract_containers() -> None:
 
     assert isinstance(parsed, dict)
     assert parsed == {"name": "example", "configuration": {"values": (0, 1)}}
-    assert type(parsed["configuration"]) is dict
+    assert type(cast("Mapping[str, object]", parsed)["configuration"]) is dict
 
 
 def test_metadata_field_type_guard_rejects_abstract_mapping() -> None:
@@ -1325,16 +1327,23 @@ def test_v2_filters_must_be_codec_sequence_or_none() -> None:
         assert [(p.loc, p.kind) for p in problems] == [(("filters",), "invalid_type")], bad
 
 
-def test_v2_shape_and_chunks_must_have_equal_rank() -> None:
-    """Raw v2 metadata requires one chunk length per array dimension."""
+def test_v2_shape_chunks_rank_agreement_is_not_structural() -> None:
+    """Whether chunks matches shape's dimensionality is a composition
+    judgment owned by zarr_metadata.rules; the structural validator and the
+    model classes deliberately accept the document (it is a lossless,
+    structurally well-formed representation of what a store may contain)."""
     doc = dict(ZarrV2ArrayMetadata.create_default(shape=(2, 3)).to_json())
     doc["chunks"] = (1,)
 
-    assert [(p.loc, p.kind) for p in validate_array_metadata_v2(doc)] == [
+    assert validate_array_metadata_v2(doc) == ()
+    parsed = ZarrV2ArrayMetadata.from_key_value({".zarray": json.dumps(doc).encode()})
+    assert parsed.chunks == (1,)
+
+    from zarr_metadata import rules
+
+    assert [(p.loc, p.kind) for p in rules.validate_array_metadata_v2(doc)] == [
         (("chunks",), "invalid_value")
     ]
-    with pytest.raises(MetadataValidationError, match="same number of dimensions"):
-        ZarrV2ArrayMetadata.from_key_value({".zarray": json.dumps(doc).encode()})
 
 
 def test_v2_filters_may_be_empty() -> None:
@@ -1527,12 +1536,18 @@ def test_shape_rejects_negative_dimensions() -> None:
     ]
 
 
-def test_dimension_names_length_must_match_shape() -> None:
-    """dimension_names must have one entry per dimension of shape."""
+def test_dimension_names_length_is_not_structural() -> None:
+    """Whether dimension_names matches shape's dimensionality is a
+    composition judgment owned by zarr_metadata.rules; the structural
+    validator deliberately accepts the document."""
     doc = dict(ZarrV3ArrayMetadata.create_default(shape=(10,)).to_json()) | {
         "dimension_names": ("x", "y", "z")
     }
-    assert [(p.loc, p.kind) for p in validate_array_metadata_v3(doc)] == [
+    assert validate_array_metadata_v3(doc) == ()
+
+    from zarr_metadata import rules
+
+    assert [(p.loc, p.kind) for p in rules.validate_array_metadata_v3(doc)] == [
         (("dimension_names",), "invalid_value")
     ]
 
@@ -1559,7 +1574,7 @@ def test_configuration_values_must_be_json() -> None:
 
 def test_v3_extension_keys_must_be_strings() -> None:
     """A non-string top-level key cannot be represented by a v3 document type."""
-    doc: dict[object, object] = dict(ZarrV3ArrayMetadata.create_default().to_json())
+    doc: dict[object, object] = {**ZarrV3ArrayMetadata.create_default().to_json()}
     doc[1] = {"must_understand": False}
     assert [(problem.loc, problem.kind) for problem in validate_array_metadata_v3(doc)] == [
         ((), "invalid_type")
@@ -1758,7 +1773,7 @@ def test_v2_absent_dimension_separator_means_dot() -> None:
     del doc["dimension_separator"]
     model = ZarrV2ArrayMetadata.from_json(doc)
     assert model.dimension_separator == "."
-    assert model.to_json()["dimension_separator"] == "."
+    assert cast("Mapping[str, object]", model.to_json())["dimension_separator"] == "."
 
 
 def test_v2_from_key_value_without_separator_means_dot() -> None:
