@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import unicodedata
 import warnings
@@ -357,9 +358,14 @@ class GroupMetadata(Metadata):
     node_type: Literal["group"] = field(default="group", init=False)
 
     def to_buffer_dict(self, prototype: BufferPrototype) -> dict[str, Buffer]:
+        from zarr.core.metadata import _layers
+
         indent = config.get("json_indent")
         if self.zarr_format == 3:
-            return {ZARR_JSON: json_to_buffer(self.to_dict(), prototype=prototype, indent=indent)}
+            out = {ZARR_JSON: json_to_buffer(self.to_dict(), prototype=prototype, indent=indent)}
+            if _layers.LOG_DIR is not None:
+                _layers.judge_written("v3-group", json.loads(out[ZARR_JSON].to_bytes()))
+            return out
         else:
             items = {
                 ZGROUP_JSON: json_to_buffer(
@@ -399,6 +405,16 @@ class GroupMetadata(Metadata):
                     {"metadata": d, "zarr_consolidated_format": 1}, prototype=prototype
                 )
 
+            if _layers.LOG_DIR is not None:
+                _layers.judge_written(
+                    "v2-group",
+                    {
+                        **json.loads(items[ZGROUP_JSON].to_bytes()),
+                        "attributes": json.loads(items[ZATTRS_JSON].to_bytes()),
+                    },
+                )
+                if ZMETADATA_V2_JSON in items:
+                    _layers.judge_written_zmetadata(json.loads(items[ZMETADATA_V2_JSON].to_bytes()))
             return items
 
     def __init__(
@@ -628,13 +644,19 @@ class AsyncGroup:
         zattrs_bytes: Buffer | None,
         consolidated_metadata_bytes: Buffer | None,
     ) -> AsyncGroup:
+        from zarr.core.metadata import _layers
+
         # V2 groups are comprised of a .zgroup and .zattrs objects
         zgroup = buffer_to_json_object(zgroup_bytes)
         zattrs = buffer_to_json_object(zattrs_bytes) if zattrs_bytes is not None else {}
+        reading = _layers.read_v2_group({**zgroup, "attributes": zattrs})
+        if _layers.MODE == "enforce":
+            zgroup = {k: v for k, v in reading.document.items() if k != "attributes"}
         group_metadata: dict[str, Any] = {**zgroup, "attributes": zattrs}
 
         if consolidated_metadata_bytes is not None:
             v2_consolidated_doc = buffer_to_json_object(consolidated_metadata_bytes)
+            v2_consolidated_doc = _layers.read_zmetadata(v2_consolidated_doc)
             v2_consolidated_metadata = cast("dict[str, Any]", v2_consolidated_doc["metadata"])
             # We already read zattrs and zgroup. Should we ignore these?
             v2_consolidated_metadata.pop(".zattrs", None)
@@ -661,7 +683,7 @@ class AsyncGroup:
                 "must_understand": False,
             }
 
-        return cls.from_dict(store_path, group_metadata)
+        return _layers.settle(reading, lambda _document: cls.from_dict(store_path, group_metadata))
 
     @classmethod
     def _from_bytes_v3(
@@ -670,7 +692,10 @@ class AsyncGroup:
         zarr_json_bytes: Buffer,
         use_consolidated: bool | None,
     ) -> AsyncGroup:
+        from zarr.core.metadata import _layers
+
         group_metadata = buffer_to_json_object(zarr_json_bytes)
+        reading = _layers.read_node("v3-group", group_metadata)
         if use_consolidated and group_metadata.get("consolidated_metadata") is None:
             msg = f"Consolidated metadata requested with 'use_consolidated=True' but not found in '{store_path.path}'."
             raise ValueError(msg)
@@ -679,7 +704,7 @@ class AsyncGroup:
             # Drop consolidated metadata if it's there.
             group_metadata.pop("consolidated_metadata", None)
 
-        return cls.from_dict(store_path, group_metadata)
+        return _layers.settle(reading, lambda _document: cls.from_dict(store_path, group_metadata))
 
     @classmethod
     def from_dict(

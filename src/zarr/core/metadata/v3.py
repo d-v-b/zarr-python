@@ -35,6 +35,7 @@ from zarr.core.config import config
 from zarr.core.dtype import VariableLengthUTF8, ZDType, get_data_type_from_json
 from zarr.core.dtype.common import check_dtype_spec_v3
 from zarr.core.json_parse import parse_field
+from zarr.core.metadata import _layers
 from zarr.core.metadata.common import parse_attributes
 from zarr.errors import MetadataValidationError, NodeTypeValidationError
 from zarr.registry import get_codec_class
@@ -627,10 +628,21 @@ class ArrayV3Metadata(Metadata):
 
     def to_buffer_dict(self, prototype: BufferPrototype) -> dict[str, Buffer]:
         indent = config.get("json_indent")
-        return {ZARR_JSON: json_to_buffer(self.to_dict(), prototype=prototype, indent=indent)}
+        out = {ZARR_JSON: json_to_buffer(self.to_dict(), prototype=prototype, indent=indent)}
+        if _layers.LOG_DIR is not None:
+            _layers.judge_written("v3-array", json.loads(out[ZARR_JSON].to_bytes()))
+        return out
 
     @classmethod
     def from_dict(cls, data: dict[str, JSON]) -> Self:
+        """Read a v3 array document: the layers first, then zarr-python's own parse."""
+        reading = _layers.read_array_v3(data)
+        metadata = _layers.settle(reading, cls._from_dict)
+        _layers.compare_pipeline(metadata, reading)
+        return metadata
+
+    @classmethod
+    def _from_dict(cls, data: dict[str, JSON]) -> Self:
         # make a copy because we are modifying the dict
         _data = data.copy()
 

@@ -10,6 +10,7 @@ from zarr.abc.metadata import Metadata
 from zarr.abc.numcodec import Numcodec, _is_numcodec
 from zarr.core.dtype import get_data_type_from_json
 from zarr.core.dtype.common import OBJECT_CODEC_IDS, DTypeSpec_V2
+from zarr.core.metadata import _layers
 from zarr.errors import ZarrUserWarning
 from zarr.registry import get_numcodec
 
@@ -143,13 +144,24 @@ class ArrayV2Metadata(Metadata):
         zarray_dict = self.to_dict()
         zattrs_dict = zarray_dict.pop("attributes", {})
         indent = config.get("json_indent")
-        return {
+        out = {
             ZARRAY_JSON: json_to_buffer(zarray_dict, prototype=prototype, indent=indent),
             ZATTRS_JSON: json_to_buffer(zattrs_dict, prototype=prototype, indent=indent),
         }
+        if _layers.LOG_DIR is not None:
+            written = json.loads(out[ZARRAY_JSON].to_bytes())
+            written["attributes"] = json.loads(out[ZATTRS_JSON].to_bytes())
+            _layers.judge_written("v2-array", written)
+        return out
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ArrayV2Metadata:
+        """Read a v2 array document: the rules first, then zarr-python's own parse."""
+        reading = _layers.read_node("v2-array", data)
+        return _layers.settle(reading, cls._from_dict)
+
+    @classmethod
+    def _from_dict(cls, data: dict[str, Any]) -> ArrayV2Metadata:
         # Make a copy to protect the original from modification.
         _data = data.copy()
         # Check that the zarr_format attribute is correct.
