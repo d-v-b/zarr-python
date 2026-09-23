@@ -27,6 +27,7 @@ from zarr_metadata.model._validation import (
 from zarr_metadata.v2.array import ZARR_V2_ARRAY_METADATA_STORE_KEY
 from zarr_metadata.v2.attributes import ZARR_V2_ATTRIBUTES_STORE_KEY
 from zarr_metadata.v3._common import parse_metadata_field_v3
+from zarr_metadata.v3._registry import CORE_AND_EXTENSIONS
 from zarr_metadata.v3.array import ZARR_V3_ARRAY_METADATA_STORE_KEY
 
 if TYPE_CHECKING:
@@ -41,6 +42,7 @@ if TYPE_CHECKING:
     from zarr_metadata.v2.attributes import ZarrV2AttributesStoreKey
     from zarr_metadata.v2.codec import ZarrV2CodecMetadata
     from zarr_metadata.v3._common import ZarrV3MetadataFieldJSON
+    from zarr_metadata.v3._registry import Context
     from zarr_metadata.v3.array import (
         ZarrV3ArrayMetadataJSON,
         ZarrV3ArrayMetadataStoreKey,
@@ -170,8 +172,11 @@ class ZarrV3ArrayMetadata:
     content for an array. Extension points (`data_type`, `chunk_grid`,
     `chunk_key_encoding`, `codecs`, `storage_transformers`) are held as
     `ZarrV3MetadataField` values (currently `ZarrV3NamedConfig` name,
-    configuration, and obligation records) and are never interpreted;
-    `fill_value` is held verbatim in its JSON form. Equivalent extension
+    configuration, and obligation records). `from_json` and
+    `from_key_value` read each through the definition that claims its name
+    in a scope -- `CORE_AND_EXTENSIONS` unless a `context` is passed -- and
+    the model holds what they read as written; `fill_value` is held
+    verbatim in its JSON form. Equivalent extension
     spellings normalize to shorthand strings when configuration is empty and
     understanding is required.
     """
@@ -288,8 +293,10 @@ class ZarrV3ArrayMetadata:
         return out
 
     @classmethod
-    def from_json(cls, data: object) -> ZarrV3ArrayMetadata:
-        parsed = parse_array_metadata_v3(arrays_to_tuples(data))
+    def from_json(
+        cls, data: object, *, context: Context = CORE_AND_EXTENSIONS
+    ) -> ZarrV3ArrayMetadata:
+        parsed = parse_array_metadata_v3(arrays_to_tuples(data), context=context)
         # Sound cast: the TypedDict types all non-standard keys as its
         # `extra_items` (`ZarrV3ExtensionField`); the comprehension's inferred value
         # type is the union over ALL keys because the key filter cannot narrow it.
@@ -325,8 +332,12 @@ class ZarrV3ArrayMetadata:
         return must_understand_subset(self.extra_fields)
 
     @classmethod
-    def from_key_value(cls, mapping: Mapping[StoreKey, bytes]) -> ZarrV3ArrayMetadata:
-        return cls.from_json(load_store_json(mapping, ZARR_V3_ARRAY_METADATA_STORE_KEY))
+    def from_key_value(
+        cls, mapping: Mapping[StoreKey, bytes], *, context: Context = CORE_AND_EXTENSIONS
+    ) -> ZarrV3ArrayMetadata:
+        return cls.from_json(
+            load_store_json(mapping, ZARR_V3_ARRAY_METADATA_STORE_KEY), context=context
+        )
 
     def to_key_value(
         self, *, indent: int | str | None = None
