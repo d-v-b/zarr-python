@@ -18,7 +18,8 @@ class Attributes(MutableMapping[str, JSON]):
         self._obj = obj
 
     def __getitem__(self, key: str) -> JSON:
-        return self._obj.metadata.attributes[key]
+        attributes: dict[str, JSON] = self._obj.metadata.attributes
+        return attributes[key]
 
     def __setitem__(self, key: str, value: JSON) -> None:
         new_attrs = dict(self._obj.metadata.attributes)
