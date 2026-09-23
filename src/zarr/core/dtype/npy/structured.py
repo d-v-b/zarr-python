@@ -13,7 +13,6 @@ from zarr.core.dtype.common import (
     HasItemSize,
     StructuredName_V2,
     check_dtype_spec_v2,
-    check_structured_dtype_name_v2,
     v3_unstable_dtype_warning,
 )
 from zarr.core.dtype.npy.common import (
@@ -241,7 +240,6 @@ class Structured(ZDType[np.dtypes.VoidDType[int], np.void], HasItemSize):
         return (
             check_dtype_spec_v2(data)
             and not isinstance(data["name"], str)
-            and check_structured_dtype_name_v2(data["name"])
             and data["object_codec_id"] is None
         )
 

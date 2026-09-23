@@ -285,3 +285,30 @@ def test_nested_struct_roundtrip_v2() -> None:
     json_v2 = dtype.to_json(zarr_format=2)
     assert json_v2 == expected
     assert get_data_type_from_json(json_v2, zarr_format=2) == dtype
+
+
+def test_v2_field_dtype_single_field_rejected() -> None:
+    """
+    Test that a field whose data type is a single field, rather than a list of fields, is rejected.
+    """
+    data = {"name": [["outer", ["x", "|i1"]]], "object_codec_id": None}
+    with pytest.raises(ValueError, match="No Zarr data type found"):
+        get_data_type_from_json(data, zarr_format=2)
+
+
+def test_v2_nested_field_non_string_dtype_rejected() -> None:
+    """
+    Test that a nested field whose data type is neither a string nor a list of fields is rejected.
+    """
+    data = {"name": [["outer", [["x", 1]]]], "object_codec_id": None}
+    with pytest.raises(ValueError, match="No Zarr data type found"):
+        get_data_type_from_json(data, zarr_format=2)
+
+
+def test_v2_empty_nested_struct_rejected() -> None:
+    """
+    Test that a nested structured data type with no fields is rejected.
+    """
+    data = {"name": [["outer", []]], "object_codec_id": None}
+    with pytest.raises(ValueError, match="must have at least one field"):
+        get_data_type_from_json(data, zarr_format=2)
