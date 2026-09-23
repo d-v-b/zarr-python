@@ -62,12 +62,11 @@ DTypeSpec_V2 = DTypeConfig_V2[DTypeName_V2, None | str]
 
 def check_structured_dtype_v2_inner(data: object) -> TypeGuard[StructuredName_V2]:
     """
-    A type guard for the inner elements of a structured dtype. This is a recursive check because
-    the type is itself recursive.
+    A type guard for a single field of a structured dtype.
 
-    This check ensures that all the elements are 2-element sequences beginning with a string
-    and ending with either another string or another 2-element sequence beginning with a string and
-    ending with another instance of that type.
+    A field is a 2-element sequence of a field name (a string) and a data type name, which is
+    either a string or, for a nested structured dtype, a sequence of fields. The check is
+    recursive because the type is itself recursive.
     """
     if isinstance(data, (str, Mapping)):
         return False
@@ -77,11 +76,7 @@ def check_structured_dtype_v2_inner(data: object) -> TypeGuard[StructuredName_V2
         return False
     if not (isinstance(data[0], str)):
         return False
-    if isinstance(data[-1], str):
-        return True
-    elif isinstance(data[-1], Sequence):
-        return check_structured_dtype_v2_inner(data[-1])
-    return False
+    return check_dtype_name_v2(data[1])
 
 
 def check_structured_dtype_name_v2(data: Sequence[object]) -> TypeGuard[StructuredName_V2]:

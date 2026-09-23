@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pytest
@@ -9,12 +9,17 @@ from tests.test_dtype.test_wrapper import BaseTestZDType
 from zarr.core.dtype import (
     Float16,
     Float64,
+    Int8,
     Int32,
     Int64,
     Struct,
     Structured,
     UInt8,
+    get_data_type_from_json,
 )
+
+if TYPE_CHECKING:
+    from zarr.core.dtype.npy.structured import StructuredJSON_V2
 
 
 class TestStruct(BaseTestZDType):
@@ -24,6 +29,7 @@ class TestStruct(BaseTestZDType):
     valid_dtype = (
         np.dtype([("field1", np.int32), ("field2", np.float64)]),
         np.dtype([("field1", np.int64), ("field2", np.int32)]),
+        np.dtype([("outer", [("x", np.int8), ("y", np.float64)]), ("field2", np.int32)]),
     )
     invalid_dtype = (
         np.dtype(np.int8),
@@ -33,6 +39,10 @@ class TestStruct(BaseTestZDType):
     valid_json_v2 = (
         {"name": [["field1", ">i4"], ["field2", ">f8"]], "object_codec_id": None},
         {"name": [["field1", ">i8"], ["field2", ">i4"]], "object_codec_id": None},
+        {
+            "name": [["outer", [["x", "|i1"], ["y", ">f8"]]], ["field2", ">i4"]],
+            "object_codec_id": None,
+        },
     )
     valid_json_v3 = (
         {
@@ -260,3 +270,18 @@ def test_struct_from_native_dtype() -> None:
     struct = Struct.from_native_dtype(dtype)
     assert struct.fields[0][0] == "field1"
     assert struct.fields[1][0] == "field2"
+
+
+def test_nested_struct_roundtrip_v2() -> None:
+    """
+    Test that a struct nested in a struct round-trips through Zarr V2 JSON. The Zarr V2 spec allows
+    the data type of a field to be another structured data type.
+    """
+    dtype = Struct(fields=(("outer", Struct(fields=(("x", Int8()), ("y", Float64())))),))
+    expected: StructuredJSON_V2 = {
+        "name": [["outer", [["x", "|i1"], ["y", "<f8"]]]],
+        "object_codec_id": None,
+    }
+    json_v2 = dtype.to_json(zarr_format=2)
+    assert json_v2 == expected
+    assert get_data_type_from_json(json_v2, zarr_format=2) == dtype
