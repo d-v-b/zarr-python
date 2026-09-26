@@ -10,13 +10,15 @@ from typing import TYPE_CHECKING, Literal, TypeAlias, cast
 
 from typing_extensions import TypedDict, Unpack
 
+from zarr_metadata._json import (
+    MetadataValidationError,
+    ValidationProblem,
+    arrays_to_tuples,
+)
 from zarr_metadata.model._sentinel import UNSET
 from zarr_metadata.model._validation import (
     ARRAY_METADATA_STANDARD_KEYS_V3,
-    MetadataValidationError,
     StoreKey,
-    ValidationProblem,
-    arrays_to_tuples,
     dump_store_json,
     load_store_json,
     parse_array_metadata_v2,
