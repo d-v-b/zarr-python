@@ -9,6 +9,10 @@ from collections.abc import Callable
 import pytest
 
 from tests.model._cases import mutate_nested_containers
+from zarr_metadata._json import (
+    MetadataValidationError,
+    ValidationProblem,
+)
 from zarr_metadata.model import UNSET
 from zarr_metadata.model._array import ZarrV3ArrayMetadata
 from zarr_metadata.model._group import (
@@ -20,8 +24,6 @@ from zarr_metadata.model._group import (
     ZarrV3GroupMetadataPartial,
 )
 from zarr_metadata.model._validation import (
-    MetadataValidationError,
-    ValidationProblem,
     is_group_metadata_v2,
     is_group_metadata_v3,
     parse_group_metadata_v2,
