@@ -125,18 +125,16 @@ class ZarrV3GroupMetadata:
             out["attributes"] = copy.deepcopy(self.attributes)
         if self.consolidated_metadata is not UNSET:
             # Consolidated metadata is a known non-core top-level JSON field.
-            out[ZARR_V3_CONSOLIDATED_METADATA_KEY] = cast(
-                "ZarrV3ExtensionField", self.consolidated_metadata.to_json()
-            )
+            out[ZARR_V3_CONSOLIDATED_METADATA_KEY] = self.consolidated_metadata.to_json()
         for key, value in self.extra_fields.items():
             out[key] = copy.deepcopy(value)
         return out
 
     @classmethod
     def from_json(cls, data: object) -> ZarrV3GroupMetadata:
-        parsed = parse_group_metadata_v3(arrays_to_tuples(data))
-        # Cast for narrowing across standard and arbitrary extra TypedDict items.
-        consolidated_raw = cast("object", parsed.get(ZARR_V3_CONSOLIDATED_METADATA_KEY, UNSET))
+        # A read model shares no mutable state with what it read.
+        parsed = copy.deepcopy(parse_group_metadata_v3(data))
+        consolidated_raw: object = parsed.get(ZARR_V3_CONSOLIDATED_METADATA_KEY, UNSET)
         consolidated: ZarrV3ConsolidatedMetadata | UNSET
         if consolidated_raw is UNSET or consolidated_raw is None:
             # consolidated_metadata: null was written by a historical
@@ -145,18 +143,11 @@ class ZarrV3GroupMetadata:
             consolidated = UNSET
         else:
             consolidated = ZarrV3ConsolidatedMetadata.from_json(consolidated_raw)
-        # Sound cast: the TypedDict types all non-standard keys as its
-        # `extra_items` (`ZarrV3ExtensionField`); the comprehension's inferred value
-        # type is the union over ALL keys because the key filter cannot narrow it.
-        extra_fields = cast(
-            "dict[str, ZarrV3ExtensionField]",
-            {
-                k: v
-                for k, v in parsed.items()
-                if k not in GROUP_METADATA_STANDARD_KEYS_V3
-                and k != ZARR_V3_CONSOLIDATED_METADATA_KEY
-            },
-        )
+        extra_fields: dict[str, ZarrV3ExtensionField] = {
+            k: v
+            for k, v in parsed.items()
+            if k not in GROUP_METADATA_STANDARD_KEYS_V3 and k != ZARR_V3_CONSOLIDATED_METADATA_KEY
+        }
         return cls(
             attributes=dict(parsed.get("attributes", {})),
             consolidated_metadata=consolidated,
@@ -310,7 +301,8 @@ class ZarrV2GroupMetadata:
 
     @classmethod
     def from_json(cls, data: object) -> ZarrV2GroupMetadata:
-        parsed = parse_group_metadata_v2(arrays_to_tuples(data))
+        # A read model shares no mutable state with what it read.
+        parsed = copy.deepcopy(parse_group_metadata_v2(data))
         return cls(attributes=(dict(parsed["attributes"]) if "attributes" in parsed else UNSET))
 
     @classmethod
@@ -419,9 +411,12 @@ class ZarrV2ConsolidatedMetadata:
                     )
         if len(problems) != 0:
             raise MetadataValidationError(problems)
-        entries_tupled = cast(
-            "dict[str, JSONValue]",
-            arrays_to_tuples(dict(cast("Mapping[str, object]", doc["metadata"]))),
+        # A read model shares no mutable state with what it read.
+        entries_tupled = copy.deepcopy(
+            cast(
+                "dict[str, JSONValue]",
+                arrays_to_tuples(dict(cast("Mapping[str, object]", doc["metadata"]))),
+            )
         )
         return cls(metadata=entries_tupled)
 

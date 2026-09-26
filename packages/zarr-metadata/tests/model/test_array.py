@@ -3,9 +3,10 @@
 import copy
 import dataclasses
 import json
+import math
 from collections import UserDict
 from collections.abc import Callable
-from typing import TYPE_CHECKING, get_args
+from typing import TYPE_CHECKING, TypeGuard, get_args, get_origin, get_type_hints
 
 import pytest
 from typing_extensions import Unpack
@@ -26,6 +27,8 @@ from zarr_metadata.model import (
     ZarrV3NamedConfig,
     is_array_metadata_v2,
     is_array_metadata_v3,
+    is_group_metadata_v2,
+    is_group_metadata_v3,
     is_json,
     is_metadata_field_v3,
     parse_array_metadata_v2,
@@ -748,6 +751,20 @@ def test_to_json_shares_no_mutable_state_with_model(
     assert model.to_json() == baseline
 
 
+@pytest.mark.parametrize("model", TO_JSON_NO_ALIASING_PARAMS)
+def test_from_json_shares_no_mutable_state_with_its_input(
+    model: ZarrV3ArrayMetadata | ZarrV2ArrayMetadata,
+) -> None:
+    """Mutating the document a model was read from leaves the model unchanged."""
+    # Arrays as tuples: the reader has nothing to rebuild, so only a copy
+    # keeps the model apart from its input.
+    document = arrays_to_tuples(model.to_json())
+    read = type(model).from_json(document)
+    baseline = copy.deepcopy(read.to_json())
+    mutate_nested_containers(document)
+    assert read.to_json() == baseline
+
+
 def test_v3_parser_accepts_bare_string_data_type() -> None:
     """V3 from_json accepts a bare-string data_type and re-serializes it canonically."""
     doc = ZarrV3ArrayMetadata.create_default().to_json()
@@ -961,6 +978,25 @@ def test_parse_json_materializes_abstract_containers() -> None:
     assert type(parsed) is dict
     assert type(parsed["values"]) is tuple
     json.dumps(parsed, allow_nan=False)
+
+
+@pytest.mark.parametrize(
+    "guard",
+    [
+        is_json,
+        is_metadata_field_v3,
+        is_array_metadata_v3,
+        is_array_metadata_v2,
+        is_group_metadata_v3,
+        is_group_metadata_v2,
+    ],
+    ids=lambda guard: guard.__name__,
+)
+def test_a_guard_narrows_only_when_it_says_yes(guard: Callable[[object], bool]) -> None:
+    """Each guard is False for some values of its type -- `is_json(math.nan)` is,
+    and a NaN is a `float` -- so it is a `TypeGuard`: a `TypeIs` would tell a
+    type checker to narrow such a value away when the guard says no."""
+    assert get_origin(get_type_hints(guard)["return"]) is TypeGuard
 
 
 def test_json_type_guard_rejects_abstract_sequence() -> None:
@@ -1282,6 +1318,52 @@ def test_v2_dtype_must_be_string_or_records() -> None:
     assert [(p.loc, p.kind) for p in problems] == [(("dtype",), "invalid_type")]
 
 
+@pytest.mark.parametrize(
+    ("validate", "document", "loc"),
+    [
+        (
+            validate_array_metadata_v3,
+            {**ZarrV3ArrayMetadata.create_default().to_json(), "codecs": b""},
+            ("codecs",),
+        ),
+        (
+            validate_array_metadata_v3,
+            {**ZarrV3ArrayMetadata.create_default().to_json(), "storage_transformers": bytearray()},
+            ("storage_transformers",),
+        ),
+        (
+            validate_array_metadata_v3,
+            {**ZarrV3ArrayMetadata.create_default(shape=()).to_json(), "dimension_names": b""},
+            ("dimension_names",),
+        ),
+        (
+            validate_array_metadata_v2,
+            {**ZarrV2ArrayMetadata.create_default().to_json(), "dtype": b""},
+            ("dtype",),
+        ),
+        (
+            validate_array_metadata_v2,
+            {**ZarrV2ArrayMetadata.create_default().to_json(), "dtype": (("f0", b""),)},
+            ("dtype",),
+        ),
+        (
+            validate_array_metadata_v2,
+            {**ZarrV2ArrayMetadata.create_default().to_json(), "filters": b""},
+            ("filters",),
+        ),
+    ],
+    ids=["codecs", "storage-transformers", "dimension-names", "dtype", "dtype-record", "filters"],
+)
+def test_error_bytes_are_not_an_array(
+    validate: Callable[[object], tuple[ValidationProblem, ...]],
+    document: dict[str, object],
+    loc: tuple[str | int, ...],
+) -> None:
+    """`bytes` is a sequence to Python and not an array to JSON: where a document
+    expects an array, an empty one no longer passes as one with no items."""
+    assert [(p.loc, p.kind) for p in validate(document)] == [(loc, "invalid_type")]
+
+
 def test_v2_structured_dtype_records_accepted() -> None:
     """A structured v2 dtype (field records, optionally nested/shaped) validates."""
     dtype = (("a", "<i4"), ("b", (("c", "|u1"),)), ("d", "<f8", (2, 2)))
@@ -1401,6 +1483,31 @@ def test_array_v2_ignores_unknown_document_member() -> None:
 
     assert validate_array_metadata_v2(doc) == ()
     assert "unexpected" not in ZarrV2ArrayMetadata.from_json(doc).to_json()
+
+
+@pytest.mark.parametrize(
+    ("member", "kind"),
+    [
+        (object(), "invalid_type"),
+        ({1, 2}, "invalid_type"),
+        (b"\x00", "invalid_type"),
+        (math.nan, "invalid_value"),
+    ],
+    ids=["object", "set", "bytes", "nan"],
+)
+def test_error_array_v2_unknown_member_that_is_not_json(member: object, kind: str) -> None:
+    """Ignored is not unchecked: an unknown member is a JSON value, as in v3."""
+    doc = dict(ZarrV2ArrayMetadata.create_default().to_json()) | {"unexpected": member}
+
+    assert [(p.loc, p.kind) for p in validate_array_metadata_v2(doc)] == [(("unexpected",), kind)]
+
+
+@pytest.mark.parametrize("key", [7, None, True, (1, 2)], ids=["int", "none", "bool", "tuple"])
+def test_error_array_v2_key_that_is_not_a_string(key: object) -> None:
+    """A document's keys are strings: `parse_array_metadata_v2` returned this one."""
+    doc: dict[object, object] = {**ZarrV2ArrayMetadata.create_default().to_json(), key: "x"}
+
+    assert [(p.loc, p.kind) for p in validate_array_metadata_v2(doc)] == [((), "invalid_type")]
 
 
 def test_array_v3_from_json_materializes_abstract_containers() -> None:

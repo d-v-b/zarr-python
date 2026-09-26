@@ -15,7 +15,6 @@ from zarr_metadata.model._validation import (
     ARRAY_METADATA_STANDARD_KEYS_V3,
     MetadataValidationError,
     ValidationProblem,
-    arrays_to_tuples,
     dump_store_json,
     load_store_json,
     parse_array_metadata_v2,
@@ -78,12 +77,8 @@ class ZarrV3NamedConfig:
         field = parse_metadata_field_v3(data)
         if isinstance(field, str):
             return cls(name=field, configuration={}, must_understand=True)
-        # Sound cast: parse_metadata_field_v3 checked the configuration is a
-        # string-keyed mapping of JSON values; arrays_to_tuples only converts
-        # lists to tuples within that shape.
-        configuration = cast(
-            "dict[str, JSONValue]", arrays_to_tuples(dict(field.get("configuration", {})))
-        )
+        # A read model shares no mutable state with what it read.
+        configuration = copy.deepcopy(dict(field.get("configuration", {})))
         return cls(
             name=field["name"],
             configuration=configuration,
@@ -119,18 +114,11 @@ def must_understand_subset(
     runtime isinstance check defends against values looser than the declared
     `ZarrV3ExtensionField`).
     """
-    fields = cast("Mapping[str, object]", extra_fields)
-    return cast(
-        "dict[str, ZarrV3ExtensionField]",
-        {
-            name: value
-            for name, value in fields.items()
-            if not (
-                isinstance(value, Mapping)
-                and cast("Mapping[str, object]", value).get("must_understand") is False
-            )
-        },
-    )
+    return {
+        name: value
+        for name, value in extra_fields.items()
+        if not (isinstance(value, Mapping) and value.get("must_understand") is False)
+    }
 
 
 class ZarrV3ArrayMetadataPartial(TypedDict, total=False):
@@ -286,14 +274,11 @@ class ZarrV3ArrayMetadata:
 
     @classmethod
     def from_json(cls, data: object) -> ZarrV3ArrayMetadata:
-        parsed = parse_array_metadata_v3(arrays_to_tuples(data))
-        # Sound cast: the TypedDict types all non-standard keys as its
-        # `extra_items` (`ZarrV3ExtensionField`); the comprehension's inferred value
-        # type is the union over ALL keys because the key filter cannot narrow it.
-        extra_fields = cast(
-            "dict[str, ZarrV3ExtensionField]",
-            {k: v for k, v in parsed.items() if k not in ARRAY_METADATA_STANDARD_KEYS_V3},
-        )
+        # A read model shares no mutable state with what it read.
+        parsed = copy.deepcopy(parse_array_metadata_v3(data))
+        extra_fields: dict[str, ZarrV3ExtensionField] = {
+            k: v for k, v in parsed.items() if k not in ARRAY_METADATA_STANDARD_KEYS_V3
+        }
         return cls(
             shape=parsed["shape"],
             fill_value=parsed["fill_value"],
@@ -454,7 +439,8 @@ class ZarrV2ArrayMetadata:
 
     @classmethod
     def from_json(cls, data: object) -> ZarrV2ArrayMetadata:
-        parsed = parse_array_metadata_v2(arrays_to_tuples(data))
+        # A read model shares no mutable state with what it read.
+        parsed = copy.deepcopy(parse_array_metadata_v2(data))
         return cls(
             shape=parsed["shape"],
             dtype=parsed["dtype"],

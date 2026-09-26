@@ -22,12 +22,18 @@ from zarr_metadata.model._group import (
 from zarr_metadata.model._validation import (
     MetadataValidationError,
     ValidationProblem,
+    arrays_to_tuples,
     is_group_metadata_v2,
     is_group_metadata_v3,
     parse_group_metadata_v2,
     parse_group_metadata_v3,
     validate_group_metadata_v2,
     validate_group_metadata_v3,
+)
+from zarr_metadata.v2.group import (
+    ZarrV2GroupMetadataJSON,
+    ZarrV2GroupMetadataJSONPartial,
+    ZarrV2ZGroupJSON,
 )
 
 # --- ZarrV3GroupMetadata ---------------------------------------------------
@@ -132,6 +138,17 @@ def test_group_v2_rejects_unknown_document_member() -> None:
     assert [(p.loc, p.kind) for p in validate_group_metadata_v2({"zarr_format": 2, "x": 1})] == [
         (("x",), "invalid_value")
     ]
+
+
+@pytest.mark.parametrize(
+    "document_type",
+    [ZarrV2ZGroupJSON, ZarrV2GroupMetadataJSON, ZarrV2GroupMetadataJSONPartial],
+    ids=lambda document_type: document_type.__name__,
+)
+def test_v2_group_document_types_are_closed(document_type: type) -> None:
+    """`.zgroup` "Other keys MUST NOT be present": the validator refuses them, and
+    the types say so."""
+    assert getattr(document_type, "__closed__", None) is True
 
 
 @pytest.mark.parametrize(
@@ -400,6 +417,25 @@ def test_consolidated_v2_metadata_values_must_be_json() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    "stored",
+    [
+        '{"zarr_format": 2}',
+        None,
+        memoryview(b'{"zarr_format": 2}'),
+        bytearray(b'{"zarr_format": 2}'),
+    ],
+    ids=["str", "none", "memoryview", "bytearray"],
+)
+def test_error_a_store_value_that_is_not_bytes_is_refused(stored: object) -> None:
+    """A store maps keys to bytes, and a reader checks that it read bytes."""
+    with pytest.raises(MetadataValidationError) as exc_info:
+        ZarrV2GroupMetadata.from_key_value({".zgroup": stored})  # pyright: ignore[reportArgumentType]
+    assert [(problem.loc, problem.kind) for problem in exc_info.value.problems] == [
+        ((".zgroup",), "invalid_type")
+    ]
+
+
 def test_group_v2_from_key_value_scalar_root_raises_metadata_error() -> None:
     """A scalar .zgroup document fails through the unified metadata error channel."""
     with pytest.raises(MetadataValidationError) as exc_info:
@@ -573,3 +609,20 @@ def test_to_json_shares_no_mutable_state_with_model(
     baseline = copy.deepcopy(model.to_json())
     mutate_nested_containers(model.to_json())
     assert model.to_json() == baseline
+
+
+@pytest.mark.parametrize("model", TO_JSON_NO_ALIASING_PARAMS)
+def test_from_json_shares_no_mutable_state_with_its_input(
+    model: ZarrV3GroupMetadata
+    | ZarrV2GroupMetadata
+    | ZarrV3ConsolidatedMetadata
+    | ZarrV2ConsolidatedMetadata,
+) -> None:
+    """Mutating the document a model was read from leaves the model unchanged."""
+    # Arrays as tuples: the reader has nothing to rebuild, so only a copy
+    # keeps the model apart from its input.
+    document = arrays_to_tuples(model.to_json())
+    read = type(model).from_json(document)
+    baseline = copy.deepcopy(read.to_json())
+    mutate_nested_containers(document)
+    assert read.to_json() == baseline
