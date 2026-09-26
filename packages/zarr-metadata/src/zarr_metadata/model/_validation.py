@@ -837,16 +837,24 @@ def load_store_json(mapping: Mapping[str, bytes], key: str) -> object:
     into typed positions silently. Narrow the result with a `parse_*`.
 
     Every ingestion failure surfaces as `MetadataValidationError`: a missing
-    store key is a `missing_key` problem and undecodable bytes are an
-    `invalid_json` problem, rather than leaking `KeyError` /
-    `json.JSONDecodeError` to callers.
+    store key is a `missing_key` problem, a value that is not `bytes` an
+    `invalid_type` problem, and undecodable bytes an `invalid_json` problem,
+    rather than leaking `KeyError`, `TypeError` or `json.JSONDecodeError` to
+    callers.
     """
     if key not in mapping:
         raise MetadataValidationError(
             [ValidationProblem((key,), "missing store key", "missing_key")]
         )
+    # The runtime half of the annotation: `json.loads` decodes a `str` and
+    # raises `TypeError` on most else.
+    raw = cast("object", mapping[key])
+    if not isinstance(raw, bytes):
+        raise MetadataValidationError(
+            [ValidationProblem((key,), f"expected bytes, got {type(raw).__name__}", "invalid_type")]
+        )
     try:
-        return json.loads(mapping[key], parse_constant=_reject_json_constant)
+        return json.loads(raw, parse_constant=_reject_json_constant)
     except (UnicodeDecodeError, ValueError) as exc:
         raise MetadataValidationError(
             [ValidationProblem((key,), f"invalid JSON: {exc}", "invalid_json")]
