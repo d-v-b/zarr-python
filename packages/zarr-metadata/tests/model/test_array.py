@@ -3,6 +3,7 @@
 import copy
 import dataclasses
 import json
+import pickle
 from collections import UserDict
 from collections.abc import Callable
 from typing import TYPE_CHECKING, get_args
@@ -672,29 +673,17 @@ def test_roundtrip_model_json_model(
     assert model_cls.from_json(model.to_json()) == model
 
 
-# --- Round-trips (model → key_value → model, parametrized) -----------------
-
-ROUNDTRIP_KEY_VALUE_PARAMS = [
-    pytest.param(
-        ZarrV3ArrayMetadata,
-        ZarrV3ArrayMetadata.create_default(attributes={"a": 1}),
-        id="v3",
-    ),
-    pytest.param(
-        ZarrV2ArrayMetadata,
-        ZarrV2ArrayMetadata.create_default(attributes={"a": 1}),
-        id="v2",
-    ),
-]
+# --- Round-trips (model → key_value → model) --------------------------------
 
 
-@pytest.mark.parametrize(("model_cls", "model"), ROUNDTRIP_KEY_VALUE_PARAMS)
-def test_roundtrip_via_key_value(
-    model_cls: type[ZarrV3ArrayMetadata | ZarrV2ArrayMetadata],
-    model: ZarrV3ArrayMetadata | ZarrV2ArrayMetadata,
-) -> None:
+def test_roundtrip_via_key_value() -> None:
     """A model round-trips through to_key_value/from_key_value back to an equal model."""
-    assert model_cls.from_key_value(model.to_key_value()) == model
+    # Not parametrized over the two classes: a mapping's key type is
+    # invariant, so a reader cannot take the union of what they write.
+    v3 = ZarrV3ArrayMetadata.create_default(attributes={"a": 1})
+    v2 = ZarrV2ArrayMetadata.create_default(attributes={"a": 1})
+    assert ZarrV3ArrayMetadata.from_key_value(v3.to_key_value()) == v3
+    assert ZarrV2ArrayMetadata.from_key_value(v2.to_key_value()) == v2
 
 
 # --- Round-trips (json → model → json, direction distinct — kept direct) ---
@@ -977,6 +966,7 @@ def test_parse_metadata_field_materializes_abstract_containers() -> None:
 
     assert isinstance(parsed, dict)
     assert parsed == {"name": "example", "configuration": {"values": (0, 1)}}
+    assert "configuration" in parsed
     assert type(parsed["configuration"]) is dict
 
 
@@ -1263,6 +1253,65 @@ def test_metadata_validation_error_holds_problems() -> None:
     assert "data_type: expected a metadata field" in str(err)
 
 
+def test_the_error_pickles_and_copies_as_its_problems() -> None:
+    error = MetadataValidationError([ValidationProblem(("a",), "bad a", "invalid_value")])
+    error.add_note("while reading a")
+    for again in (pickle.loads(pickle.dumps(error)), copy.copy(error), copy.deepcopy(error)):
+        assert type(again) is MetadataValidationError
+        assert again.problems == error.problems
+        assert str(again) == str(error)
+        assert again.__notes__ == ["while reading a"]
+
+
+def test_error_a_problem_refuses_a_loc_that_is_not_a_tuple() -> None:
+    # The missing comma: `("level")` is a string, and read as a location
+    # it would be the path through each of its characters.
+    with pytest.raises(TypeError, match="loc is a tuple of keys and indices"):
+        ValidationProblem(("level"), "bad level", "invalid_value")  # pyright: ignore[reportArgumentType]
+
+
+@pytest.mark.parametrize("part", [True, 1.5], ids=["bool", "float"])
+def test_error_a_problem_refuses_a_loc_part_that_is_not_a_key_or_an_index(part: object) -> None:
+    # `True` passes as an `int`, and would index a sequence as 1.
+    with pytest.raises(TypeError, match="loc is a tuple of keys and indices"):
+        ValidationProblem(("a", part), "bad a", "invalid_value")  # pyright: ignore[reportArgumentType]
+
+
+def test_error_a_problem_refuses_a_message_that_is_not_a_string() -> None:
+    with pytest.raises(TypeError, match="message is a string"):
+        ValidationProblem(("level",), 7, "invalid_value")  # pyright: ignore[reportArgumentType]
+
+
+def test_error_a_problem_refuses_a_kind_that_is_not_one() -> None:
+    # A kind outside the set is one a consumer that dispatches on kinds
+    # never sees.
+    with pytest.raises(TypeError, match="kind is one of"):
+        ValidationProblem(("level",), "bad level", "invalid")  # pyright: ignore[reportArgumentType]
+
+
+class _EqualToEveryKind:
+    """Not a kind, though it compares equal to each."""
+
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    def __hash__(self) -> int:
+        return 0
+
+
+def test_error_a_problem_refuses_a_kind_that_only_compares_equal_to_one() -> None:
+    # `in` tests equality, which any object can claim.
+    with pytest.raises(TypeError, match="kind is one of"):
+        ValidationProblem(("level",), "bad level", _EqualToEveryKind())  # pyright: ignore[reportArgumentType]
+
+
+def test_error_the_error_refuses_what_is_not_a_problem() -> None:
+    # A list of one-element tuples of problems is the likely slip: it
+    # would otherwise fail far away, where a `loc` is read off an entry.
+    with pytest.raises(TypeError, match="takes ValidationProblem values, got tuple"):
+        MetadataValidationError([(ValidationProblem(("a",), "bad a", "invalid_value"),)])  # pyright: ignore[reportArgumentType]
+
+
 def test_prefix_prepends_loc_head() -> None:
     """_prefix prepends a loc head to each problem's loc."""
     problems = [ValidationProblem(loc=("name",), message="expected str", kind="invalid_type")]
@@ -1415,12 +1464,12 @@ def test_array_v3_from_json_materializes_abstract_containers() -> None:
 
 
 def test_from_key_value_rejects_non_standard_json_constant() -> None:
-    """Store JSON decoding rejects JavaScript NaN/Infinity constants."""
+    """A JavaScript NaN constant outside the attributes is located, not decoded as a fill value."""
     doc = dict(ZarrV3ArrayMetadata.create_default().to_json())
     doc["fill_value"] = float("nan")
     raw = json.dumps(doc)
 
-    with pytest.raises(MetadataValidationError, match="invalid JSON"):
+    with pytest.raises(MetadataValidationError, match="fill_value: non-finite float nan"):
         ZarrV3ArrayMetadata.from_key_value({"zarr.json": raw.encode()})
 
 
@@ -1428,7 +1477,7 @@ def test_to_key_value_rejects_non_finite_model_value() -> None:
     """Strict encoding prevents directly-constructed models from writing invalid JSON."""
     model = ZarrV3ArrayMetadata.create_default(fill_value=float("nan"))
 
-    with pytest.raises(ValueError, match="JSON compliant"):
+    with pytest.raises(MetadataValidationError, match="fill_value: non-finite float nan"):
         model.to_key_value()
 
 
@@ -1559,7 +1608,7 @@ def test_configuration_values_must_be_json() -> None:
 
 def test_v3_extension_keys_must_be_strings() -> None:
     """A non-string top-level key cannot be represented by a v3 document type."""
-    doc: dict[object, object] = dict(ZarrV3ArrayMetadata.create_default().to_json())
+    doc: dict[object, object] = {**ZarrV3ArrayMetadata.create_default().to_json()}
     doc[1] = {"must_understand": False}
     assert [(problem.loc, problem.kind) for problem in validate_array_metadata_v3(doc)] == [
         ((), "invalid_type")
@@ -1758,7 +1807,7 @@ def test_v2_absent_dimension_separator_means_dot() -> None:
     del doc["dimension_separator"]
     model = ZarrV2ArrayMetadata.from_json(doc)
     assert model.dimension_separator == "."
-    assert model.to_json()["dimension_separator"] == "."
+    assert model.to_json().get("dimension_separator") == "."
 
 
 def test_v2_from_key_value_without_separator_means_dot() -> None:

@@ -163,7 +163,7 @@ def test_group_guards_reject_noncanonical_nested_json() -> None:
     assert not is_group_metadata_v3(v3)
     assert not is_group_metadata_v2(v2)
     assert parse_group_metadata_v3(v3)["extension"] == (0, 1)
-    assert parse_group_metadata_v2(v2)["attributes"] == {"values": (0, 1)}
+    assert parse_group_metadata_v2(v2).get("attributes") == {"values": (0, 1)}
 
 
 def test_group_v3_extension_fields_are_validated() -> None:
@@ -496,6 +496,19 @@ def test_v2_consolidated_rejects_unknown_document_member() -> None:
 
     with pytest.raises(MetadataValidationError, match="unexpected"):
         ZarrV2ConsolidatedMetadata.from_json(doc)
+
+
+@pytest.mark.parametrize("key", [1, None], ids=["int", "none"])
+def test_v2_consolidated_rejects_non_string_document_key(key: object) -> None:
+    """A non-string key is a problem at the document: not a member at a
+    location that reads as an index, nor a `TypeError`."""
+    doc = {"zarr_consolidated_format": 1, "metadata": {}, key: "x"}
+
+    with pytest.raises(MetadataValidationError) as exc_info:
+        ZarrV2ConsolidatedMetadata.from_json(doc)
+    assert [(problem.loc, problem.kind) for problem in exc_info.value.problems] == [
+        ((), "invalid_type")
+    ]
 
 
 # --- must_understand partition ------------------------------------------------

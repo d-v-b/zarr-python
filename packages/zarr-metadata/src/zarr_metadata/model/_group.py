@@ -18,14 +18,16 @@ from zarr_metadata.model._sentinel import UNSET
 from zarr_metadata.model._validation import (
     GROUP_METADATA_STANDARD_KEYS_V3,
     MetadataValidationError,
+    StoreKey,
     ValidationProblem,
     arrays_to_tuples,
     dump_store_json,
     load_store_json,
     parse_group_metadata_v2,
     parse_group_metadata_v3,
+    refine_json,
+    refine_user_data,
     validate_consolidated_metadata_v3,
-    validate_json,
 )
 from zarr_metadata.v2.attributes import ZARR_V2_ATTRIBUTES_STORE_KEY
 from zarr_metadata.v2.consolidated import ZARR_V2_CONSOLIDATED_METADATA_STORE_KEY
@@ -176,13 +178,16 @@ class ZarrV3GroupMetadata:
         return must_understand_subset(self.extra_fields)
 
     @classmethod
-    def from_key_value(cls, mapping: Mapping[str, bytes]) -> ZarrV3GroupMetadata:
+    def from_key_value(cls, mapping: Mapping[StoreKey, bytes]) -> ZarrV3GroupMetadata:
         return cls.from_json(load_store_json(mapping, ZARR_V3_GROUP_METADATA_STORE_KEY))
 
     def to_key_value(
         self, *, indent: int | str | None = None
     ) -> Mapping[ZarrV3GroupMetadataStoreKey, bytes]:
-        return {ZARR_V3_GROUP_METADATA_STORE_KEY: dump_store_json(self.to_json(), indent=indent)}
+        # A model built by hand is not validated: its document is written only
+        # if it reads as `from_json` reads one, and every problem is raised.
+        document = parse_group_metadata_v3(self.to_json())
+        return {ZARR_V3_GROUP_METADATA_STORE_KEY: dump_store_json(document, indent=indent)}
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -314,7 +319,7 @@ class ZarrV2GroupMetadata:
         return cls(attributes=(dict(parsed["attributes"]) if "attributes" in parsed else UNSET))
 
     @classmethod
-    def from_key_value(cls, mapping: Mapping[str, bytes]) -> ZarrV2GroupMetadata:
+    def from_key_value(cls, mapping: Mapping[StoreKey, bytes]) -> ZarrV2GroupMetadata:
         zgroup_raw = load_store_json(mapping, ZARR_V2_GROUP_METADATA_STORE_KEY)
         if not isinstance(zgroup_raw, Mapping):
             return cls.from_json(zgroup_raw)
@@ -339,13 +344,18 @@ class ZarrV2GroupMetadata:
     ) -> Mapping[ZarrV2GroupMetadataStoreKey | ZarrV2AttributesStoreKey, bytes]:
         # Attributes live only in the sibling `.zattrs` file; the `.zgroup`
         # document must exclude them. The `.zattrs` key is present exactly
-        # when attributes are set (even empty) — UNSET emits no file.
-        zgroup = {k: v for k, v in self.to_json().items() if k != "attributes"}
+        # when attributes are set (even empty) — UNSET emits no file. A model
+        # built by hand is not validated: its document is written only if it
+        # reads as `from_json` reads one, and every problem is raised.
+        document = parse_group_metadata_v2(self.to_json())
+        zgroup = {k: v for k, v in document.items() if k != "attributes"}
         out: dict[ZarrV2GroupMetadataStoreKey | ZarrV2AttributesStoreKey, bytes] = {
             ZARR_V2_GROUP_METADATA_STORE_KEY: dump_store_json(zgroup, indent=indent)
         }
-        if self.attributes is not UNSET:
-            out[ZARR_V2_ATTRIBUTES_STORE_KEY] = dump_store_json(self.attributes, indent=indent)
+        if "attributes" in document:
+            out[ZARR_V2_ATTRIBUTES_STORE_KEY] = dump_store_json(
+                document["attributes"], indent=indent
+            )
         return out
 
 
@@ -377,7 +387,7 @@ class ZarrV2ConsolidatedMetadata:
             raise MetadataValidationError(
                 [ValidationProblem((), "expected a mapping", "invalid_type")]
             )
-        doc = cast("Mapping[str, object]", normalized)
+        doc = cast("Mapping[object, object]", normalized)
         problems: list[ValidationProblem] = [
             ValidationProblem((key,), "missing required key", "missing_key")
             for key in ("zarr_consolidated_format", "metadata")
@@ -385,7 +395,10 @@ class ZarrV2ConsolidatedMetadata:
         ]
         problems.extend(
             ValidationProblem((key,), "unexpected document member", "invalid_value")
-            for key in doc.keys() - {"zarr_consolidated_format", "metadata"}
+            if isinstance(key, str)
+            else ValidationProblem((), f"non-string document key {key!r}", "invalid_type")
+            for key in doc
+            if key not in {"zarr_consolidated_format", "metadata"}
         )
         if "zarr_consolidated_format" in doc and (
             not isinstance(doc["zarr_consolidated_format"], int)
@@ -399,6 +412,7 @@ class ZarrV2ConsolidatedMetadata:
                     "invalid_value",
                 )
             )
+        refined: dict[str, JSONValue] = {}
         if "metadata" in doc:
             entries = doc["metadata"]
             if not isinstance(entries, Mapping) or not all(
@@ -410,28 +424,29 @@ class ZarrV2ConsolidatedMetadata:
                     )
                 )
             else:
+                # Each entry is the document its key names: a `.zattrs` is
+                # user data, and any other is JSON by RFC 8259.
                 for key, value in cast("Mapping[str, object]", entries).items():
-                    problems.extend(
-                        ValidationProblem(
-                            ("metadata", key, *problem.loc), problem.message, problem.kind
-                        )
-                        for problem in validate_json(value)
+                    refine = (
+                        refine_user_data
+                        if key.rsplit("/", 1)[-1] == ZARR_V2_ATTRIBUTES_STORE_KEY
+                        else refine_json
                     )
+                    entry, found = refine(value, ("metadata", key))
+                    problems.extend(found)
+                    refined[key] = entry
         if len(problems) != 0:
             raise MetadataValidationError(problems)
-        entries_tupled = cast(
-            "dict[str, JSONValue]",
-            arrays_to_tuples(dict(cast("Mapping[str, object]", doc["metadata"]))),
-        )
-        return cls(metadata=entries_tupled)
+        return cls(metadata=refined)
 
     @classmethod
-    def from_key_value(cls, mapping: Mapping[str, bytes]) -> ZarrV2ConsolidatedMetadata:
+    def from_key_value(cls, mapping: Mapping[StoreKey, bytes]) -> ZarrV2ConsolidatedMetadata:
         return cls.from_json(load_store_json(mapping, ZARR_V2_CONSOLIDATED_METADATA_STORE_KEY))
 
     def to_key_value(
         self, *, indent: int | str | None = None
     ) -> Mapping[ZarrV2ConsolidatedMetadataStoreKey, bytes]:
-        return {
-            ZARR_V2_CONSOLIDATED_METADATA_STORE_KEY: dump_store_json(self.to_json(), indent=indent)
-        }
+        # A model built by hand is not validated: it is written only as
+        # `from_json` reads it, and every problem is raised.
+        document = ZarrV2ConsolidatedMetadata.from_json(self.to_json()).to_json()
+        return {ZARR_V2_CONSOLIDATED_METADATA_STORE_KEY: dump_store_json(document, indent=indent)}
