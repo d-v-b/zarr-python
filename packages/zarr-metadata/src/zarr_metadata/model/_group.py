@@ -134,7 +134,8 @@ class ZarrV3GroupMetadata:
 
     @classmethod
     def from_json(cls, data: object) -> ZarrV3GroupMetadata:
-        parsed = parse_group_metadata_v3(arrays_to_tuples(data))
+        # A read model shares no mutable state with what it read.
+        parsed = copy.deepcopy(parse_group_metadata_v3(data))
         # Cast for narrowing across standard and arbitrary extra TypedDict items.
         consolidated_raw = cast("object", parsed.get(ZARR_V3_CONSOLIDATED_METADATA_KEY, UNSET))
         consolidated: ZarrV3ConsolidatedMetadata | UNSET
@@ -310,7 +311,8 @@ class ZarrV2GroupMetadata:
 
     @classmethod
     def from_json(cls, data: object) -> ZarrV2GroupMetadata:
-        parsed = parse_group_metadata_v2(arrays_to_tuples(data))
+        # A read model shares no mutable state with what it read.
+        parsed = copy.deepcopy(parse_group_metadata_v2(data))
         return cls(attributes=(dict(parsed["attributes"]) if "attributes" in parsed else UNSET))
 
     @classmethod
@@ -419,9 +421,12 @@ class ZarrV2ConsolidatedMetadata:
                     )
         if len(problems) != 0:
             raise MetadataValidationError(problems)
-        entries_tupled = cast(
-            "dict[str, JSONValue]",
-            arrays_to_tuples(dict(cast("Mapping[str, object]", doc["metadata"]))),
+        # A read model shares no mutable state with what it read.
+        entries_tupled = copy.deepcopy(
+            cast(
+                "dict[str, JSONValue]",
+                arrays_to_tuples(dict(cast("Mapping[str, object]", doc["metadata"]))),
+            )
         )
         return cls(metadata=entries_tupled)
 
