@@ -18,6 +18,7 @@ from zarr_metadata.model._sentinel import UNSET
 from zarr_metadata.model._validation import (
     GROUP_METADATA_STANDARD_KEYS_V3,
     MetadataValidationError,
+    StoreKey,
     ValidationProblem,
     arrays_to_tuples,
     dump_store_json,
@@ -176,7 +177,7 @@ class ZarrV3GroupMetadata:
         return must_understand_subset(self.extra_fields)
 
     @classmethod
-    def from_key_value(cls, mapping: Mapping[str, bytes]) -> ZarrV3GroupMetadata:
+    def from_key_value(cls, mapping: Mapping[StoreKey, bytes]) -> ZarrV3GroupMetadata:
         return cls.from_json(load_store_json(mapping, ZARR_V3_GROUP_METADATA_STORE_KEY))
 
     def to_key_value(
@@ -314,7 +315,7 @@ class ZarrV2GroupMetadata:
         return cls(attributes=(dict(parsed["attributes"]) if "attributes" in parsed else UNSET))
 
     @classmethod
-    def from_key_value(cls, mapping: Mapping[str, bytes]) -> ZarrV2GroupMetadata:
+    def from_key_value(cls, mapping: Mapping[StoreKey, bytes]) -> ZarrV2GroupMetadata:
         zgroup_raw = load_store_json(mapping, ZARR_V2_GROUP_METADATA_STORE_KEY)
         if not isinstance(zgroup_raw, Mapping):
             return cls.from_json(zgroup_raw)
@@ -426,7 +427,7 @@ class ZarrV2ConsolidatedMetadata:
         return cls(metadata=entries_tupled)
 
     @classmethod
-    def from_key_value(cls, mapping: Mapping[str, bytes]) -> ZarrV2ConsolidatedMetadata:
+    def from_key_value(cls, mapping: Mapping[StoreKey, bytes]) -> ZarrV2ConsolidatedMetadata:
         return cls.from_json(load_store_json(mapping, ZARR_V2_CONSOLIDATED_METADATA_STORE_KEY))
 
     def to_key_value(

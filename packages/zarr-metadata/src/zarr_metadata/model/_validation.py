@@ -17,7 +17,7 @@ import json
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Final, Literal, NoReturn, cast
+from typing import Final, Literal, NoReturn, TypeVar, cast
 
 from typing_extensions import TypeIs
 
@@ -836,7 +836,11 @@ def _reject_json_constant(constant: str) -> NoReturn:
     raise ValueError(f"non-standard JSON constant {constant!r}")
 
 
-def load_store_json(mapping: Mapping[str, bytes], key: str) -> object:
+StoreKey = TypeVar("StoreKey", bound=str)
+"""The key type of a mapping of store keys to bytes: `str`, or the literal keys one document names."""
+
+
+def load_store_json(mapping: Mapping[StoreKey, bytes], key: str) -> object:
     """Decode the JSON document stored at `key` in `mapping`.
 
     Returns `object`, not `Any`: what a store holds is unknown until a
@@ -848,12 +852,15 @@ def load_store_json(mapping: Mapping[str, bytes], key: str) -> object:
     `invalid_json` problem, rather than leaking `KeyError` /
     `json.JSONDecodeError` to callers.
     """
-    if key not in mapping:
+    # Read by a `str` key whatever narrower key type the mapping declares:
+    # a key it does not hold is only absent.
+    stored = cast("Mapping[str, bytes]", mapping)
+    if key not in stored:
         raise MetadataValidationError(
             [ValidationProblem((key,), "missing store key", "missing_key")]
         )
     try:
-        return json.loads(mapping[key], parse_constant=_reject_json_constant)
+        return json.loads(stored[key], parse_constant=_reject_json_constant)
     except (UnicodeDecodeError, ValueError) as exc:
         raise MetadataValidationError(
             [ValidationProblem((key,), f"invalid JSON: {exc}", "invalid_json")]
