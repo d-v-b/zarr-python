@@ -6,8 +6,27 @@ from typing import TYPE_CHECKING, Generic, TypeVar
 
 import pytest
 
+from zarr_metadata.model import ZarrV2ArrayMetadata, ZarrV3ArrayMetadata
+
 if TYPE_CHECKING:
     from contextlib import AbstractContextManager
+
+# Canonical documents shared by the integration test modules
+# (test_pydantic_module.py, test_msgspec_module.py), so a model change that
+# alters a canonical document is corrected in one place.
+V3_ARRAY_DOC = dict(ZarrV3ArrayMetadata.create_default(shape=(4,)).to_json())
+V2_ARRAY_DOC = dict(ZarrV2ArrayMetadata.create_default(shape=(4,), chunks=(2,)).to_json())
+V3_GROUP_DOC = {"zarr_format": 3, "node_type": "group", "attributes": {"a": 1}}
+V2_GROUP_DOC = {"zarr_format": 2, "attributes": {"a": 1}}
+V3_CONSOLIDATED_DOC = {
+    "kind": "inline",
+    "must_understand": False,
+    "metadata": {"a": dict(V3_ARRAY_DOC)},
+}
+V2_CONSOLIDATED_DOC = {
+    "zarr_consolidated_format": 1,
+    "metadata": {".zgroup": {"zarr_format": 2}},
+}
 
 TIn = TypeVar("TIn")
 TOut = TypeVar("TOut")
