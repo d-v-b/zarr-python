@@ -860,14 +860,13 @@ def dump_store_json(value: object, *, indent: int | str | None = None) -> bytes:
 
 def arrays_to_tuples(obj: object) -> object:
     """Recursively materialize mappings and convert array-like values to tuples."""
-    if isinstance(obj, Sequence) and not isinstance(obj, (str, bytes, bytearray)):
-        sequence = cast("Sequence[object]", obj)
-        converted_sequence = tuple(arrays_to_tuples(item) for item in sequence)
+    if _is_array(obj):
+        converted_sequence = tuple(arrays_to_tuples(item) for item in obj)
         if isinstance(obj, tuple) and all(
             converted is original
-            for converted, original in zip(converted_sequence, sequence, strict=True)
+            for converted, original in zip(converted_sequence, obj, strict=True)
         ):
-            return cast("tuple[object, ...]", obj)
+            return obj
         return converted_sequence
     if isinstance(obj, Mapping):
         mapping = cast("Mapping[object, object]", obj)
@@ -875,6 +874,6 @@ def arrays_to_tuples(obj: object) -> object:
             key: arrays_to_tuples(value) for key, value in mapping.items()
         }
         if isinstance(obj, dict) and all(converted[key] is value for key, value in mapping.items()):
-            return cast("object", obj)
+            return mapping
         return converted
     return obj
