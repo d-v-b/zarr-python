@@ -71,7 +71,7 @@ against the chunk it is handed, a shard's inner and index codecs too.
 The validators do no arithmetic on values: whether a fill value survives
 a `cast_value` round trip is not judged.
 
-Three choices the specs' words leave open, or settle two ways:
+Two choices the specs' words leave open, or settle two ways:
 
 - **`attributes` may hold `NaN`, `Infinity` and `-Infinity`.** The spec
   interprets no attribute, and zarr-python and xarray write those numbers
@@ -85,11 +85,13 @@ Three choices the specs' words leave open, or settle two ways:
   reads wrong bytes as surely as one that skips a data type reads wrong
   values. It keeps its meaning on an unknown top-level member, which a
   reader can skip.
-- **A chunk length of 0 is allowed along a dimension of length 0.** The
-  core spec asks for non-zero chunk lengths only "when the corresponding
-  dimensions of the arrays have non-zero length"; the regular grid spec
-  says chunk sizes are greater than zero. The package follows the core
-  spec, which zarr-python 3.0 and 3.1 wrote for an empty dimension.
+
+A regular grid's chunk lengths are at least 1, along a dimension of
+length 0 too: "Chunk sizes must be greater than zero", the regular grid
+spec says. The core spec's "non-zero when the corresponding dimensions
+of the arrays have non-zero length" says less, and allows nothing more,
+so a document with a 0 there, as zarr-python 3.0 and 3.1 wrote for an
+empty dimension, is refused.
 
 `read_array_metadata_v3` reads a document once and returns everything
 the read found: each field as the scope read it -- `Read` by the
@@ -134,13 +136,37 @@ build the model of either kind, as the models' own `from_json` and
 A member the spec does not define is not a field; the model's
 `must_understand_fields` names those a reader must understand.
 
-The Pydantic integration's generated JSON Schemas express independently
-checkable document structure and field constraints, but they are not a
-replacement for runtime model validation. Standard JSON Schema treats a
-mathematically integral number such as `1.0` as an integer, while the runtime
-boundary requires Python `int` values, and it cannot express arbitrary
-same-length relations such as `dimension_names` versus `shape` or v2 `chunks`
-versus `shape`. Consumers should run the model parser after schema validation.
+`node_metadata_json_schema_v3` writes what the validators read as a
+JSON Schema, draft 2020-12, for an editor that checks a `zarr.json` as it
+is written, or a validator in another language. Each extension point is
+a field as its scope reads it: a configuration as its definition's
+TypedDict says, bounds and all, and a name nothing in the scope claims
+with any configuration. The fill value is what the data type it names
+takes. `field_json_schema(kind, context)`, in
+`zarr_metadata.v3.definition`, writes one field's schema, and
+`json_schema`, in `zarr_metadata.typed_json`, any TypedDict's, as `check`
+reads it. A schema says what each member is, and not what the rules say
+of members together, so a document it accepts may still have a problem;
+a JSON document the validators accept, it accepts. A validator reads
+JSON as a parser gives it, arrays as lists: a model's `to_json` writes
+tuples, which a Python validator does not take for arrays.
+
+```python
+import json
+from zarr_metadata.model import node_metadata_json_schema_v3
+
+with open("zarr.schema.json", "w") as f:
+    json.dump(node_metadata_json_schema_v3(), f, indent=2)
+```
+
+The Pydantic integration's field types have JSON Schemas of their own,
+for a model that holds them: an extension point there is a name and any
+configuration, read in no scope, and v2 documents have one too. For a
+`zarr.json`, use `node_metadata_json_schema_v3`. Neither replaces the
+validators: JSON Schema takes a number such as `1.0` for an integer,
+where the models require an `int`, and says nothing of what members read
+together say, such as `dimension_names` against `shape` or v2 `chunks`
+against `shape`. Run the model parser after schema validation.
 
 ## Scope
 
