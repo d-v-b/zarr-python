@@ -128,10 +128,20 @@ metadata = reading.metadata  # None when reading.problems is not empty
 its consolidated metadata holds once. `read_node_metadata_v3` reads a
 `zarr.json` of either kind as the node its `node_type` says it is, as
 a discriminated union reads its tag: a document that says neither reads
-as `ZarrV3UnknownNodeReading`, with the problem, and nothing else of it
-is read. `node_metadata_from_json_v3` and `node_metadata_from_key_value_v3`
+as `ZarrV3UnknownNodeReading`, with the problems, and nothing else of it
+is read but its `zarr_format`, so a document of another format says it
+is not v3. `node_metadata_from_json_v3` and `node_metadata_from_key_value_v3`
 build the model of either kind, as the models' own `from_json` and
 `from_key_value` build one.
+
+Consolidated metadata holds the hierarchy below its group, the group its
+root: the document of the node at `/a/b` sits at the key `a/b`, and the
+documents and the group make a tree in which only groups hold nodes and
+each node's parent is held. `NodeName` and `NodePath`, in
+`zarr_metadata.v3`, are the strings the spec's rules for node names and
+paths hold of, modelled on zarrs' types of those names, and
+`validate_node_name_v3`, `is_node_name_v3` and `parse_node_name_v3`, and
+their `node_path` twins, judge a string by them.
 
 A member the spec does not define is not a field; the model's
 `must_understand_fields` names those a reader must understand.
@@ -147,6 +157,20 @@ an `Unclaimed`, as the scope read it: one built by hand is taken as
 read. A model a read builds is not read a second time. Change a model by
 building another: a container it holds, changed in place, is not
 checked again.
+
+Two models are equal when they mean the same document, however each is
+spelled. What the package interprets -- each field, and the fill value
+against its data type -- compares by its canonical spelling, as
+`canonical_of` and `canonical_fill_value` give it: `"NaN"` and
+`"0x7fc00000"` are one `float32` fill value, `0.0` and `-0.0` two, and a
+blosc with and without the `typesize` that `noshuffle` ignores one
+codec. What it does not interpret -- attributes, extra fields, the
+configuration of a field nothing in scope claims, and every member of a
+v2 document -- compares as JSON text, which tells `true` from `1` and
+`-0.0` from `0.0`, and takes `NaN` for itself. Equal models hash alike,
+and may write two documents: `to_json` writes each as it was given. A
+model's hash is of what its containers held when it was hashed, so a
+model in a set, or a key of a dict, is not changed in place.
 
 `node_metadata_json_schema_v3` writes what the validators read as a
 JSON Schema, draft 2020-12, for an editor that checks a `zarr.json` as it

@@ -6,7 +6,7 @@ import copy
 import dataclasses
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Final, Literal, TypeGuard, cast
+from typing import TYPE_CHECKING, Any, Final, Literal, TypeGuard, TypeVar, cast
 
 from typing_extensions import TypeAliasType, TypedDict, Unpack
 
@@ -16,10 +16,12 @@ from zarr_metadata._json import (
     arrays_to_tuples,
     copied,
     is_canonical_json,
+    json_text,
     not_an_object,
     outside_of,
     refine_json,
     refine_user_data,
+    shown,
     with_input,
 )
 from zarr_metadata._json import prefixed as _prefix
@@ -27,6 +29,7 @@ from zarr_metadata._sentinel import UNSET
 from zarr_metadata.model._array import (
     ZarrV3ArrayMetadata,
     array_json,
+    array_key,
     array_model,
     must_understand_subset,
     read_array_metadata_v3,
@@ -53,6 +56,7 @@ from zarr_metadata.model._validation import (
 from zarr_metadata.v2.attributes import ZARR_V2_ATTRIBUTES_STORE_KEY
 from zarr_metadata.v2.consolidated import ZARR_V2_CONSOLIDATED_METADATA_STORE_KEY
 from zarr_metadata.v2.group import ZARR_V2_GROUP_METADATA_STORE_KEY
+from zarr_metadata.v3._hierarchy import NodeType, hierarchy_problems, path_faults, said
 from zarr_metadata.v3._registry import CORE_AND_EXTENSIONS, Context
 from zarr_metadata.v3.array import ZarrV3ExtensionField
 from zarr_metadata.v3.consolidated import ZARR_V3_CONSOLIDATED_METADATA_KEY
@@ -155,6 +159,15 @@ class ZarrV3GroupMetadata:
             return updated
         return dataclasses.replace(updated, consolidated_metadata=self.consolidated_metadata)
 
+    def __eq__(self, other: object) -> bool:
+        """Whether `other` models the same group: the same document, however each is spelled, as `group_key` says; equal models hash alike."""
+        if type(other) is not type(self):
+            return NotImplemented
+        return group_key(self) == group_key(cast("ZarrV3GroupMetadata", other))
+
+    def __hash__(self) -> int:
+        return hash(group_key(self))
+
     def to_json(self) -> ZarrV3GroupMetadataJSON:
         """The document as JSON, sharing no mutable state with the model.
 
@@ -226,6 +239,9 @@ class ZarrV3ConsolidatedMetadata:
     `must_understand` is typed permissively as `bool` to mirror the document
     shape, but only `False` is valid; this is enforced at runtime. Each
     document it holds is a model, which checked itself when it was built.
+    The documents and the group make the hierarchy below the group, the
+    group its root, each at its node's path in it without the leading `/`:
+    the node at `/a/b` at `a/b`.
     """
 
     kind: Literal["inline"] = field(default="inline", init=False)
@@ -252,7 +268,33 @@ class ZarrV3ConsolidatedMetadata:
             if not isinstance(node, (ZarrV3ArrayMetadata, ZarrV3GroupMetadata)):
                 msg = f"metadata[{path!r}]: expected a v3 array or group model, got {node!r}"
                 raise TypeError(msg)
+        problems: list[ValidationProblem] = []
+        node_types: dict[str, NodeType | None] = {}
+        for path, node in self.metadata.items():
+            faults = _key_problems(path)
+            problems.extend(faults)
+            if len(faults) == 0:
+                node_types[path] = _model_node_type(node)
+        problems.extend(_hierarchy_problems(node_types))
+        for path, node in self.metadata.items():
+            if path in node_types:
+                problems.extend(
+                    _nested_listing_problems(
+                        path, _model_listing(node), node_types, _model_node_type
+                    )
+                )
+        if len(problems) != 0:
+            raise MetadataValidationError(problems)
         object.__setattr__(self, "metadata", dict(self.metadata))
+
+    def __eq__(self, other: object) -> bool:
+        """Whether `other` holds the same documents at the same paths, each as its model compares; equal ones hash alike."""
+        if type(other) is not type(self):
+            return NotImplemented
+        return consolidated_key(self) == consolidated_key(cast("ZarrV3ConsolidatedMetadata", other))
+
+    def __hash__(self) -> int:
+        return hash(consolidated_key(self))
 
     def to_json(self) -> ZarrV3ConsolidatedMetadataJSON:
         """The `consolidated_metadata` member as JSON, sharing no mutable state with the model: its `kind`, `must_understand: false`, and each document by its path."""
@@ -364,7 +406,12 @@ class ZarrV3GroupMetadataReading:
 
 @dataclass(frozen=True, slots=True)
 class ZarrV3UnknownNodeReading:
-    """A v3 document of no node type the spec defines -- its `node_type` missing, or neither `"array"` nor `"group"` -- or not an object at all: nothing else of it is read, as its problem says."""
+    """A v3 document of no node type the spec defines -- its `node_type` missing, or neither `"array"` nor `"group"` -- or not an object at all: nothing else of it is read but its `zarr_format`, as its problems say.
+
+    So a document of another format says so: zarr-python 2's draft of v3
+    wrote a root `zarr.json` whose `zarr_format` is a URL, and a v2
+    document names format 2.
+    """
 
     problems: tuple[ValidationProblem, ...]
     """Why it is no node."""
@@ -395,8 +442,9 @@ def read_node_metadata_v3(
     zod's discriminated union read one: an array is read as
     `read_array_metadata_v3` reads it, a group as `read_group_metadata_v3`
     does, and a document that says neither, or is not an object, is
-    `ZarrV3UnknownNodeReading`, with the problem. So no caller reads
-    `node_type` from JSON it has not read.
+    `ZarrV3UnknownNodeReading`, with the problems, its `zarr_format`'s
+    among them. So no caller reads `node_type` from JSON it has not read,
+    and a document of another format says it is not v3.
     """
     node_type, problems = _node_type(value)
     if node_type == "array":
@@ -465,16 +513,26 @@ _NODE_TYPES: Final = ("array", "group")
 
 
 def _node_type(value: object) -> tuple[str | None, tuple[ValidationProblem, ...]]:
-    """The node type `value` says it is, one of `_NODE_TYPES`; None, with the problem, when it says none of them, or is not an object."""
+    """The node type `value` says it is, one of `_NODE_TYPES`; None, with the problems, when it says none of them, or is not an object.
+
+    A document that says none is judged by its `zarr_format` too, so one
+    of another format says it is not v3.
+    """
     if not isinstance(value, Mapping):
         return None, not_an_object(value)
     document = cast("Mapping[object, object]", value)
-    if "node_type" not in document:
-        return None, (ValidationProblem(("node_type",), "missing required key", "missing_key"),)
-    node_type = document["node_type"]
+    node_type = document.get("node_type")
     if isinstance(node_type, str) and node_type in _NODE_TYPES:
         return node_type, ()
-    return None, with_input((outside_of(("node_type",), node_type, _NODE_TYPES),), document)
+    problems = [
+        *missing_keys(frozenset({"zarr_format"}), document),
+        *check_literal(document, "zarr_format", 3),
+    ]
+    if "node_type" not in document:
+        problems.append(ValidationProblem(("node_type",), "missing required key", "missing_key"))
+    else:
+        problems.append(outside_of(("node_type",), node_type, _NODE_TYPES))
+    return None, with_input(problems, document)
 
 
 @dataclass(frozen=True, slots=True)
@@ -544,6 +602,8 @@ def read_group_v3(
     return reading, GroupMembersV3(attributes, extra_fields, held)
 
 
+T = TypeVar("T")
+
 _CONSOLIDATED_MEMBERS: Final = ("kind", "must_understand", "metadata")
 """The members of an inline `consolidated_metadata`, in the order the convention declares them."""
 
@@ -570,6 +630,7 @@ def _read_consolidated_v3(
     problems.extend(check_literal(env, "must_understand", False))
     readings: dict[str, ZarrV3NodeMetadataReading] = {}
     members: dict[str, ArrayMembersV3 | GroupMembersV3] = {}
+    node_types: dict[str, NodeType | None] = {}
     entries = env.get("metadata")
     if "metadata" in env and not isinstance(entries, Mapping):
         problems.append(ValidationProblem(("metadata",), "expected an object", "invalid_type"))
@@ -580,11 +641,155 @@ def _read_consolidated_v3(
                     ValidationProblem(("metadata",), f"non-string key {key!r}", "invalid_type")
                 )
                 continue
+            faults = _key_problems(key)
+            problems.extend(faults)
             readings[key], child = _read_node_v3(entry, context)
             if child is not None:
                 members[key] = child
             problems.extend(_prefix("metadata", _prefix(key, readings[key].problems)))
+            if len(faults) == 0:
+                node_types[key] = _node_type_of(readings[key])
+    problems.extend(_hierarchy_problems(node_types))
+    for key in node_types:
+        problems.extend(
+            _nested_listing_problems(
+                key, _reading_listing(readings[key]), node_types, _node_type_of
+            )
+        )
     return readings, members, tuple(problems)
+
+
+def group_key(model: ZarrV3GroupMetadata) -> tuple[object, ...]:
+    """What `==` and `hash` compare of a v3 group model: its attributes and extra fields as JSON text, and what its consolidated metadata holds, by `consolidated_key`."""
+    consolidated = model.consolidated_metadata
+    return (
+        json_text(model.attributes),
+        UNSET if consolidated is UNSET else consolidated_key(consolidated),
+        json_text(model.extra_fields),
+    )
+
+
+def consolidated_key(model: ZarrV3ConsolidatedMetadata) -> tuple[object, ...]:
+    """What `==` and `hash` compare of consolidated metadata: each document's key, by its path, in path order."""
+    return tuple(
+        (path, array_key(node) if isinstance(node, ZarrV3ArrayMetadata) else group_key(node))
+        for path, node in sorted(model.metadata.items(), key=lambda item: item[0])
+    )
+
+
+def _key_problems(key: str) -> list[ValidationProblem]:
+    """What keeps `key` from being where consolidated metadata keeps a document, said in one problem at the key.
+
+    Consolidated metadata holds the hierarchy below its group, the group its
+    root, and the reference implementation keeps the document of each node
+    at the node's path in that hierarchy without its leading `/`: the node
+    at `/a/b` at the key `a/b`.
+    """
+    faults = _below_faults(key)
+    if len(faults) == 0:
+        return []
+    message = f"expected the path of a node below the group, got {shown(key)}, which {said(faults)}"
+    return [ValidationProblem(("metadata", key), message, "invalid_value")]
+
+
+def _nested_listing_problems(
+    key: str,
+    listing: Mapping[str, T],
+    node_types: Mapping[str, NodeType | None],
+    node_type: Callable[[T], NodeType | None],
+) -> list[ValidationProblem]:
+    """What is wrong with `listing`, the own consolidated listing of the group at `key`, against `node_types`, the group's flat listing: each problem at the nested entry.
+
+    The reference implementation lists every node below the group in the
+    group's own listing, flat, and gives each group it lists an empty
+    listing of its own. So a node a listed group lists is one the group
+    lists too, at the joined key, of the same node type: one it lists
+    alone would be dropped by the reference reader, and one it lists as
+    another type contradicts the tree. Only the listing's own entries are
+    judged: what a group listed there lists in turn is that group's own to
+    judge, when its document is read. `node_type` says what each entry is,
+    so readings and models are judged alike.
+    """
+    problems: list[ValidationProblem] = []
+    for path, entry in listing.items():
+        if len(_below_faults(path)) != 0:
+            # Its own reader reports a key that is no node's path.
+            continue
+        joined = f"{key}/{path}"
+        here = ("metadata", key, ZARR_V3_CONSOLIDATED_METADATA_KEY, "metadata", path)
+        if joined not in node_types:
+            message = (
+                f"expected a node the group lists, got {shown(f'/{joined}')}, which "
+                f"{shown(f'/{key}')} lists alone"
+            )
+            problems.append(ValidationProblem(here, message, "invalid_value"))
+            continue
+        listed, nested = node_types[joined], node_type(entry)
+        if listed is not None and nested is not None and listed != nested:
+            message = (
+                f"expected {_an(listed)}, as the group lists {shown(f'/{joined}')}, "
+                f"got {_an(nested)}"
+            )
+            problems.append(ValidationProblem(here, message, "invalid_value"))
+    return problems
+
+
+def _an(node_type: NodeType) -> str:
+    return "an array" if node_type == "array" else "a group"
+
+
+def _model_node_type(node: ZarrV3ArrayMetadata | ZarrV3GroupMetadata) -> NodeType:
+    """The node type a model is."""
+    return "array" if isinstance(node, ZarrV3ArrayMetadata) else "group"
+
+
+def _model_listing(
+    node: ZarrV3ArrayMetadata | ZarrV3GroupMetadata,
+) -> Mapping[str, ZarrV3ArrayMetadata | ZarrV3GroupMetadata]:
+    """What a model lists in its own consolidated metadata: nothing, for an array or a group with none."""
+    if isinstance(node, ZarrV3GroupMetadata) and node.consolidated_metadata is not UNSET:
+        return node.consolidated_metadata.metadata
+    return {}
+
+
+def _reading_listing(reading: ZarrV3NodeMetadataReading) -> Mapping[str, ZarrV3NodeMetadataReading]:
+    """What a reading lists in its own consolidated metadata: nothing, for an array's or one of no node type."""
+    if isinstance(reading, ZarrV3GroupMetadataReading):
+        return reading.consolidated
+    return {}
+
+
+def _hierarchy_problems(node_types: Mapping[str, NodeType | None]) -> list[ValidationProblem]:
+    """What keeps the documents consolidated metadata keeps and its group from making a hierarchy, the group its root, as `hierarchy_problems` judges one: each at the key it is about.
+
+    `node_types` gives the node type of each document by its key, None for
+    a document of no node type the spec defines, and holds only keys
+    `_key_problems` finds nothing wrong with.
+    """
+    nodes: dict[str, NodeType | None] = {"/": "group"}
+    nodes.update((f"/{key}", node_type) for key, node_type in node_types.items())
+    return [
+        ValidationProblem(("metadata", cast("str", found.loc[0])[1:]), found.message, found.kind)
+        for found in hierarchy_problems(nodes)
+    ]
+
+
+def _node_type_of(reading: ZarrV3NodeMetadataReading) -> NodeType | None:
+    """The node type a document says it is, as its reading tells; None when it says none."""
+    if isinstance(reading, ZarrV3ArrayMetadataReading):
+        return "array"
+    if isinstance(reading, ZarrV3GroupMetadataReading):
+        return "group"
+    return None
+
+
+def _below_faults(path: str) -> list[str]:
+    """What keeps `path` from being the path of a node below a group, relative to the group, each said."""
+    if path == "":
+        return ["is the group's own"]
+    if path.startswith("/"):
+        return ['starts with "/"']
+    return path_faults(f"/{path}")
 
 
 def _with_models(
@@ -734,6 +939,15 @@ class ZarrV2GroupMetadata:
         """
         return dataclasses.replace(self, **kwargs)
 
+    def __eq__(self, other: object) -> bool:
+        """Whether `other` models the same group: the same document, as JSON text, which takes `NaN` for itself; equal models hash alike."""
+        if type(other) is not type(self):
+            return NotImplemented
+        return json_text(self.to_json()) == json_text(cast("ZarrV2GroupMetadata", other).to_json())
+
+    def __hash__(self) -> int:
+        return hash(json_text(self.to_json()))
+
     def to_json(self) -> ZarrV2GroupMetadataJSON:
         """Return the merged in-memory document form.
 
@@ -772,8 +986,9 @@ class ZarrV2GroupMetadata:
             return cls.from_json(zgroup_raw)
         zgroup = cast("Mapping[str, object]", zgroup_raw)
         if "attributes" in zgroup:
+            # A key `.zgroup` does not declare: its attributes are `.zattrs`.
             refused = ValidationProblem(
-                ("attributes",), "unexpected document member", "invalid_value"
+                ("attributes",), "unexpected key 'attributes'", "unknown_key"
             )
             raise MetadataValidationError(with_input((refused,), zgroup))
         if ZARR_V2_ATTRIBUTES_STORE_KEY in mapping:
@@ -827,6 +1042,17 @@ class ZarrV2ConsolidatedMetadata:
         if len(problems) != 0:
             raise MetadataValidationError(problems)
         object.__setattr__(self, "metadata", refined)
+
+    def __eq__(self, other: object) -> bool:
+        """Whether `other` holds the same document: the same JSON text; equal ones hash alike."""
+        if type(other) is not type(self):
+            return NotImplemented
+        return json_text(self.to_json()) == json_text(
+            cast("ZarrV2ConsolidatedMetadata", other).to_json()
+        )
+
+    def __hash__(self) -> int:
+        return hash(json_text(self.to_json()))
 
     def to_json(self) -> dict[str, JSONValue]:
         """The `.zmetadata` document as JSON, sharing no mutable state with the model."""
@@ -889,13 +1115,7 @@ def _read_consolidated_v2(
         for key in ("zarr_consolidated_format", "metadata")
         if key not in doc
     ]
-    problems.extend(
-        ValidationProblem((key,), "unexpected document member", "invalid_value")
-        if isinstance(key, str)
-        else ValidationProblem((), f"non-string document key {key!r}", "invalid_type")
-        for key in doc
-        if key not in {"zarr_consolidated_format", "metadata"}
-    )
+    problems.extend(unexpected_keys(frozenset({"zarr_consolidated_format", "metadata"}), doc))
     problems.extend(check_literal(doc, "zarr_consolidated_format", 1))
     refined: dict[str, JSONValue] = {}
     if "metadata" in doc:

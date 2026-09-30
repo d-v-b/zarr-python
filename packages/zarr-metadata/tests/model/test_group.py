@@ -57,6 +57,7 @@ from zarr_metadata.v3.definition import (
     Nested,
     Refused,
     Unclaimed,
+    resolve,
 )
 from zarr_metadata.v3.group import ZarrV3GroupMetadataJSONPartial
 
@@ -157,11 +158,58 @@ def test_group_zarr_format_rejects_float(
     assert [(p.loc, p.kind) for p in validate(document)] == [(("zarr_format",), "invalid_value")]
 
 
-def test_group_v2_rejects_unknown_document_member() -> None:
-    """The closed v2 merged-document shape rejects undeclared members."""
-    assert [(p.loc, p.kind) for p in validate_group_metadata_v2({"zarr_format": 2, "x": 1})] == [
-        (("x",), "invalid_value")
-    ]
+def _v2_consolidated_problems(document: object) -> list[tuple[tuple[str | int, ...], str]]:
+    with pytest.raises(MetadataValidationError) as raised:
+        ZarrV2ConsolidatedMetadata.from_json(document)
+    return [(p.loc, p.kind) for p in raised.value.problems]
+
+
+def _v3_field_problems(field: object) -> list[tuple[tuple[str | int, ...], str]]:
+    return [(p.loc, p.kind) for p in resolve(field, CodecDefinition, CORE_AND_EXTENSIONS)[1]]
+
+
+@pytest.mark.parametrize(
+    ("problems", "expected"),
+    [
+        (
+            lambda: [
+                (p.loc, p.kind) for p in validate_group_metadata_v2({"zarr_format": 2, "x": 1})
+            ],
+            [(("x",), "unknown_key")],
+        ),
+        (
+            lambda: _v2_consolidated_problems(
+                {"zarr_consolidated_format": 1, "metadata": {}, "x": 1}
+            ),
+            [(("x",), "unknown_key")],
+        ),
+        (
+            lambda: [
+                (p.loc, p.kind)
+                for p in validate_group_metadata_v3(
+                    _group(consolidated_metadata={**_inline(), "x": 1})
+                )
+            ],
+            [(("consolidated_metadata", "x"), "unknown_key")],
+        ),
+        (
+            lambda: _v3_field_problems({"name": "gzip", "configuration": {"level": 1}, "x": 1}),
+            [(("x",), "unknown_key")],
+        ),
+        (
+            lambda: _v3_field_problems({"name": "gzip", "configuration": {"level": 1, "x": 1}}),
+            [(("configuration", "x"), "unknown_key")],
+        ),
+    ],
+    ids=["v2-group", "v2-consolidated", "v3-consolidated", "v3-field", "v3-configuration"],
+)
+def test_a_member_a_closed_object_does_not_declare_is_an_unknown_key(
+    problems: Callable[[], list[tuple[tuple[str | int, ...], str]]],
+    expected: list[tuple[tuple[str | int, ...], str]],
+) -> None:
+    # Wherever it sits, so a reader that tolerates what another writer
+    # added -- NCZarr's `_nczarr_*` keys -- filters by kind.
+    assert problems() == expected
 
 
 @pytest.mark.parametrize(
@@ -254,7 +302,7 @@ def test_v2_group_from_key_value_rejects_zgroup_extra_members(extra_key: str) ->
         ZarrV2GroupMetadata.from_key_value({".zgroup": json.dumps(doc).encode()})
 
     assert [(problem.loc, problem.kind) for problem in exc_info.value.problems] == [
-        ((extra_key,), "invalid_value")
+        ((extra_key,), "unknown_key")
     ]
 
 
@@ -453,19 +501,35 @@ def _fields_of_an_array(*at: str | int) -> list[tuple[str | int, ...]]:
             ["a", "g"],
             _fields_of_an_array(*A),
         ),
-        # A group's consolidated metadata in a group's: each field located
-        # from the root of the outer document.
+        # Every node below the group, each below a group, at its path.
+        (
+            _group(consolidated_metadata=_inline(g=_group(), **{"g/b": _array()})),
+            ["g", "g/b"],
+            _fields_of_an_array("consolidated_metadata", "metadata", "g/b"),
+        ),
+        # A group's consolidated metadata in a group's, listing what the group
+        # lists too: each field located from the root of the outer document.
         (
             _group(
-                consolidated_metadata=_inline(g=_group(consolidated_metadata=_inline(b=_array())))
+                consolidated_metadata=_inline(
+                    g=_group(consolidated_metadata=_inline(b=_array())), **{"g/b": _array()}
+                )
             ),
-            ["g"],
-            _fields_of_an_array(
-                "consolidated_metadata", "metadata", "g", "consolidated_metadata", "metadata", "b"
-            ),
+            ["g", "g/b"],
+            [
+                *_fields_of_an_array(
+                    "consolidated_metadata",
+                    "metadata",
+                    "g",
+                    "consolidated_metadata",
+                    "metadata",
+                    "b",
+                ),
+                *_fields_of_an_array("consolidated_metadata", "metadata", "g/b"),
+            ],
         ),
     ],
-    ids=["no-consolidated-metadata", "null", "an-array-and-a-group", "nested"],
+    ids=["no-consolidated-metadata", "null", "an-array-and-a-group", "paths", "nested"],
 )
 def test_a_group_reads_each_document_its_consolidated_metadata_holds(
     document: dict[str, object], paths: list[str], locs: list[tuple[str | int, ...]]
@@ -481,6 +545,166 @@ def test_a_group_reads_each_document_its_consolidated_metadata_holds(
     consolidated = model.consolidated_metadata
     held = {} if consolidated is UNSET else consolidated.metadata
     assert all(held[path] is reading.consolidated[path].metadata for path in paths)
+
+
+@pytest.mark.parametrize(
+    ("path", "fault"),
+    [
+        ("", "is the group's own"),
+        ("/a", 'starts with "/"'),
+        ("a/", 'ends with "/"'),
+        ("a//b", 'holds an empty name between two "/"'),
+        (".", 'holds ".", a name that is periods alone'),
+        ("a/../b", 'holds "..", a name that is periods alone'),
+        ("__a", 'holds "__a", a name that starts with the reserved "__"'),
+        ("zarr.json", 'holds "zarr.json", a name that is the reserved "zarr.json"'),
+    ],
+)
+def test_error_a_document_in_consolidated_metadata_is_at_a_node_s_path_below_the_group(
+    path: str, fault: str
+) -> None:
+    # Its node names, joined by "/", as the reference implementation keeps
+    # it: the group's own path, "/", and it make the node's.
+    document = _group(consolidated_metadata=_inline(**{path: _group()}))
+    message = f"expected the path of a node below the group, got {json.dumps(path)}, which {fault}"
+    assert validate_group_metadata_v3(document) == (
+        ValidationProblem(("consolidated_metadata", "metadata", path), message, "invalid_value"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("documents", "path"),
+    [
+        ({"a": _array(), "a/b": _group()}, "a/b"),
+        # However many groups are missing between them: none would help.
+        ({"a": _array(), "a/b/c": _array()}, "a/b/c"),
+    ],
+    ids=["child", "descendant"],
+)
+def test_error_no_document_in_consolidated_metadata_is_below_an_array(
+    documents: dict[str, object], path: str
+) -> None:
+    # "Group nodes may have children but array nodes may not." A message
+    # names each node by its path in the hierarchy below the group.
+    document = _group(consolidated_metadata=_inline(**documents))
+    message = f'expected a node below a group, got "/{path}", below the array "/a"'
+    assert validate_group_metadata_v3(document) == (
+        ValidationProblem(("consolidated_metadata", "metadata", path), message, "invalid_value"),
+    )
+
+
+def test_a_document_of_no_node_type_is_taken_as_a_group_s() -> None:
+    # Its own problem is reported where it sits, and the nodes below it are
+    # not refused for it.
+    document = _group(
+        consolidated_metadata=_inline(a={"zarr_format": 3, "node_type": "x"}, **{"a/b": _array()})
+    )
+    assert [(p.loc, p.kind) for p in validate_group_metadata_v3(document)] == [
+        (("consolidated_metadata", "metadata", "a", "node_type"), "invalid_value")
+    ]
+
+
+def test_error_consolidated_metadata_holds_the_group_holding_each_document() -> None:
+    # The nearest group missing above a node, once, counting those above it
+    # up to the group holding the documents.
+    document = _group(consolidated_metadata=_inline(**{"a/b/c": _array(), "a/b/d": _array()}))
+    assert [(p.loc, p.message, p.kind) for p in validate_group_metadata_v3(document)] == [
+        (
+            ("consolidated_metadata", "metadata", "a/b"),
+            'missing the group holding "/a/b/c", and 1 group above it',
+            "missing_key",
+        ),
+    ]
+
+
+def test_error_a_consolidated_metadata_key_that_is_not_a_string() -> None:
+    listing: dict[object, object] = {"a": _array(), 1: _array()}
+    document = _group(consolidated_metadata={**_inline(), "metadata": listing})
+    assert [(p.loc, p.kind) for p in validate_group_metadata_v3(document)] == [
+        (("consolidated_metadata", "metadata"), "invalid_type")
+    ]
+
+
+NESTED = ("consolidated_metadata", "metadata", "g", "consolidated_metadata", "metadata")
+"""Where the own listing of the group at `g` sits in the outer document."""
+
+
+@pytest.mark.parametrize(
+    ("listed", "flat", "expected"),
+    [
+        # What a listed group lists itself is what the group lists, too.
+        ({"b": _array()}, {"g/b": _array()}, []),
+        # A node the listed group lists alone would be dropped by the
+        # reference reader, which keeps the flat listing.
+        (
+            {"b": _array()},
+            {},
+            [
+                (
+                    (*NESTED, "b"),
+                    'expected a node the group lists, got "/g/b", which "/g" lists alone',
+                    "invalid_value",
+                )
+            ],
+        ),
+        # Nor may the two listings disagree on what a node is.
+        (
+            {"b": _array()},
+            {"g/b": _group()},
+            [
+                (
+                    (*NESTED, "b"),
+                    'expected a group, as the group lists "/g/b", got an array',
+                    "invalid_value",
+                )
+            ],
+        ),
+        # A deeper listing is the listed group's own to judge, when its
+        # document is read: its problem is that document's, at its place.
+        (
+            {"h": _group(consolidated_metadata=_inline(x=_array()))},
+            {"g/h": _group()},
+            [
+                (
+                    (*NESTED, "h", "consolidated_metadata", "metadata", "x"),
+                    'expected a node the group lists, got "/h/x", which "/h" lists alone',
+                    "invalid_value",
+                )
+            ],
+        ),
+    ],
+    ids=["agreeing", "listed-alone", "contradicting", "deeper"],
+)
+def test_a_listed_group_s_own_listing_lists_what_the_group_lists(
+    listed: dict[str, object],
+    flat: dict[str, object],
+    expected: list[tuple[tuple[str, ...], str, str]],
+) -> None:
+    document = _group(
+        consolidated_metadata=_inline(g=_group(consolidated_metadata=_inline(**listed)), **flat)
+    )
+    problems = validate_group_metadata_v3(document)
+    assert [(p.loc, p.message, p.kind) for p in problems] == expected
+    # The constructor refuses what the reader reports, built of models: a
+    # listed group whose own listing is wrong is refused as it is built.
+    listing = {"g": _group(consolidated_metadata=_inline(**listed)), **flat}
+    deeper = [(loc, message, kind) for loc, message, kind in expected if len(loc) > len(NESTED) + 1]
+    if len(deeper) != 0:
+        with pytest.raises(MetadataValidationError) as inner:
+            node_metadata_from_json_v3(listing["g"])
+        assert [(p.loc, p.message, p.kind) for p in inner.value.problems] == [
+            (loc[3:], message, kind) for loc, message, kind in deeper
+        ]
+        return
+    members = {key: node_metadata_from_json_v3(value) for key, value in listing.items()}
+    if expected == []:
+        assert ZarrV3ConsolidatedMetadata(metadata=members).metadata.keys() == members.keys()
+        return
+    with pytest.raises(MetadataValidationError) as raised:
+        ZarrV3ConsolidatedMetadata(metadata=members)
+    assert [(p.loc[1:], p.message, p.kind) for p in raised.value.problems] == [
+        (loc[2:], message, kind) for loc, message, kind in expected
+    ]
 
 
 def test_each_document_its_consolidated_metadata_holds_is_read_once() -> None:
@@ -581,7 +805,7 @@ def test_a_node_is_read_as_the_node_its_node_type_says(
     ids=["another-kind", "a-number", "null"],
 )
 def test_error_a_node_type_the_spec_does_not_define(node_type: object, kind: str) -> None:
-    """Nothing else of the document is read, so nothing else is judged."""
+    """Nothing else of the document is read but its `zarr_format`, which is 3 here, so nothing else is judged."""
     read = read_node_metadata_v3({**_array(), "node_type": node_type, "shape": "not a shape"})
     assert isinstance(read, ZarrV3UnknownNodeReading)
     assert [(p.loc, p.kind) for p in read.problems] == [(("node_type",), kind)]
@@ -594,6 +818,41 @@ def test_error_a_document_without_a_node_type() -> None:
     read = read_node_metadata_v3(document)
     assert isinstance(read, ZarrV3UnknownNodeReading)
     assert [(p.loc, p.kind) for p in read.problems] == [(("node_type",), "missing_key")]
+
+
+@pytest.mark.parametrize(
+    ("document", "problems"),
+    [
+        # zarr-python 2's draft of v3 (zarr-python#2982): a root `zarr.json`
+        # naming its format by URL, and no node type.
+        (
+            {
+                "zarr_format": "https://purl.org/zarr/spec/protocol/core/3.0",
+                "metadata_encoding": "https://purl.org/zarr/spec/protocol/core/3.0",
+                "metadata_key_suffix": ".json",
+                "extensions": [],
+            },
+            [(("zarr_format",), "invalid_type"), (("node_type",), "missing_key")],
+        ),
+        (
+            {"zarr_format": 2, "shape": [4], "chunks": [4], "dtype": "|u1"},
+            [(("zarr_format",), "invalid_value"), (("node_type",), "missing_key")],
+        ),
+        (
+            {"node_type": "dataset"},
+            [(("zarr_format",), "missing_key"), (("node_type",), "invalid_value")],
+        ),
+    ],
+    ids=["v3-draft", "v2", "no-format"],
+)
+def test_error_a_document_of_another_format_says_so(
+    document: dict[str, object], problems: list[tuple[tuple[str | int, ...], str]]
+) -> None:
+    read = read_node_metadata_v3(document)
+    assert isinstance(read, ZarrV3UnknownNodeReading)
+    assert [(p.loc, p.kind) for p in read.problems] == problems
+    # The validator reads a node's type as the reader does.
+    assert [(p.loc, p.kind) for p in validate_node_metadata_v3(document)] == problems
 
 
 def test_error_a_node_that_is_not_an_object() -> None:
