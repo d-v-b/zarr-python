@@ -688,13 +688,14 @@ def _chunk_keys(
     n = int(chunk_ids[0].size)
     if len(chunk_ids) == 1:
         return np.asarray(chunk_ids[0], dtype=np.intp)
-    # Mixed-radix key with the first dimension most significant. Negative
-    # chunk ids do not fit these zero-based digits; group their tuples directly.
+    # Mixed-radix key with the first dimension most significant; chunk ids are
+    # `[0, n)` per axis (`DimensionGridLike`), so they are its digits. When the
+    # radices outgrow intp, group the tuples directly instead.
     keys = np.zeros(n, dtype=np.intp)
     multiplier = 1
     for ids in reversed(chunk_ids):
         radix = int(ids.max()) + 1
-        if int(ids.min()) < 0 or multiplier * radix >= 2**62:
+        if multiplier * radix >= 2**62:
             stacked = np.stack([np.asarray(i, dtype=np.intp).ravel() for i in chunk_ids], axis=1)
             _, inverse = np.unique(stacked, axis=0, return_inverse=True)
             return np.asarray(inverse, dtype=np.intp).reshape(-1)

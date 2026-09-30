@@ -56,52 +56,6 @@ def _points(domain: IndexDomain) -> list[tuple[int, ...]]:
     ]
 
 
-@pytest.mark.parametrize("shape", [(4,), (2, 2)])
-@pytest.mark.parametrize(
-    "coordinates",
-    [
-        [(-1, 0), (0, -1), (-1, 0), (0, 0)],
-        [(-2, -1), (-1, -2), (-2, -2), (-1, -1)],
-        [(0, 1), (1, 0), (0, 1), (0, 0)],
-        [(-(2**63), 0), (0, -(2**63)), (-1, -1), (0, 0)],
-    ],
-)
-def test_correlated_plan_with_signed_chunk_ids(
-    shape: tuple[int, ...], coordinates: list[tuple[int, int]]
-) -> None:
-    """Shared-axis lookups group distinct signed chunk tuples without collisions."""
-
-    class SignedUnitGrid:
-        def index_to_chunk(self, index: int) -> int:
-            return index
-
-        def indices_to_chunks(self, indices: Any) -> Any:
-            return indices
-
-        def chunk_offset(self, chunk: int) -> int:
-            return chunk
-
-        def chunk_size(self, chunk: int) -> int:
-            return 1
-
-    values = np.array(coordinates, dtype=np.intp)
-    transform = IndexTransform(
-        IndexDomain.from_shape(shape),
-        tuple(ArrayMap(values[:, axis].reshape(shape)) for axis in range(2)),
-    )
-    plan = plan_chunks(transform, (SignedUnitGrid(), SignedUnitGrid()))
-    expected_chunks = sorted(set(coordinates))
-    assert [tuple(row) for row in plan.partition().chunk_coords()] == expected_chunks
-    seen = []
-    for projection in plan:
-        for point in _points(projection.chunk_transform.domain):
-            assert _storage_of(projection.chunk_transform, point) == (0, 0)
-            request_point = _storage_of(projection.cell_transform, point)
-            assert _storage_of(transform, request_point) == projection.chunk_coords
-            seen.append(request_point)
-    assert sorted(seen) == sorted(_points(transform.domain))
-
-
 def test_basic_plan_is_reiterable_and_projects_both_spaces() -> None:
     """A plan can be revisited without losing either side of each projection."""
     transform = IndexTransform.from_shape((6,))[1:6]
@@ -955,23 +909,40 @@ def test_independent_components_scatter_through_lazy_array(reader_kind: str) -> 
     np.testing.assert_array_equal(view.result(), source[a, b, c, :])
 
 
-class SignedGrid:
-    """An unbounded grid with translated boundaries and signed chunk identifiers."""
+class TranslatedGrid:
+    """A bounded custom grid over `[lo, lo + count * size)` with chunk ids `[0, count)`.
 
-    def __init__(self, size: int, origin: int) -> None:
+    A custom grid may start at any coordinate, signed included, but its chunk
+    ids are `[0, n)` and a lookup outside its extent raises, as
+    `DimensionGridLike` declares.
+    """
+
+    def __init__(self, size: int, lo: int, count: int) -> None:
         self.size = size
-        self.origin = origin
+        self.lo = lo
+        self.count = count
+
+    def _outside(self, index: object) -> IndexError:
+        return IndexError(
+            f"index {index} is outside [{self.lo}, {self.lo + self.count * self.size})"
+        )
 
     def index_to_chunk(self, index: int) -> int:
-        return (index - self.origin) // self.size
+        chunk = (index - self.lo) // self.size
+        if not 0 <= chunk < self.count:
+            raise self._outside(index)
+        return chunk
 
     def indices_to_chunks(
         self, indices: np.ndarray[Any, np.dtype[np.intp]]
     ) -> np.ndarray[Any, np.dtype[np.intp]]:
-        return (indices - self.origin) // self.size
+        chunks = (indices - self.lo) // self.size
+        if chunks.size > 0 and (int(chunks.min()) < 0 or int(chunks.max()) >= self.count):
+            raise self._outside(indices[(chunks < 0) | (chunks >= self.count)][0])
+        return chunks
 
     def chunk_offset(self, chunk: int) -> int:
-        return self.origin + chunk * self.size
+        return self.lo + chunk * self.size
 
     def chunk_size(self, chunk: int) -> int:
         return self.size
@@ -1018,7 +989,15 @@ def test_component_dependency_graph_matches_pointwise_oracle(
                 stride=data.draw(st.integers(-2, 2)),
             )
         )
-    grids = [SignedGrid(data.draw(st.integers(1, 3)), data.draw(st.integers(-3, 3))) for _ in maps]
+    # Every storage coordinate the draws above can produce lies in [-15, 15]
+    # (|offset| <= 3, |stride| <= 2, |input| <= 6, |value| <= 2). The grid
+    # starts below that range at a drawn phase and raises outside its extent,
+    # so a wider draw fails loudly rather than being silently accepted.
+    grids = []
+    for _ in maps:
+        size = data.draw(st.integers(1, 3), label="chunk size")
+        lo = data.draw(st.integers(-19, -15), label="grid start")
+        grids.append(TranslatedGrid(size, lo, count=-(-(16 - lo) // size)))
     transform = IndexTransform(
         IndexDomain(origin, tuple(lo + size for lo, size in zip(origin, shape, strict=True))),
         tuple(maps),
@@ -1061,7 +1040,7 @@ def test_generated_shared_affine_dependency_is_rejected(
         (DimensionMap(0, stride=stride), DimensionMap(0, offset=3)),
     )
     with pytest.raises(ValueError, match="read input axis 0"):
-        list(plan_chunks(transform, (SignedGrid(2, -1), SignedGrid(3, 1))))
+        list(plan_chunks(transform, (TranslatedGrid(2, -21, 21), TranslatedGrid(3, -21, 14))))
 
 
 @given(origin=st.integers(-4, 4), size=st.integers(2, 5), stride=st.sampled_from([-2, -1, 1, 2]))
@@ -1073,7 +1052,7 @@ def test_generated_mixed_affine_array_dependency_is_rejected(
         (DimensionMap(0, stride=stride), ArrayMap(np.zeros(size, dtype=np.intp))),
     )
     with pytest.raises(NotImplementedError, match="also bound by a slice map"):
-        list(plan_chunks(transform, (SignedGrid(2, -1), SignedGrid(3, 1))))
+        list(plan_chunks(transform, (TranslatedGrid(2, -21, 21), TranslatedGrid(3, -21, 14))))
 
 
 @pytest.mark.parametrize("stride", [0, 1, 2, -2])
