@@ -1121,9 +1121,10 @@ class LazyArray:
         `write_chunk_sizes` or `chunks`: each touched cell is read once, updated
         in memory, and written back, so the number of storage round trips is
         bounded by the number of touched cells rather than selected elements.
-        A NumPy source receives one fancy assignment instead, and a source with
-        no advertised grid is written one element at a time without reading.
-        The read-side partitioning (`with_parts`) does not affect writes.
+        A NumPy source receives one fancy assignment instead. A source with no
+        advertised grid is one cell, so it is read and written back once, over
+        the selection's bounding box. The read-side partitioning (`with_parts`)
+        does not affect writes.
 
         Writes go to the source directly and bypass the reader. A reader that
         caches source data is not invalidated, so reading after writing through
