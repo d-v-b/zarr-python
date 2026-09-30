@@ -182,13 +182,12 @@ def test_execution_reproduces_numpy(
     values = np.arange(expected.size, dtype=np.int64).reshape(expected.shape) + 1000
 
     view = LazyArray.from_numpy(reference)
-    lazy = view.lazy
     indexed = (
-        lazy[selection]
+        view[selection]
         if mode == "basic"
-        else lazy.oindex[selection]
+        else view.oindex[selection]
         if mode == "orthogonal"
-        else lazy.vindex[selection]
+        else view.vindex[selection]
     )
     literal = normalize_positional_selection(selection, IndexDomain.from_shape(shape), mode)
     plans: list[tuple[str, ExecutionPlan]] = [

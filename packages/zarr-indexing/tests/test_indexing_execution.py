@@ -10,11 +10,10 @@ import pytest
 from zarr_indexing import _execution as execution
 
 zarr = pytest.importorskip("zarr")
+sync = pytest.importorskip("zarr.core.sync").sync
 
 if TYPE_CHECKING:
     from zarr.core.indexing import Indexer
-
-pytestmark = pytest.mark.asyncio
 
 
 @pytest.mark.parametrize("pipeline", ["BatchedCodecPipeline", "FusedCodecPipeline"])
@@ -22,7 +21,7 @@ pytestmark = pytest.mark.asyncio
 @pytest.mark.parametrize(
     "case", ["basic", "integer", "reverse", "sorted", "components", "orthogonal"]
 )
-async def test_execution_codec_read_write(pipeline: str, layout: str, case: str) -> None:
+def test_execution_codec_read_write(pipeline: str, layout: str, case: str) -> None:
     from zarr.core.buffer.core import default_buffer_prototype
 
     shape: tuple[int, ...]
@@ -64,23 +63,25 @@ async def test_execution_codec_read_write(pipeline: str, layout: str, case: str)
             plan = plan.lower("shard")
         indexer = cast("Indexer", plan)
         prototype = default_buffer_prototype()
-        result = await async_array._get_selection(indexer, prototype=prototype)
+        result = sync(async_array._get_selection(indexer, prototype=prototype))
         np.testing.assert_array_equal(result, source[selection])
         replacement = np.arange(np.prod(plan.shape)).reshape(plan.shape) + 10000
         write_plan = execution.execute_selection(selection, shape, grids, mode=mode, access="write")
         if layout == "sharded":
             write_plan = write_plan.lower("shard")
-        await async_array._set_selection(
-            cast("Indexer", write_plan), replacement, prototype=prototype
+        sync(
+            async_array._set_selection(
+                cast("Indexer", write_plan), replacement, prototype=prototype
+            )
         )
         expected = source.copy()
         expected[selection] = replacement
-        np.testing.assert_array_equal(await async_array.getitem(Ellipsis), expected)
+        np.testing.assert_array_equal(sync(async_array.getitem(Ellipsis)), expected)
 
 
 @pytest.mark.parametrize("pipeline", ["BatchedCodecPipeline", "FusedCodecPipeline"])
 @pytest.mark.parametrize("step", [1, 2])
-async def test_boundary_complete_write_skips_read(pipeline: str, step: int) -> None:
+def test_boundary_complete_write_skips_read(pipeline: str, step: int) -> None:
     from zarr.core.buffer.core import default_buffer_prototype
 
     store = zarr.storage.LoggingStore(zarr.storage.MemoryStore())
@@ -91,11 +92,13 @@ async def test_boundary_complete_write_skips_read(pipeline: str, step: int) -> N
             slice(6, 7, step), (7,), array._async_array._chunk_grid._dimensions, access="write"
         )
         store.counter.clear()
-        await array._async_array._set_selection(
-            cast("Indexer", plan), np.array([99]), prototype=default_buffer_prototype()
+        sync(
+            array._async_array._set_selection(
+                cast("Indexer", plan), np.array([99]), prototype=default_buffer_prototype()
+            )
         )
         assert store.counter["get"] == 0
         assert store.counter["get_sync"] == 0
         np.testing.assert_array_equal(
-            await array._async_array.getitem(Ellipsis), [0, 1, 2, 3, 4, 5, 99]
+            sync(array._async_array.getitem(Ellipsis)), [0, 1, 2, 3, 4, 5, 99]
         )

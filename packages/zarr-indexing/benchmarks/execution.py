@@ -113,7 +113,8 @@ def compare_case(
     old_coords = [tuple(p.chunk_coords) for p in baseline()]
     partition = new()
     new_coords = [tuple(p.chunk_coords) for p in partition]
-    assert old_coords == new_coords
+    if old_coords != new_coords:
+        raise RuntimeError("partition chunk order differs from the zarr indexer")
     expected_size = (
         math.prod(shape)
         if mode == "basic"
@@ -123,7 +124,8 @@ def compare_case(
             else math.prod(np.broadcast_shapes(*(s.shape for s in selection)))
         )
     )
-    assert sum(math.prod(p.cell_transform.domain.shape) for p in partition) == expected_size
+    if sum(math.prod(p.cell_transform.domain.shape) for p in partition) != expected_size:
+        raise RuntimeError("partition cell count differs from the selection size")
     # Alternate evaluation order across rounds to reduce temporal bias.
     rounds = []
 
@@ -135,7 +137,8 @@ def compare_case(
             mode={"basic": "basic", "orthogonal": "orthogonal", "coordinate": "vectorized"}[mode],
         )
 
-    assert [tuple(p.chunk_coords) for p in immediate()] == old_coords
+    if [tuple(p.chunk_coords) for p in immediate()] != old_coords:
+        raise RuntimeError("prepared execution chunk order differs from the zarr indexer")
     operations = {
         "zarr_setup": baseline,
         "new_setup": new,

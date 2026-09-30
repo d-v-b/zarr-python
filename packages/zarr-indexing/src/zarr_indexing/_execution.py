@@ -248,16 +248,17 @@ def execute_selection(
         raise ValueError("shape dimensions must be nonnegative")
     if mode == "basic":
         normalized = _normalize_basic_selection(selection, len(shape))
-        if all(sel is not None for sel in normalized):
+        # newaxis entries fall through to the general path below.
+        literal = tuple(sel for sel in normalized if sel is not None)
+        if len(literal) == len(normalized):
             axes: list[_BasicAxis] = []
             out_shape: list[int] = []
-            for dim, (sel, size, grid) in enumerate(zip(normalized, shape, grids, strict=True)):
+            for dim, (sel, size, grid) in enumerate(zip(literal, shape, grids, strict=True)):
                 if isinstance(sel, int):
                     if not 0 <= sel < size:
                         raise BoundsCheckError(f"index {sel} is out of bounds for dimension {dim}")
                     axes.append(_BasicAxis(sel, 1, 1, grid, True))
                 else:
-                    assert isinstance(sel, slice)
                     start, step, _origin, count = _resolve_slice_ts(sel, dim, 0, size)
                     axes.append(_BasicAxis(start, step, count, grid))
                     out_shape.append(count)
