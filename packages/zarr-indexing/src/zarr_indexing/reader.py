@@ -32,7 +32,7 @@ __all__ = [
 
 @dataclass(frozen=True, slots=True)
 class ReadContext:
-    """A source-global transform and optional projection for a partitioned read.
+    """A source-global read transform and the chunk projection that planned it.
 
     Examples
     --------
