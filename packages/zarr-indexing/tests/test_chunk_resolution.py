@@ -948,6 +948,29 @@ class TranslatedGrid:
         return self.size
 
 
+class NegativeIdGrid(TranslatedGrid):
+    """A grid that breaks the `[0, n)` chunk-id contract by not raising below its start."""
+
+    def index_to_chunk(self, index: int) -> int:
+        return (index - self.lo) // self.size
+
+    def indices_to_chunks(
+        self, indices: np.ndarray[Any, np.dtype[np.intp]]
+    ) -> np.ndarray[Any, np.dtype[np.intp]]:
+        return (indices - self.lo) // self.size
+
+
+def test_a_grid_returning_a_negative_chunk_id_is_reported_not_grouped() -> None:
+    """Two correlated axes with signed ids would collide in the chunk key; the planner says so."""
+    values = np.array([[-1, 0], [0, -1]], dtype=np.intp)
+    transform = IndexTransform(
+        IndexDomain.from_shape((2,)), tuple(ArrayMap(values[:, axis]) for axis in range(2))
+    )
+    grids = (NegativeIdGrid(1, 0, 4), NegativeIdGrid(1, 0, 4))
+    with pytest.raises(ValueError, match="negative chunk id"):
+        plan_chunks(transform, grids).partition()
+
+
 def _assert_plan_matches_pointwise_oracle(
     transform: IndexTransform, grids: tuple[TranslatedGrid, ...]
 ) -> tuple[dict[tuple[int, ...], tuple[int, ...]], list[ChunkProjection]]:

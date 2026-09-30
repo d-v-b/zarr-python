@@ -91,10 +91,11 @@ def lower_index_array(raw: Any, where: str) -> np.ndarray[Any, np.dtype[np.intp]
             else:
                 _check_int(value, where)
     try:
-        # Every leaf is a checked integer, so the only remaining failure is a
-        # ragged nesting; an empty list lowers to an empty intp array.
+        # Every leaf is a checked 64-bit integer, so what remains is a ragged
+        # nesting, or a value past `intp` where that is narrower than 64 bits;
+        # an empty list lowers to an empty intp array.
         return np.asarray(raw, dtype=np.intp)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         raise NdselError("invalid_json", f"{where} is not an array: {exc}") from exc
 
 

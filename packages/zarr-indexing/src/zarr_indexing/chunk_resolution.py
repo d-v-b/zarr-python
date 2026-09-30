@@ -694,6 +694,10 @@ def _chunk_keys(
     keys = np.zeros(n, dtype=np.intp)
     multiplier = 1
     for ids in reversed(chunk_ids):
+        if int(ids.min()) < 0:
+            # A negative digit would collide with another tuple's key, so a
+            # grid that breaks the `[0, n)` contract is reported, not grouped.
+            raise ValueError(f"grid returned a negative chunk id: {int(ids.min())}")
         radix = int(ids.max()) + 1
         if multiplier * radix >= 2**62:
             stacked = np.stack([np.asarray(i, dtype=np.intp).ravel() for i in chunk_ids], axis=1)
