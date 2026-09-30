@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from zarr_indexing.messages import NdselError, validate_index_array_bounds
+from zarr_indexing.messages import NdselError, _check_int, validate_index_array_bounds
 
 if TYPE_CHECKING:
     from zarr_indexing.domain import IndexDomain
@@ -68,7 +68,10 @@ def lower_index_array(raw: Any, where: str) -> np.ndarray[Any, np.dtype[np.intp]
     and type to the engine — so this is where the content is checked. An index
     array names output coordinates, and nothing but an integer names one: converting
     `[0.9, 1.9]` would silently read cells 0 and 1, and `[true, false]` cells 1
-    and 0. Strings raise here rather than leaking NumPy's own conversion error.
+    and 0. Every leaf is held to the message layer's one definition of an
+    integer on the wire, `_check_int` (not a `bool`, within the signed 64-bit
+    range), before NumPy sees the list, so its inference can neither coerce a
+    boolean nor wrap a coordinate.
     """
     if not isinstance(raw, list):
         # The wire representation requires a nested array, not a scalar.
@@ -76,39 +79,19 @@ def lower_index_array(raw: Any, where: str) -> np.ndarray[Any, np.dtype[np.intp]
             "invalid_json",
             f"{where} must be an array of integers, got {raw!r}",
         )
-    # Validate before NumPy inference can coerce mixed booleans to integers or
-    # conversion to intp can wrap unsigned coordinates.
-    limits = np.iinfo(np.intp)
     pending = [raw]
     while pending:
         for value in pending.pop():
             if isinstance(value, list):
                 pending.append(value)
-            elif isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
-                dtype = np.asarray(value).dtype.name
-                raise NdselError(
-                    "invalid_json", f"{where} must hold integers, got {dtype}: {value!r}"
-                )
-            elif not limits.min <= value <= limits.max:
-                raise NdselError(
-                    "invalid_json", f"{where} coordinate {value} is outside intp range"
-                )
+            else:
+                _check_int(value, where)
     try:
-        arr = np.asarray(raw)
+        # Every leaf is a checked integer, so the only remaining failure is a
+        # ragged nesting; an empty list lowers to an empty intp array.
+        return np.asarray(raw, dtype=np.intp)
     except (TypeError, ValueError) as exc:
         raise NdselError("invalid_json", f"{where} is not an array: {exc}") from exc
-    if arr.size == 0 and arr.dtype.kind == "f":
-        # An empty JSON list carries no element type and NumPy defaults it to
-        # float64. An empty selection is legal, so take it as an empty index array.
-        return np.zeros(arr.shape, dtype=np.intp)
-    if arr.dtype.kind not in "iu":
-        raise NdselError(
-            "invalid_json",
-            f"{where} must hold integers, got an array of {arr.dtype.name}; an "
-            f"index array names output coordinates, which floats, booleans and "
-            f"strings do not",
-        )
-    return np.asarray(arr, dtype=np.intp)
 
 
 def lower_labels(labels: list[str]) -> tuple[str, ...] | None:

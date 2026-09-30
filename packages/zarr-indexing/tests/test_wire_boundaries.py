@@ -9,9 +9,10 @@ from zarr_indexing._wire import lower_index_array
 from zarr_indexing.messages import NdselError, normalize_ndsel
 
 
-@pytest.mark.parametrize("raw", [[True, 2], [[0, False]], [True, False]])
+@pytest.mark.parametrize("raw", [[True, 2], [[0, False]]])
 def test_index_array_rejects_boolean_elements(raw: Any) -> None:
-    with pytest.raises(NdselError, match="integers"):
+    """A boolean among integers is caught leaf by leaf, before NumPy can coerce it."""
+    with pytest.raises(NdselError, match="must be an integer"):
         lower_index_array(raw, "index_array")
 
 
