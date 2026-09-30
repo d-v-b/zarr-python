@@ -1082,7 +1082,10 @@ def _component_joint_sets(
     transform: IndexTransform, grids: tuple[DimensionGridLike, ...]
 ) -> tuple[JointSet, ...]:
     """Partition the input/index-array dependency graph into connected components."""
-    affine_axes = {m.input_dimension for m in transform.output if isinstance(m, DimensionMap)}
+    if transform.index_array_shares_affine_axis:
+        raise NotImplementedError(
+            "index array varies over an input dimension also bound by a slice map"
+        )
     # Accumulated components have disjoint input axes. A new map can bridge
     # several of them; merging every overlap maintains that invariant.
     components: list[tuple[set[int], list[int]]] = []
@@ -1090,10 +1093,6 @@ def _component_joint_sets(
         if not isinstance(m, ArrayMap):
             continue
         axes = set(m.dependency_axes)
-        if axes.intersection(affine_axes):
-            raise NotImplementedError(
-                "index array varies over an input dimension also bound by a slice map"
-            )
         dimensions = [dimension]
         separate = []
         for other_axes, other_dimensions in components:

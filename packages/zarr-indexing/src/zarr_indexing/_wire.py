@@ -13,7 +13,11 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from zarr_indexing.messages import NdselError, _check_int, validate_index_array_bounds
+from zarr_indexing.messages import (
+    NdselError,
+    _check_int,  # pyright: ignore[reportPrivateUsage]
+    validate_index_array_bounds,
+)
 
 if TYPE_CHECKING:
     from zarr_indexing.domain import IndexDomain

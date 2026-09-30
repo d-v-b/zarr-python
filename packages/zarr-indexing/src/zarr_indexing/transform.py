@@ -677,7 +677,9 @@ class IndexTransform:
         >>> t.vindex[np.array([0, 2]), np.array([1, 3])].index_array_structure
         'general'
         """
-        seen = {m.input_dimension for m in self.output if isinstance(m, DimensionMap)}
+        if self.index_array_shares_affine_axis:
+            return "general"
+        seen: set[int] = set()
         has_array = False
         for m in self.output:
             if not isinstance(m, ArrayMap):
@@ -688,6 +690,32 @@ class IndexTransform:
                 return "general"
             seen.add(dep[0])
         return "orthogonal" if has_array else "none"
+
+    @property
+    def index_array_shares_affine_axis(self) -> bool:
+        """Whether an index array varies over an input axis a `DimensionMap` also reads.
+
+        Such a transform is a diagonal between a slice map and a gather: the
+        two cannot be restricted independently of each other, so neither the
+        orthogonal nor the correlated resolution path takes it. No selection
+        builds one; it is reachable only by hand-constructing the output maps.
+        This is the one definition every site that rejects it consults.
+
+        Examples
+        --------
+        >>> t = IndexTransform(
+        ...     IndexDomain.from_shape((4,)), (DimensionMap(0), ArrayMap(np.array([3, 1, 2, 0])))
+        ... )
+        >>> t.index_array_shares_affine_axis
+        True
+        >>> IndexTransform.from_shape((4,)).oindex[[3, 1]].index_array_shares_affine_axis
+        False
+        """
+        affine_axes = {m.input_dimension for m in self.output if isinstance(m, DimensionMap)}
+        return any(
+            isinstance(m, ArrayMap) and not affine_axes.isdisjoint(m.dependency_axes)
+            for m in self.output
+        )
 
     def select(
         self,
@@ -1099,17 +1127,16 @@ def _prepare_correlated(
     )
     broadcast_shape = tuple(transform.domain.shape[a] for a in broadcast_axes)
 
+    if transform.index_array_shares_affine_axis:
+        raise NotImplementedError(
+            "intersecting a transform whose index array varies over an "
+            "input dimension also bound by a slice map is not supported"
+        )
+
     flat_index: dict[int, np.ndarray[Any, np.dtype[np.intp]]] = {}
     flat_storage: dict[int, np.ndarray[Any, np.dtype[np.intp]]] = {}
     for out_dim in correlated_dims:
         arr_map = cast("ArrayMap", transform.output[out_dim])
-        if any(a not in broadcast_axes for a in arr_map.dependency_axes):
-            # Reachable only by hand-building a transform: no selection binds
-            # the same input axis to both a slice map and an index array.
-            raise NotImplementedError(
-                "intersecting a transform whose index array varies over an "
-                "input dimension also bound by a slice map is not supported"
-            )
         arr = arr_map.index_array
         # Index arrays are singleton on every non-broadcast axis, so they
         # collapse (C-order) to the broadcast block. A map may also be singleton
