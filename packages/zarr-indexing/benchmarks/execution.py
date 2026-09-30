@@ -1,8 +1,10 @@
-"""Compare PR planner with existing Zarr indexers; no storage I/O.
+"""Compare partition rows with Zarr's indexers on the same selections; no storage I/O.
 
 Grid construction and input selection allocation are excluded for both sides.
-Selection compilation/indexer construction and complete streaming walks are included.
-Run with the worktree src and packages/zarr-indexing/src on PYTHONPATH in Hatch.
+Indexer construction and complete row walks are included. Run from this
+package directory with the in-repo zarr overlaid:
+
+    uv run --with-editable ../.. --group test python benchmarks/execution.py
 """
 
 from __future__ import annotations
@@ -18,9 +20,7 @@ import numpy as np
 import zarr.core.indexing as zi
 from zarr.core.chunk_grids import ChunkGrid
 
-from zarr_indexing import IndexTransform, plan_chunks
 from zarr_indexing._execution import execute_selection
-from zarr_indexing.grid import dimension_grids_from_chunks
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -61,23 +61,23 @@ def main() -> None:
             (1_000_000,),
             (100_000,),
             (np.arange(1_000_000),),
-            "coordinate",
+            "vectorized",
         ),
-        ("correlated_dense", (1000, 1000), (10, 10), (i, i), "coordinate"),
-        ("correlated_sparse", (10000, 10000), (10, 10), (i * 9, i * 9), "coordinate"),
+        ("correlated_dense", (1000, 1000), (10, 10), (i, i), "vectorized"),
+        ("correlated_sparse", (10000, 10000), (10, 10), (i * 9, i * 9), "vectorized"),
         (
             "independent_one_chunk",
             (1000,) * 3,
             (1000,) * 3,
             (i[:, None], i[:, None], i[None, :]),
-            "coordinate",
+            "vectorized",
         ),
         (
             "independent_100_chunks",
             (1000,) * 3,
             (100,) * 3,
             (i[:, None], i[:, None], i[None, :]),
-            "coordinate",
+            "vectorized",
         ),
     ]
     results = {
@@ -91,30 +91,21 @@ def compare_case(
     shape: tuple[int, ...], chunks: tuple[int, ...], selection: Any, mode: str
 ) -> dict[str, Any]:
     zg = ChunkGrid.from_sizes(shape, chunks)
-    pg = dimension_grids_from_chunks(chunks, shape)
     cls = {
         "basic": zi.BasicIndexer,
         "orthogonal": zi.OrthogonalIndexer,
-        "coordinate": zi.CoordinateIndexer,
+        "vectorized": zi.CoordinateIndexer,
     }[mode]
 
     def baseline() -> Any:
         return cls(selection, shape, zg)
 
-    def new() -> Any:
-        base = IndexTransform.from_shape(shape)
-        transform = (
-            base[selection]
-            if mode == "basic"
-            else (base.oindex[selection] if mode == "orthogonal" else base.vindex[selection])
-        )
-        return plan_chunks(transform, pg).partition()
+    def rows() -> Any:
+        return execute_selection(selection, shape, zg._dimensions, mode=mode)
 
     old_coords = [tuple(p.chunk_coords) for p in baseline()]
-    partition = new()
-    new_coords = [tuple(p.chunk_coords) for p in partition]
-    if old_coords != new_coords:
-        raise RuntimeError("partition chunk order differs from the zarr indexer")
+    if [tuple(p.chunk_coords) for p in rows()] != old_coords:
+        raise RuntimeError("partition rows visit chunks in a different order from the zarr indexer")
     expected_size = (
         math.prod(shape)
         if mode == "basic"
@@ -124,32 +115,16 @@ def compare_case(
             else math.prod(np.broadcast_shapes(*(s.shape for s in selection)))
         )
     )
-    if sum(math.prod(p.cell_transform.domain.shape) for p in partition) != expected_size:
-        raise RuntimeError("partition cell count differs from the selection size")
-    # Alternate evaluation order across rounds to reduce temporal bias.
-    rounds = []
-
-    def immediate() -> Any:
-        return execute_selection(
-            selection,
-            shape,
-            zg._dimensions,
-            mode={"basic": "basic", "orthogonal": "orthogonal", "coordinate": "vectorized"}[mode],
-        )
-
-    if [tuple(p.chunk_coords) for p in immediate()] != old_coords:
-        raise RuntimeError("prepared execution chunk order differs from the zarr indexer")
     operations = {
         "zarr_setup": baseline,
-        "new_setup": new,
+        "rows_setup": rows,
         "zarr_walk": lambda: consume(baseline()),
-        "new_walk": lambda: consume(new()),
-        "immediate_setup": immediate,
-        "immediate_walk": lambda: consume(immediate()),
+        "rows_walk": lambda: consume(rows()),
         "zarr_retained": lambda: list(baseline()),
-        "immediate_retained": lambda: list(immediate()),
-        "shard_retained": lambda: list(immediate().lower("shard")),
+        "rows_retained": lambda: list(rows()),
     }
+    # Alternate evaluation order across rounds to reduce temporal bias.
+    rounds = []
     for round_id in range(3):
         names = list(operations)
         if round_id % 2:

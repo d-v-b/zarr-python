@@ -1,41 +1,58 @@
-"""Internal selector-execution prototype; not a public API.
+"""Partition rows in the shape zarr's codec pipeline consumes; not a public API.
 
-Prepared work shares literal-coordinate semantics with IndexTransform. Inputs
-are snapshotted; access intent and duplicate-write policy are explicit. NumPy and shard consumers lower the same work to their required
-selector layout. Neither path changes Zarr's default indexers.
+`execute_transform` factors a transform with `plan_chunks(...).partition()` and
+wraps the `GridPartition` as an object with zarr's `Indexer` surface: `shape`,
+`drop_axes`, and iteration yielding one
+`(chunk_coords, chunk_selection, out_selection, is_complete_chunk)` row per
+touched chunk. Rows are read straight off the partition's `StridedSet`,
+`IndexedSet` and `JointSet` columns; no `ChunkProjection` is built.
+`execute_selection` is the NumPy-dialect front door: `LazyArray`'s selection
+handling (scalars first, positional coordinates) followed by `execute_transform`.
+
+Both sides of the pipeline's assignment, `out[out_selection]` and
+`chunk[chunk_selection]`, must produce values of one shape. Two layouts
+guarantee that without relying on NumPy's advanced-index placement rules:
+
+- **basic**: every table is a `StridedSet` and the request axes appear in
+  storage order. Chunk selectors are ints and ascending slices (a reversed
+  request puts the reversal in the out slice), out selectors are slices, and a
+  singleton request axis no output reads selects position ``0``. A row is
+  complete when every table row covers its chunk's data extent exactly once,
+  so a whole-chunk write can skip its read.
+- **coordinates**: everything else. Every selector is an integer array shaped
+  along one *slot* of a common layout: one slot per request axis, with the
+  broadcast axes of a connected index-array component collapsed into the slot
+  of its first. All selectors are advanced, so both sides take the broadcast
+  shape in slot order. Rows are never complete.
+
+A mixed layout, one index array with the rest slices, is used when it is safe
+(exactly one `IndexedSet`, no constants, no unread request axes, storage order).
 """
 
 from __future__ import annotations
 
 import itertools
-from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import numpy as np
 
-from zarr_indexing._affine import checked_affine
-from zarr_indexing._axis_plan import axis_runs
-from zarr_indexing._selector import as_scalar_index
-from zarr_indexing.boundary import split_scalar_axes
-from zarr_indexing.chunk_resolution import ChunkPlan, IndexedSet, plan_chunks
-from zarr_indexing.errors import BoundsCheckError
-from zarr_indexing.grid import DimensionGridLike, RegularDimensionGridLike
-from zarr_indexing.output_map import ArrayMap, ConstantMap, DimensionMap
-from zarr_indexing.transform import (
-    IndexTransform,
-    _normalize_basic_selection,  # pyright: ignore[reportPrivateUsage]
-    _positional_slice,  # pyright: ignore[reportPrivateUsage]
-    _resolve_slice_ts,  # pyright: ignore[reportPrivateUsage]
-)
-
-type Selector = int | slice | np.ndarray[Any, Any]
+from zarr_indexing.boundary import normalize_positional_selection, split_scalar_axes
+from zarr_indexing.chunk_resolution import GridPartition, IndexedSet, StridedSet, plan_chunks
+from zarr_indexing.transform import IndexTransform
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
 
+    from zarr_indexing.boundary import SelectionMode
+    from zarr_indexing.grid import DimensionGridLike
+
+type Selector = int | slice | np.ndarray[Any, np.dtype[np.intp]]
+type _Array = np.ndarray[Any, np.dtype[np.intp]]
+
 
 class ExecutionChunk(NamedTuple):
-    """Legacy four-field codec row produced by a named consumer's lowering."""
+    """One chunk's share of a request, in the four fields zarr's codec pipeline reads."""
 
     chunk_coords: tuple[int, ...]
     chunk_selection: tuple[Selector, ...]
@@ -45,186 +62,32 @@ class ExecutionChunk(NamedTuple):
 
 @dataclass(frozen=True, slots=True)
 class ExecutionPlan:
-    """Prepared semantic work, independent of a consumer's selector layout.
+    """A partition walked as zarr `Indexer` rows.
 
-    Input arrays are snapshotted, so a plan cannot drift under its caller.
-    Writers must prepare with access='write'; duplicate coordinates are rejected
-    unless conflicts='last' explicitly requests request-order last-write-wins.
+    `shape` is the request shape and `drop_axes` is empty: integer axes are
+    dropped by the selectors themselves. Iteration yields the rows in the
+    partition's row-major order, the same rows on every walk.
     """
 
-    shape: tuple[int, ...]
-    work: _BasicWork | _SortedWork | _ComponentWork | ChunkPlan
-    access: Literal["read", "write"] = "read"
-    conflicts: Literal["error", "last"] = "error"
+    partition: GridPartition
     drop_axes: tuple[int, ...] = ()
-
-    def __iter__(self) -> Iterator[ExecutionChunk]:
-        return iter(self.lower())
-
-    def lower(self, consumer: Literal["numpy", "shard"] = "numpy") -> LoweredPlan:
-        """Choose a consumer; shard lowering may materialize paired coordinates."""
-        if consumer not in ("numpy", "shard"):
-            raise ValueError(f"unknown execution consumer: {consumer}")
-        return LoweredPlan(self, consumer)
-
-
-@dataclass(frozen=True, slots=True)
-class LoweredPlan:
-    plan: ExecutionPlan
-    consumer: Literal["numpy", "shard"]
 
     @property
     def shape(self) -> tuple[int, ...]:
-        return self.plan.shape
+        return self.partition.transform.domain.shape
 
-    @property
-    def drop_axes(self) -> tuple[int, ...]:
-        return self.plan.drop_axes
+    def __len__(self) -> int:
+        return len(self.partition)
 
     def __iter__(self) -> Iterator[ExecutionChunk]:
-        return _consumer_rows(self.plan, self.consumer)
+        return rows(self.partition)
 
 
-class _BasicAxis(NamedTuple):
-    start: int
-    step: int
-    nitems: int
-    grid: DimensionGridLike
-    scalar: bool = False
-
-
-@dataclass(frozen=True, slots=True)
-class _BasicWork:
-    axes: tuple[_BasicAxis, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class _SortedWork:
-    coordinates: np.ndarray[Any, Any]
-    chunk_size: int
-    first: int
-    cuts: np.ndarray[Any, Any]
-
-
-@dataclass(frozen=True, slots=True)
-class _ComponentWork:
-    plan: ChunkPlan
-    local: tuple[np.ndarray[Any, Any], ...]
-
-
-def _axis_rows(axis: _BasicAxis) -> Iterator[tuple[int, int | slice, slice | None, bool]]:
-    start, step, count, grid, scalar = axis
-    for run in axis_runs(start, step, count, grid):
-        yield (
-            run.chunk,
-            run.local_start if scalar else _positional_slice(run.local_start, run.nitems, step),
-            None if scalar else slice(run.position, run.position + run.nitems),
-            (step == 1 or run.nitems == 1)
-            and run.local_start == 0
-            and run.nitems == run.data_extent,
-        )
-
-
-def _basic_rows(axes: tuple[_BasicAxis, ...]) -> Iterator[ExecutionChunk]:
-    if any(axis.nitems == 0 for axis in axes):
-        return
-    # Cache only small axes. Large axes stay implicit, including before the
-    # first result; a long dimension must not be drained by itertools.product.
-    pools: list[tuple[tuple[int, int | slice, slice | None, bool], ...] | None] = []
-    for axis in axes:
-        span = (
-            abs(
-                axis.grid.index_to_chunk(axis.start + (axis.nitems - 1) * axis.step)
-                - axis.grid.index_to_chunk(axis.start)
-            )
-            + 1
-        )
-        pools.append(tuple(_axis_rows(axis)) if min(span, axis.nitems) <= 128 else None)
-    combinations = (
-        itertools.product(*cast("list[tuple[Any, ...]]", pools))
-        if all(pool is not None for pool in pools)
-        else _implicit_product(axes, pools)
-    )
-    for pieces in combinations:
-        yield ExecutionChunk(
-            tuple(piece[0] for piece in pieces),
-            tuple(piece[1] for piece in pieces),
-            tuple(piece[2] for piece in pieces if piece[2] is not None),
-            all(piece[3] for piece in pieces),
-        )
-
-
-def _implicit_product(
-    axes: tuple[_BasicAxis, ...],
-    pools: list[tuple[Any, ...] | None],
-    dimension: int = 0,
-    prefix: tuple[Any, ...] = (),
-) -> Iterator[tuple[Any, ...]]:
-    if dimension == len(axes):
-        yield prefix
-    else:
-        pool = pools[dimension]
-        for piece in pool if pool is not None else _axis_rows(axes[dimension]):
-            yield from _implicit_product(axes, pools, dimension + 1, (*prefix, piece))
-
-
-def _basic_plan(shape: tuple[int, ...], axes: tuple[_BasicAxis, ...]) -> ExecutionPlan:
-    # Validate all axes before handing any work to a writer. A late failure
-    # must not leave earlier chunks of an invalid selection modified.
-    if all(shape):
-        for axis in axes:
-            if axis.nitems:
-                axis.grid.index_to_chunk(axis.start)
-                axis.grid.index_to_chunk(axis.start + (axis.nitems - 1) * axis.step)
-    return ExecutionPlan(shape, _BasicWork(axes))
-
-
-def _sorted_plan(
-    coordinates: np.ndarray[Any, Any], grids: tuple[DimensionGridLike, ...]
-) -> ExecutionPlan | None:
-    if (
-        len(grids) != 1
-        or not isinstance(grids[0], RegularDimensionGridLike)
-        or coordinates.dtype != np.dtype(np.intp)
-        or coordinates.ndim != 1
-        or coordinates.size == 0
-    ):
-        return None
-    grid = grids[0]
-    if coordinates[0] < 0 or coordinates[-1] >= grid.extent or grid.size == 0:
-        return None
-    first = int(coordinates[0]) // grid.size
-    last = int(coordinates[-1]) // grid.size
-    # Sparse or unordered selections use the shared component/table planner.
-    if (last - first + 1) * coordinates.size.bit_length() >= coordinates.size:
-        return None
-    if not bool((coordinates[:-1] <= coordinates[1:]).all()):
-        return None
-    # Only internal boundaries: the last chunk's end may exceed intp.
-    edges = np.arange(first + 1, last + 1, dtype=np.intp) * grid.size
-    cuts = np.searchsorted(coordinates, edges)
-    cuts.setflags(write=False)
-    return ExecutionPlan(coordinates.shape, _SortedWork(coordinates, grid.size, first, cuts))
-
-
-def _sorted_rows(
-    coordinates: np.ndarray[Any, Any],
-    chunk_size: int,
-    first: int,
-    cuts: np.ndarray[Any, Any],
-) -> Iterator[ExecutionChunk]:
-    start = 0
-    for relative in range(cuts.size + 1):
-        stop = int(cuts[relative]) if relative < cuts.size else coordinates.size
-        if stop > start:
-            chunk = first + relative
-            yield ExecutionChunk(
-                (chunk,),
-                (coordinates[start:stop] - chunk * chunk_size,),
-                (slice(start, stop),),
-                False,
-            )
-        start = stop
+def execute_transform(
+    transform: IndexTransform, dimension_grids: Sequence[DimensionGridLike]
+) -> ExecutionPlan:
+    """Factor `transform` over `dimension_grids` and wrap the partition as an indexer."""
+    return ExecutionPlan(plan_chunks(transform, dimension_grids).partition())
 
 
 def execute_selection(
@@ -232,419 +95,201 @@ def execute_selection(
     shape: tuple[int, ...],
     dimension_grids: Sequence[DimensionGridLike],
     *,
-    mode: str = "basic",
-    access: Literal["read", "write"] = "read",
-    conflicts: Literal["error", "last"] = "error",
+    mode: SelectionMode = "basic",
 ) -> ExecutionPlan:
-    """Compile literal-coordinate selections directly to execution selectors.
+    """Plan a NumPy-dialect selection of an array of `shape`.
 
-    Input arrays are snapshotted on every planning path. This is a
-    literal-coordinate frontend, not a NumPy/Zarr selection-normalization API.
+    The selection is read as `LazyArray` reads it: positional coordinates with
+    negatives counted from the end, and, in the orthogonal and vectorized
+    modes, scalar integers applied first so their axes drop.
     """
-    grids = tuple(dimension_grids)
-    if len(grids) != len(shape):
-        raise ValueError("dimension_grids must have one entry per storage dimension")
-    if any(size < 0 for size in shape):
-        raise ValueError("shape dimensions must be nonnegative")
-    if mode == "basic":
-        normalized = _normalize_basic_selection(selection, len(shape))
-        # newaxis entries fall through to the general path below.
-        literal = tuple(sel for sel in normalized if sel is not None)
-        if len(literal) == len(normalized):
-            axes: list[_BasicAxis] = []
-            out_shape: list[int] = []
-            for dim, (sel, size, grid) in enumerate(zip(literal, shape, grids, strict=True)):
-                if isinstance(sel, int):
-                    if not 0 <= sel < size:
-                        raise BoundsCheckError(f"index {sel} is out of bounds for dimension {dim}")
-                    axes.append(_BasicAxis(sel, 1, 1, grid, True))
-                else:
-                    start, step, _origin, count = _resolve_slice_ts(sel, dim, 0, size)
-                    axes.append(_BasicAxis(start, step, count, grid))
-                    out_shape.append(count)
-            return _with_policy(_basic_plan(tuple(out_shape), tuple(axes)), access, conflicts)
-    elif mode in ("orthogonal", "vectorized"):
-        items: tuple[Any, ...] = selection if isinstance(selection, tuple) else (selection,)
-        if (
-            len(shape) == len(items) == 1
-            and isinstance(items[0], np.ndarray)
-            and items[0].ndim == 1
-            and items[0].size > 0
-            and 0 <= items[0][0] <= items[0][-1] < shape[0]
-        ):
-            coordinates = items[0].copy()
-            coordinates.setflags(write=False)
-            sorted_plan = _sorted_plan(coordinates, grids)
-            if sorted_plan is not None:
-                return _with_policy(sorted_plan, access, conflicts)
-    else:
-        raise ValueError(f"unknown indexing mode: {mode}")
-    base = IndexTransform.from_shape(shape)
+    if mode not in ("basic", "orthogonal", "vectorized"):
+        raise ValueError(f"unknown indexing mode: {mode!r}")
+    transform = IndexTransform.from_shape(shape)
     if mode != "basic":
-        # Keep scalar-axis removal at the execution boundary: the transform
-        # algebra's oindex and vindex both retain a scalar axis as length one,
-        # where NumPy and Zarr's indexers drop it.
-        items = selection if isinstance(selection, tuple) else (selection,)
-        for item in items:
-            scalar = as_scalar_index(item)
-            if scalar is not None and scalar < 0:
-                raise BoundsCheckError("negative scalar is outside the literal source domain")
-        scalars, selection = split_scalar_axes(selection, base.domain, mode)
+        scalars, selection = split_scalar_axes(selection, transform.domain, mode)
         if scalars is not None:
-            base = base[scalars]
-    transform = (
-        base[selection]
-        if mode == "basic"
-        else base.oindex[selection]
-        if mode == "orthogonal"
-        else base.vindex[selection]
+            transform = transform.select(scalars, "basic")
+    literal = normalize_positional_selection(selection, transform.domain, mode)
+    transform = transform[literal] if mode == "basic" else transform.select(literal, mode)
+    return execute_transform(transform, dimension_grids)
+
+
+def rows(partition: GridPartition) -> Iterator[ExecutionChunk]:
+    """Lower every row of `partition` to a codec row, in row-major order."""
+    if len(partition) == 0:
+        return iter(())
+    domain = partition.transform.domain
+    sets, joints = partition.sets, partition.joint_sets
+    read = [axis.input_dimension for axis in sets if axis.input_dimension is not None]
+    bound = set(read).union(axis for joint in joints for axis in joint.broadcast_axes)
+    unread = tuple(k for k in range(domain.ndim) if k not in bound)
+    arrays = sum(isinstance(axis, IndexedSet) for axis in sets)
+    basic = (
+        not joints
+        and read == sorted(read)
+        and all(domain.shape[k] == 1 for k in unread)
+        and (arrays == 0 or (arrays == 1 and len(read) == len(sets) and not unread))
     )
-    return _with_policy(execute_transform(transform, grids), access, conflicts)
+    return _basic_rows(partition, unread) if basic else _coordinate_rows(partition, unread)
 
 
-def execute_transform(
-    transform: IndexTransform,
-    dimension_grids: Sequence[DimensionGridLike],
-    *,
-    access: Literal["read", "write"] = "read",
-    conflicts: Literal["error", "last"] = "error",
-) -> ExecutionPlan:
-    """Lower an existing immutable transform through the same execution paths."""
-    grids = tuple(dimension_grids)
-    if len(grids) != transform.output_rank:
-        raise ValueError("dimension_grids must have one entry per storage dimension")
-    domain = transform.domain
-    axes: list[_BasicAxis] = []
-    input_axes: list[int] = []
-    for m, grid in zip(transform.output, grids, strict=True):
-        if isinstance(m, ConstantMap):
-            axes.append(_BasicAxis(m.offset, 1, 1, grid, True))
-        elif isinstance(m, DimensionMap) and m.stride != 0:
-            axis = m.input_dimension
-            input_axes.append(axis)
-            axes.append(
-                _BasicAxis(
-                    m.offset + m.stride * domain.inclusive_min[axis],
-                    m.stride,
-                    domain.shape[axis],
-                    grid,
-                )
-            )
-        else:
-            break
-    else:
-        if input_axes == list(range(domain.ndim)):
-            return _with_policy(_basic_plan(domain.shape, tuple(axes)), access, conflicts)
-    if transform.input_rank == transform.output_rank == 1:
-        (m,) = transform.output
-        if isinstance(m, ArrayMap) and m.offset == 0 and m.stride == 1:
-            sorted_plan = _sorted_plan(m.index_array, grids)
-            if sorted_plan is not None and sorted_plan.shape == domain.shape:
-                return _with_policy(sorted_plan, access, conflicts)
-    _validate_storage_bounds(transform, grids)
-    plan = plan_chunks(transform, grids)
-    # Factor the plan once, up front: a transform the planner cannot factor
-    # (a diagonal) is rejected here rather than on first iteration.
-    partition = plan.partition()
-    if (
-        any(isinstance(m, ArrayMap) for m in transform.output)
-        and not partition.sets
-        and all(bool((joint.chunk_start >= 0).all()) for joint in partition.joint_sets)
-    ):
-        # Column arithmetic is checked once by JointSet.local; nonnegative
-        # chunk origins make its final local subtraction safe in intp.
-        work = _ComponentWork(plan, tuple(joint.local for joint in partition.joint_sets))
-        return _with_policy(ExecutionPlan(domain.shape, work), access, conflicts)
-    return _with_policy(ExecutionPlan(domain.shape, plan), access, conflicts)
+# -- basic layout -----------------------------------------------------------
+
+type _Piece = tuple[int, Selector, Selector | None, bool]
+"""A table row: chunk index, chunk selector, out selector (None for a constant), whole-chunk cover."""
 
 
-def _coordinates(transform: IndexTransform, origins: tuple[int, ...]) -> tuple[Selector, ...]:
-    """Broadcast coordinate selectors in synthetic-axis order without expansion."""
-    domain = transform.domain
-    selectors: list[Selector] = []
-    for m, origin in zip(transform.output, origins, strict=True):
-        if isinstance(m, ConstantMap):
-            values = np.full((1,) * domain.ndim, m.offset - origin, dtype=np.intp)
-        elif isinstance(m, DimensionMap):
-            axis = m.input_dimension
-            shape = tuple(domain.shape[k] if k == axis else 1 for k in range(domain.ndim))
-            positions = np.arange(domain.shape[axis], dtype=np.intp).reshape(shape)
-            values = checked_affine(
-                m.offset + m.stride * domain.inclusive_min[axis] - origin, m.stride, positions
-            )
-        else:
-            values = checked_affine(m.offset - origin, m.stride, m.index_array)
-        selectors.append(np.broadcast_to(values, domain.shape))
-    return tuple(selectors)
+def _strided_piece(axis: StridedSet, i: int) -> _Piece:
+    chunk, local, full = int(axis.chunk[i]), int(axis.local_start[i]), bool(axis.full[i])
+    if axis.input_dimension is None:
+        return chunk, local, None, full
+    n, origin, stride = int(axis.extent[i]), int(axis.origin[i]), axis.stride
+    if stride > 0:
+        return (
+            chunk,
+            slice(local, local + stride * (n - 1) + 1, stride),
+            slice(origin, origin + n),
+            full,
+        )
+    # Storage is read ascending; the reversal lives in the out slice.
+    last = local + stride * (n - 1)
+    out = slice(origin + n - 1, origin - 1 if origin else None, -1)
+    return chunk, slice(last, local + 1, -stride), out, full
 
 
-def _general_rows(plan: ChunkPlan) -> Iterator[ExecutionChunk]:
-    transform = plan.transform
-    for projection in plan:
+def _indexed_piece(axis: IndexedSet, i: int) -> _Piece:
+    run = axis.run(i)
+    return int(axis.chunk[i]), axis.local[run], axis.positions[run], False
+
+
+def _basic_rows(partition: GridPartition, unread: tuple[int, ...]) -> Iterator[ExecutionChunk]:
+    sets = partition.sets
+    ndim = partition.transform.domain.ndim
+    rank = partition.transform.output_rank
+    pieces = [
+        [
+            _strided_piece(axis, i) if isinstance(axis, StridedSet) else _indexed_piece(axis, i)
+            for i in range(len(axis))
+        ]
+        for axis in sets
+    ]
+    for combo in itertools.product(*pieces):
+        coords = [0] * rank
+        chunk: list[Selector] = [0] * rank
+        out: list[Selector | None] = [None] * ndim
+        for k in unread:
+            out[k] = 0
+        complete = True
+        for axis, (c, chunk_sel, out_sel, full) in zip(sets, combo, strict=True):
+            coords[axis.output_dimension] = c
+            chunk[axis.output_dimension] = chunk_sel
+            if axis.input_dimension is not None and out_sel is not None:
+                out[axis.input_dimension] = out_sel
+            complete = complete and full
         yield ExecutionChunk(
-            projection.chunk_coords,
-            _coordinates(projection.chunk_transform, (0,) * transform.output_rank),
-            _coordinates(projection.cell_transform, transform.domain.inclusive_min),
-            # Arrays may repeat coordinates; only the direct basic path proves
-            # full data-extent coverage with a codec-compatible value layout.
-            False,
+            tuple(coords), tuple(chunk), tuple(o for o in out if o is not None), complete
         )
 
 
-def _flat_selectors(
-    selection: tuple[Selector, ...], shape: tuple[int, ...]
-) -> tuple[Selector, ...]:
-    if not selection:
-        return ()
-    if all(isinstance(sel, np.ndarray) for sel in selection):
-        arrays = cast("tuple[np.ndarray[Any, Any], ...]", selection)
-    else:
-        rank = sum(not isinstance(sel, int) for sel in selection)
-        basic_arrays: list[np.ndarray[Any, Any]] = []
-        axis = 0
-        for sel, extent in zip(selection, shape, strict=True):
-            if isinstance(sel, int):
-                values = np.asarray(sel, dtype=np.intp).reshape((1,) * rank)
+# -- coordinate layout ------------------------------------------------------
+
+
+def _coordinate_rows(partition: GridPartition, unread: tuple[int, ...]) -> Iterator[ExecutionChunk]:
+    transform = partition.transform
+    domain = transform.domain
+    sets, joints = partition.sets, partition.joint_sets
+    # One slot per request axis; a joint's broadcast axes share the slot of its first.
+    lead = {joint.broadcast_axes[0]: n for n, joint in enumerate(joints) if joint.broadcast_axes}
+    skip = {axis for joint in joints for axis in joint.broadcast_axes[1:]}
+    slot: dict[int, int] = {}
+    joint_slot: dict[int, int] = {}
+    for k in range(domain.ndim):
+        if k in skip:
+            continue
+        if k in lead:
+            joint_slot[lead[k]] = len(slot) + len(joint_slot)
+        else:
+            slot[k] = len(slot) + len(joint_slot)
+    rank = len(slot) + len(joint_slot)
+    scalar_shape = (1,) * rank
+
+    def along(values: _Array, s: int) -> _Array:
+        return values.reshape((1,) * s + (-1,) + (1,) * (rank - s - 1))
+
+    per_set: list[list[tuple[int, _Array, _Array | None]]] = []
+    for axis in sets:
+        table: list[tuple[int, _Array, _Array | None]] = []
+        for i in range(len(axis)):
+            if isinstance(axis, IndexedSet):
+                run, s = axis.run(i), slot[axis.input_dimension]
+                table.append(
+                    (int(axis.chunk[i]), along(axis.local[run], s), along(axis.positions[run], s))
+                )
+            elif axis.input_dimension is None:
+                table.append(
+                    (
+                        int(axis.chunk[i]),
+                        np.full(scalar_shape, int(axis.local_start[i]), dtype=np.intp),
+                        None,
+                    )
+                )
             else:
-                values = (
-                    np.arange(*sel.indices(extent), dtype=np.intp)
-                    if isinstance(sel, slice)
-                    else sel
+                s = slot[axis.input_dimension]
+                steps = np.arange(int(axis.extent[i]), dtype=np.intp)
+                local = int(axis.local_start[i]) + axis.stride * steps
+                table.append(
+                    (int(axis.chunk[i]), along(local, s), along(int(axis.origin[i]) + steps, s))
                 )
-                values = values.reshape((1,) * axis + (values.size,) + (1,) * (rank - axis - 1))
-                axis += 1
-            basic_arrays.append(values)
-        arrays = tuple(basic_arrays)
-    return tuple(array.reshape(-1) for array in np.broadcast_arrays(*arrays))
-
-
-def _shard_rows(plan: ExecutionPlan, rows: Iterator[ExecutionChunk]) -> Iterator[ExecutionChunk]:
-    for row in rows:
-        if not row.out_selection:
-            # The shard coordinate indexer returns a length-one vector for a
-            # 0-D array selector. Integer selectors preserve a scalar result.
-            yield ExecutionChunk(
-                row.chunk_coords,
-                tuple(
-                    int(sel.item()) if isinstance(sel, np.ndarray) and sel.ndim == 0 else sel
-                    for sel in row.chunk_selection
-                ),
-                (),
-                row.is_complete_chunk,
-            )
-            continue
-        if all(isinstance(sel, np.ndarray) and sel.ndim <= 1 for sel in row.chunk_selection) and (
-            all(isinstance(sel, np.ndarray) and sel.ndim <= 1 for sel in row.out_selection)
-            or (len(row.out_selection) == 1 and isinstance(row.out_selection[0], slice))
-        ):
-            # The existing shard indexer already produces this flat value
-            # shape. In particular, retain sorted runs' output slices.
-            yield row
-            continue
-        if any(
-            isinstance(sel, np.ndarray)
-            or (isinstance(sel, slice) and sel.step is not None and sel.step < 0)
-            for sel in row.chunk_selection
-        ):
-            shape = _chunk_shape(plan, row.chunk_coords)
-            yield ExecutionChunk(
-                row.chunk_coords,
-                _flat_selectors(row.chunk_selection, shape),
-                _flat_selectors(row.out_selection, plan.shape),
-                False,
-            )
-        else:
-            yield row
-
-
-def _validate_storage_bounds(
-    transform: IndexTransform, grids: tuple[DimensionGridLike, ...]
-) -> None:
-    if 0 in transform.domain.shape:
-        return
-    for m, grid in zip(transform.output, grids, strict=True):
-        if isinstance(m, ConstantMap):
-            bounds = (m.offset, m.offset)
-        elif isinstance(m, DimensionMap):
-            axis = m.input_dimension
-            bounds = (
-                checked_affine(m.offset, m.stride, transform.domain.inclusive_min[axis]),
-                checked_affine(m.offset, m.stride, transform.domain.exclusive_max[axis] - 1),
-            )
-        else:
-            mapped = checked_affine(m.offset, m.stride, m.index_array)
-            bounds = (int(mapped.min()), int(mapped.max()))
-        grid.index_to_chunk(min(bounds))
-        grid.index_to_chunk(max(bounds))
-
-
-def _with_policy(
-    plan: ExecutionPlan,
-    access: Literal["read", "write"],
-    conflicts: Literal["error", "last"],
-) -> ExecutionPlan:
-    if access not in ("read", "write"):
-        raise ValueError(f"unknown access intent: {access}")
-    if conflicts not in ("error", "last"):
-        raise ValueError(f"unknown conflict policy: {conflicts}")
-    result = (
-        plan
-        if (plan.access, plan.conflicts) == (access, conflicts)
-        else replace(plan, access=access, conflicts=conflicts)
-    )
-    if access == "write" and conflicts == "error":
-        _validate_unique_writes(result)
-    return result
-
-
-def _validate_unique_writes(plan: ExecutionPlan) -> None:
-    if 0 in plan.shape or isinstance(plan.work, _BasicWork):
-        return
-    work = plan.work
-    if isinstance(work, _SortedWork):
-        unique = not bool((work.coordinates[1:] == work.coordinates[:-1]).any())
-    else:
-        source_plan = work.plan if isinstance(work, _ComponentWork) else work
-        transform = source_plan.transform
-        referenced: set[int] = set()
-        for m in transform.output:
-            if isinstance(m, DimensionMap) and m.stride != 0:
-                referenced.add(m.input_dimension)
-            elif isinstance(m, ArrayMap) and m.stride != 0:
-                referenced.update(m.dependency_axes)
-        unique = all(size <= 1 or axis in referenced for axis, size in enumerate(plan.shape))
-        if unique and transform.index_array_structure != "general":
-            for axis, size in enumerate(plan.shape):
-                if size <= 1 or any(
-                    isinstance(m, DimensionMap) and m.input_dimension == axis and m.stride != 0
-                    for m in transform.output
-                ):
-                    continue
-                columns = [
-                    m.index_array.reshape(-1)
-                    for m in transform.output
-                    if isinstance(m, ArrayMap) and m.dependent_axis == axis and m.stride != 0
-                ]
-                unique &= (
-                    bool(columns) and np.unique(np.stack(columns, axis=1), axis=0).shape[0] == size
-                )
-        elif unique and any(isinstance(m, ArrayMap) for m in transform.output):
-            partition = source_plan.partition()
-            for table in partition.sets:
-                if isinstance(table, IndexedSet):
-                    unique &= table.stride != 0 and np.unique(table.index).size == table.index.size
-            for joint in partition.joint_sets:
-                active_columns = [i for i, stride in enumerate(joint.strides) if stride != 0]
-                values = joint.index[:, active_columns]
-                unique &= np.unique(values, axis=0).shape[0] == values.shape[0]
-    if not unique:
-        raise ValueError("duplicate writes require conflicts='last'")
-
-
-def _raw_rows(plan: ExecutionPlan) -> Iterator[ExecutionChunk]:
-    work = plan.work
-    if isinstance(work, _BasicWork):
-        return _basic_rows(work.axes)
-    if isinstance(work, _SortedWork):
-        return _sorted_rows(work.coordinates, work.chunk_size, work.first, work.cuts)
-    if isinstance(work, _ComponentWork):
-        return _component_rows(work)
-    return _general_rows(work)
-
-
-def _chunk_shape(plan: ExecutionPlan, coords: tuple[int, ...]) -> tuple[int, ...]:
-    work = plan.work
-    if isinstance(work, _SortedWork):
-        return (work.chunk_size,)
-    grids = (
-        tuple(axis.grid for axis in work.axes)
-        if isinstance(work, _BasicWork)
-        else work.plan.dimension_grids
-        if isinstance(work, _ComponentWork)
-        else work.dimension_grids
-    )
-    return tuple(grid.chunk_size(c) for grid, c in zip(grids, coords, strict=True))
-
-
-def _ordered_write_rows(
-    plan: ExecutionPlan, rows: Iterator[ExecutionChunk]
-) -> Iterator[ExecutionChunk]:
-    for row in rows:
-        chunk = _flat_selectors(row.chunk_selection, _chunk_shape(plan, row.chunk_coords))
-        out = _flat_selectors(row.out_selection, plan.shape)
-        if not out:
-            yield row
-            continue
-        positions = cast("tuple[np.ndarray[Any, Any], ...]", out)
-        order = np.lexsort(positions[::-1])
-        if not chunk:
-            # A scalar target repeated over a request has one final value.
-            yield ExecutionChunk(
-                row.chunk_coords, (), tuple(int(p[order[-1]]) for p in positions), False
-            )
-        else:
-            # Eliminate duplicate destinations ourselves: a backend's repeated
-            # advanced-assignment order must not define our conflict policy.
-            destinations = np.stack([cast("np.ndarray[Any, Any]", c)[order] for c in chunk], axis=1)
-            _, reversed_positions = np.unique(destinations[::-1], axis=0, return_index=True)
-            order = order[np.sort(order.size - 1 - reversed_positions)]
-            yield ExecutionChunk(
-                row.chunk_coords,
-                tuple(cast("np.ndarray[Any, Any]", c)[order] for c in chunk),
-                tuple(p[order] for p in positions),
-                False,
-            )
-
-
-def _consumer_rows(
-    plan: ExecutionPlan, consumer: Literal["numpy", "shard"]
-) -> Iterator[ExecutionChunk]:
-    rows = _raw_rows(plan)
-    if (
-        plan.access == "write"
-        and plan.conflicts == "last"
-        and not isinstance(plan.work, _BasicWork)
-    ):
-        rows = _ordered_write_rows(plan, rows)
-    return _shard_rows(plan, rows) if consumer == "shard" else rows
-
-
-def _component_rows(work: _ComponentWork) -> Iterator[ExecutionChunk]:
-    """Lower factored coordinate columns without constructing transform pairs."""
-    partition = work.plan.partition()
-    joints = partition.joint_sets
-    domain = work.plan.transform.domain
-    if 0 in domain.shape:
-        return
-    referenced = {axis for joint in joints for axis in joint.broadcast_axes}
-    unread = tuple(axis for axis in range(domain.ndim) if axis not in referenced)
-    slots: list[int | None] = []
-    lead = 0
-    for joint in joints:
-        slots.append(lead if joint.broadcast_axes else None)
-        lead += bool(joint.broadcast_axes)
-    rank = lead + len(unread)
-    for rows in itertools.product(*(range(len(joint)) for joint in joints)):
-        chunk: list[Selector] = [0] * work.plan.transform.output_rank
-        out: list[Selector] = [0] * domain.ndim
-        coords = [0] * len(chunk)
-        shape = [1] * rank
-        for joint, local, slot, row in zip(joints, work.local, slots, rows, strict=True):
-            run = joint.run(row)
-            component_shape = [1] * rank
-            if slot is not None:
-                shape[slot] = component_shape[slot] = run.stop - run.start
-            for column, dimension in enumerate(joint.output_dimensions):
-                coords[dimension] = int(joint.chunk[row, column])
-                chunk[dimension] = local[run, column].reshape(component_shape)
-            for column, axis in enumerate(joint.broadcast_axes):
-                out[axis] = joint.block_coordinates[run, column].reshape(component_shape)
-        for i, axis in enumerate(unread):
-            component_shape = [1] * rank
-            shape[lead + i] = component_shape[lead + i] = domain.shape[axis]
-            out[axis] = np.arange(domain.shape[axis], dtype=np.intp).reshape(component_shape)
-        if any(domain.shape[axis] > 1 for axis in unread):
-            chunk = [
-                np.broadcast_to(cast("np.ndarray[Any, Any]", sel), tuple(shape)) for sel in chunk
-            ]
-        yield ExecutionChunk(tuple(coords), tuple(chunk), tuple(out), False)
+        per_set.append(table)
+    per_joint: list[list[tuple[tuple[int, ...], tuple[_Array, ...], tuple[_Array, ...]]]] = []
+    for n, joint in enumerate(joints):
+        local, block = joint.local, joint.block_coordinates
+        columns, axes = range(len(joint.output_dimensions)), range(len(joint.broadcast_axes))
+        table_j: list[tuple[tuple[int, ...], tuple[_Array, ...], tuple[_Array, ...]]] = []
+        for i in range(len(joint)):
+            run = joint.run(i)
+            coords_j = tuple(int(c) for c in joint.chunk[i])
+            if n in joint_slot:
+                s = joint_slot[n]
+                chunk_cols = tuple(along(local[run, c], s) for c in columns)
+                out_cols = tuple(along(block[run, a], s) for a in axes)
+            else:
+                # A component with no broadcast axis is a single point.
+                chunk_cols = tuple(local[run, c].reshape(scalar_shape) for c in columns)
+                out_cols = ()
+            table_j.append((coords_j, chunk_cols, out_cols))
+        per_joint.append(table_j)
+    unread_out = {k: along(np.arange(domain.shape[k], dtype=np.intp), slot[k]) for k in unread}
+    # A chunk value is read through an unread axis by broadcasting, but cannot
+    # be written through one: expand the chunk selectors so the shapes match.
+    expand = any(domain.shape[k] > 1 for k in unread)
+    out_rank = transform.output_rank
+    for set_combo in itertools.product(*per_set):
+        for joint_combo in itertools.product(*per_joint):
+            coords = [0] * out_rank
+            chunk: list[_Array] = [np.empty(0, dtype=np.intp)] * out_rank
+            out: list[_Array | None] = [None] * domain.ndim
+            for k, values in unread_out.items():
+                out[k] = values
+            for axis, (c, chunk_sel, out_sel) in zip(sets, set_combo, strict=True):
+                coords[axis.output_dimension] = c
+                chunk[axis.output_dimension] = chunk_sel
+                if axis.input_dimension is not None and out_sel is not None:
+                    out[axis.input_dimension] = out_sel
+            for joint, (coords_j, chunk_cols, out_cols) in zip(joints, joint_combo, strict=True):
+                for d, c, sel in zip(joint.output_dimensions, coords_j, chunk_cols, strict=True):
+                    coords[d] = c
+                    chunk[d] = sel
+                for a, sel in zip(joint.broadcast_axes, out_cols, strict=True):
+                    out[a] = sel
+            out_sels = tuple(o for o in out if o is not None)
+            chunk_sels: tuple[Selector, ...]
+            if expand:
+                shape = np.broadcast_shapes(*(a.shape for a in (*chunk, *out_sels)))
+                chunk_sels = tuple(np.broadcast_to(a, shape) for a in chunk)
+            elif rank == 0:
+                chunk_sels = tuple(int(a) for a in chunk)
+            else:
+                chunk_sels = tuple(chunk)
+            yield ExecutionChunk(tuple(coords), chunk_sels, out_sels, False)

@@ -1,13 +1,13 @@
-"""Prepared execution against a chunked NumPy reference.
+"""Partition rows against a chunked NumPy reference.
 
 For any array shape, chunk grid (fixed, rectilinear, clipped to the extent, or
 the narrow edge-grid protocol without `data_size`) and basic, orthogonal or
-vectorized selection, assembling the rows of an execution plan out of the
-chunks of a reference array must reproduce NumPy's answer; a plan must yield
-the same rows every time it is walked; `is_complete_chunk` must be a proof
-that the row covers its chunk's data exactly once; and a write plan must
-scatter values exactly as NumPy assignment does, or refuse a selection that
-repeats a destination unless told to keep the last value.
+vectorized selection, assembling the rows of a plan out of the chunks of a
+reference array must reproduce NumPy's answer; a plan must yield the same rows
+every time it is walked; `is_complete_chunk` must be a proof that the row
+covers its chunk's data exactly once; and scattering through the rows must
+write exactly the cells NumPy assignment writes, with NumPy's values when no
+destination repeats.
 """
 
 from __future__ import annotations
@@ -15,14 +15,12 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
-import pytest
 from hypothesis import event, given, settings
 from hypothesis import strategies as st
 
 from zarr_indexing import (
     EdgeDimensionGrid,
     FixedDimension,
-    IndexDomain,
     LazyArray,
     VaryingDimension,
 )
@@ -32,7 +30,6 @@ from zarr_indexing._execution import (
     execute_selection,
     execute_transform,
 )
-from zarr_indexing.boundary import normalize_positional_selection
 from zarr_indexing.testing import (
     apply_selection,
     basic_selections,
@@ -69,8 +66,8 @@ def _axis_grid(draw: st.DrawFn, size: int, kind: str) -> Any:
 @st.composite
 def _cases(draw: st.DrawFn) -> tuple[tuple[int, ...], str, tuple[Any, ...], str, Any]:
     if draw(st.integers(0, 4)) == 0:
-        # A dense sorted coordinate gather over few chunks: the only shape the
-        # sorted fast path accepts, which the small shapes below never produce.
+        # A long sorted coordinate gather over few chunks, which the small
+        # shapes below never produce.
         size = draw(st.integers(8, 64))
         grid = FixedDimension(size=draw(st.integers(1, size)), extent=size)
         points = draw(st.lists(st.integers(0, size - 1), min_size=1, max_size=2 * size))
@@ -189,28 +186,27 @@ def test_execution_reproduces_numpy(
         if mode == "orthogonal"
         else view.vindex[selection]
     )
-    literal = normalize_positional_selection(selection, IndexDomain.from_shape(shape), mode)
     plans: list[tuple[str, ExecutionPlan]] = [
         ("transform", execute_transform(indexed.transform, grids)),
-        ("selection", execute_selection(literal, shape, grids, mode=mode)),
+        ("selection", execute_selection(selection, shape, grids, mode=mode)),
     ]
     for entry, plan in plans:
-        event(f"{entry}:{type(plan.work).__name__}")
+        event(f"{entry}:{'basic' if _is_basic(plan) else 'coordinates'}")
         assert plan.shape == expected.shape, (entry, plan.shape, expected.shape)
-        for consumer in ("numpy", "shard"):
-            rows = list(plan.lower(consumer))
-            assert _same_rows(rows, list(plan.lower(consumer))), "a plan must walk the same twice"
-            np.testing.assert_array_equal(_gather(rows, reference, grids, expected.shape), expected)
+        rows = list(plan)
+        assert _same_rows(rows, list(plan)), "a plan must walk the same twice"
+        np.testing.assert_array_equal(_gather(rows, reference, grids, expected.shape), expected)
 
-    expected_write = reference.copy()
-    _assign(expected_write, selection, mode, values)
-    if unique:
-        write_plan = execute_transform(indexed.transform, grids, access="write")
-    else:
-        with pytest.raises(ValueError, match="duplicate writes"):
-            execute_transform(indexed.transform, grids, access="write")
-        write_plan = execute_transform(indexed.transform, grids, access="write", conflicts="last")
-    for consumer in ("numpy", "shard"):
         written = reference.copy()
-        _scatter(list(write_plan.lower(consumer)), written, grids, values)
-        np.testing.assert_array_equal(written, expected_write)
+        _scatter(rows, written, grids, values)
+        changed = written != reference
+        selected = np.isin(reference, expected)
+        np.testing.assert_array_equal(changed, selected)
+        if unique:
+            expected_write = reference.copy()
+            _assign(expected_write, selection, mode, values)
+            np.testing.assert_array_equal(written, expected_write)
+
+
+def _is_basic(plan: ExecutionPlan) -> bool:
+    return all(all(not isinstance(sel, np.ndarray) for sel in row.chunk_selection) for row in plan)

@@ -1,8 +1,11 @@
-"""Measure actual in-memory Zarr codec reads/writes, including plan construction.
+"""Measure in-memory Zarr codec reads/writes through partition rows, including planning.
 
 Storage, source data, grids, and replacement data are prepared before timing.
 Both paths use the same array and codec pipeline. These are local MemoryStore
-measurements, not estimates of cloud or filesystem throughput.
+measurements, not estimates of cloud or filesystem throughput. Run from this
+package directory with the in-repo zarr overlaid:
+
+    uv run --with-editable ../.. --group test python benchmarks/execution_io.py
 """
 
 from __future__ import annotations
@@ -81,9 +84,7 @@ async def run_case(case: str, sharded: bool) -> dict[str, Any]:
 
     async def new_read() -> Any:
         plan = execute_selection(selection, shape, grids, mode=mode)
-        return await array._get_selection(
-            cast("Indexer", plan.lower("shard" if sharded else "numpy")), prototype=prototype
-        )
+        return await array._get_selection(cast("Indexer", plan), prototype=prototype)
 
     async def old_write() -> None:
         await array._set_selection(
@@ -93,20 +94,16 @@ async def run_case(case: str, sharded: bool) -> dict[str, Any]:
         )
 
     async def new_write() -> None:
-        plan = execute_selection(selection, shape, grids, mode=mode, access="write")
-        await array._set_selection(
-            cast("Indexer", plan.lower("shard" if sharded else "numpy")),
-            replacement,
-            prototype=prototype,
-        )
+        plan = execute_selection(selection, shape, grids, mode=mode)
+        await array._set_selection(cast("Indexer", plan), replacement, prototype=prototype)
 
     np.testing.assert_array_equal(await old_read(), expected)
     np.testing.assert_array_equal(await new_read(), expected)
     results = {
         "zarr_read": await measure(old_read),
-        "new_read": await measure(new_read),
+        "rows_read": await measure(new_read),
         "zarr_write": await measure(old_write),
-        "new_write": await measure(new_write),
+        "rows_write": await measure(new_write),
     }
     expected_full = source.copy()
     expected_full[selection] = replacement

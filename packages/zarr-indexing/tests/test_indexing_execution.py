@@ -1,4 +1,4 @@
-"""Exercise the optional indexing prototype through real Zarr codec pipelines."""
+"""Drive real Zarr codec pipelines with partition rows in place of Zarr's indexers."""
 
 from __future__ import annotations
 
@@ -58,30 +58,30 @@ def test_execution_codec_read_write(pipeline: str, layout: str, case: str) -> No
         async_array = array._async_array
         # The pipeline processes shard-sized buffers for sharded arrays.
         grids = async_array._chunk_grid._dimensions
-        plan = execution.execute_selection(selection, shape, grids, mode=mode)
-        if layout == "sharded":
-            plan = plan.lower("shard")
-        indexer = cast("Indexer", plan)
+        indexer = cast("Indexer", execution.execute_selection(selection, shape, grids, mode=mode))
         prototype = default_buffer_prototype()
         result = sync(async_array._get_selection(indexer, prototype=prototype))
         np.testing.assert_array_equal(result, source[selection])
-        replacement = np.arange(np.prod(plan.shape)).reshape(plan.shape) + 10000
-        write_plan = execution.execute_selection(selection, shape, grids, mode=mode, access="write")
-        if layout == "sharded":
-            write_plan = write_plan.lower("shard")
-        sync(
-            async_array._set_selection(
-                cast("Indexer", write_plan), replacement, prototype=prototype
-            )
-        )
+        replacement = np.arange(np.prod(indexer.shape)).reshape(indexer.shape) + 10000
+        sync(async_array._set_selection(indexer, replacement, prototype=prototype))
         expected = source.copy()
         expected[selection] = replacement
         np.testing.assert_array_equal(sync(async_array.getitem(Ellipsis)), expected)
 
 
 @pytest.mark.parametrize("pipeline", ["BatchedCodecPipeline", "FusedCodecPipeline"])
-@pytest.mark.parametrize("step", [1, 2])
-def test_boundary_complete_write_skips_read(pipeline: str, step: int) -> None:
+@pytest.mark.parametrize(
+    ("selection", "value", "expected"),
+    [
+        (slice(6, 7), [99], [0, 1, 2, 3, 4, 5, 99]),
+        (slice(6, 7, 2), [99], [0, 1, 2, 3, 4, 5, 99]),
+        (slice(None, None, -1), list(range(100, 107)), [106, 105, 104, 103, 102, 101, 100]),
+    ],
+)
+def test_complete_chunk_writes_skip_the_read(
+    pipeline: str, selection: slice, value: list[int], expected: list[int]
+) -> None:
+    """Every touched chunk is covered exactly once, so no chunk is read before writing."""
     from zarr.core.buffer.core import default_buffer_prototype
 
     store = zarr.storage.LoggingStore(zarr.storage.MemoryStore())
@@ -89,16 +89,14 @@ def test_boundary_complete_write_skips_read(pipeline: str, step: int) -> None:
         array = zarr.create_array(store=store, shape=(7,), chunks=(3,), dtype="int64")
         array[:] = np.arange(7)
         plan = execution.execute_selection(
-            slice(6, 7, step), (7,), array._async_array._chunk_grid._dimensions, access="write"
+            selection, (7,), array._async_array._chunk_grid._dimensions
         )
         store.counter.clear()
         sync(
             array._async_array._set_selection(
-                cast("Indexer", plan), np.array([99]), prototype=default_buffer_prototype()
+                cast("Indexer", plan), np.array(value), prototype=default_buffer_prototype()
             )
         )
         assert store.counter["get"] == 0
         assert store.counter["get_sync"] == 0
-        np.testing.assert_array_equal(
-            sync(array._async_array.getitem(Ellipsis)), [0, 1, 2, 3, 4, 5, 99]
-        )
+        np.testing.assert_array_equal(sync(array._async_array.getitem(Ellipsis)), expected)

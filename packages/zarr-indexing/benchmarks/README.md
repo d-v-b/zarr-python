@@ -40,17 +40,19 @@ measurements with alternating operation order before interpreting small timing
 differences. Preserve raw benchmark output as an experiment artifact rather than
 accumulating successive result tables in this README.
 
-## Experimental execution
+## Partition rows
 
-The execution follow-up adds two scripts:
+Two scripts compare `zarr_indexing._execution`, which walks a `GridPartition`
+as Zarr `Indexer` rows, with Zarr's own indexers. Run them from this package
+directory with the in-repo zarr overlaid:
 
 ```sh
-hatch run test.py3.12-minimal:python packages/zarr-indexing/benchmarks/execution.py
-hatch run test.py3.12-minimal:python packages/zarr-indexing/benchmarks/execution_io.py
+uv run --with-editable ../.. --group test python benchmarks/execution.py
+uv run --with-editable ../.. --group test python benchmarks/execution_io.py
 ```
 
-`execution.py` compares Zarr indexers, declarative projections, and execution
-selectors, including retained rows and shard lowering. `execution_io.py` verifies and measures MemoryStore reads and writes
-through real codec pipelines. Neither establishes filesystem or cloud throughput.
-The prototype remains opt-in; planning wins alone do not justify replacing the
-existing indexers.
+`execution.py` times indexer construction and row walks with no storage I/O.
+`execution_io.py` verifies and times MemoryStore reads and writes through real
+codec pipelines, plain and sharded. Neither establishes filesystem or cloud
+throughput, and planning wins alone do not justify replacing the existing
+indexers.
