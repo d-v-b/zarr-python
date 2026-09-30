@@ -115,10 +115,14 @@ _OUTPUT_MAP_FIELDS = frozenset(
     }
 )
 
-# An upper bound on `input_rank`, because normalization allocates proportionally
-# to it — an identity `output`, a bound per dimension, a label per dimension —
-# from a document that carries no data behind the number. Matches the rank
-# TensorStore accepts. This is an implementation limit, not an ndsel limit.
+# An upper bound on `input_rank`, checked at two sites for two reasons. A
+# transform's declared `input_rank` is checked before normalization fills an
+# identity `output`, a bound and a label per dimension, so a document that
+# carries no data behind the number cannot make it allocate. Every canonical
+# result is checked again in `normalize_ndsel`, inferred and shorthand ranks
+# included, so normalization stays idempotent (spec section 4.3): whatever it
+# emits must pass on the way back in. 32 matches the rank TensorStore accepts.
+# This is an implementation limit, not an ndsel limit.
 _MAX_RANK = 32
 
 
