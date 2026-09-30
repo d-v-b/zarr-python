@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, cast
 import numpy as np
 import pytest
 
-from zarr_indexing import _execution as execution
+from zarr_indexing._indexer import PartitionIndexer
 
 zarr = pytest.importorskip("zarr")
 sync = pytest.importorskip("zarr.core.sync").sync
@@ -58,7 +58,9 @@ def test_execution_codec_read_write(pipeline: str, layout: str, case: str) -> No
         async_array = array._async_array
         # The pipeline processes shard-sized buffers for sharded arrays.
         grids = async_array._chunk_grid._dimensions
-        indexer = cast("Indexer", execution.execute_selection(selection, shape, grids, mode=mode))
+        indexer = cast(
+            "Indexer", PartitionIndexer.from_selection(selection, shape, grids, mode=mode)
+        )
         prototype = default_buffer_prototype()
         result = sync(async_array._get_selection(indexer, prototype=prototype))
         np.testing.assert_array_equal(result, source[selection])
@@ -88,7 +90,7 @@ def test_complete_chunk_writes_skip_the_read(
     with zarr.config.set({"codec_pipeline.path": "zarr.core.codec_pipeline." + pipeline}):
         array = zarr.create_array(store=store, shape=(7,), chunks=(3,), dtype="int64")
         array[:] = np.arange(7)
-        plan = execution.execute_selection(
+        plan = PartitionIndexer.from_selection(
             selection, (7,), array._async_array._chunk_grid._dimensions
         )
         store.counter.clear()

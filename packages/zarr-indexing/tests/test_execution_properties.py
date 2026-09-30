@@ -1,11 +1,11 @@
-"""Partition rows against a chunked NumPy reference.
+"""Partition indexer rows against a chunked NumPy reference.
 
 For any array shape, chunk grid (fixed, rectilinear, clipped to the extent, or
 the narrow edge-grid protocol without `data_size`) and basic, orthogonal or
 vectorized selection, assembling the rows of a plan out of the chunks of a
 reference array must reproduce NumPy's answer; a plan must yield the same rows
 every time it is walked; `is_complete_chunk` must be a proof that the row
-covers its chunk's data exactly once; and scattering through the rows must
+walks its chunk's data in order; and scattering through the rows must
 write exactly the cells NumPy assignment writes, with NumPy's values when no
 destination repeats.
 """
@@ -24,12 +24,7 @@ from zarr_indexing import (
     LazyArray,
     VaryingDimension,
 )
-from zarr_indexing._execution import (
-    ExecutionChunk,
-    ExecutionPlan,
-    execute_selection,
-    execute_transform,
-)
+from zarr_indexing._indexer import IndexerRow, PartitionIndexer
 from zarr_indexing.testing import (
     apply_selection,
     basic_selections,
@@ -94,7 +89,7 @@ def _bounds(grids: tuple[Any, ...], coords: tuple[int, ...]) -> tuple[slice, ...
 
 
 def _gather(
-    rows: list[ExecutionChunk], reference: np.ndarray[Any, Any], grids: tuple[Any, ...], shape: Any
+    rows: list[IndexerRow], reference: np.ndarray[Any, Any], grids: tuple[Any, ...], shape: Any
 ) -> np.ndarray[Any, Any]:
     """Assemble a read from chunks, checking every cell lands exactly once."""
     result = np.full(shape, -1, dtype=reference.dtype)
@@ -104,15 +99,17 @@ def _gather(
         result[row.out_selection] = chunk[row.chunk_selection]
         np.add.at(touched, row.out_selection, 1)
         if row.is_complete_chunk:
-            cover = np.zeros(chunk.shape, dtype=np.intp)
-            np.add.at(cover, row.chunk_selection, 1)
-            assert (cover == 1).all(), (row, cover)
+            # zarr writes `value[out_selection]` as the whole chunk without
+            # applying `chunk_selection`, so complete must mean the identity walk.
+            # An integer selector drops its axis but keeps the walk in order.
+            walk = np.asarray(chunk[row.chunk_selection]).reshape(chunk.shape)
+            np.testing.assert_array_equal(walk, chunk)
     assert (touched == 1).all(), touched
     return result
 
 
 def _scatter(
-    rows: list[ExecutionChunk], target: np.ndarray[Any, Any], grids: tuple[Any, ...], values: Any
+    rows: list[IndexerRow], target: np.ndarray[Any, Any], grids: tuple[Any, ...], values: Any
 ) -> None:
     for row in rows:
         bounds = _bounds(grids, row.chunk_coords)
@@ -143,7 +140,7 @@ def _assign(reference: np.ndarray[Any, Any], selection: Any, mode: str, values: 
         reference[scalars] = values
 
 
-def _same_rows(first: list[ExecutionChunk], second: list[ExecutionChunk]) -> bool:
+def _same_rows(first: list[IndexerRow], second: list[IndexerRow]) -> bool:
     if len(first) != len(second):
         return False
     for a, b in zip(first, second, strict=True):
@@ -186,12 +183,12 @@ def test_execution_reproduces_numpy(
         if mode == "orthogonal"
         else view.vindex[selection]
     )
-    plans: list[tuple[str, ExecutionPlan]] = [
-        ("transform", execute_transform(indexed.transform, grids)),
-        ("selection", execute_selection(selection, shape, grids, mode=mode)),
+    plans: list[tuple[str, PartitionIndexer]] = [
+        ("transform", PartitionIndexer.from_transform(indexed.transform, grids)),
+        ("selection", PartitionIndexer.from_selection(selection, shape, grids, mode=mode)),
     ]
     for entry, plan in plans:
-        event(f"{entry}:{'basic' if _is_basic(plan) else 'coordinates'}")
+        event(f"{entry}:{'slices' if _uses_slices(plan) else 'coordinates'}")
         assert plan.shape == expected.shape, (entry, plan.shape, expected.shape)
         rows = list(plan)
         assert _same_rows(rows, list(plan)), "a plan must walk the same twice"
@@ -208,5 +205,5 @@ def test_execution_reproduces_numpy(
             np.testing.assert_array_equal(written, expected_write)
 
 
-def _is_basic(plan: ExecutionPlan) -> bool:
+def _uses_slices(plan: PartitionIndexer) -> bool:
     return all(all(not isinstance(sel, np.ndarray) for sel in row.chunk_selection) for row in plan)

@@ -1,4 +1,4 @@
-"""Compare partition rows with Zarr's indexers on the same selections; no storage I/O.
+"""Compare partition indexer rows with Zarr's indexers on the same selections; no storage I/O.
 
 Grid construction and input selection allocation are excluded for both sides.
 Indexer construction and complete row walks are included. Run from this
@@ -20,7 +20,7 @@ import numpy as np
 import zarr.core.indexing as zi
 from zarr.core.chunk_grids import ChunkGrid
 
-from zarr_indexing._execution import execute_selection
+from zarr_indexing._indexer import PartitionIndexer
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -101,7 +101,7 @@ def compare_case(
         return cls(selection, shape, zg)
 
     def rows() -> Any:
-        return execute_selection(selection, shape, zg._dimensions, mode=mode)
+        return PartitionIndexer.from_selection(selection, shape, zg._dimensions, mode=mode)
 
     old_coords = [tuple(p.chunk_coords) for p in baseline()]
     if [tuple(p.chunk_coords) for p in rows()] != old_coords:
@@ -120,8 +120,8 @@ def compare_case(
         "rows_setup": rows,
         "zarr_walk": lambda: consume(baseline()),
         "rows_walk": lambda: consume(rows()),
-        "zarr_retained": lambda: list(baseline()),
-        "rows_retained": lambda: list(rows()),
+        # The alternative the adapter avoids: materialize ChunkProjection objects.
+        "projections_walk": lambda: consume(iter(rows().partition)),
     }
     # Alternate evaluation order across rounds to reduce temporal bias.
     rounds = []
