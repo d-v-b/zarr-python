@@ -255,13 +255,20 @@ def _dimension_map_coords(
     return checked_affine(first, m.stride, np.arange(extent, dtype=np.intp))
 
 
-def _array_map_coords(m: ArrayMap) -> np.ndarray[Any, np.dtype[np.intp]]:
-    """The storage coordinates an ArrayMap enumerates, flattened."""
-    return checked_affine(m.offset, m.stride, m.index_array).reshape(-1)
+def _array_map_coords(m: ArrayMap, output_dimension: int) -> np.ndarray[Any, np.dtype[np.intp]]:
+    """The storage coordinates an ArrayMap enumerates, flattened.
+
+    Every value becomes a storage coordinate, so the array is read through the
+    checked accessor: a value outside the map's declared range fails here."""
+    return checked_affine(m.offset, m.stride, m.checked_index_array(output_dimension)).reshape(-1)
 
 
 def _correlated_map_coords(
-    m: ArrayMap, broadcast_axes: list[int], broadcast_shape: tuple[int, ...], input_rank: int
+    m: ArrayMap,
+    output_dimension: int,
+    broadcast_axes: list[int],
+    broadcast_shape: tuple[int, ...],
+    input_rank: int,
 ) -> np.ndarray[Any, np.dtype[np.intp]]:
     """One storage coordinate per point of the correlated block, flattened.
 
@@ -270,9 +277,10 @@ def _correlated_map_coords(
     broadcast axes it shares with the *other* correlated maps but is itself
     constant along. Flattening it directly would then yield fewer coordinates
     than there are points, so it is reduced to the broadcast block and
-    broadcast up to it explicitly.
+    broadcast up to it explicitly. As in `_array_map_coords`, every value is
+    read, through the checked accessor.
     """
-    coords = checked_affine(m.offset, m.stride, m.index_array)
+    coords = checked_affine(m.offset, m.stride, m.checked_index_array(output_dimension))
     if math.prod(broadcast_shape) == 0:
         # A zero-extent broadcast axis makes the correlated block empty — for
         # example an ArrayMap composed over an empty domain, which the package
@@ -364,7 +372,7 @@ def _lower_orthogonal(array: Any, transform: IndexTransform) -> Any:
     gathered: dict[int, np.ndarray[Any, np.dtype[np.intp]]] = {}
     for out_dim, m in enumerate(outputs):
         if isinstance(m, ArrayMap):
-            gathered[out_dim] = _array_map_coords(m)
+            gathered[out_dim] = _array_map_coords(m, out_dim)
         elif isinstance(m, DimensionMap) and m.stride <= 0:
             # Reversing and repeating maps have no positive-step slice; gather them.
             gathered[out_dim] = _dimension_map_coords(m, transform)
@@ -484,9 +492,11 @@ def _lower_general(array: Any, transform: IndexTransform) -> Any:
     flat_index = np.zeros(math.prod(broadcast_shape), dtype=np.intp)
     stride = 1
     for position in range(n_corr - 1, -1, -1):
-        _, corr_map = correlated[position]
+        out_dim, corr_map = correlated[position]
         flat_index = flat_index + (
-            _correlated_map_coords(corr_map, broadcast_axes, broadcast_shape, transform.input_rank)
+            _correlated_map_coords(
+                corr_map, out_dim, broadcast_axes, broadcast_shape, transform.input_rank
+            )
             * stride
         )
         stride *= corr_sizes[position]
@@ -575,7 +585,7 @@ def _decompose(
 ) -> tuple[tuple[slice, ...], IndexTransform]:
     key: list[slice] = []
     residual: list[OutputIndexMap] = []
-    for output_map in transform.output:
+    for out_dim, output_map in enumerate(transform.output):
         if isinstance(output_map, ConstantMap):
             coordinate = checked_affine(output_map.offset, 0, 0)
             key.append(slice(coordinate, coordinate + 1, 1))
@@ -585,8 +595,9 @@ def _decompose(
             key.append(pushed)
             residual.append(local)
         else:
+            # Every value keys the storage read, so every value is read.
             coordinates = checked_affine(
-                output_map.offset, output_map.stride, output_map.index_array
+                output_map.offset, output_map.stride, output_map.checked_index_array(out_dim)
             )
             if coordinates.size == 0:
                 key.append(slice(0, 0, 1))
