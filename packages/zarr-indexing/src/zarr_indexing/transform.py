@@ -1539,8 +1539,12 @@ class _OIndexHelper:
 
 def _normalize_oindex_selection(
     selection: Any, ndim: int
-) -> tuple[np.ndarray[Any, np.dtype[np.intp]] | slice, ...]:
-    """Normalize an oindex selection: arrays, slices, booleans, integers."""
+) -> tuple[npt.NDArray[np.integer[Any]] | slice, ...]:
+    """Normalize an oindex selection: arrays, slices, booleans, integers.
+
+    Integer arrays keep the caller's dtype; `_check_array_in_bounds` checks
+    them against the domain and narrows them to `intp`.
+    """
     if not isinstance(selection, tuple):
         selection = (selection,)
 
@@ -1549,7 +1553,7 @@ def _normalize_oindex_selection(
     n_ellipsis = 1 if has_ellipsis else 0
     n_real = len(selection) - n_ellipsis
 
-    result: list[np.ndarray[Any, np.dtype[np.intp]] | slice] = []
+    result: list[npt.NDArray[np.integer[Any]] | slice] = []
     for sel in selection:
         if sel is Ellipsis:
             num_missing = ndim - n_real
@@ -1558,9 +1562,7 @@ def _normalize_oindex_selection(
             # Boolean array -> integer indices
             (indices,) = np.nonzero(sel)
             result.append(indices.astype(np.intp))
-        elif isinstance(sel, np.ndarray):
-            result.append(checked_affine(0, 1, sel))
-        elif isinstance(sel, slice):
+        elif isinstance(sel, (np.ndarray, slice)):
             result.append(sel)
         elif (scalar := as_scalar_index(sel)) is not None:
             # Convert integer scalars to 1-element arrays for orthogonal indexing
@@ -1572,8 +1574,7 @@ def _normalize_oindex_selection(
                 result.append(indices.astype(np.intp))
             else:
                 # Advanced selection validation has already checked the element types.
-                integer_array = cast("npt.NDArray[np.integer[Any]]", array)
-                result.append(checked_affine(0, 1, integer_array))
+                result.append(cast("npt.NDArray[np.integer[Any]]", array))
         else:
             result.append(sel)
 
@@ -1614,8 +1615,7 @@ def _apply_oindex(transform: IndexTransform, selection: Any) -> IndexTransform:
             hi = transform.domain.exclusive_max[old_dim]
             # Index-array values are literal domain coordinates; the fancy dim
             # they create gets a fresh zero-origin [0, n) domain (TensorStore).
-            _check_array_in_bounds(sel, lo, hi)
-            dim_array[old_dim] = sel
+            dim_array[old_dim] = _check_array_in_bounds(sel, lo, hi)
             new_inclusive_min.append(0)
             new_exclusive_max.append(len(sel))
             old_to_new_dim[old_dim] = new_dim_idx
@@ -1756,19 +1756,19 @@ def _apply_vindex(transform: IndexTransform, selection: Any) -> IndexTransform:
         expanded.append(slice(None))
         n_expanded_dims += 1
 
-    # Convert booleans, lists, ints to integer arrays
-    processed: list[np.ndarray[Any, np.dtype[np.intp]] | slice] = []
+    # Convert booleans, lists, ints to integer arrays. Integer arrays keep the
+    # caller's dtype until `_check_array_in_bounds` checks and narrows them.
+    processed: list[npt.NDArray[np.integer[Any]] | slice] = []
     for sel in expanded:
         boolean_array = _as_boolean_index_array(sel)
         if boolean_array is not None:
             indices_tuple = np.nonzero(boolean_array)
             processed.extend(indices.astype(np.intp) for indices in indices_tuple)
         elif isinstance(sel, np.ndarray):
-            processed.append(checked_affine(0, 1, sel))
+            processed.append(sel)
         elif isinstance(sel, (list, tuple)):
             # Advanced selection validation has already checked the element types.
-            integer_array = cast("npt.NDArray[np.integer[Any]]", np.asarray(sel))
-            processed.append(checked_affine(0, 1, integer_array))
+            processed.append(cast("npt.NDArray[np.integer[Any]]", np.asarray(sel)))
         elif (scalar := as_scalar_index(sel)) is not None:
             processed.append(np.array([scalar], dtype=np.intp))
         else:
@@ -1783,9 +1783,8 @@ def _apply_vindex(transform: IndexTransform, selection: Any) -> IndexTransform:
         if isinstance(sel, np.ndarray):
             lo = transform.domain.inclusive_min[i]
             hi = transform.domain.exclusive_max[i]
-            _check_array_in_bounds(sel, lo, hi)
             array_dims.append(i)
-            arrays.append(sel)
+            arrays.append(_check_array_in_bounds(sel, lo, hi))
         else:
             slices[i] = sel
     slice_dims = list(slices)
@@ -1941,15 +1940,20 @@ def _resolve_slice_ts(sel: slice, dim: int, lo: int, hi: int) -> tuple[int, int,
     return start, step, origin, size
 
 
-def _check_array_in_bounds(arr: np.ndarray[Any, np.dtype[np.intp]], lo: int, hi: int) -> None:
-    """Reject index-array values outside the domain `[lo, hi)`.
+def _check_array_in_bounds(
+    arr: npt.NDArray[np.integer[Any]], lo: int, hi: int
+) -> np.ndarray[Any, np.dtype[np.intp]]:
+    """Check index-array values against the domain `[lo, hi)` and narrow them to `intp`.
 
     Index-array values are literal domain coordinates (TensorStore semantics):
     a value below `inclusive_min` is out of bounds rather than counting from
-    the end. Out-of-range values raise instead of silently wrapping.
+    the end. The extrema are read as Python integers in the caller's dtype, so
+    an out-of-range value is reported as the value the caller passed; a uint64
+    past the intp range is out of bounds, not a wrapped negative. Narrowing
+    comes after the check, through the same conversion `ArrayMap` applies.
     """
     if arr.size == 0:
-        return
+        return np.empty(arr.shape, dtype=np.intp)
     lo_val, hi_val = int(arr.min()), int(arr.max())
     if lo_val < lo:
         hint = _LITERAL_HINT if lo_val < 0 and lo >= 0 else ""
@@ -1958,6 +1962,7 @@ def _check_array_in_bounds(arr: np.ndarray[Any, np.dtype[np.intp]], lo: int, hi:
         )
     if hi_val >= hi:
         raise BoundsCheckError(f"index {hi_val} is out of bounds (valid indices [{lo}, {hi}))")
+    return checked_affine(0, 1, arr)
 
 
 def _validate_array_selection(selection: Any, shape: tuple[int, ...], mode: str) -> None:
