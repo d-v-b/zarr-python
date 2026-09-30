@@ -125,8 +125,11 @@ def rows(partition: GridPartition) -> Iterator[ExecutionChunk]:
     bound = set(read).union(axis for joint in joints for axis in joint.broadcast_axes)
     unread = tuple(k for k in range(domain.ndim) if k not in bound)
     arrays = sum(isinstance(axis, IndexedSet) for axis in sets)
+    # A slice cannot repeat a coordinate: a stride-0 map is a coordinate row.
+    strided = all(axis.stride != 0 or axis.input_dimension is None for axis in sets)
     basic = (
         not joints
+        and strided
         and read == sorted(read)
         and all(domain.shape[k] == 1 for k in unread)
         and (arrays == 0 or (arrays == 1 and len(read) == len(sets) and not unread))

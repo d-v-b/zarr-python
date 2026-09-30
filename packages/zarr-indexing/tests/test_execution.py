@@ -152,6 +152,18 @@ def test_unread_request_axis_replicates_on_read() -> None:
     np.testing.assert_array_equal(result, [[10, 10, 10], [20, 20, 20]])
 
 
+def test_stride_zero_map_replicates_one_coordinate() -> None:
+    grids = dimension_grids_from_chunks((2,), (4,))
+    transform = IndexTransform(IndexDomain.from_shape((3,)), (DimensionMap(0, offset=1, stride=0),))
+    plan = execute_transform(transform, grids)
+    source = np.array([10, 20, 30, 40])
+    values = np.array([7, 8, 9])
+    result, written = _assemble(plan, source, grids, values)
+    np.testing.assert_array_equal(result, [20, 20, 20])
+    np.testing.assert_array_equal(written[[0, 2, 3]], [10, 30, 40])
+    assert written[1] in values
+
+
 def test_plan_does_not_follow_later_mutation_of_its_input() -> None:
     coordinates = np.arange(1000)
     grids = dimension_grids_from_chunks((100,), (1000,))
