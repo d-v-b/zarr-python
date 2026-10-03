@@ -107,8 +107,7 @@ the domain's origin. The literal frame is reachable through `view.transform`,
 and directly through the two literal keys: an `IndexDomain` restricts the view
 to those coordinates, and an `IndexTransform` composes onto it. A reversed view
 carries a negative origin, as in TensorStore, because a reversing map traverses
-the source frame backwards. The current main Zarr `Array` does not expose this
-wrapper as an `Array.lazy` attribute; use `LazyArray(array)` explicitly.
+the source frame backwards.
 
 Scalar integers drop axes. Non-boolean objects implementing `SupportsIndex`
 are accepted as scalar indices and in slice bounds; `__int__` alone is not enough.
@@ -238,8 +237,9 @@ def _read_source_attribute(array: Any, name: str) -> Any:
     """
     try:
         return getattr(array, name, None)
-    # Guarded properties (e.g. zarr's LazyViewError) and broken foreign
-    # attributes may raise anything; discovery must degrade to None.
+    # Guarded properties (zarr's `Array.chunks` raises `NotImplementedError` on
+    # a rectilinear grid) and broken foreign attributes may raise anything;
+    # discovery must degrade to None.
     except Exception:
         return None
 
@@ -484,7 +484,8 @@ class Partition:
         and to positions in this view's zero-origin result buffer respectively.
         (The planner's own projections place cells in the request's literal
         domain; `parts()` re-bases them.) This is the authoritative placement
-        model; `base_coords` and `is_complete` are conveniences derived from it.
+        model; `base_coords`, `box`, and `is_complete` are conveniences derived
+        from it.
     base_coords
         Which box of the base partitioning this is, one coordinate per dimension
         of the wrapped array.
@@ -492,9 +493,7 @@ class Partition:
         The box itself, in the global storage coordinates of the wrapped
         array: one `[inclusive_min, exclusive_max)` interval per dimension. It
         describes the whole partition cell, while `view.bounding_box()` is the
-        global hull of only the selected values in that cell. For a nested or
-        repartitioned view this box may be narrower than
-        `projection.chunk_domain`.
+        global hull of only the selected values in that cell.
     view
         A `LazyArray` covering exactly the cells of the view that live in this
         box. Its transform directly addresses its raw wrapped `array`; only the
@@ -532,7 +531,6 @@ class Partition:
     """
 
     projection: ChunkProjection
-    box: tuple[tuple[int, int], ...]
     view: LazyArray
     out_selection: tuple[Any, ...]
     _owner: _PartOwner | None = field(default=None, repr=False, compare=False)
@@ -541,6 +539,12 @@ class Partition:
     def base_coords(self) -> tuple[int, ...]:
         """Coordinates of this partition in the selected base grid."""
         return self.projection.chunk_coords
+
+    @property
+    def box(self) -> tuple[tuple[int, int], ...]:
+        """The whole partition cell, as `[inclusive_min, exclusive_max)` per dimension."""
+        domain = self.projection.chunk_domain
+        return tuple(zip(domain.inclusive_min, domain.exclusive_max, strict=True))
 
     @property
     def is_complete(self) -> bool:
@@ -676,11 +680,6 @@ class LazyArray:
         view._part_owner = _PartOwner()
         return view
 
-    @property
-    def _base_shape(self) -> tuple[int, ...]:
-        """The shape of what this wrapper treats as its base array."""
-        return tuple(int(s) for s in self._array.shape)
-
     # -- array-like surface -------------------------------------------------
 
     @property
@@ -696,7 +695,7 @@ class LazyArray:
         read, not of the view reading it. All derived views, including partition
         views, retain the full source shape as their partitioning frame.
         """
-        return self._base_shape
+        return tuple(int(s) for s in self._array.shape)
 
     @property
     def transform(self) -> IndexTransform:
@@ -909,7 +908,7 @@ class LazyArray:
                 "with_parts takes one integer per dimension; for per-axis box "
                 "sizes use with_parts_per_axis"
             )
-        return self._with_grids(dimension_grids_from_chunks(entries, self._base_shape))
+        return self._with_grids(dimension_grids_from_chunks(entries, self.base_shape))
 
     def with_parts_per_axis(self, sizes: Sequence[Sequence[int]]) -> LazyArray:
         """Return the same view, read in boxes of explicitly listed sizes.
@@ -945,7 +944,7 @@ class LazyArray:
         [((0, 1), (0, 4)), ((1, 3), (0, 4))]
         """
         entries = self._part_entries(sizes, "with_parts_per_axis")
-        return self._with_grids(dimension_grids_from_chunks(entries, self._base_shape))
+        return self._with_grids(dimension_grids_from_chunks(entries, self.base_shape))
 
     @staticmethod
     def _part_entries(parts: Sequence[Any], method: str) -> tuple[Any, ...]:
@@ -1007,11 +1006,10 @@ class LazyArray:
         >>> (part.base_coords, part.view.shape, part.is_complete)
         ((0, 0), (2, 1), False)
         """
-        grids = self._parts if self._parts is not None else _whole_array_grids(self._base_shape)
+        grids = self._parts if self._parts is not None else _whole_array_grids(self.base_shape)
         to_buffer = tuple(-o for o in self._transform.domain.inclusive_min)
         for planned in plan_chunks(self._transform, grids):
-            domain = planned.chunk_domain
-            part_transform = planned.chunk_transform.translate(domain.inclusive_min)
+            part_transform = planned.chunk_transform.translate(planned.chunk_domain.inclusive_min)
             placement = _pure_translation(planned.cell_transform)
             if placement is not None:
                 # A box part sits at a fixed offset in the request, so its view
@@ -1025,7 +1023,6 @@ class LazyArray:
             )
             yield Partition(
                 projection=projection,
-                box=tuple(zip(domain.inclusive_min, domain.exclusive_max, strict=True)),
                 view=LazyArray._derive(self._array, part_transform, self._parts, self._reader),
                 out_selection=_partition_out_selection(projection.cell_transform),
                 _owner=self._part_owner,
@@ -1124,9 +1121,10 @@ class LazyArray:
         `write_chunk_sizes` or `chunks`: each touched cell is read once, updated
         in memory, and written back, so the number of storage round trips is
         bounded by the number of touched cells rather than selected elements.
-        A NumPy source receives one fancy assignment instead, and a source with
-        no advertised grid is written one element at a time without reading.
-        The read-side partitioning (`with_parts`) does not affect writes.
+        A NumPy source receives one fancy assignment instead. A source with no
+        advertised grid is one cell, so it is read and written back once, over
+        the selection's bounding box. The read-side partitioning (`with_parts`)
+        does not affect writes.
 
         Writes go to the source directly and bypass the reader. A reader that
         caches source data is not invalidated, so reading after writing through
@@ -1140,7 +1138,7 @@ class LazyArray:
             self._array,
             self._transform,
             values,
-            write_grid=_discover_write_grid(self._array, self._base_shape),
+            write_grid=_discover_write_grid(self._array, self.base_shape),
         )
 
     def result(self, *, parts: Sequence[Partition] | None = None) -> Any:
@@ -1328,7 +1326,7 @@ class LazyArray:
     def __repr__(self) -> str:
         wrapped = type(self._array).__name__
         described = [f"{wrapped} shape={self.shape} dtype={self.dtype}"]
-        if not _is_identity_transform(self._transform, self._base_shape):
+        if not _is_identity_transform(self._transform, self.base_shape):
             described.append(f"view={self._transform.selection_repr}")
         return f"<LazyArray {' '.join(described)}>"
 
