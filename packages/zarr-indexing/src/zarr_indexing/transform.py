@@ -44,6 +44,7 @@ from zarr_indexing.output_map import (
     ArrayMap,
     ConstantMap,
     DimensionMap,
+    IndexRange,
     OutputIndexMap,
     array_map_or_constant,
 )
@@ -360,10 +361,15 @@ class IndexTransform:
                     else _positions_from_origin(points[..., axis], self.domain.inclusive_min[axis])
                     for axis in range(self.input_rank)
                 )
+                # Only the gathered values are used, so only they are checked
+                # against the map's declared range: a point that avoids an
+                # out-of-range entry evaluates, as in TensorStore.
+                gathered = np.asarray(output_map.index_array[index])
+                output_map.index_range.check(gathered, output_dimension=output_dimension)
                 result[..., output_dimension] = checked_affine(
                     output_map.offset,
                     output_map.stride,
-                    np.asarray(output_map.index_array[index]),
+                    gathered,
                 )
         return result
 
@@ -792,10 +798,11 @@ class IndexTransform:
         that omitted fields — identity `output`, default bounds and labels —
         are filled and validated, then lowered to the engine representation.
         Lower-rank `index_array`s are widened to the full input rank on the way
-        in. Every supplied raw index value is checked against the inclusive
-        `index_array_bounds` before offset, stride, or map simplification.
-        Out-of-bounds values raise `NdselError` immediately, even if a later
-        selection would avoid them. Validated immutable maps do not retain bounds.
+        in. `index_array_bounds` becomes each array map's `index_range` as
+        given; array values are not compared with it here. A value outside the
+        range loads and fails at the use that reads it (`apply`, `intersect`,
+        chunk planning, reading), and a selection that avoids the value never
+        trips over it — TensorStore's behaviour, see `IndexRange`.
 
         Examples
         --------
@@ -807,7 +814,6 @@ class IndexTransform:
         True
         """
         from zarr_indexing._wire import (
-            check_index_array_bounds,
             full_rank_index_array,
             lower_bound,
             lower_index_array,
@@ -844,7 +850,6 @@ class IndexTransform:
             if "index_array" in om:
                 where = f"output[{i}]"
                 arr = lower_index_array(om["index_array"], f"{where}.index_array")
-                check_index_array_bounds(arr, om["index_array_bounds"], where)
                 # ndsel leaves index-array rank unvalidated, so an external
                 # producer may send an array of lower rank that broadcasts
                 # against the domain. Widen it here, on the way in, so every
@@ -855,6 +860,7 @@ class IndexTransform:
                         index_array=full_rank_index_array(arr, domain, where),
                         offset=om.get("offset", 0),
                         stride=om.get("stride", 1),
+                        index_range=IndexRange.from_json(om["index_array_bounds"], where),
                     )
                 )
             elif "input_dimension" in om:
@@ -1016,7 +1022,9 @@ def _intersect_orthogonal(
                     "collapsed to a ConstantMap"
                 )
             d = axis
-            storage = checked_affine(m.offset, m.stride, m.index_array)
+            # Every value is placed against the output domain, so every value
+            # is read: the checked accessor refuses an out-of-range entry here.
+            storage = checked_affine(m.offset, m.stride, m.checked_index_array(out_dim))
             mask = (storage >= lo) & (storage < hi)
             # The array is singleton on every axis but `d`, so its mask reduces
             # to a 1-D vector along `d`.
@@ -1029,6 +1037,7 @@ def _intersect_orthogonal(
                     index_array=np.asarray(filtered, dtype=np.intp),
                     offset=m.offset,
                     stride=m.stride,
+                    index_range=m.index_range,
                 )
             )
             new_max[d] = new_min[d] + int(survivors.size)
@@ -1110,7 +1119,8 @@ def _prepare_correlated(
                 "intersecting a transform whose index array varies over an "
                 "input dimension also bound by a slice map is not supported"
             )
-        arr = arr_map.index_array
+        # The whole block is flattened and placed, so every value is read.
+        arr = arr_map.checked_index_array(out_dim)
         # Index arrays are singleton on every non-broadcast axis, so they
         # collapse (C-order) to the broadcast block. A map may also be singleton
         # along a block axis it does not vary over (an orthogonal member, or a
@@ -1226,6 +1236,7 @@ def _intersect_general(
                     index_array=corr_values[out_dim].reshape(corr_shape),
                     offset=m.offset,
                     stride=m.stride,
+                    index_range=m.index_range,
                 )
             )
         elif isinstance(m, ConstantMap):
@@ -1477,7 +1488,7 @@ def _apply_basic_indexing(transform: IndexTransform, selection: Any) -> IndexTra
 
     # Now update output maps
     new_output: list[OutputIndexMap] = []
-    for m in transform.output:
+    for out_dim, m in enumerate(transform.output):
         if isinstance(m, ConstantMap):
             new_output.append(m)
         elif isinstance(m, DimensionMap):
@@ -1506,9 +1517,10 @@ def _apply_basic_indexing(transform: IndexTransform, selection: Any) -> IndexTra
             # ConstantMap it equals — whether an integer consumed the dependency
             # axis or a slice narrowed it to one entry — so a non-empty ArrayMap
             # always varies over at least one axis. Nothing here renumbers: the
-            # array's axes are the new domain's axes by construction.
+            # array's axes are the new domain's axes by construction. The map's
+            # range rides along; only a collapse reads a value and checks it.
             new_arr = _reindex_array(m, normalized, transform.domain)
-            new_output.append(array_map_or_constant(new_arr, offset=m.offset, stride=m.stride))
+            new_output.append(m.with_index_array(new_arr, output_dimension=out_dim))
 
     return IndexTransform(domain=new_domain, output=tuple(new_output))
 

@@ -101,20 +101,51 @@ structurally discriminated union back to the right kind. Exact JSON equality
 in this example is not a general round-trip guarantee: implicit flags are
 removed and degenerate array maps are collapsed.
 
-`index_array_bounds` constrains raw index-array values before the map's offset
-and stride are applied. Both `IndexTransform.from_json` and
-`output_index_map_from_json` validate every supplied value against the inclusive
-bounds when loading. Finite and one-sided bounds are supported; omitted bounds
-and `["-inf", "+inf"]` impose no additional constraint. Values outside the
-bounds raise `NdselError("invalid_json", ...)`, including in singleton arrays
-and zero-stride maps. Empty arrays satisfy any well-formed, ordered bounds.
+`index_array_bounds` declares the inclusive interval the raw index-array values
+lie in, before the map's offset and stride are applied. Both
+`IndexTransform.from_json` and `output_index_map_from_json` validate the
+interval's syntax — two `index-value`s in extended-integer order, with `"-inf"`
+legal only below and `"+inf"` only above — and lower it, as given, to the
+map's [`IndexRange`](api/output_map.md#zarr_indexing.output_map.IndexRange).
+Omitted bounds and `["-inf", "+inf"]` are the unbounded default.
 
-Validation is eager: an invalid entry rejects the entire map even if a later
-selection would avoid that entry. After validation the engine owns immutable
-index coordinates, so it need not retain the bounds; serialization emits
-unbounded constraints for non-degenerate maps. Message normalization preserves
-the original bounds without checking array contents. This implementation does
-not defer bounds errors until individual positions are accessed.
+The bounds are **retained and checked at use, not at load**. A document whose
+array holds a value outside its bounds loads; the value fails with
+`BoundsCheckError`, naming the value, the output dimension and the bounds, when
+something reads it to address storage — `IndexTransform.apply` on a point that
+gathers it, `intersect`, chunk planning, reading or writing through the
+transform, composing another index array through it, or collapsing a
+one-element map to a constant. A selection that avoids the value never meets
+it: slicing the offending row away leaves a transform every consumer accepts.
+This is TensorStore's behaviour, copied from its source at the commit the
+`IndexRange` docstring links: its JSON binder parses `index_array_bounds`
+without consulting the array, and `OUT_OF_RANGE` is raised when a point is
+evaluated or the array iterated. It replaces an earlier eager rejection at load.
+
+```python
+from zarr_indexing import IndexTransform
+
+t = IndexTransform.from_json(
+    {"input_shape": [3], "output": [{"index_array": [0, 5, 20], "index_array_bounds": [0, 10]}]}
+)
+t.apply((1,))       # (5,)
+t.apply((2,))       # BoundsCheckError: index 20 on output dimension 0 is outside index_array_bounds [0, 10]
+t[0:2].to_json()["output"][0]["index_array_bounds"]  # [0, 10]: the range travels
+```
+
+The range travels unchanged through slicing, translation, reindexing and
+affine composition, and serialization emits it: the canonical form requires
+`index_array_bounds` on every `index_array` map (spec section 4.3), so it is
+always present, finite when it was given finite. TensorStore's minimal
+encoding omits a range the values satisfy; a body from its `to_json` reloads
+here with the unbounded default in that case. One difference from TensorStore
+is deliberate: TensorStore also narrows the range to the domain it composes
+onto, while `compose` here proves every value lies in that domain up front, so
+the narrowing would change nothing a value can fail and the declared range is
+kept as written. A one-element map whose value lies *outside* its range is not
+collapsed to a constant on the wire, since the constant would be a valid map
+where the original fails at use; it is emitted as the array with its bounds,
+as TensorStore emits it.
 
 A canonical body carrying a
 `"-inf"` or `"+inf"` bound cannot be lowered — an `IndexDomain` addresses a
