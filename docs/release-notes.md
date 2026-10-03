@@ -4,6 +4,103 @@
 
 <!-- towncrier release notes start -->
 
+## 3.4.1 (2026-10-03)
+
+### Bugfixes
+
+- A chunk edge length is now always at least 1, while an array extent may be 0. Every spelling of one chunk spanning an axis (`chunks=-1`, `chunks=False`, `chunks="auto"`, `shards=-1`, `shards=False`) gives chunk size 1 on a zero-length axis, and a shard spanning an axis is a multiple of the inner chunk size, so `shards=-1` no longer fails when the axis length is not a multiple of it. Rectilinear chunk grids can be created on a zero-length dimension with a non-empty list of positive chunk sizes, which are kept for later growth.
+
+  `FixedDimension(size=0, ...)` now raises a `ValueError`. `ArrayV2Metadata(chunks=(0,))` is still accepted and written as given; an array built from such metadata (with `create_hierarchy`, for example) reads the chunk size as a stored chunk size of 0 is read (below). `create_hierarchy` now builds every array and group before it deletes or stores anything, so a node that cannot be built fails with the store untouched. The regular chunk grid metadata class reads a `bool` chunk edge length as the `int` it equals, and rejects a string or a mapping as a chunk shape as a whole. `RectilinearChunkGridMetadata`, which is experimental, now reads a `bool` edge length as the `int` it equals and rejects a NumPy integer or a float edge length such as `4.0` with a `TypeError`; it used to keep them as given, so that it could not store a NumPy integer, could not read back a `bool`, and stored a float as a JSON float, which the Zarr specification does not allow.
+
+  Stored metadata with a regular chunk size of 0 or JSON `false` (Zarr format 2 `chunks`, Zarr format 3 `regular` `chunk_shape`) is now read as chunk size 1 (the inner chunk size for sharded arrays, which previously failed to open), however long the axis is: that is the chunk size `chunks=-1` gives on a zero-length axis, and it does not depend on how far the axis has grown since. zarr-python wrote such sizes for arrays created with a zero-length axis until 3.4, and, from 2.18.7 to 3.2.1, for an explicit chunk size of 0 or `False` on an axis of any length, as in `chunks=(0,)` (those arrays could store no data). On a zero-length axis this opens silently, as before, and appending to it stores chunks of size 1. On an axis of positive length it opens with a `ZarrUserWarning`, which says that the array holds only its fill value, so that recreating it with the wanted chunk shape loses nothing (`zarr.from_array(array.store, name=array.path, data=array, chunks=..., overwrite=True, write_data=False)` keeps its data type, fill value, attributes and codecs), and how to keep it by storing valid metadata instead: `array.update_attributes({})`, then `zarr.consolidate_metadata` if the metadata is consolidated. JSON `true`, as zarr-python 3.0 and 3.2 wrote for a chunk size of `True`, is read as 1, silently, in the chunk grid (regular, and the explicit edges and run-length encoded sizes of a rectilinear one) and in the inner chunk shape of every sharding codec, nested or not. A stored rectilinear chunk grid whose edge lengths are integral JSON floats (`[[4.0, 2]]`), as zarr-python 3.2 wrote for float edges, is read with those edges as integers, silently; a float anywhere no release wrote one (a regular chunk shape, the inner chunk shape of a sharding codec, a run-length repeat count, an edge below 1) is rejected.
+
+  Writing data to an array whose stored metadata holds a regular chunk size of 0 or `false` (other than an empty selection) first stores the repair of the metadata the store then holds, unless another writer has stored valid metadata since, so that other readers find the chunks written (a `true` chunk size or an integral float edge is read as the value it equals, so a write stores no metadata for it); in a `ZipStore` this adds a second entry for the metadata document, as every metadata update does. If the metadata the store then holds lays out chunks differently (another writer stored a different chunk size since, say), the write raises a `ValueError` asking to reopen the array, and stores nothing. Apart from the array's own metadata writes (`update_attributes`, `resize`), which store the repair as before, this is the only operation that stores it: a group's consolidated metadata keeps such an array's metadata as it was stored (`zarr.consolidate_metadata` copies it as the array's own document holds it) until the array stores its repair through the group's handle, and changing a group reads and writes no metadata of its members. ([#4334](https://github.com/zarr-developers/zarr-python/pull/4334))
+- Fix nested structured dtype round-tripping through Zarr format 2 metadata. Native NumPy dtypes with field titles or subarray fields now raise `ValueError` identifying the unsupported field during conversion, rather than being converted to duplicate fields or raw-byte fields. This reflects a limitation of the current Zarr-Python dtype implementation; the V2 format supports subarray fields, as did Zarr-Python 2.x. Padded layouts continue to be converted to packed layouts, now with a `ZarrUserWarning` explaining that field values are preserved when writing arrays but offsets and itemsize may change. These checks also apply to nested fields. Add dtype serialization and layout-conversion property tests using new `zdtypes` and `structured_dtypes` strategies. ([#4340](https://github.com/zarr-developers/zarr-python/pull/4340))
+- `DateTime64` and `TimeDelta64` normalize `μs` to `us` and preserve generic-unit scale factors when converting native NumPy dtypes and serializing V2/V3 metadata. V2 writes an explicit suffix such as `[2generic]` to avoid the scale loss in NumPy's `dtype.str` and `dtype.name`. Generic temporal arrays also preserve dtype parameters during CPU buffer allocation and correctly convert byte order; generic datetime fill values can be read back, including in structured fields. The default NaT fill value now carries the scale factor, so missing chunks of a scaled timedelta array such as `m8[2us]` read back as NaT on NumPy < 2.2 instead of an arbitrary count. ([#4342](https://github.com/zarr-developers/zarr-python/pull/4342))
+- `LocalStore` no longer blocks the event loop on filesystem calls. `open`,
+  `clear`, `delete`, `delete_dir`, `list`, `list_prefix`, `list_dir`,
+  `move` and `getsize` now run their disk I/O in a worker thread via
+  `asyncio.to_thread`, as `get` and `set` already did, so other tasks
+  sharing the loop are not stalled while the store walks or modifies a directory
+  tree. The `LocalStore` test suite now fails if any async store method touches
+  the filesystem from the event loop thread. ([#4353](https://github.com/zarr-developers/zarr-python/pull/4353))
+- Coordinate selections (including `vindex` masks) and orthogonal integer-array
+  selections no longer allocate counts proportional to the total number of chunks.
+  Previously, selecting a few points on an array with billions of chunks could raise
+  `MemoryError`. The indexers now store occupied chunk IDs and run-end offsets
+  (`chunk_run_ends`); unsorted selections can still require sorting. The dense
+  `chunk_nitems` / `chunk_nitems_cumsum` attributes of `CoordinateIndexer` and
+  `IntArrayDimIndexer` remain available without deprecation warnings. Each array is
+  materialized on first access and cached, preserving its identity and in-place
+  mutations on subsequent reads. These attributes remain dataclass fields, so
+  `dataclasses.asdict()` materializes them; `repr` omits them to avoid dense allocation
+  during inspection. Accessing a dense attribute still allocates memory proportional
+  to the full chunk grid.
+
+  The new `zarr.core.common.ceildiv_int` helper uses exact integer arithmetic for
+  chunk counts and slice calculations. For example, `ceildiv_int(2**62 - 1, 1)`
+  returns `2**62 - 1`. The existing `ceildiv` helper retains its floating-point behavior. ([#4356](https://github.com/zarr-developers/zarr-python/pull/4356))
+- Removed every `assert` statement from runtime code and enabled ruff's `S101`
+  rule to keep them out. Asserts are stripped under `python -O`, and two of them
+  were load-bearing: `GroupMetadata.from_dict` asserted on `node_type` and the
+  array-to-group fallback in `zarr.open` relied on catching the resulting
+  `AssertionError`, and `make_store` asserted on `mode` before the real
+  validation. Both now raise proper errors (`NodeTypeValidationError` and
+  `ValueError`). Redundant asserts were deleted, type-narrowing asserts were
+  restructured so mypy narrows without them, and the rest became explicit raises. ([#4363](https://github.com/zarr-developers/zarr-python/pull/4363))
+- Arrays whose stored `regular` chunk grid mixes chunk sizes with lists of chunk edge lengths, such as `"chunk_shape": [2, [5, 10, 5]]` (written by zarr 3.2.0 and 3.2.1 for `chunks=(2, (5, 10, 5))`, and as `[2, [5.0, 10.0, 5.0]]` for float edges), can be read again, without enabling `array.rectilinear_chunks`. The grid is read as the rectilinear chunk grid it describes, with a `ZarrUserWarning`; re-saving the array's metadata (or writing chunks to it) stores that rectilinear grid, which requires the flag. A group's consolidated metadata keeps such an array's metadata as it was stored.
+
+  The `array.rectilinear_chunks` flag now gates reading and storing array metadata that declares a rectilinear chunk grid, including in a group's consolidated metadata, instead of constructing `RectilinearChunkGridMetadata`. An operation that would store such metadata with the flag off (creating an array, `Array.resize`, deleting a member of a group with consolidated metadata, `create_hierarchy`) raises before it deletes or writes anything, and the error names the array, also when it is a member of a group's consolidated metadata. ([#4375](https://github.com/zarr-developers/zarr-python/pull/4375))
+- Chunk specifications are judged only by the chunk normalizer: the separate duck-typed check for rectilinear input is gone, so the Zarr format 2 and sharding restrictions apply to what the normalized grid says was declared. A chunk size is an integer by Python's integer protocol: numpy integer scalars and 0-d integer arrays are accepted wherever a chunk or shard shape is. The legacy `zarr.create(..., zarr_format=2)` no longer tests the truth value of a numpy array given as `chunks`, so numpy arrays work there. A non-integer scalar chunk specification raises a `TypeError` naming the problem. An explicit list of chunk edges declares a rectilinear dimension everywhere, including a stored rectilinear chunk grid passed as `chunks=` whose edges happen to be uniform, so the Zarr format 2 and sharding restrictions treat it the same whether it is given as lists or as metadata, and `zarr.create` stores it as a rectilinear chunk grid, as `create_array` does. A `RectilinearChunkGridMetadata` made only of bare integers declares no explicit edge list, so it is read as the regular grid it describes: it is accepted for Zarr format 2 and as the chunk shape of a sharded array. The `chunks` and `chunk_shape` parameters of `zarr.create` and the `ShardsLike` type now declare every chunk specification the normalizer accepts, including numpy integers and arrays, explicit edge lists and stored chunk grid metadata. ([#4376](https://github.com/zarr-developers/zarr-python/pull/4376))
+- Zarr format 2 arrays with a `<u1` or `>u1` data type can now be read as unsigned 8-bit integers. Serialized metadata continues to use the canonical `|u1` spelling. ([#4381](https://github.com/zarr-developers/zarr-python/pull/4381))
+- Made the `fill_value` check on the write path substantially cheaper.
+  `NDBuffer.all_equal` runs on every chunk write when `write_empty_chunks` is
+  false, which is the default, and it dominated the cost of writing chunks.
+
+  Two changes. The bit-pattern comparison used for a zero `fill_value`, which
+  keeps `-0.0` distinct from `0.0`, now views the buffer as an unsigned integer
+  of the same width instead of as a void dtype; NumPy has vectorised integer
+  comparison loops but no void one, so the void form fell back to a generic
+  elementwise path. Separately, the scan now walks slices of the leading axis,
+  doubling in length, and returns on the first slice that differs, so a buffer
+  that is not uniformly `fill_value` no longer has to be read in full. The
+  leading axis is used rather than a flattened view because a chunk is normally
+  a strided view into a larger array and cannot be flattened without a copy. A
+  buffer that really is uniform is still covered in the same number of element
+  comparisons.
+
+  Results are unchanged, including for `-0.0`, NaN, and non-contiguous buffers. ([#4382](https://github.com/zarr-developers/zarr-python/pull/4382))
+- Zarr format 2 arrays whose data type is a single-byte boolean or integer, or raw bytes, written with a `<` or `>` byte order (e.g. `<i1`, `>b1`, `<V4`, as written by netCDF-C, Zarr.jl and jzarr) can be read again, including as fields of structured data types. The byte order of these data types is not relevant, and metadata is written back with the canonical `|` spelling. Also, `datetime64` and `timedelta64` data types no longer accept an object codec in Zarr format 2, and a structured data type with an unrecognized field data type is rejected with `DataTypeValidationError`. ([#4385](https://github.com/zarr-developers/zarr-python/pull/4385))
+- A structured data type read by a `DataTypeRegistry` now resolves its field data types with that registry, instead of always with the default registry. A structured data type with a field whose data type matches no data type now reports the location of that field in the JSON (e.g. `at /configuration/fields/1/data_type`), instead of reporting that the whole structured data type matches nothing. Data types registered through the `zarr.data_type` entry point group are now loaded; previously they were collected but never registered. ([#4387](https://github.com/zarr-developers/zarr-python/pull/4387))
+- Zarr format 3 group metadata now accepts extra fields that are objects with `"must_understand": false`, as the specification requires, and writes them back unchanged; previously opening such a group raised `TypeError`. Extra fields of any other shape raise `MetadataValidationError`, both when reading a metadata document and when constructing `GroupMetadata` or `ArrayV3Metadata` directly. `GroupMetadata` exposes these fields as `extra_fields`, like `ArrayV3Metadata`. ([#4391](https://github.com/zarr-developers/zarr-python/pull/4391))
+- Sharding `index_codecs` containing a variable-size codec, such as a compressor, are now rejected when the `ShardingCodec` is built, with a clear error. Before, writing failed later with an unexplained `NotImplementedError`. ([#4397](https://github.com/zarr-developers/zarr-python/pull/4397))
+- Fixed `FsspecStore.list_dir` over HTTP returning entries that are not children
+  of the listed directory. A link to the site root on the index page made a group
+  list itself as a member named `""`, in-page anchor links such as `#usage` were
+  returned as keys, and directory names kept a trailing `/`. `list_dir` now
+  returns each direct child once, by its bare name. ([#4402](https://github.com/zarr-developers/zarr-python/pull/4402))
+- Opening or creating an array or group with `mode="w"` or `overwrite=True` no longer deletes the existing node when the call fails. Previously the existing node was deleted before the new one was validated, so an invalid argument (for example `zarr.open(store, mode="w", config=...)`, an invalid `fill_value`, attributes that are not JSON, or an array `zarr.save_group` cannot store) destroyed the existing data and created nothing. Deletion now belongs to node creation: `StorePath.open(mode="w")` no longer erases the keys under the path, and the node written there replaces them once its metadata is valid. On a store that cannot delete keys, such as `ZipStore`, `mode="w"` creates the node when the path is empty and raises `ContainsArrayError` or `ContainsGroupError` when a node already exists, instead of `NotImplementedError`. ([#4410](https://github.com/zarr-developers/zarr-python/pull/4410))
+- `Group.empty`, `zeros`, `ones`, `full` and their `*_like` versions now create arrays in the zarr format of the group. Previously a zarr v2 group got zarr v3 arrays, which were written into the group without becoming members of it. Creating an array like an array of the other zarr format (for example `zarr.zeros_like(v2_array)`) no longer fails. The new array uses the default codecs of its own format, and top-level `*_like` functions inherit the zarr format of the source array unless `zarr_format` is passed. ([#4412](https://github.com/zarr-developers/zarr-python/pull/4412))
+- `Group.require_array` now applies the `config` argument when it returns an existing array. Previously `config` was only used when `require_array` created a new array, so an existing array was returned with the global defaults. An invalid `config` now raises instead of being ignored. ([#4413](https://github.com/zarr-developers/zarr-python/pull/4413))
+- An array `config` with a key that is not a runtime configuration option (for example a misspelled `write_empty_chunk`) now raises a `TypeError` naming the unknown and valid keys. Previously `create_array`, `create`, `open_array` and other functions silently ignored such keys. ([#4414](https://github.com/zarr-developers/zarr-python/pull/4414))
+- `zarr.save` now takes `storage_options` as an option instead of treating it as one of the arrays to save: saving a single array with `storage_options` set no longer produces a group holding `arr_0`, and the options now reach the store. `zarr.save_group` no longer fails with `'storage_options' was provided but unused` when the arrays are passed positionally. ([#4415](https://github.com/zarr-developers/zarr-python/pull/4415))
+- Fix byte-order bugs found by running the test suite on a big-endian (s390x) host.
+
+  - Zarr V3 data type metadata has no byte order, so V3 data types without an explicit `endianness` (such as `Float64()`, or a data type parsed from `"float64"`) now use the host byte order instead of always little-endian. On big-endian hosts, arrays opened from V3 metadata now return native arrays, and `dtype="float64"` and `dtype=np.float64` produce the same data type. Nothing changes on little-endian hosts. Stored chunks are still little-endian by default.
+  - `ShardingCodec` now defaults its inner and index `bytes` codecs to little-endian, so sharded arrays written with default settings are byte-identical on every host.
+  - The `scale_offset` codec no longer fails on arrays whose byte order is not the host's, for example a `">f8"` or `">u8"` array on a little-endian host.
+  - Base64-encoded fill values of structured data types in Zarr V3 metadata are now read and written as little-endian bytes, whatever the byte order of the fields in memory.
+  - Tests no longer assume that the host is little-endian.
+
+  ([#4435](https://github.com/zarr-developers/zarr-python/pull/4435))
+- Fixed `FsspecStore.list_dir` and `FsspecStore.list_prefix` returning nothing below the root of a store whose path is `""` or `"/"`, such as a store opened from `"reference://"`. Nested groups in kerchunk-style references now list their members. ([#4452](https://github.com/zarr-developers/zarr-python/pull/4452))
+- A stored shard too short to hold its shard index, including a zero-length value, now raises a `ValueError` saying the shard is truncated or corrupt, on every read and partial-write path under either codec pipeline. Previously the asynchronous full-shard read and partial write treated a zero-length shard as missing (reading the fill value, or overwriting it), while every other path failed with a checksum mismatch or a decode error. zarrs and tensorstore also reject such a shard. ([#4475](https://github.com/zarr-developers/zarr-python/pull/4475))
+
+### Misc
+
+- [#4368](https://github.com/zarr-developers/zarr-python/pull/4368), [#4372](https://github.com/zarr-developers/zarr-python/pull/4372), [#4377](https://github.com/zarr-developers/zarr-python/pull/4377), [#4392](https://github.com/zarr-developers/zarr-python/pull/4392), [#4407](https://github.com/zarr-developers/zarr-python/pull/4407), [#4417](https://github.com/zarr-developers/zarr-python/pull/4417), [#4455](https://github.com/zarr-developers/zarr-python/pull/4455)
+
+
 ## 3.4.0 (2026-09-15)
 
 ### Features
