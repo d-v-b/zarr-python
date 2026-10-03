@@ -41,9 +41,10 @@ test-versions *args:
         uv run --python "$version" --group test pytest tests "$@"
     done
 
-# Lint with the same invocation CI uses
+# Lint with the same invocation CI uses. Ruff is pinned to the repo-wide
+# version in .pre-commit-config.yaml; bump together.
 lint:
-    uvx ruff check .
+    uvx ruff@0.16.0 check .
 
 # Pinned so a pyright release cannot turn CI red on its own schedule. Bump it
 # deliberately: run the new version, read what it found, then move the pin.
