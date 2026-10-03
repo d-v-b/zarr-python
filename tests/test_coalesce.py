@@ -518,8 +518,11 @@ async def test_fetch_raises_propagates() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_coverage_invariant_random_inputs() -> None:
-    """For any random RangeByteRequest input, every input index appears exactly once."""
+async def test_coverage_invariant_random_inputs(subtests: pytest.Subtests) -> None:
+    """For any random RangeByteRequest input, every input index appears exactly once.
+
+    Each range's content check runs in its own subtest identified by its bounds, so a
+    single wrong range reports itself instead of hiding the other 49."""
     import random
 
     rng = random.Random(42)
@@ -538,7 +541,8 @@ async def test_coverage_invariant_random_inputs() -> None:
     flat = _contents(groups)
     for i, r in enumerate(ranges):
         assert isinstance(r, RangeByteRequest)
-        assert flat[i] == _INDEXED_BLOB[r.start : r.end]
+        with subtests.test(index=i, start=r.start, end=r.end):
+            assert flat[i] == _INDEXED_BLOB[r.start : r.end]
 
 
 # ---------------------------------------------------------------------------
