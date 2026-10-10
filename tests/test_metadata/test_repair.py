@@ -235,6 +235,76 @@ def test_invalid_repaired_document_raises_without_warning(doc: dict[str, JSON], 
             metadata_cls.from_dict(doc)
 
 
+def _rename_bytes_codecs(codecs: list[Any], where: str) -> None:
+    """Rename the bytes codecs of `codecs` (`where` is "codecs") or of their sharding
+    codecs (`where` is the configuration key, "codecs" or "index_codecs") to "endian"."""
+    for i, codec in enumerate(codecs):
+        if where == "codecs" and codec["name"] == "bytes":
+            codecs[i] = {**codec, "name": "endian"}
+        elif codec["name"] == "sharding_indexed":
+            configuration = codec["configuration"]
+            if where == "codecs":
+                _rename_bytes_codecs(configuration["codecs"], "codecs")
+            else:
+                # the outermost sharding codec only
+                configuration[where] = [
+                    {**c, "name": "endian"} if c["name"] == "bytes" else c
+                    for c in configuration[where]
+                ]
+
+
+@pytest.mark.parametrize(
+    ("doc", "where"),
+    [
+        (_v3_doc([4], [2]), "codecs"),
+        (_v3_doc([4], [4], inner=[2]), "codecs"),
+        (_v3_doc([4], [4], inner=[2]), "index_codecs"),
+        (_nested_sharded_doc([4], [2]), "codecs"),
+    ],
+    ids=["top-level", "sharded", "index-codecs", "nested-sharded"],
+)
+def test_read_endian_codec_name(tmp_path: Path, doc: dict[str, JSON], where: str) -> None:
+    """A codec stored with the name "endian", which an early draft of the Zarr format 3
+    specification gave the bytes codec, is read as the bytes codec, at the top level and
+    in the codecs and index codecs of sharding codecs, nested or not. It warns that the
+    name is invalid and how to store valid metadata; the reading moves no chunks.
+    Re-saving the metadata stores the name "bytes"."""
+    stored = cast("dict[str, Any]", json.loads(json.dumps(doc)))
+    _rename_bytes_codecs(stored["codecs"], where)
+    assert '"name": "endian"' in json.dumps(stored)
+    assert repair_array_document(stored, 3)[1]
+
+    with pytest.warns(ZarrUserWarning, match="codec name 'endian' is invalid") as record:
+        metadata = ArrayV3Metadata.from_dict(dict(stored), path="group/array")
+    [message] = [str(w.message) for w in record]
+    assert message.endswith(RESAVE_HINT)
+    assert metadata._stored_document is None
+    assert metadata.to_dict() == ArrayV3Metadata.from_dict(doc).to_dict()
+
+    (tmp_path / "zarr.json").write_text(json.dumps(stored))
+    with pytest.warns(ZarrUserWarning, match="codec name 'endian' is invalid"):
+        array = zarr.open_array(store=tmp_path, mode="r+")
+    data = np.arange(array.shape[0], dtype="int16")
+    array[:] = data
+    array.update_attributes({})
+    assert "endian" not in json.dumps(
+        [c["name"] for c in json.loads((tmp_path / "zarr.json").read_text())["codecs"]]
+    )
+    np.testing.assert_array_equal(_open_strictly(tmp_path)[:], data)
+
+
+def test_endian_codec_name_with_invalid_configuration_rejected() -> None:
+    """A codec named "endian" is read as the bytes codec, so a configuration the bytes
+    codec rejects raises that error, without first warning about the name."""
+    doc = _v3_doc([4], [2]) | {
+        "codecs": [{"name": "endian", "configuration": {"endian": "middle"}}]
+    }
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ZarrUserWarning)
+        with pytest.raises(ValueError, match="middle"):
+            ArrayV3Metadata.from_dict(doc)
+
+
 def _read_strictly(doc: dict[str, JSON]) -> ArrayV2Metadata | ArrayV3Metadata:
     """Read `doc`, failing on any warning that it was repaired."""
     metadata_cls = ArrayV2Metadata if doc["zarr_format"] == 2 else ArrayV3Metadata
