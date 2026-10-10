@@ -466,6 +466,12 @@ class GroupMetadata(Metadata):
         """Read a stored group document; `path` names the group in warnings about the
         consolidated metadata it holds."""
         data = dict(data)
+        if "zarr_format" not in data:
+            # Both formats require the key; without it the format is unknown, so it is
+            # not defaulted.
+            raise MetadataValidationError(
+                "Required key 'zarr_format' is missing from the group metadata document."
+            )
         node_type = data.pop("node_type", None)
         if node_type not in ("group", None):
             raise NodeTypeValidationError(
