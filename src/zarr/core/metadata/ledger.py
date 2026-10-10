@@ -45,6 +45,8 @@ class Entry:
     """Whether the current zarr writes it."""
     reading: str
     """How the current zarr reads it, and whether it warns."""
+    other_readers: str
+    """Whether the implementations in `READERS_TESTED` read it."""
     repairs: tuple[Repair, ...] = ()
     """The repairs in `zarr.core.metadata.repair` that read it."""
 
@@ -54,6 +56,13 @@ MARKERS: Final[Mapping[Conformance, str]] = {
     "unregistered": "UNREGISTERED",
 }
 """The comment tag that marks the code of an entry of each conformance."""
+
+READERS_TESTED: Final = (
+    "zarrs 0.23.14 (Rust crate, `Array::open` then reading every element, else `Group::open`), "
+    "tensorstore 0.1.85 (`zarr` and `zarr3` drivers, which open arrays only), and zarr 2.18.7 "
+    "(Zarr format 2 only), on 2026-10-10, each against a sample store of every entry"
+)
+"""Which other implementations `Entry.other_readers` was tested with, and how."""
 
 
 LEDGER: Final[Mapping[str, Entry]] = {
@@ -75,6 +84,9 @@ LEDGER: Final[Mapping[str, Entry]] = {
             "array holds only its fill value. Writing chunks first stores the repaired "
             "metadata."
         ),
+        other_readers=(
+            "zarrs and tensorstore reject it. zarr 2.18.7 fails to open it on a zero-length axis."
+        ),
         repairs=(repair._invalid_chunk_sizes_v2, repair._invalid_chunk_sizes_v3),
     ),
     "chunk-size-true": Entry(
@@ -86,6 +98,11 @@ LEDGER: Final[Mapping[str, Entry]] = {
         written_by="zarr 3.0 and 3.2 for a chunk size of `True`",
         still_written=False,
         reading="Repaired silently: read as 1.",
+        other_readers=(
+            "zarrs and tensorstore reject it, in every place it was tested (regular chunk shape, "
+            "sharding inner chunk shape, rectilinear edges; tensorstore reads no rectilinear "
+            "grid). zarr 2.18.7 reads the Zarr format 2 form."
+        ),
         repairs=(
             repair._invalid_chunk_sizes_v2,
             repair._invalid_chunk_sizes_v3,
@@ -106,6 +123,7 @@ LEDGER: Final[Mapping[str, Entry]] = {
             "without the `array.rectilinear_chunks` flag. Re-saving the metadata, or "
             "writing chunks, stores that rectilinear grid, which requires the flag."
         ),
+        other_readers="zarrs and tensorstore reject it.",
         repairs=(repair._invalid_chunk_sizes_v3,),
     ),
     "rectilinear-float-edges": Entry(
@@ -117,6 +135,10 @@ LEDGER: Final[Mapping[str, Entry]] = {
             "Repaired silently: read as the integer it equals. A float anywhere else in a "
             "chunk grid is rejected."
         ),
+        other_readers=(
+            "zarrs rejects it (it reads a rectilinear grid with integer edges). tensorstore reads "
+            "no rectilinear grid."
+        ),
         repairs=(repair._invalid_edge_lengths_v3,),
     ),
     "v2-empty-filters": Entry(
@@ -125,6 +147,7 @@ LEDGER: Final[Mapping[str, Entry]] = {
         written_by="zarr 3.0.0 to 3.0.3 for `filters=[]`",
         still_written=False,
         reading="Read as `filters: null`, with a warning.",
+        other_readers="zarrs, tensorstore and zarr 2.18.7 read it.",
     ),
     "group-consolidated-metadata-null": Entry(
         title='A Zarr format 3 group with `"consolidated_metadata": null`',
@@ -132,6 +155,7 @@ LEDGER: Final[Mapping[str, Entry]] = {
         written_by="zarr 3.0.0 to 3.1.3, for every Zarr format 3 group",
         still_written=False,
         reading="Read silently as a group with no consolidated metadata.",
+        other_readers="zarrs opens the group.",
     ),
     "struct-bytes-codec-without-endian": Entry(
         title=(
@@ -142,6 +166,10 @@ LEDGER: Final[Mapping[str, Entry]] = {
         written_by="zarr 3.1.x",
         still_written=False,
         reading="Read as little-endian, with a warning.",
+        other_readers=(
+            "tensorstore reads it, field by field, as little-endian. zarrs reads no `structured` "
+            "data type."
+        ),
     ),
     "structured-data-type": Entry(
         title=(
@@ -159,6 +187,7 @@ LEDGER: Final[Mapping[str, Entry]] = {
             "registry defines it: a legacy alias that implementations may read but must not "
             "write. Written with an `UnstableSpecificationWarning`."
         ),
+        other_readers="tensorstore reads it, field by field. zarrs rejects the `structured` name.",
     ),
     "variable-length-bytes": Entry(
         title='The `"variable_length_bytes"` data type',
@@ -174,6 +203,7 @@ LEDGER: Final[Mapping[str, Entry]] = {
             "`UnstableSpecificationWarning`; re-saving metadata that names `bytes` stores "
             "`variable_length_bytes`."
         ),
+        other_readers="zarrs reads it. tensorstore rejects the name.",
     ),
     "null-terminated-bytes": Entry(
         title='The `"null_terminated_bytes"` data type, for NumPy `S` data types',
@@ -181,6 +211,7 @@ LEDGER: Final[Mapping[str, Entry]] = {
         written_by="zarr 3.1.0 and later",
         still_written=True,
         reading="Read. Written with an `UnstableSpecificationWarning`.",
+        other_readers="zarrs and tensorstore reject the name.",
     ),
     "raw-bytes": Entry(
         title='The `"raw_bytes"` data type, for NumPy `V` data types',
@@ -188,6 +219,10 @@ LEDGER: Final[Mapping[str, Entry]] = {
         written_by="zarr 3.1.0 and later",
         still_written=True,
         reading="Read. Written with an `UnstableSpecificationWarning`.",
+        other_readers=(
+            "tensorstore opens it as an array of bytes with an extra trailing dimension. zarrs "
+            "rejects the name."
+        ),
     ),
     "numcodecs-codecs": Entry(
         title=(
@@ -205,6 +240,11 @@ LEDGER: Final[Mapping[str, Entry]] = {
             "Read when numcodecs has a codec of that id; the `configuration` member is "
             "required, and is passed to numcodecs as it is. Written without a warning."
         ),
+        other_readers=(
+            "zarrs reads some of these codecs (`numcodecs.zlib`, `numcodecs.bz2`, "
+            "`numcodecs.fixedscaleoffset`) and rejects others (`numcodecs.delta`, `numcodecs.lz4`, "
+            "`numcodecs.crc32`). tensorstore rejects every one tested."
+        ),
     ),
     "v3-consolidated-metadata": Entry(
         title=(
@@ -218,6 +258,7 @@ LEDGER: Final[Mapping[str, Entry]] = {
             "Read. Readers that do not know it ignore it, because of `must_understand`. "
             "`zarr.consolidate_metadata` warns when it writes it."
         ),
+        other_readers="zarrs opens the group.",
     ),
     "v2-consolidated-group-entries": Entry(
         title=(
@@ -231,6 +272,7 @@ LEDGER: Final[Mapping[str, Entry]] = {
             "Read: the member marks a group with no members, as the Zarr format 3 "
             "consolidated metadata does."
         ),
+        other_readers="zarrs opens the group; zarr 2.18.7 opens the consolidated group.",
     ),
     "json-nan-tokens": Entry(
         title=(
@@ -244,6 +286,11 @@ LEDGER: Final[Mapping[str, Entry]] = {
         ),
         still_written=True,
         reading="Read silently in any metadata document. Written without a warning.",
+        other_readers=(
+            "zarrs rejects the document (`zarr.json`, or `.zattrs` with Zarr format 2), and "
+            "tensorstore rejects such a `zarr.json`. tensorstore reads a Zarr format 2 array, "
+            "whose `.zattrs` it does not read; zarr 2.18.7 reads it."
+        ),
     ),
     "numeric-fill-value-spellings": Entry(
         title=(
@@ -254,6 +301,10 @@ LEDGER: Final[Mapping[str, Entry]] = {
         written_by="Other software; found in public data. No zarr release wrote it.",
         still_written=False,
         reading="Read silently as the number it spells; re-saving stores that number.",
+        other_readers=(
+            "zarrs rejects every form. tensorstore reads an integer fill value of `0.0` and "
+            "rejects the string forms. zarr 2.18.7 reads the Zarr format 2 string form."
+        ),
     ),
     "string-fill-value-number": Entry(
         title="A number as the fill value of a variable-length string array",
@@ -263,6 +314,10 @@ LEDGER: Final[Mapping[str, Entry]] = {
         reading=(
             'Read silently as the string the number prints as (`0` as `"0"`), in both Zarr '
             "formats; re-saving stores that string."
+        ),
+        other_readers=(
+            "zarrs and zarr 2.18.7 read the Zarr format 2 form; zarrs rejects the Zarr format 3 "
+            "form. tensorstore reads no variable-length string array."
         ),
     ),
 }

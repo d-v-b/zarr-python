@@ -99,17 +99,20 @@ def on_page_markdown(markdown: str, page: Page, config: MkDocsConfig, files: Fil
 
 def ledger_markdown() -> str:
     """Render ``zarr.core.metadata.ledger.LEDGER`` as Markdown: the metadata the current
-    zarr still writes, then the metadata it only reads."""
-    from zarr.core.metadata.ledger import LEDGER
+    zarr still writes, then the metadata it only reads, then which other implementations
+    were tested."""
+    from zarr.core.metadata.ledger import LEDGER, READERS_TESTED
 
     sections = []
     for heading, still_written in (("Still written", True), ("No longer written", False)):
         items = [
             f"- **{entry.title}** ({entry.conformance})\n"
             f"    - Written by: {entry.written_by}\n"
-            f"    - Current behavior: {entry.reading}"
+            f"    - Current behavior: {entry.reading}\n"
+            f"    - Other implementations: {entry.other_readers}"
             for entry in LEDGER.values()
             if entry.still_written is still_written
         ]
         sections.append(f"## {heading}\n\n" + "\n".join(items))
+    sections.append(f"## Other implementations tested\n\n{READERS_TESTED}.")
     return "\n\n".join(sections)

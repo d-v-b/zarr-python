@@ -8,8 +8,9 @@ uses a name that the
 does not define (unregistered). Other Zarr implementations may refuse to read
 such metadata, or read it differently.
 
-For each kind of metadata, the list says which software wrote it and how the
-current release of `zarr` reads it. Some are read by a repair: zarr reads the
+For each kind of metadata, the list says which software wrote it, how the
+current release of `zarr` reads it, and whether other implementations read it
+(the end of the page says which versions were tested). Some are read by a repair: zarr reads the
 metadata as the valid metadata it was meant to be, and stores that valid
 metadata the next time it writes the array's metadata. Where a repair needs you
 to act, opening the array warns and says what to do.
