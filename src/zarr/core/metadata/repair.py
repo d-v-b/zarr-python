@@ -359,12 +359,58 @@ def _invalid_edge_lengths_v3(doc: ArrayDocument) -> tuple[ArrayDocument, Reading
     return {**doc, "chunk_grid": {**grid, "configuration": repaired}}, Reading(False, None)
 
 
+def _read_codec_names(codecs: list[JSON]) -> list[JSON] | None:
+    """Read the stored codec name "endian" as "bytes", in `codecs` and in the codecs and
+    index codecs of the sharding codecs among them, nested or not. Returns `None` if no
+    codec is named "endian"."""
+    read: list[JSON] = []
+    for codec in codecs:
+        match codec:
+            case {"name": "endian"}:
+                # The mapping pattern does not narrow `codec` for mypy.
+                codec = {**cast("Mapping[str, JSON]", codec), "name": "bytes"}
+            case {"name": "sharding_indexed", "configuration": Mapping() as configuration}:
+                inner = {
+                    key: renamed
+                    for key in ("codecs", "index_codecs")
+                    if isinstance(stored := configuration.get(key), list)
+                    and (renamed := _read_codec_names(stored)) is not None
+                }
+                if inner:
+                    codec = {
+                        **cast("Mapping[str, JSON]", codec),
+                        "configuration": {**configuration, **inner},
+                    }
+        read.append(codec)
+    if all(new is old for new, old in zip(read, codecs, strict=True)):
+        return None
+    return read
+
+
+def _endian_codec_name_v3(doc: ArrayDocument) -> tuple[ArrayDocument, Reading] | None:
+    stored = doc.get("codecs")
+    if not isinstance(stored, list) or (codecs := _read_codec_names(stored)) is None:
+        return None
+    warning = (
+        "The stored codec name 'endian' is invalid: it is the name an early draft of the "
+        "Zarr format 3 specification gave the 'bytes' codec, and it is read as 'bytes'. "
+        f"{RESAVE_HINT}"
+    )
+    # The bytes codec is read with the configuration stored for it, so no chunk moves.
+    return {**doc, "codecs": codecs}, Reading(moves_chunks=False, warning=warning)
+
+
 ARRAY_REPAIRS: Final[Mapping[ZarrFormat, tuple[Repair, ...]]] = {
     2: (_invalid_chunk_sizes_v2,),
     # The inner chunk shape is read first: it gives the unit of the outer chunk shape.
     # The rectilinear edge lengths are read last, after any repair that yields a
     # rectilinear chunk grid.
-    3: (_invalid_inner_chunk_sizes_v3, _invalid_chunk_sizes_v3, _invalid_edge_lengths_v3),
+    3: (
+        _endian_codec_name_v3,
+        _invalid_inner_chunk_sizes_v3,
+        _invalid_chunk_sizes_v3,
+        _invalid_edge_lengths_v3,
+    ),
 }
 """The repairs of an array document of each Zarr format, applied in order."""
 
