@@ -4,7 +4,7 @@ from typing import Any
 
 import numpy as np
 import pytest
-from hypothesis import assume, given, settings
+from hypothesis import assume, event, given, settings
 from hypothesis import strategies as st
 
 import zarr_indexing
@@ -54,52 +54,6 @@ def _points(domain: IndexDomain) -> list[tuple[int, ...]]:
         )
         for position in np.ndindex(*domain.shape)
     ]
-
-
-@pytest.mark.parametrize("shape", [(4,), (2, 2)])
-@pytest.mark.parametrize(
-    "coordinates",
-    [
-        [(-1, 0), (0, -1), (-1, 0), (0, 0)],
-        [(-2, -1), (-1, -2), (-2, -2), (-1, -1)],
-        [(0, 1), (1, 0), (0, 1), (0, 0)],
-        [(-(2**63), 0), (0, -(2**63)), (-1, -1), (0, 0)],
-    ],
-)
-def test_correlated_plan_with_signed_chunk_ids(
-    shape: tuple[int, ...], coordinates: list[tuple[int, int]]
-) -> None:
-    """Shared-axis lookups group distinct signed chunk tuples without collisions."""
-
-    class SignedUnitGrid:
-        def index_to_chunk(self, index: int) -> int:
-            return index
-
-        def indices_to_chunks(self, indices: Any) -> Any:
-            return indices
-
-        def chunk_offset(self, chunk: int) -> int:
-            return chunk
-
-        def chunk_size(self, chunk: int) -> int:
-            return 1
-
-    values = np.array(coordinates, dtype=np.intp)
-    transform = IndexTransform(
-        IndexDomain.from_shape(shape),
-        tuple(ArrayMap(values[:, axis].reshape(shape)) for axis in range(2)),
-    )
-    plan = plan_chunks(transform, (SignedUnitGrid(), SignedUnitGrid()))
-    expected_chunks = sorted(set(coordinates))
-    assert [tuple(row) for row in plan.partition().chunk_coords()] == expected_chunks
-    seen = []
-    for projection in plan:
-        for point in _points(projection.chunk_transform.domain):
-            assert _storage_of(projection.chunk_transform, point) == (0, 0)
-            request_point = _storage_of(projection.cell_transform, point)
-            assert _storage_of(transform, request_point) == projection.chunk_coords
-            seen.append(request_point)
-    assert sorted(seen) == sorted(_points(transform.domain))
 
 
 def test_basic_plan_is_reiterable_and_projects_both_spaces() -> None:
@@ -955,38 +909,120 @@ def test_independent_components_scatter_through_lazy_array(reader_kind: str) -> 
     np.testing.assert_array_equal(view.result(), source[a, b, c, :])
 
 
-class SignedGrid:
-    """An unbounded grid with translated boundaries and signed chunk identifiers."""
+class TranslatedGrid:
+    """A bounded custom grid over `[lo, lo + count * size)` with chunk ids `[0, count)`.
 
-    def __init__(self, size: int, origin: int) -> None:
+    A custom grid may start at any coordinate, signed included, but its chunk
+    ids are `[0, n)` and a lookup outside its extent raises, as
+    `DimensionGridLike` declares.
+    """
+
+    def __init__(self, size: int, lo: int, count: int) -> None:
         self.size = size
-        self.origin = origin
+        self.lo = lo
+        self.count = count
+
+    def _outside(self, index: object) -> IndexError:
+        return IndexError(
+            f"index {index} is outside [{self.lo}, {self.lo + self.count * self.size})"
+        )
 
     def index_to_chunk(self, index: int) -> int:
-        return (index - self.origin) // self.size
+        chunk = (index - self.lo) // self.size
+        if not 0 <= chunk < self.count:
+            raise self._outside(index)
+        return chunk
 
     def indices_to_chunks(
         self, indices: np.ndarray[Any, np.dtype[np.intp]]
     ) -> np.ndarray[Any, np.dtype[np.intp]]:
-        return (indices - self.origin) // self.size
+        chunks = (indices - self.lo) // self.size
+        if chunks.size > 0 and (int(chunks.min()) < 0 or int(chunks.max()) >= self.count):
+            raise self._outside(indices[(chunks < 0) | (chunks >= self.count)][0])
+        return chunks
 
     def chunk_offset(self, chunk: int) -> int:
-        return self.origin + chunk * self.size
+        return self.lo + chunk * self.size
 
     def chunk_size(self, chunk: int) -> int:
         return self.size
 
 
+class NegativeIdGrid(TranslatedGrid):
+    """A grid that breaks the `[0, n)` chunk-id contract by not raising below its start."""
+
+    def index_to_chunk(self, index: int) -> int:
+        return (index - self.lo) // self.size
+
+    def indices_to_chunks(
+        self, indices: np.ndarray[Any, np.dtype[np.intp]]
+    ) -> np.ndarray[Any, np.dtype[np.intp]]:
+        return (indices - self.lo) // self.size
+
+
+def test_a_grid_returning_a_negative_chunk_id_is_reported_not_grouped() -> None:
+    """Two correlated axes with signed ids would collide in the chunk key; the planner says so."""
+    values = np.array([[-1, 0], [0, -1]], dtype=np.intp)
+    transform = IndexTransform(
+        IndexDomain.from_shape((2,)), tuple(ArrayMap(values[:, axis]) for axis in range(2))
+    )
+    grids = (NegativeIdGrid(1, 0, 4), NegativeIdGrid(1, 0, 4))
+    with pytest.raises(ValueError, match="negative chunk id"):
+        plan_chunks(transform, grids).partition()
+
+
+def _assert_plan_matches_pointwise_oracle(
+    transform: IndexTransform, grids: tuple[TranslatedGrid, ...]
+) -> tuple[dict[tuple[int, ...], tuple[int, ...]], list[ChunkProjection]]:
+    """Compare the plan with the transform's domain enumerated point by point.
+
+    No planner intersection, grouping, or dependency helper contributes to the
+    expected mapping. Returns the oracle's request-to-storage map and the
+    plan's rows so callers can report on what the example reached.
+    """
+    expected = {point: _storage_of(transform, point) for point in _points(transform.domain)}
+    expected_chunks = {
+        tuple(grid.index_to_chunk(value) for grid, value in zip(grids, storage, strict=True))
+        for storage in expected.values()
+    }
+    partition = plan_chunks(transform, grids).partition()
+    rows = list(partition)
+    _check_projections(transform, rows)
+    assert {row.chunk_coords for row in rows} == expected_chunks
+    assert len(rows) == len(expected_chunks)
+    assert partition.chunk_coords().tolist() == [list(row.chunk_coords) for row in rows]
+    reconstructed = []
+    for row in rows:
+        assert row.chunk_domain.inclusive_min == tuple(
+            grid.chunk_offset(chunk) for grid, chunk in zip(grids, row.chunk_coords, strict=True)
+        )
+        for cell in _points(row.cell_transform.domain):
+            request = _storage_of(row.cell_transform, cell)
+            storage = tuple(
+                local + grid.chunk_offset(chunk)
+                for local, grid, chunk in zip(
+                    _storage_of(row.chunk_transform, cell), grids, row.chunk_coords, strict=True
+                )
+            )
+            reconstructed.append((request, storage))
+    # A list comparison retains multiplicity: repeating one position cannot hide a missing one.
+    assert sorted(reconstructed) == sorted(expected.items())
+    return expected, rows
+
+
 @settings(max_examples=300)
-@given(data=st.data(), shape=st.lists(st.integers(0, 3), min_size=0, max_size=3))
+@given(data=st.data(), shape=st.lists(st.integers(1, 3), min_size=1, max_size=3))
 def test_component_dependency_graph_matches_pointwise_oracle(
     data: st.DataObject, shape: list[int]
 ) -> None:
-    """Catch lost duplicates, signed chunk collisions, and incorrect request origins.
+    """Catch lost duplicates, chunk collisions, and incorrect request origins.
 
-    Enumerate the transform's small domain directly: no planner intersection,
-    grouping, or dependency helpers contribute to the expected mapping.
+    Rank 0 and empty domains are covered by the explicit examples below; here
+    an empty axis is a minority case (one axis at most) so most examples have
+    points for the oracle to compare.
     """
+    if data.draw(st.integers(0, 3), label="empty axis roll") == 0:
+        shape[data.draw(st.integers(0, len(shape) - 1), label="empty axis")] = 0
     origin = tuple(data.draw(st.integers(-4, 4)) for _ in shape)
     output_rank = data.draw(st.integers(1, 5))
     affine_axes = {axis for axis in range(len(shape)) if data.draw(st.booleans())}
@@ -1018,62 +1054,38 @@ def test_component_dependency_graph_matches_pointwise_oracle(
                 stride=data.draw(st.integers(-2, 2)),
             )
         )
-    grids = [SignedGrid(data.draw(st.integers(1, 3)), data.draw(st.integers(-3, 3))) for _ in maps]
+    # Every storage coordinate the draws above can produce lies in [-15, 15]
+    # (|offset| <= 3, |stride| <= 2, |input| <= 6, |value| <= 2). The grid
+    # starts below that range at a drawn phase and raises outside its extent,
+    # so a wider draw fails loudly rather than being silently accepted.
+    grids = []
+    for _ in maps:
+        size = data.draw(st.integers(1, 3), label="chunk size")
+        lo = data.draw(st.integers(-19, -15), label="grid start")
+        grids.append(TranslatedGrid(size, lo, count=-(-(16 - lo) // size)))
     transform = IndexTransform(
         IndexDomain(origin, tuple(lo + size for lo, size in zip(origin, shape, strict=True))),
         tuple(maps),
     )
-    expected = {point: _storage_of(transform, point) for point in _points(transform.domain)}
-    expected_chunks = {
-        tuple(grid.index_to_chunk(value) for grid, value in zip(grids, storage, strict=True))
-        for storage in expected.values()
-    }
-    partition = plan_chunks(transform, tuple(grids)).partition()
-    rows = list(partition)
-    _check_projections(transform, rows)
-    assert {row.chunk_coords for row in rows} == expected_chunks
-    assert len(rows) == len(expected_chunks)
-    assert partition.chunk_coords().tolist() == [list(row.chunk_coords) for row in rows]
-    reconstructed = []
-    for row in rows:
-        assert row.chunk_domain.inclusive_min == tuple(
-            grid.chunk_offset(chunk) for grid, chunk in zip(grids, row.chunk_coords, strict=True)
-        )
-        for cell in _points(row.cell_transform.domain):
-            request = _storage_of(row.cell_transform, cell)
-            storage = tuple(
-                local + grid.chunk_offset(chunk)
-                for local, grid, chunk in zip(
-                    _storage_of(row.chunk_transform, cell), grids, row.chunk_coords, strict=True
-                )
-            )
-            reconstructed.append((request, storage))
-    # A list comparison retains multiplicity: repeating one position cannot hide a missing one.
-    assert sorted(reconstructed) == sorted(expected.items())
+    expected, rows = _assert_plan_matches_pointwise_oracle(transform, tuple(grids))
+    event(f"rank={len(shape)}")
+    event(f"multi_chunk={len(rows) > 1}")
+    event(f"dup_storage={len(set(expected.values())) < len(expected)}")
+    event(f"signed_origin={any(lo < 0 for lo in origin)}")
 
 
-@given(origin=st.integers(-4, 4), size=st.integers(2, 5), stride=st.sampled_from([-2, -1, 1, 2]))
-def test_generated_shared_affine_dependency_is_rejected(
-    origin: int, size: int, stride: int
+@pytest.mark.parametrize("shape", [(), (0,), (2, 0)], ids=["rank-0", "empty", "empty-axis"])
+def test_component_dependency_graph_matches_pointwise_oracle_on_degenerate_domains(
+    shape: tuple[int, ...],
 ) -> None:
+    """A rank-0 domain plans one point; an empty domain plans no rows."""
     transform = IndexTransform(
-        IndexDomain((origin,), (origin + size,)),
-        (DimensionMap(0, stride=stride), DimensionMap(0, offset=3)),
+        IndexDomain.from_shape(shape),
+        (ConstantMap(1), ArrayMap(np.full((1,) * len(shape), 2, dtype=np.intp), offset=-1)),
     )
-    with pytest.raises(ValueError, match="read input axis 0"):
-        list(plan_chunks(transform, (SignedGrid(2, -1), SignedGrid(3, 1))))
-
-
-@given(origin=st.integers(-4, 4), size=st.integers(2, 5), stride=st.sampled_from([-2, -1, 1, 2]))
-def test_generated_mixed_affine_array_dependency_is_rejected(
-    origin: int, size: int, stride: int
-) -> None:
-    transform = IndexTransform(
-        IndexDomain((origin,), (origin + size,)),
-        (DimensionMap(0, stride=stride), ArrayMap(np.zeros(size, dtype=np.intp))),
+    _assert_plan_matches_pointwise_oracle(
+        transform, (TranslatedGrid(2, -1, 3), TranslatedGrid(1, 0, 2))
     )
-    with pytest.raises(NotImplementedError, match="also bound by a slice map"):
-        list(plan_chunks(transform, (SignedGrid(2, -1), SignedGrid(3, 1))))
 
 
 @pytest.mark.parametrize("stride", [0, 1, 2, -2])

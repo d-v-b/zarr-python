@@ -766,15 +766,25 @@ class TestIndexTransformVindex:
 @pytest.mark.parametrize("mode", ["oindex", "vindex"])
 @pytest.mark.parametrize("as_list", [False, True])
 @pytest.mark.parametrize("value", [2**63, 2**64 - 1])
+@pytest.mark.parametrize(
+    "domain",
+    [IndexDomain((int(np.iinfo(np.intp).min),), (0,)), IndexDomain.from_shape((5,))],
+    ids=["negative-domain", "zero-origin"],
+)
 def test_direct_advanced_index_rejects_unsigned_overflow(
-    mode: str, as_list: bool, value: int
+    mode: str, as_list: bool, value: int, domain: IndexDomain
 ) -> None:
-    """Narrowing must not turn huge positive coordinates into valid negative ones."""
-    transform = IndexTransform.identity(
-        IndexDomain(inclusive_min=(np.iinfo(np.intp).min,), exclusive_max=(0,))
-    )
+    """A coordinate past the intp range is out of bounds under the value the caller passed.
+
+    The bounds check runs before narrowing, so the value cannot wrap into the
+    negative domain, and the message names it and the domain.
+    """
+    transform = IndexTransform.identity(domain)
     selector = [value] if as_list else np.array([value], dtype=np.uint64)
-    with pytest.raises(OverflowError, match="outside np.intp range"):
+    lo, hi = domain.inclusive_min[0], domain.exclusive_max[0]
+    with pytest.raises(
+        BoundsCheckError, match=rf"index {value} is out of bounds \(valid indices \[{lo}, {hi}\)\)"
+    ):
         getattr(transform, mode)[selector]
 
 

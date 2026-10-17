@@ -342,21 +342,22 @@ def _index_array_body(index_array: Any, rank: int = 1, extent: int = 2) -> Index
 @pytest.mark.parametrize(
     ("index_array", "detail"),
     [
-        ([0.9, 1.9], "float64"),
-        ([0, 1.5], "float64"),
-        ([True, False], "bool"),
-        (["a", "b"], "str"),
+        # The message names the first leaf that is not a wire integer.
+        ([0.9, 1.9], "must be an integer, got 0.9"),
+        ([0, 1.5], "must be an integer, got 1.5"),
+        ([True, False], "must be an integer, got True"),
+        (["a", "b"], "must be an integer, got 'a'"),
         # Not lists at all, so they are turned away before their content is
         # looked at: the wire representation requires a nested array rather
         # than a scalar string or integer.
         ("abc", "must be an array of integers"),
         (5, "must be an array of integers"),
-        ([None, None], "object"),
+        ([None, None], "must be an integer, got None"),
     ],
     ids=["floats", "mixed", "bools", "strings", "string", "scalar", "nulls"],
 )
 def test_a_non_integer_index_array_is_rejected(index_array: Any, detail: str) -> None:
-    """Index arrays require integer coordinates and reject float, bool, and string dtypes."""
+    """Index arrays require integer coordinates and reject floats, booleans, strings and nulls."""
     with pytest.raises(NdselError) as excinfo:
         IndexTransform.from_json(_index_array_body(index_array))
     assert excinfo.value.reason == "invalid_json"

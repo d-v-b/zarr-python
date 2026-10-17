@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from zarr_indexing.chunk_resolution import plan_chunks
+from zarr_indexing.grid import FixedDimension
 from zarr_indexing.output_map import ArrayMap, ConstantMap, DimensionMap
 
 if TYPE_CHECKING:
@@ -25,22 +26,23 @@ def write_into(
 ) -> None:
     """Write broadcast values to precisely the cells addressed by ``transform``.
 
-    The source must expose ``shape``, a NumPy-compatible ``dtype``, and basic
-    integer/slice assignment. Values are snapshotted and converted before the
-    first mutation, so source aliases and conversion failures are safe. Extra
-    leading singleton value axes are accepted, as in NumPy assignment. Repeated
-    source coordinates receive the last value in C order of the view.
+    The source must expose ``shape``, a NumPy-compatible ``dtype``, basic
+    integer/slice assignment, and, for selections that are not one affine
+    assignment, basic slice reads. Values are snapshotted and converted before
+    the first mutation, so source aliases and conversion failures are safe.
+    Extra leading singleton value axes are accepted, as in NumPy assignment.
+    Repeated source coordinates receive the last value in C order of the view.
 
     Independent affine maps use one basic assignment. Other selections are
-    scattered in bulk: a NumPy source receives one fancy assignment, and a
-    readable source with a ``write_grid`` is written one grid cell at a time —
-    the cell's touched hull is read once, updated in memory, and written back
-    with one basic assignment, so storage round trips are bounded by touched
-    cells. Without a grid, or for the few transforms the planner cannot factor
-    (such as one input axis feeding two output maps), or for a source that
-    cannot be read, the fallback is one integer assignment per element, which
-    never reads. Backend assignment may itself read storage units as part of
-    updating them.
+    scattered in bulk: a NumPy source receives one fancy assignment, and any
+    other source is written one grid cell at a time — the cell's touched hull
+    is read once, updated in memory, and written back with one basic
+    assignment, so storage round trips are bounded by touched cells. Without a
+    ``write_grid`` the source is one cell covering the whole array, so its
+    hull is the selection's bounding box. Backend assignment may itself read
+    storage units as part of updating them. A transform the planner cannot
+    factor (one input axis feeding two output maps) is rejected before any
+    cell is written, as it is for reads.
 
     Source assignment failures propagate and may leave preceding writes
     applied; this operation is not transactional.
@@ -103,17 +105,13 @@ def write_into(
     if isinstance(source, np.ndarray):
         _scatter_numpy(source, transform, broadcast)
         return
-    if write_grid is not None and hasattr(source, "__getitem__"):
-        try:
-            # Materialized before any write: an unfactorable transform is
-            # reported by planning, never after some cells were rewritten.
-            projections = list(plan_chunks(transform, tuple(write_grid)))
-        except (ValueError, NotImplementedError):
-            projections = None
-        if projections is not None:
-            _scatter_planned(source, transform, broadcast, projections)
-            return
-    _scatter_elementwise(source, transform, broadcast)
+    if write_grid is None:
+        # No advertised grid: one cell covering the whole array.
+        write_grid = tuple(FixedDimension(size=n, extent=n) for n in source_shape)
+    # Materialized before any write: an unfactorable transform is reported by
+    # planning, never after some cells were rewritten.
+    projections = list(plan_chunks(transform, tuple(write_grid)))
+    _scatter_planned(source, transform, broadcast, projections)
 
 
 def _write_affine(source: Any, transform: IndexTransform, broadcast: Any) -> bool:
@@ -188,7 +186,13 @@ def _scatter_planned(
     broadcast: Any,
     projections: Sequence[ChunkProjection],
 ) -> None:
-    """One read-modify-write per touched grid cell, through basic slices only."""
+    """One read-modify-write per touched grid cell, through basic slices only.
+
+    Every cell is read before it is rewritten. A projection proves
+    `coverage == "full"` only for affine maps, which `_write_affine` already
+    wrote as one basic assignment, so no planned cell can skip its read on
+    that evidence.
+    """
     origin = np.asarray(transform.domain.inclusive_min, dtype=np.intp)
     for projection in projections:
         cells = _domain_cells(projection.chunk_transform.domain.shape)
@@ -208,19 +212,3 @@ def _scatter_planned(
         keep = _last_occurrences(flat)
         np.put(block, flat[keep], np.asarray(broadcast[tuple(positions[keep].T)]))
         source[box] = block
-
-
-def _scatter_elementwise(source: Any, transform: IndexTransform, broadcast: Any) -> None:
-    """One integer assignment per element, for sources that cannot be read."""
-    origin = transform.domain.inclusive_min
-    for position in np.ndindex(transform.domain.shape):
-        point = tuple(start + offset for start, offset in zip(origin, position, strict=True))
-        if isinstance(broadcast, np.ma.MaskedArray):
-            # Masked scalar indexing returns the shared ``masked`` singleton,
-            # discarding the payload. A zero-dimensional array retains both.
-            value = np.ma.array(
-                broadcast.data[position], mask=np.ma.getmaskarray(broadcast)[position]
-            )
-        else:
-            value = broadcast[position]
-        source[transform.apply(point)] = value
