@@ -33,21 +33,27 @@ The three types exist because they trade off generality for efficiency:
 Collapsing everything to `ArrayMap` would be correct but wasteful — a
 billion-element slice would materialize a billion coordinates just to group
 them by chunk, when `DimensionMap` does it with three integers.
+
+An `ArrayMap` also carries an `IndexRange`: the closed interval its raw values
+are *declared* to lie in (ndsel's `index_array_bounds`, TensorStore's
+`index_range`). The declaration is retained, not enforced at construction; a
+value outside it fails when it is used to address storage. See `IndexRange`.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
 
 from zarr_indexing._affine import checked_affine
+from zarr_indexing.errors import BoundsCheckError
 
 if TYPE_CHECKING:
     import numpy.typing as npt
 
-    from zarr_indexing.json import OutputIndexMapJSON
+    from zarr_indexing.json import IndexValueJSON, OutputIndexMapJSON
 
 
 def _array_map_dependency_axes(index_array: np.ndarray[Any, Any]) -> tuple[int, ...]:
@@ -62,6 +68,137 @@ def _array_map_dependency_axes(index_array: np.ndarray[Any, Any]) -> tuple[int, 
     itself is not reported.
     """
     return tuple(axis for axis, size in enumerate(index_array.shape) if size > 1)
+
+
+@dataclass(frozen=True, slots=True)
+class IndexRange:
+    """The closed interval an `ArrayMap`'s raw index values are declared to lie in.
+
+    This is TensorStore's `index_range` on an index-array output map
+    ([`output_index_map.h#L72-L73`](https://github.com/google/tensorstore/blob/5c6997751f4b4855de72d6e7f696c572aae3a4e5/tensorstore/index_space/output_index_map.h#L72-L73)),
+    which ndsel spells `index_array_bounds` (spec section 4.2). It bounds the
+    values of `index_array` themselves, before `offset` and `stride` are
+    applied, and it is infinite on both sides by default, so `IndexRange()` is
+    the unconstrained range every selection-built map carries.
+
+    A range is a **declaration, not a proof**. An `ArrayMap` may hold values
+    outside its range, and loading such a document succeeds; the value fails
+    when it is *used* to address storage. This copies TensorStore, whose JSON
+    binder parses the interval without looking at the array
+    ([`json.cc#L200-L215`](https://github.com/google/tensorstore/blob/5c6997751f4b4855de72d6e7f696c572aae3a4e5/tensorstore/index_space/json.cc#L200-L215))
+    and whose point evaluation checks each value it reads
+    ([`transform_rep.cc#L471-L497`](https://github.com/google/tensorstore/blob/5c6997751f4b4855de72d6e7f696c572aae3a4e5/tensorstore/index_space/internal/transform_rep.cc#L471-L497)),
+    as do its array iteration
+    ([`iterate.cc#L232-L239`](https://github.com/google/tensorstore/blob/5c6997751f4b4855de72d6e7f696c572aae3a4e5/tensorstore/index_space/internal/iterate.cc#L232-L239))
+    and the collapse of a one-element map to a constant
+    ([`transform_rep.cc#L526-L531`](https://github.com/google/tensorstore/blob/5c6997751f4b4855de72d6e7f696c572aae3a4e5/tensorstore/index_space/internal/transform_rep.cc#L526-L531)).
+    `ArrayMap.checked_index_array` is that gate here.
+
+    Both bounds are inclusive, as on the wire. The lower bound is an integer or
+    `"-inf"` and the upper an integer or `"+inf"`: a sentinel on the other side,
+    or a lower bound above the upper, names no closed interval, and the
+    constructor rejects it, as TensorStore's `IndexInterval::Closed` does at
+    parse (`(10, 0) do not specify a valid closed index interval`).
+
+    Examples
+    --------
+    >>> IndexRange().contains([-(10**18), 10**18])
+    True
+    >>> IndexRange(0, 9).contains([7, 3, 5]), IndexRange(0, 9).contains([7, 30])
+    (True, False)
+    >>> IndexRange(0, "+inf").to_json()
+    [0, '+inf']
+    """
+
+    inclusive_min: int | Literal["-inf"] = "-inf"
+    """The smallest value a raw index may take; `"-inf"` for no lower bound."""
+
+    inclusive_max: int | Literal["+inf"] = "+inf"
+    """The largest value a raw index may take; `"+inf"` for no upper bound."""
+
+    def __post_init__(self) -> None:
+        for name, value, sentinel in (
+            ("inclusive_min", self.inclusive_min, "-inf"),
+            ("inclusive_max", self.inclusive_max, "+inf"),
+        ):
+            if isinstance(value, (bool, np.bool_)) or not (
+                value == sentinel or isinstance(value, (int, np.integer))
+            ):
+                raise ValueError(f"{name} must be an integer or {sentinel!r}, got {value!r}")
+            if isinstance(value, np.integer):
+                object.__setattr__(self, name, int(value))
+        lo, hi = self.inclusive_min, self.inclusive_max
+        if isinstance(lo, int) and isinstance(hi, int) and lo > hi:
+            raise ValueError(
+                f"[{lo}, {hi}] is not a closed interval: inclusive_min > inclusive_max"
+            )
+
+    @property
+    def is_unbounded(self) -> bool:
+        """`True` when neither side constrains anything: the default range."""
+        return self.inclusive_min == "-inf" and self.inclusive_max == "+inf"
+
+    def contains(self, values: npt.ArrayLike) -> bool:
+        """Whether every value lies in the range; vacuously true of no values."""
+        return self._outlier(np.asarray(values)) is None
+
+    def check(self, values: npt.ArrayLike, *, output_dimension: int) -> None:
+        """Raise `BoundsCheckError` unless every value lies in the range.
+
+        `output_dimension` names the map the values came from in the error,
+        which also names the offending value and the range.
+        """
+        outlier = self._outlier(np.asarray(values))
+        if outlier is not None:
+            raise BoundsCheckError(
+                f"index {outlier} on output dimension {output_dimension} is outside "
+                f"index_array_bounds {self.to_json()}"
+            )
+
+    def _outlier(self, values: np.ndarray[Any, Any]) -> int | None:
+        """One value outside the range, or `None`; extrema decide in one scan.
+
+        Python integers hold the extrema, so integer limits compare exactly.
+        """
+        if values.size == 0 or self.is_unbounded:
+            return None
+        low, high = int(values.min()), int(values.max())
+        if self.inclusive_min != "-inf" and low < self.inclusive_min:
+            return low
+        if self.inclusive_max != "+inf" and high > self.inclusive_max:
+            return high
+        return None
+
+    def to_json(self) -> list[IndexValueJSON]:
+        """The wire spelling: `[inclusive_min, inclusive_max]`."""
+        return [self.inclusive_min, self.inclusive_max]
+
+    @classmethod
+    def from_json(cls, bounds: Any, where: str = "output") -> IndexRange:
+        """Lower a wire `index_array_bounds` value, validating its syntax.
+
+        The message layer's `validate_index_array_bounds` checks the shape,
+        the `index-value` grammar and the extended-integer order of the pair;
+        the constructor then rejects a sentinel on the wrong side, the one
+        well-ordered pair that is not a closed interval. Both failures are
+        `NdselError("invalid_json")` (order errors are `bounds_out_of_order`).
+        Array values are not consulted here or anywhere at load.
+
+        Examples
+        --------
+        >>> IndexRange.from_json([0, 9])
+        IndexRange(inclusive_min=0, inclusive_max=9)
+        >>> IndexRange.from_json(["-inf", "+inf"]).is_unbounded
+        True
+        """
+        from zarr_indexing.messages import NdselError, validate_index_array_bounds
+
+        lo, hi = validate_index_array_bounds(bounds, where)
+        try:
+            # The validator's `int | str` is narrowed at runtime by the constructor.
+            return cls(cast("Any", lo), cast("Any", hi))
+        except ValueError as exc:
+            raise NdselError("invalid_json", f"{where}.index_array_bounds: {exc}") from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,6 +308,12 @@ class ArrayMap:
     hand-built all-singleton `ArrayMap` is still a valid value; resolution
     classifies it with the correlated maps and reads it pointwise.
 
+    `index_range` declares the closed interval the raw values lie in. It is
+    retained, not enforced here: a map may hold a value outside its range, and
+    the value fails at the use that reads it (see `IndexRange` and
+    `checked_index_array`). The range travels unchanged through the affine
+    adjustment, reindexing, slicing and composition.
+
     Examples
     --------
     The fancy selection `arr[[5, 1, 1]]` reads coordinate 5, then 1, then 1
@@ -181,6 +324,15 @@ class ArrayMap:
     [5, 1, 1]
     >>> np.arange(10)[[5, 1, 1]].tolist()
     [5, 1, 1]
+
+    A declared range does not reject a value at construction; the value is
+    refused when it is read to address storage:
+
+    >>> m = ArrayMap(index_array=np.array([5, 1, 40]), index_range=IndexRange(0, 9))
+    >>> m.checked_index_array(output_dimension=0)
+    Traceback (most recent call last):
+        ...
+    zarr_indexing.errors.BoundsCheckError: index 40 on output dimension 0 is outside index_array_bounds [0, 9]
     """
 
     index_array: npt.NDArray[np.integer[Any]]
@@ -193,13 +345,18 @@ class ArrayMap:
     stride: int = 1
     """Multiplier applied to each `index_array` value before `offset` is added."""
 
+    index_range: IndexRange = IndexRange()
+    """The closed interval the raw `index_array` values are declared to lie in;
+    unbounded by default. Retained and checked at use, never at construction."""
+
     def __post_init__(self) -> None:
         """Own an immutable snapshot of the integer index coordinates.
 
         The snapshot is backed by immutable bytes, so callers cannot modify it
         or re-enable its WRITEABLE flag. Changes to the supplied array do not
         change the map's coordinates or hash. This freezes the coordinate
-        mapping, not the source values read through it."""
+        mapping, not the source values read through it. The values are not
+        compared with `index_range`: that is a declaration checked at use."""
         # Immutable bytes are the ultimate owner so callers cannot re-enable
         # the WRITEABLE flag, as they can on a read-only array that owns its
         # allocation. `asarray` also accepts the NumPy scalars that reach here
@@ -207,30 +364,34 @@ class ArrayMap:
         array = np.asarray(self.index_array)
         if not np.issubdtype(array.dtype, np.integer):
             raise TypeError(f"index_array must have an integer dtype, got {array.dtype}")
+        if not isinstance(self.index_range, IndexRange):  # pyright: ignore[reportUnnecessaryIsInstance] - untyped callers pass wire lists
+            raise TypeError(f"index_range must be an IndexRange, got {self.index_range!r}")
         normalized = checked_affine(0, 1, array)
         frozen = np.frombuffer(normalized.tobytes(), dtype=np.intp).reshape(normalized.shape)
         object.__setattr__(self, "index_array", frozen)
 
-    def __reduce__(self) -> tuple[object, tuple[object, int, int]]:
+    def __reduce__(self) -> tuple[object, tuple[object, int, int, IndexRange]]:
         """Reconstruct through `__init__`, preserving the ownership invariant."""
         return (
             type(self),
-            (self.index_array, self.offset, self.stride),
+            (self.index_array, self.offset, self.stride, self.index_range),
         )
 
     def _with_affine(self, offset: int, stride: int) -> ArrayMap:
         """Return a map with a different affine adjustment.
 
-        Share the immutable index array while replacing the offset and stride.
-        This preserves coordinate ownership without copying the array."""
+        Share the immutable index array and the range while replacing the
+        offset and stride. This preserves coordinate ownership without copying
+        the array."""
         new = object.__new__(ArrayMap)
         object.__setattr__(new, "index_array", self.index_array)
         object.__setattr__(new, "offset", offset)
         object.__setattr__(new, "stride", stride)
+        object.__setattr__(new, "index_range", self.index_range)
         return new
 
     def __eq__(self, other: object) -> bool:
-        """Compare offset, stride, array shape, and index values.
+        """Compare offset, stride, range, array shape, and index values.
 
         Return a scalar boolean for another ArrayMap and NotImplemented for
         other types."""
@@ -239,12 +400,13 @@ class ArrayMap:
         return (
             self.offset == other.offset
             and self.stride == other.stride
+            and self.index_range == other.index_range
             and self.index_array.shape == other.index_array.shape
             and bool(np.array_equal(self.index_array, other.index_array))
         )
 
     def __hash__(self) -> int:
-        """Hash the offset, stride, array shape, and index bytes.
+        """Hash the offset, stride, range, array shape, and index bytes.
 
         The immutable coordinate snapshot keeps the hash stable, and equal
         maps have equal hashes."""
@@ -252,9 +414,66 @@ class ArrayMap:
             (
                 self.offset,
                 self.stride,
+                self.index_range,
                 self.index_array.shape,
                 self.index_array.tobytes(),
             )
+        )
+
+    def checked_index_array(self, output_dimension: int) -> npt.NDArray[np.integer[Any]]:
+        """The index array, after every value is checked against `index_range`.
+
+        This is the gate through which index-array values reach storage.
+        Intersection, chunk planning, composition through the array and the
+        readers that lower a transform to array operations all read the array
+        here, so a map holding a value outside its declared range fails at
+        that use, not at construction or load, as TensorStore's does (see
+        `IndexRange`). Point evaluation gathers only the values a point needs
+        and checks those through `index_range.check`. `output_dimension` names
+        the map in the `BoundsCheckError`.
+
+        Examples
+        --------
+        >>> ArrayMap(np.array([3, 1]), index_range=IndexRange(0, 4)).checked_index_array(0)
+        array([3, 1])
+        """
+        self.index_range.check(self.index_array, output_dimension=output_dimension)
+        return self.index_array
+
+    def with_index_array(
+        self, index_array: npt.ArrayLike, *, output_dimension: int
+    ) -> ArrayMap | ConstantMap:
+        """This map over a reindexed selection of its own coordinates.
+
+        `offset`, `stride` and `index_range` carry over: basic indexing and
+        composition pick among the map's coordinates without changing what
+        those coordinates are declared to satisfy, as in TensorStore
+        ([`compose_transforms.cc#L244`](https://github.com/google/tensorstore/blob/5c6997751f4b4855de72d6e7f696c572aae3a4e5/tensorstore/index_space/internal/compose_transforms.cc#L244)).
+        A result holding exactly one coordinate is the `ConstantMap` it equals;
+        building that constant reads the coordinate, so the coordinate is
+        checked against the range first, as TensorStore's collapse does
+        ([`transform_rep.cc#L526-L531`](https://github.com/google/tensorstore/blob/5c6997751f4b4855de72d6e7f696c572aae3a4e5/tensorstore/index_space/internal/transform_rep.cc#L526-L531)).
+        An empty result stays an `ArrayMap`, as in `array_map_or_constant`.
+
+        Examples
+        --------
+        >>> m = ArrayMap(np.array([5, 1, 40]), offset=100, index_range=IndexRange(0, 9))
+        >>> m.with_index_array(np.array([1, 5]), output_dimension=0)
+        ArrayMap(index_array=array([1, 5]), offset=100, stride=1, index_range=IndexRange(inclusive_min=0, inclusive_max=9))
+        >>> m.with_index_array(np.array([5]), output_dimension=0)
+        ConstantMap(offset=105)
+        >>> m.with_index_array(np.array([40]), output_dimension=0)
+        Traceback (most recent call last):
+            ...
+        zarr_indexing.errors.BoundsCheckError: index 40 on output dimension 0 is outside index_array_bounds [0, 9]
+        """
+        arr = np.asarray(index_array)
+        if arr.size == 1:
+            self.index_range.check(arr, output_dimension=output_dimension)
+            value = int(arr.reshape(-1)[0])
+            return ConstantMap(offset=checked_affine(self.offset, self.stride, value))
+        return ArrayMap(
+            index_array=arr, offset=self.offset, stride=self.stride, index_range=self.index_range
         )
 
     @property
@@ -330,14 +549,24 @@ class ArrayMap:
         no cell and can only be empty because an input dimension is, so the
         emptiness travels in the domain instead.
 
+        `index_array_bounds` is the stored `index_range`, always present, as
+        ndsel's canonical form requires (spec section 4.3); TensorStore omits
+        a range its values already satisfy, which the spec notes as its
+        minimal encoding. A one-coordinate map whose coordinate lies outside
+        its range is not collapsed: the constant it would become is not the
+        map, which fails at use, so the array and its range are emitted, which
+        is also what TensorStore emits for it.
+
         Examples
         --------
         >>> ArrayMap(np.array([[4], [1], [1]])).to_json()["index_array"]
         [[4], [1], [1]]
         >>> ArrayMap(np.array([7])).to_json()  # degenerate: one coordinate
         {'offset': 7}
+        >>> ArrayMap(np.array([4, 1]), index_range=IndexRange(0, 9)).to_json()["index_array_bounds"]
+        [0, 9]
         """
-        if self.index_array.size == 1:
+        if self.index_array.size == 1 and self.index_range.contains(self.index_array):
             value = int(self.index_array.reshape(-1)[0])
             return {"offset": self.offset + self.stride * value}
         if self.index_array.size == 0:
@@ -346,7 +575,7 @@ class ArrayMap:
             "offset": self.offset,
             "stride": self.stride,
             "index_array": self.index_array.tolist(),
-            "index_array_bounds": ["-inf", "+inf"],
+            "index_array_bounds": self.index_range.to_json(),
         }
 
 
@@ -357,9 +586,10 @@ def output_index_map_from_json(data: OutputIndexMapJSON) -> OutputIndexMap:
     selects an array map, `input_dimension` selects a dimension map, and
     neither selects a constant map.
 
-    Validate every raw index value against the inclusive `index_array_bounds`
-    before applying offset and stride. Out-of-bounds values raise `NdselError`
-    at load time. Validated immutable maps do not retain the bounds.
+    `index_array_bounds` is lowered to the map's `index_range` as given; its
+    syntax is validated, its relation to the array's values is not. A value
+    outside the range loads, and fails at the use that reads it (see
+    `IndexRange`).
 
     Examples
     --------
@@ -367,16 +597,18 @@ def output_index_map_from_json(data: OutputIndexMapJSON) -> OutputIndexMap:
     ConstantMap(offset=5)
     >>> output_index_map_from_json({"offset": 0, "stride": 2, "input_dimension": 1})
     DimensionMap(input_dimension=1, offset=0, stride=2)
+    >>> output_index_map_from_json({"index_array": [0, 40], "index_array_bounds": [0, 9]}).index_range
+    IndexRange(inclusive_min=0, inclusive_max=9)
     """
-    from zarr_indexing._wire import check_index_array_bounds, lower_index_array
+    from zarr_indexing._wire import lower_index_array
 
     if "index_array" in data:
         array = lower_index_array(data["index_array"], "index_array")
-        check_index_array_bounds(array, data.get("index_array_bounds", ["-inf", "+inf"]), "output")
         return ArrayMap(
             index_array=array,
             offset=data.get("offset", 0),
             stride=data.get("stride", 1),
+            index_range=IndexRange.from_json(data.get("index_array_bounds", ["-inf", "+inf"])),
         )
     if "input_dimension" in data:
         return DimensionMap(
