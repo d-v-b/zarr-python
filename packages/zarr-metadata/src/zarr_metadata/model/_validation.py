@@ -80,6 +80,7 @@ from zarr_metadata.v3._definition import (
     fill_value_problems,
     resolve_refined,
 )
+from zarr_metadata.v3._fast import FastArrayRead, reader_for
 from zarr_metadata.v3._pipeline import Stage, read_pipeline
 from zarr_metadata.v3._registry import (
     CORE_AND_EXTENSIONS,
@@ -538,6 +539,15 @@ def read_array_v3(
     its group's -- so the levels a reader walks are counted from that
     one's root; the problems are located in this document.
     """
+    if type(context) is Context:
+        # The fast path, where pydantic-core is installed: the structural
+        # walk compiled, the rules in Python. It reads only a document with
+        # no problem; any other is read below, which reports it.
+        reader = reader_for(context)
+        if reader is not None:
+            fast = reader.read(value, len(at))
+            if fast is not None:
+                return _fast_array_v3(fast)
     if not is_object(value):
         return ZarrV3ArrayMetadataReading(problems=not_an_object(value)), None
     doc = value
@@ -672,6 +682,27 @@ def read_array_v3(
         attributes=attributes,
         extra_fields=extra_fields,
         document={key: refined[key] for key in cast("Mapping[str, object]", doc)},
+    )
+    return reading, members
+
+
+def _fast_array_v3(fast: FastArrayRead) -> tuple[ZarrV3ArrayMetadataReading, ArrayMembersV3]:
+    """The reading and members of a document the fast path read with no problem, as `read_array_v3` gives them."""
+    reading = ZarrV3ArrayMetadataReading(
+        data_type=fast.read.get("data_type", UNSET),
+        chunk_grid=fast.read.get("chunk_grid", UNSET),
+        chunk_key_encoding=fast.read.get("chunk_key_encoding", UNSET),
+        chunk=fast.chunk,
+        pipeline=fast.pipeline,
+        storage_transformers=fast.storage_transformers,
+    )
+    members = ArrayMembersV3(
+        shape=fast.shape,
+        fill_value=fast.fill_value,
+        dimension_names=UNSET if fast.dimension_names is None else fast.dimension_names,
+        attributes=fast.attributes,
+        extra_fields=fast.extra_fields,
+        document=fast.document,
     )
     return reading, members
 

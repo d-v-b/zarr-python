@@ -43,6 +43,12 @@ dependencies = [
     "typing_extensions>=4.16",
 ]
 
+[project.optional-dependencies]
+# The fast path: one pydantic-core schema per scope does the structural
+# walk of a v3 array document. Import-gated; without it every document is
+# read by the Python walk, which says the same of every document.
+fast = ["pydantic-core>=2.46"]
+
 [project.urls]
 Homepage = "https://github.com/zarr-developers/zarr-python"
 Source = "https://github.com/zarr-developers/zarr-python/tree/main/packages/zarr-metadata"

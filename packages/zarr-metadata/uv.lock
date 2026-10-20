@@ -1139,6 +1139,11 @@ dependencies = [
     { name = "typing-extensions" },
 ]
 
+[package.optional-dependencies]
+fast = [
+    { name = "pydantic-core" },
+]
+
 [package.dev-dependencies]
 docs = [
     { name = "griffe-inherited-docstrings" },
@@ -1158,8 +1163,10 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "annotated-types", specifier = ">=0.6" },
+    { name = "pydantic-core", marker = "extra == 'fast'", specifier = ">=2.46" },
     { name = "typing-extensions", specifier = ">=4.16" },
 ]
+provides-extras = ["fast"]
 
 [package.metadata.requires-dev]
 docs = [

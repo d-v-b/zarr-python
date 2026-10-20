@@ -692,7 +692,7 @@ def frozen(value: JSONValue) -> JSONValue:
     containers a view needs. What a model shows of its document.
     """
     cls = type(value)
-    if cls in _SCALARS:
+    if cls in SCALARS:
         return value
     if cls is dict or isinstance(value, Mapping):
         members = cast("Mapping[str, JSONValue]", value)
@@ -700,20 +700,20 @@ def frozen(value: JSONValue) -> JSONValue:
             "JSONValue",
             MappingProxyType(
                 {
-                    key: item if type(item) in _SCALARS else frozen(item)
+                    key: item if type(item) in SCALARS else frozen(item)
                     for key, item in members.items()
                 }
             ),
         )
     if cls is tuple or cls is list or isinstance(value, (tuple, list)):
         return tuple(
-            item if type(item) in _SCALARS else frozen(item)
+            item if type(item) in SCALARS else frozen(item)
             for item in cast("Sequence[JSONValue]", value)
         )
     return value
 
 
-_SCALARS: Final[frozenset[type]] = frozenset({str, int, float, bool, type(None)})
+SCALARS: Final[frozenset[type]] = frozenset({str, int, float, bool, type(None)})
 """The types a JSON scalar is held as, which a read-only view shares as they are."""
 
 
@@ -761,6 +761,7 @@ def arrays_to_tuples(obj: object) -> object:
 
 
 __all__ = [
+    "SCALARS",
     "MetadataValidationError",
     "ProblemKind",
     "ValidationProblem",

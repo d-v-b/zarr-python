@@ -88,6 +88,8 @@ class Context(Generic[F]):
 
     tables: Tables
     _format: Literal[2, 3] | None = field(init=False, repr=False)
+    _fast: object = field(init=False, repr=False, default=None)
+    """The compiled reader of this scope, built the first time a document is read in it; what `zarr_metadata.v3._fast.reader_for` keeps."""
 
     def __post_init__(self) -> None:
         # What `of` builds, the constructor refuses to build otherwise: each

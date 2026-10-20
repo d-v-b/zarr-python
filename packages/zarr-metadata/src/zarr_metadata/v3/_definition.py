@@ -55,6 +55,7 @@ from typing_extensions import TypeAliasType, TypedDict, TypeVar, is_typeddict
 
 from zarr_metadata._common import JSONValue, ZarrV3NamedConfigJSON
 from zarr_metadata._json import (
+    SCALARS,
     ValidationProblem,
     copied,
     frozen,
@@ -470,7 +471,7 @@ class WithFillValue(Definition[C]):
 
     def _refusal(self) -> str | None:
         try:
-            _fill_value_parser(self.fill_value)
+            fill_value_parser(self.fill_value)
         except TypeError as error:
             return f"{self.name!r}: fill_value: {error}"
         return None
@@ -548,7 +549,7 @@ class DataTypeDefinition(WithFillValue[C], kind=True, format=3):
 
 
 @functools.cache
-def _fill_value_parser(annotation: object) -> Parser:
+def fill_value_parser(annotation: object) -> Parser:
     """The checker for a fill value's JSON shape, compiled once; `TypeError` naming what no checker reads, or a metadata field in it."""
     return parser(annotation, _no_field)
 
@@ -1277,6 +1278,40 @@ class AcceptedField(Generic[D]):
         return copied(written_json(self))
 
 
+def trusted_field(
+    json: JSONValue,
+    name: str,
+    definition: Definition[Any],
+    configuration: Mapping[str, JSONValue],
+    nested: Nested,
+) -> AcceptedField[Any]:
+    """An `AcceptedField` built by a reader of this package, which vouches for it: `AcceptedField(...)` without the checks of a field built by hand, read-only at every level all the same."""
+    field = cast("AcceptedField[Any]", object.__new__(AcceptedField))
+    set_member = object.__setattr__
+    held = frozen(configuration)
+    if type(json) is dict:
+        # The envelope's view shares the configuration's, where the
+        # configuration is the envelope's own: one walk of it, not two.
+        members = cast("dict[str, JSONValue]", json)
+        view = MappingProxyType(
+            {
+                key: held
+                if value is configuration
+                else (value if type(value) in SCALARS else frozen(value))
+                for key, value in members.items()
+            }
+        )
+        set_member(field, "json", view)
+    else:
+        set_member(field, "json", frozen(json))
+    set_member(field, "name", name)
+    set_member(field, "definition", definition)
+    set_member(field, "configuration", held)
+    set_member(field, "nested", MappingProxyType(nested))
+    set_member(field, "read_as", _kind_of_class(type(definition)))
+    return field
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class UnclaimedField:
     """A field nothing in scope claims: an extension the scope leaves unjudged, which is what keeps the format open.
@@ -1653,7 +1688,7 @@ def fill_value_problems(data_type: ResolvedField[F], value: object, loc: Loc = (
     if len(problems) != 0 or not isinstance(data_type, AcceptedField):
         return with_input(problems, value, loc)
     definition, configuration = data_type.definition, data_type.configuration
-    typed, problems = _fill_value_parser(definition.fill_value)(refined, loc)
+    typed, problems = fill_value_parser(definition.fill_value)(refined, loc)
     if not _usable(problems):
         return with_input(problems, value, loc)
     refused = ruled(
@@ -2138,6 +2173,7 @@ __all__ = [
     "field_schemas",
     "filed_under",
     "fill_value_as_written",
+    "fill_value_parser",
     "fill_value_problems",
     "kind_of",
     "multi_byte",
@@ -2151,6 +2187,7 @@ __all__ = [
     "single_byte",
     "spelled_canonically",
     "storage_of",
+    "trusted_field",
     "unchanged",
     "unknown_chunk",
     "unknown_lengths",
