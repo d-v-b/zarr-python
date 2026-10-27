@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from zarr_metadata._common import JSONValue
+    from zarr_metadata.testing._strategy import Strategies
     from zarr_metadata.v3._definition import ChunkGridDefinition
 
 _MAX_RANK: Final = 5
@@ -43,7 +44,9 @@ def _length(extent: int | None) -> st.SearchStrategy[int]:
     return st.integers(1, 2 * extent)
 
 
-def _regular(shape: tuple[int, ...] | None) -> st.SearchStrategy[Mapping[str, JSONValue]]:
+def _regular(
+    shape: tuple[int, ...] | None, _strategies: Strategies
+) -> st.SearchStrategy[Mapping[str, JSONValue]]:
     """A chunk length for each dimension."""
     if shape is None:
         lengths = st.lists(_length(None), max_size=_MAX_RANK).map(tuple)
@@ -89,7 +92,9 @@ def _rectilinear_dimension(extent: int | None) -> st.SearchStrategy[JSONValue]:
     return _length(extent) | _edges(extent)
 
 
-def _rectilinear(shape: tuple[int, ...] | None) -> st.SearchStrategy[Mapping[str, JSONValue]]:
+def _rectilinear(
+    shape: tuple[int, ...] | None, _strategies: Strategies
+) -> st.SearchStrategy[Mapping[str, JSONValue]]:
     """Inline chunk shapes, one entry for each dimension."""
     if shape is None:
         dimensions = st.lists(_rectilinear_dimension(None), max_size=_MAX_RANK).map(tuple)

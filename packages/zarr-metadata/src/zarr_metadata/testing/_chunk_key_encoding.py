@@ -25,12 +25,12 @@ CHUNK_KEY_ENCODING_STRATEGIES: Final[
     Mapping[ChunkKeyEncodingDefinition[Any], ChunkKeyEncodingStrategy]
 ] = {
     DEFAULT_CHUNK_KEY_ENCODING: ChunkKeyEncodingStrategy(
-        configurations=st.fixed_dictionaries(
+        configurations=lambda _strategies: st.fixed_dictionaries(
             {}, optional={"separator": st.sampled_from(DEFAULT_CHUNK_KEY_ENCODING_SEPARATOR)}
         )
     ),
     V2_CHUNK_KEY_ENCODING: ChunkKeyEncodingStrategy(
-        configurations=st.fixed_dictionaries(
+        configurations=lambda _strategies: st.fixed_dictionaries(
             {}, optional={"separator": st.sampled_from(V2_CHUNK_KEY_ENCODING_SEPARATOR)}
         )
     ),
