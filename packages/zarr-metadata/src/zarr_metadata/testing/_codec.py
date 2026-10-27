@@ -16,21 +16,21 @@ import math
 from functools import partial
 from typing import TYPE_CHECKING, Any, Final
 
+from hypothesis import reject
 from hypothesis import strategies as st
 
 from zarr_metadata.testing._data_type import FLOAT_WIDTHS, INTEGER_RANGES, finite_floats
-from zarr_metadata.testing._nested import (
+from zarr_metadata.testing._draw import (
     briefly,
     data_type_fields,
     data_types,
     fill_values_of,
-    pipeline_walk,
+    pipelines_for,
     read,
-    takes,
 )
 from zarr_metadata.testing._strategy import CodecStrategy
 from zarr_metadata.v3._definition import Chunk, DataTypeDefinition, storage_of
-from zarr_metadata.v3.codec._arithmetic import COMPLEX, FLOATING_POINT, NOT_NUMBERS, read_name
+from zarr_metadata.v3.codec._arithmetic import FLOATING_POINT, NO_REAL_NUMBERS, read_name
 from zarr_metadata.v3.codec.blosc import BLOSC_CNAME, BLOSC_CODEC, BLOSC_NO_SHUFFLE, BLOSC_SHUFFLE
 from zarr_metadata.v3.codec.bytes import BYTES_CODEC, ENDIANNESS
 from zarr_metadata.v3.codec.cast_value import (
@@ -134,8 +134,8 @@ def _scale_offset(chunk: Chunk, _strategies: Strategies) -> Configurations | Non
     are small non-negative integers, which every listed type holds.
     """
     data_type = chunk.data_type
-    read = data_type is not None and data_type.resolution == "read"
-    definition = data_type.definition if data_type is not None and read else None
+    is_read = data_type is not None and data_type.resolution == "read"
+    definition = data_type.definition if data_type is not None and is_read else None
     if definition is None:
         offset: st.SearchStrategy[JSONValue] = _SMALL_NUMBERS
         scale: st.SearchStrategy[JSONValue] = st.integers(1, 127)
@@ -154,10 +154,6 @@ def _scale_offset(chunk: Chunk, _strategies: Strategies) -> Configurations | Non
 def _unchunked(configurations: Configurations) -> CodecStrategy:
     """A codec whose configurations do not depend on the chunk it is handed."""
     return CodecStrategy(configurations=lambda _chunk, _strategies: configurations)
-
-
-_NO_REAL_NUMBERS: Final = NOT_NUMBERS | COMPLEX
-"""The data types `cast_value` takes neither from nor to: none of them models real numbers."""
 
 
 def _source_scalars(chunk: Chunk, strategies: Strategies) -> st.SearchStrategy[JSONValue]:
@@ -203,9 +199,9 @@ def _cast_value(chunk: Chunk, strategies: Strategies) -> Configurations | None:
     of its direction; `wrap` is drawn only for a type that is not
     floating-point.
     """
-    if read_name(chunk.data_type) in _NO_REAL_NUMBERS:
+    if read_name(chunk.data_type) in NO_REAL_NUMBERS:
         return None
-    targets = [d for d in data_types(strategies) if d.name not in _NO_REAL_NUMBERS]
+    targets = [d for d in data_types(strategies) if d.name not in NO_REAL_NUMBERS]
     if len(targets) == 0:
         return None
     return _cast_value_configuration(targets, _source_scalars(chunk, strategies), strategies)
@@ -244,10 +240,14 @@ def _sharding_configuration(
         "index_codecs": (),
     }
     handed = SHARDING_INDEXED_CODEC.pipelines(sized, {}, chunk)
+    codecs = pipelines_for(handed["codecs"], inner)
+    index_codecs = pipelines_for(handed["index_codecs"], strategies, _STATIC)
+    if codecs is None or index_codecs is None:
+        reject()  # a codec that takes a chunk of the data type, but not of these lengths
     configuration: dict[str, st.SearchStrategy[Any]] = {
         "chunk_shape": st.just(chunk_shape),
-        "codecs": pipeline_walk(handed["codecs"], inner),
-        "index_codecs": pipeline_walk(handed["index_codecs"], strategies, _STATIC),
+        "codecs": codecs,
+        "index_codecs": index_codecs,
     }
     optional = {"index_location": st.sampled_from(SHARDING_INDEX_LOCATION)}
     return draw(st.fixed_dictionaries(configuration, optional=optional))
@@ -273,9 +273,9 @@ def _sharding(chunk: Chunk, strategies: Strategies, *, depth: int) -> Configurat
     not drawn: shards drawn without end would nest without end.
     """
     handed = SHARDING_INDEXED_CODEC.pipelines(_NO_SHAPE, {}, Chunk(None, chunk.data_type))
-    if not takes(Chunk(None, handed["codecs"].data_type), strategies):
+    if pipelines_for(Chunk(None, handed["codecs"].data_type), strategies) is None:
         return None
-    if not takes(Chunk(None, handed["index_codecs"].data_type), strategies, _STATIC):
+    if pipelines_for(Chunk(None, handed["index_codecs"].data_type), strategies, _STATIC) is None:
         return None
     inner = {d: s for d, s in strategies.items() if d is not SHARDING_INDEXED_CODEC}
     if depth > 0:

@@ -39,7 +39,6 @@ from zarr_metadata.typed_json import typeddict_keys
 from zarr_metadata.v3._definition import as_kind, kind_of, no_pipelines, storage_of, unchanged
 from zarr_metadata.v3._pipeline import read_pipeline
 from zarr_metadata.v3.chunk_grid.rectilinear import RECTILINEAR_CHUNK_GRID
-from zarr_metadata.v3.codec._arithmetic import COMPLEX, NOT_NUMBERS
 from zarr_metadata.v3.codec.bytes import BYTES_CODEC
 from zarr_metadata.v3.codec.cast_value import CAST_VALUE_CODEC
 from zarr_metadata.v3.codec.gzip import GZIP_CODEC
@@ -276,7 +275,28 @@ def test_a_cast_from_a_data_type_without_a_strategy_draws_numbers() -> None:
     find(configurations, lambda configuration: "scalar_map" in configuration, settings=_REACH)
 
 
-@given(data=st.data(), chunk=_chunks())
+@st.composite
+def _partly_known_chunks(draw: st.DrawFn) -> Chunk:
+    """A chunk some of which nothing says: its lengths along an axis or at all, or its data type, read by nothing in scope."""
+    chunk = draw(_chunks())
+    lengths = draw(
+        st.sampled_from(
+            [
+                chunk.lengths,
+                None,
+                None if chunk.lengths is None else tuple(None for _ in chunk.lengths),
+            ]
+        )
+    )
+    data_type = draw(st.sampled_from([chunk.data_type, None, _UNREAD_DATA_TYPE]))
+    return Chunk(lengths, data_type)
+
+
+_UNREAD_DATA_TYPE = resolve({"name": "an.unread.type"}, DataTypeDefinition, CORE_AND_EXTENSIONS)[0]
+"""A data type field that nothing in scope claims: a chunk of it says nothing of its values."""
+
+
+@given(data=st.data(), chunk=_chunks() | _partly_known_chunks())
 def test_pipelines_read(data: st.DataObject, chunk: Chunk) -> None:
     """A pipeline drawn for a chunk reads as one handed it, through JSON too; none is drawn only for a chunk no codec encodes."""
     drawn = pipelines(chunk)
@@ -419,6 +439,14 @@ def test_a_codec_strategy_refusing_an_unknown_chunk_is_a_value_error() -> None:
         fields(GZIP_CODEC, strategies=DEFAULT_STRATEGIES | {GZIP_CODEC: refusing})
 
 
+def test_fill_values_of_a_field_no_definition_reads_is_a_lookup_error() -> None:
+    """A struct handed a field type that no definition in the strategies reads has no fill values to draw for it."""
+    without_float32 = {d: s for d, s in DEFAULT_STRATEGIES.items() if d is not FLOAT32_DATA_TYPE}
+    configuration: Any = {"fields": ({"name": "a", "data_type": "float32"},)}
+    with pytest.raises(LookupError, match="no definition in `strategies` reads"):
+        fill_values(STRUCT_DATA_TYPE, configuration, strategies=without_float32)
+
+
 def test_a_refused_nested_draw_is_a_value_error() -> None:
     """A field a configuration holds is read as it is drawn, so a strategy that draws a refused one is caught there."""
     refused = DataTypeStrategy(
@@ -429,7 +457,7 @@ def test_a_refused_nested_draw_is_a_value_error() -> None:
         CAST_VALUE_CODEC: DEFAULT_STRATEGIES[CAST_VALUE_CODEC],
         NUMPY_DATETIME64_DATA_TYPE: refused,
     }
-    with pytest.raises(ValueError, match="which is refused"):
+    with pytest.raises(ValueError, match="read in the strategies. scope, is refused"):
         find(fields(CAST_VALUE_CODEC, strategies=strategies), lambda _field: True, settings=_ONCE)
 
 
@@ -560,16 +588,21 @@ def test_pipelines_reach_every_codec(definition: CodecDefinition[Any]) -> None:
     )
 
 
-@pytest.mark.parametrize("member", ["codecs", "index_codecs"])
 @pytest.mark.parametrize(
-    "definition", [d for d in _CODECS if d is not SHARDING_INDEXED_CODEC], ids=_id
+    ("definition", "member"),
+    [
+        (d, member)
+        for d in _CODECS
+        if d is not SHARDING_INDEXED_CODEC
+        for member in ("codecs", "index_codecs")
+        if member == "codecs" or d.size == "static"
+    ],
+    ids=_id,
 )
 def test_shards_hold_every_codec_their_pipeline_takes(
     definition: CodecDefinition[Any], member: str
 ) -> None:
     """A shard's pipelines reach each codec they take: its index codecs, only those of static size."""
-    if member == "index_codecs" and definition.size != "static":
-        return
     find(
         _shards(),
         lambda shard: (definition.name, (member,)) in _codecs_in((shard,)),
@@ -612,8 +645,18 @@ def _read_data_type(field: object) -> Any:  # noqa: ANN401
     return resolved
 
 
-_REAL_NUMBERS = [d for d in _DATA_TYPES if d.name not in NOT_NUMBERS | COMPLEX]
-"""The data types `cast_value` casts to: those that model real numbers."""
+_REAL_NUMBERS = [
+    d
+    for d in _DATA_TYPES
+    if d.name
+    in {
+        *(f"{sign}int{bits}" for sign in ("", "u") for bits in (8, 16, 32, 64)),
+        *(f"float{bits}" for bits in (16, 32, 64)),
+        "numpy.datetime64",
+        "numpy.timedelta64",
+    }
+]
+"""The data types `cast_value` casts to: integers and floats, and the numpy times, which are signed 64-bit integers."""
 
 
 @pytest.mark.parametrize("definition", _REAL_NUMBERS, ids=_id)

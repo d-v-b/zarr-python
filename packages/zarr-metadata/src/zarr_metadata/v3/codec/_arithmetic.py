@@ -67,6 +67,10 @@ does not name them.
 """
 
 
+NO_REAL_NUMBERS: Final = NOT_NUMBERS | COMPLEX
+"""The data types that model no real number, which `cast_value` takes neither from nor to."""
+
+
 def read_name(data_type: Resolved[Any] | None) -> str | None:
     """The name the definition that read `data_type` is filed under; None when no definition read it."""
     if data_type is None or data_type.resolution != "read" or data_type.definition is None:
@@ -74,4 +78,4 @@ def read_name(data_type: Resolved[Any] | None) -> str | None:
     return data_type.definition.name
 
 
-__all__ = ["COMPLEX", "FLOATING_POINT", "NOT_NUMBERS", "read_name"]
+__all__ = ["COMPLEX", "FLOATING_POINT", "NOT_NUMBERS", "NO_REAL_NUMBERS", "read_name"]

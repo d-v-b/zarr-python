@@ -117,14 +117,15 @@ def scope_of(strategies: Strategies) -> Context:
 
 
 def read(field: object, kind: type[D], strategies: Strategies) -> Resolved[D]:
-    """`field`, drawn from `strategies`, read in their scope; a `ValueError` if it is refused.
+    """`field`, drawn from `strategies` or held by a configuration handed to one, read in their scope; a `ValueError` if it is refused.
 
-    A strategy draws what its definition accepts, so a refused draw is a
-    fault in the strategy, not something to draw again.
+    A strategy draws what its definition accepts, so a refused field is a
+    fault in a strategy or in the configuration it was handed, not
+    something to draw again.
     """
     resolved, problems = resolve(field, kind, scope_of(strategies))
     if len(problems) != 0:
-        msg = f"a strategy drew {field!r}, which is refused: {problems!r}"
+        msg = f"{field!r}, read in the strategies' scope, is refused: {problems!r}"
         raise ValueError(msg)
     return resolved
 
@@ -190,10 +191,11 @@ def data_type_fields(
 def fill_values_of(
     data_type: Resolved[DataTypeDefinition[Any]], strategies: Strategies
 ) -> SearchStrategy[JSONValue]:
-    """Fill values of `data_type`, a data type field read in the strategies' scope."""
+    """Fill values of `data_type`, a data type field read in the strategies' scope; a `LookupError` if no definition in it read the field."""
     definition, configuration = data_type.definition, data_type.configuration
-    assert definition is not None
-    assert configuration is not None
+    if definition is None or configuration is None:
+        msg = f"no strategy draws fill values of {data_type.json!r}, which no definition in `strategies` reads"
+        raise LookupError(msg)
     found = cast("DataTypeStrategy", strategy_for(definition, strategies))
     return found.fill_values(configuration, strategies)
 
@@ -228,12 +230,18 @@ def _holds_pipelines(definition: CodecDefinition[Any]) -> bool:
     return definition.pipelines is not no_pipelines
 
 
-def takes(chunk: Chunk, strategies: Strategies, sizes: frozenset[CodecSize] = EVERY_SIZE) -> bool:
-    """Whether some array -> bytes codec that holds no pipelines takes `chunk` as it is.
+def pipelines_for(
+    chunk: Chunk, strategies: Strategies, sizes: frozenset[CodecSize] = EVERY_SIZE
+) -> SearchStrategy[tuple[ZarrV3MetadataFieldJSON, ...]] | None:
+    """Pipelines handed `chunk`, of codecs of one of `sizes`; None when no array -> bytes codec that holds no pipelines takes the chunk as it is.
 
-    Enough for a pipeline to be drawn for it: one of only that codec.
+    One that does is enough for a pipeline: one of only that codec. One
+    that holds pipelines of its own takes a chunk only if what it holds
+    does, so it settles nothing.
     """
-    return len(_taking(chunk, "array_bytes", sizes, strategies, holding=False)) != 0
+    if len(_taking(chunk, "array_bytes", sizes, strategies, holding=False)) == 0:
+        return None
+    return _walk(chunk, strategies, sizes)
 
 
 @st.composite
@@ -245,11 +253,8 @@ def _codec(
 
 
 @st.composite
-def pipeline_walk(
-    draw: st.DrawFn,
-    chunk: Chunk,
-    strategies: Strategies,
-    sizes: frozenset[CodecSize] = EVERY_SIZE,
+def _walk(
+    draw: st.DrawFn, chunk: Chunk, strategies: Strategies, sizes: frozenset[CodecSize]
 ) -> tuple[ZarrV3MetadataFieldJSON, ...]:
     """Codecs for a pipeline handed `chunk`, each drawn for the chunk the one before it hands on.
 
@@ -257,7 +262,6 @@ def pipeline_walk(
     bytes codecs, each of one of `sizes`. What an array -> array codec
     hands on is what its definition's `transition` says of the codec as
     drawn: a `cast_value` hands the next codec the data type it casts to.
-    Draw it only for a chunk `takes` says a pipeline is drawn for.
     """
     codecs: list[ZarrV3MetadataFieldJSON] = []
     handed = chunk
@@ -288,9 +292,8 @@ __all__ = [
     "data_type_fields",
     "data_types",
     "fill_values_of",
-    "pipeline_walk",
+    "pipelines_for",
     "read",
     "scope_of",
     "strategy_for",
-    "takes",
 ]

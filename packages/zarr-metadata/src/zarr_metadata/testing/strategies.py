@@ -50,13 +50,12 @@ from zarr_metadata.testing._chunk_grid import CHUNK_GRID_STRATEGIES
 from zarr_metadata.testing._chunk_key_encoding import CHUNK_KEY_ENCODING_STRATEGIES
 from zarr_metadata.testing._codec import CODEC_STRATEGIES
 from zarr_metadata.testing._data_type import DATA_TYPE_STRATEGIES
-from zarr_metadata.testing._nested import (
+from zarr_metadata.testing._draw import (
     any_spelling,
     briefly,
-    pipeline_walk,
+    pipelines_for,
     scope_of,
     strategy_for,
-    takes,
 )
 from zarr_metadata.testing._strategy import (
     NOTHING_KNOWN,
@@ -190,9 +189,7 @@ def pipelines(
     defines takes a `string` one.
     """
     strategies = briefly(strategies)
-    if not takes(chunk, strategies):
-        return None
-    return pipeline_walk(chunk, strategies)
+    return pipelines_for(chunk, strategies)
 
 
 def _canonical(

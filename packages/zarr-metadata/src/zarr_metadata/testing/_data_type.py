@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal, cast, get_args
 
 from hypothesis import strategies as st
 
-from zarr_metadata.testing._nested import (
+from zarr_metadata.testing._draw import (
     briefly,
     data_type_fields,
     data_types,
