@@ -40,6 +40,7 @@ from zarr_metadata.v3._definition import as_kind, kind_of, no_pipelines, storage
 from zarr_metadata.v3._pipeline import read_pipeline
 from zarr_metadata.v3.chunk_grid.rectilinear import RECTILINEAR_CHUNK_GRID
 from zarr_metadata.v3.codec._arithmetic import COMPLEX, NOT_NUMBERS
+from zarr_metadata.v3.codec.bytes import BYTES_CODEC
 from zarr_metadata.v3.codec.cast_value import CAST_VALUE_CODEC
 from zarr_metadata.v3.codec.gzip import GZIP_CODEC
 from zarr_metadata.v3.codec.scale_offset import SCALE_OFFSET_CODEC
@@ -51,6 +52,7 @@ from zarr_metadata.v3.data_type.complex128 import COMPLEX128_DATA_TYPE
 from zarr_metadata.v3.data_type.float16 import FLOAT16_DATA_TYPE
 from zarr_metadata.v3.data_type.float32 import FLOAT32_DATA_TYPE
 from zarr_metadata.v3.data_type.float64 import FLOAT64_DATA_TYPE
+from zarr_metadata.v3.data_type.int8 import INT8_DATA_TYPE
 from zarr_metadata.v3.data_type.numpy_datetime64 import NUMPY_DATETIME64_DATA_TYPE
 from zarr_metadata.v3.data_type.numpy_timedelta64 import NUMPY_TIMEDELTA64_DATA_TYPE
 from zarr_metadata.v3.data_type.string import STRING_DATA_TYPE
@@ -240,6 +242,38 @@ def test_shards_divide_every_length(
     assert configurations is not None
     codec = _read(SHARDING_INDEXED_CODEC, data.draw(fields(SHARDING_INDEXED_CODEC, configurations)))
     assert _handed_problems(codec, chunk) == []
+
+
+def test_shards_divide_a_long_shard() -> None:
+    """A length of 2**30 has its divisors found without counting to it."""
+    chunk = Chunk((frozenset({2**30}),))
+    configurations = codec_configurations(SHARDING_INDEXED_CODEC, chunk)
+    assert configurations is not None
+    find(
+        configurations,
+        lambda configuration: configuration["chunk_shape"][0] > 2**15,
+        settings=_REACH,
+    )
+
+
+def test_a_shard_whose_index_nothing_encodes_is_none() -> None:
+    """Without a codec of static size to encode the index, no shard is drawn."""
+    without_bytes = {d: s for d, s in DEFAULT_STRATEGIES.items() if d is not BYTES_CODEC}
+    assert codec_configurations(SHARDING_INDEXED_CODEC, strategies=without_bytes) is None
+
+
+def test_a_cast_from_a_data_type_without_a_strategy_draws_numbers() -> None:
+    """Scalars of a chunk's data type that no strategy draws for are small numbers, which it holds."""
+    data_type = _read(INT8_DATA_TYPE, "int8")
+    strategies: Strategies = {
+        CAST_VALUE_CODEC: DEFAULT_STRATEGIES[CAST_VALUE_CODEC],
+        FLOAT32_DATA_TYPE: DEFAULT_STRATEGIES[FLOAT32_DATA_TYPE],
+    }
+    configurations = codec_configurations(
+        CAST_VALUE_CODEC, Chunk(None, data_type), strategies=strategies
+    )
+    assert configurations is not None
+    find(configurations, lambda configuration: "scalar_map" in configuration, settings=_REACH)
 
 
 @given(data=st.data(), chunk=_chunks())

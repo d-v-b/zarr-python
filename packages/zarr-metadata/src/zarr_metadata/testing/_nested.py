@@ -68,13 +68,15 @@ class _Brief(Mapping["Definition[Any]", "DefinitionStrategy"]):
     rejections it raises itself, as `floats(width=16)` does -- warning
     when that repr runs past 30,000 characters. Every definition's
     strategy, in full, runs past that, which fails a test suite that
-    turns warnings into errors.
+    turns warnings into errors. It also holds the scope drawn fields are
+    read in, built once rather than for every field read.
     """
 
-    __slots__ = ("_strategies",)
+    __slots__ = ("_strategies", "scope")
 
     def __init__(self, strategies: Strategies) -> None:
         self._strategies = strategies
+        self.scope = Context.of(*strategies)
 
     def __getitem__(self, definition: Definition[Any]) -> DefinitionStrategy:
         return self._strategies[definition]
@@ -89,7 +91,7 @@ class _Brief(Mapping["Definition[Any]", "DefinitionStrategy"]):
         return f"<strategies for {len(self)} definitions>"
 
 
-def briefly(strategies: Strategies) -> Strategies:
+def briefly(strategies: Strategies) -> _Brief:
     """`strategies`, with a repr short enough to go in Hypothesis's notes."""
     return strategies if isinstance(strategies, _Brief) else _Brief(strategies)
 
@@ -111,7 +113,7 @@ def strategy_for(definition: Definition[Any], strategies: Strategies) -> Definit
 
 def scope_of(strategies: Strategies) -> Context:
     """The scope a drawn field is read in: every definition the strategies draw for."""
-    return Context.of(*strategies)
+    return briefly(strategies).scope
 
 
 def read(field: object, kind: type[D], strategies: Strategies) -> Resolved[D]:

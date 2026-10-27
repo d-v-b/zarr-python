@@ -161,9 +161,9 @@ _NO_REAL_NUMBERS: Final = NOT_NUMBERS | COMPLEX
 
 
 def _source_scalars(chunk: Chunk, strategies: Strategies) -> st.SearchStrategy[JSONValue]:
-    """Values of the chunk's data type: its fill values, or small numbers when the scope did not read it."""
+    """Values of the chunk's data type: its fill values, or small numbers when no scope read it or no strategy draws for it."""
     source = chunk.data_type
-    if source is None or read_name(source) is None:
+    if source is None or read_name(source) is None or source.definition not in strategies:
         return _SMALL_NUMBERS
     return fill_values_of(source, strategies)
 
@@ -216,7 +216,9 @@ def _divisors(lengths: frozenset[int] | None) -> st.SearchStrategy[int]:
     common = 0 if lengths is None else math.gcd(*lengths)
     if common == 0:
         return st.integers(1, _MAX_INNER_LENGTH)
-    return st.sampled_from([n for n in range(1, common + 1) if common % n == 0])
+    # Divisors come in pairs, one of each no greater than the square root.
+    small = [n for n in range(1, math.isqrt(common) + 1) if common % n == 0]
+    return st.sampled_from(sorted({*small, *(common // n for n in small)}))
 
 
 def _inner_chunk_shapes(lengths: Lengths | None) -> st.SearchStrategy[tuple[int, ...]]:
@@ -251,17 +253,29 @@ def _sharding_configuration(
     return draw(st.fixed_dictionaries(configuration, optional=optional))
 
 
-def _sharding(chunk: Chunk, strategies: Strategies, *, depth: int) -> Configurations | None:
-    """A shard of the chunk, holding shards `depth` deep at most; None when no pipeline is drawn for its inner chunks.
+_NO_SHAPE: Final[ShardingIndexedCodecConfiguration] = {
+    "chunk_shape": (),
+    "codecs": (),
+    "index_codecs": (),
+}
+"""A shard configuration that says nothing but what its definition's `pipelines` reads: the data type each pipeline is handed."""
 
-    Its inner chunks are of the shard's data type, so a codec that holds
-    no pipelines must take one of that type; whether one does is asked
-    of a chunk nothing else is known of, since the inner lengths are
-    drawn after. Its inner codecs are drawn from the same strategies but
-    for a shard, which holds one level fewer, or is not drawn: shards
-    drawn without end would nest without end.
+
+def _sharding(chunk: Chunk, strategies: Strategies, *, depth: int) -> Configurations | None:
+    """A shard of the chunk, holding shards `depth` deep at most; None when no pipeline is drawn for its inner chunks or its index.
+
+    Each pipeline needs a codec that holds no pipelines and takes the
+    data type its definition hands it -- the shard's own for the inner
+    chunks, and for the index one of static size; whether one does is
+    asked of a chunk of that data type and nothing else known, since the
+    inner lengths are drawn after. Its inner codecs are drawn from the
+    same strategies but for a shard, which holds one level fewer, or is
+    not drawn: shards drawn without end would nest without end.
     """
-    if not takes(Chunk(None, chunk.data_type), strategies):
+    handed = SHARDING_INDEXED_CODEC.pipelines(_NO_SHAPE, {}, Chunk(None, chunk.data_type))
+    if not takes(Chunk(None, handed["codecs"].data_type), strategies):
+        return None
+    if not takes(Chunk(None, handed["index_codecs"].data_type), strategies, _STATIC):
         return None
     inner = {d: s for d, s in strategies.items() if d is not SHARDING_INDEXED_CODEC}
     if depth > 0:
