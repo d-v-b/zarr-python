@@ -31,19 +31,37 @@ from zarr_metadata.testing._draw import (
 from zarr_metadata.testing._strategy import CodecStrategy
 from zarr_metadata.v3._definition import Chunk, DataTypeDefinition, storage_of
 from zarr_metadata.v3.codec._arithmetic import FLOATING_POINT, NO_REAL_NUMBERS, read_name
-from zarr_metadata.v3.codec.blosc import BLOSC_CNAME, BLOSC_CODEC, BLOSC_NO_SHUFFLE, BLOSC_SHUFFLE
-from zarr_metadata.v3.codec.bytes import BYTES_CODEC, ENDIANNESS
+from zarr_metadata.v3.codec.blosc import (
+    BLOSC_CNAME,
+    BLOSC_CODEC,
+    BLOSC_NO_SHUFFLE,
+    BLOSC_SHUFFLE,
+    BloscCodecConfiguration,
+)
+from zarr_metadata.v3.codec.bytes import BYTES_CODEC, ENDIANNESS, BytesCodecConfiguration
 from zarr_metadata.v3.codec.cast_value import (
     CAST_OUT_OF_RANGE_MODE,
     CAST_ROUNDING_MODE,
     CAST_VALUE_CODEC,
+    CastOutOfRangeMode,
+    CastValueCodecConfiguration,
+    ScalarMap,
 )
-from zarr_metadata.v3.codec.crc32c import CRC32C_CODEC
-from zarr_metadata.v3.codec.gzip import GZIP_CODEC
-from zarr_metadata.v3.codec.scale_offset import SCALE_OFFSET_CODEC
-from zarr_metadata.v3.codec.sharding_indexed import SHARDING_INDEX_LOCATION, SHARDING_INDEXED_CODEC
-from zarr_metadata.v3.codec.transpose import TRANSPOSE_CODEC
-from zarr_metadata.v3.codec.zstd import ZSTD_CODEC, ZSTD_MAX_LEVEL, ZSTD_MIN_LEVEL
+from zarr_metadata.v3.codec.crc32c import CRC32C_CODEC, Empty
+from zarr_metadata.v3.codec.gzip import GZIP_CODEC, GzipCodecConfiguration
+from zarr_metadata.v3.codec.scale_offset import SCALE_OFFSET_CODEC, ScaleOffsetCodecConfiguration
+from zarr_metadata.v3.codec.sharding_indexed import (
+    SHARDING_INDEX_LOCATION,
+    SHARDING_INDEXED_CODEC,
+    ShardingIndexedCodecConfiguration,
+)
+from zarr_metadata.v3.codec.transpose import TRANSPOSE_CODEC, TransposeCodecConfiguration
+from zarr_metadata.v3.codec.zstd import (
+    ZSTD_CODEC,
+    ZSTD_MAX_LEVEL,
+    ZSTD_MIN_LEVEL,
+    ZstdCodecConfiguration,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -51,7 +69,6 @@ if TYPE_CHECKING:
     from zarr_metadata._common import JSONValue
     from zarr_metadata.testing._strategy import Configurations, Strategies
     from zarr_metadata.v3._definition import CodecDefinition, CodecSize, Lengths, Resolved
-    from zarr_metadata.v3.codec.sharding_indexed import ShardingIndexedCodecConfiguration
 
 _MAX_RANK: Final = 5
 """The most axes an `order` is drawn with, when the chunk does not say."""
@@ -80,48 +97,73 @@ _SMALL_NUMBERS: Final = st.integers(0, 127)
 """Values every integral and floating-point data type holds: for a chunk whose data type is not known."""
 
 
-def _bytes(chunk: Chunk, _strategies: Strategies) -> Configurations | None:
+@st.composite
+def _endians(draw: st.DrawFn, *, required: bool) -> BytesCodecConfiguration:
+    configuration = BytesCodecConfiguration()
+    if required or draw(st.booleans()):
+        configuration["endian"] = draw(_ENDIAN)
+    return configuration
+
+
+def _bytes(
+    chunk: Chunk, _strategies: Strategies
+) -> st.SearchStrategy[BytesCodecConfiguration] | None:
     """An `endian`, required for a data type whose values take several bytes; None for one whose values vary in size."""
     storage = None if chunk.data_type is None else storage_of(chunk.data_type)
     if storage == "variable_length":
         return None
-    if storage == "multi_byte":
-        return st.fixed_dictionaries({"endian": _ENDIAN})
-    return st.fixed_dictionaries({}, optional={"endian": _ENDIAN})
+    return _endians(required=storage == "multi_byte")
 
 
 @st.composite
-def _blosc(draw: st.DrawFn) -> Mapping[str, JSONValue]:
+def _blosc(draw: st.DrawFn) -> BloscCodecConfiguration:
     """A compressor, a level, a shuffle and a block size; and a `typesize`, which only `noshuffle` may leave out.
 
     Under `noshuffle` the spec says `typesize` "is ignored", so it is
     drawn there too, a spelling that is not the simplest.
     """
     shuffle = draw(st.sampled_from(BLOSC_SHUFFLE))
-    typesize = st.integers(1, _BLOSC_MAX_TYPESIZE)
-    required: dict[str, st.SearchStrategy[JSONValue]] = {
-        "cname": st.sampled_from(BLOSC_CNAME),
-        "clevel": st.integers(0, 9),
-        "shuffle": st.just(shuffle),
-        "blocksize": st.integers(0, _BLOSC_MAX_BLOCKSIZE),
-    }
-    if shuffle == BLOSC_NO_SHUFFLE:
-        return draw(st.fixed_dictionaries(required, optional={"typesize": typesize}))
-    return draw(st.fixed_dictionaries({**required, "typesize": typesize}))
+    configuration = BloscCodecConfiguration(
+        cname=draw(st.sampled_from(BLOSC_CNAME)),
+        clevel=draw(st.integers(0, 9)),
+        shuffle=shuffle,
+        blocksize=draw(st.integers(0, _BLOSC_MAX_BLOCKSIZE)),
+    )
+    if shuffle != BLOSC_NO_SHUFFLE or draw(st.booleans()):
+        configuration["typesize"] = draw(st.integers(1, _BLOSC_MAX_TYPESIZE))
+    return configuration
 
 
-def _order(rank: int) -> st.SearchStrategy[Mapping[str, JSONValue]]:
-    return st.permutations(range(rank)).map(lambda order: {"order": tuple(order)})
+def _order(rank: int) -> st.SearchStrategy[TransposeCodecConfiguration]:
+    return st.permutations(range(rank)).map(
+        lambda order: TransposeCodecConfiguration(order=tuple(order))
+    )
 
 
-def _transpose(chunk: Chunk, _strategies: Strategies) -> Configurations:
+def _transpose(
+    chunk: Chunk, _strategies: Strategies
+) -> st.SearchStrategy[TransposeCodecConfiguration]:
     """A permutation of the chunk's axes; of some number of axes, when the chunk does not say."""
     if chunk.rank is not None:
         return _order(chunk.rank)
     return st.integers(0, _MAX_RANK).flatmap(_order)
 
 
-def _scale_offset(chunk: Chunk, _strategies: Strategies) -> Configurations | None:
+@st.composite
+def _offsets_and_scales(
+    draw: st.DrawFn, offsets: st.SearchStrategy[JSONValue], scales: st.SearchStrategy[JSONValue]
+) -> ScaleOffsetCodecConfiguration:
+    configuration = ScaleOffsetCodecConfiguration()
+    if draw(st.booleans()):
+        configuration["offset"] = draw(offsets)
+    if draw(st.booleans()):
+        configuration["scale"] = draw(scales)
+    return configuration
+
+
+def _scale_offset(
+    chunk: Chunk, _strategies: Strategies
+) -> st.SearchStrategy[ScaleOffsetCodecConfiguration] | None:
     """An `offset` and a `scale`, each a finite value of the data type the codec is handed, the scale not zero.
 
     Each is a fill value of the chunk's data type
@@ -148,7 +190,16 @@ def _scale_offset(chunk: Chunk, _strategies: Strategies) -> Configurations | Non
         scale = finite_floats(FLOAT_WIDTHS[definition]).filter(lambda value: value != 0)
     else:
         return None
-    return st.fixed_dictionaries({}, optional={"offset": offset, "scale": scale})
+    return _offsets_and_scales(offset, scale)
+
+
+@st.composite
+def _zstd(draw: st.DrawFn) -> ZstdCodecConfiguration:
+    """A level, and a checksum or none, which means no checksum."""
+    configuration = ZstdCodecConfiguration(level=draw(st.integers(ZSTD_MIN_LEVEL, ZSTD_MAX_LEVEL)))
+    if draw(st.booleans()):
+        configuration["checksum"] = draw(st.booleans())
+    return configuration
 
 
 def _unchunked(configurations: Configurations) -> CodecStrategy:
@@ -165,31 +216,50 @@ def _source_scalars(chunk: Chunk, strategies: Strategies) -> st.SearchStrategy[J
 
 
 @st.composite
+def _scalar_maps(
+    draw: st.DrawFn, sources: st.SearchStrategy[JSONValue], targets: st.SearchStrategy[JSONValue]
+) -> ScalarMap:
+    """Entries pairing a value of each type, the one an entry maps from first."""
+    scalar_map = ScalarMap()
+    if draw(st.booleans()):
+        scalar_map["encode"] = tuple(
+            draw(st.lists(st.tuples(sources, targets), max_size=_MAX_SCALARS))
+        )
+    if draw(st.booleans()):
+        scalar_map["decode"] = tuple(
+            draw(st.lists(st.tuples(targets, sources), max_size=_MAX_SCALARS))
+        )
+    return scalar_map
+
+
+@st.composite
 def _cast_value_configuration(
     draw: st.DrawFn,
     targets: list[DataTypeDefinition[Any]],
     sources: st.SearchStrategy[JSONValue],
     strategies: Strategies,
-) -> Mapping[str, JSONValue]:
+) -> CastValueCodecConfiguration:
     """A data type to cast to, a rounding, an out-of-range mode it allows, and a scalar map between the two types."""
     field = draw(data_type_fields(targets, strategies))
     target: Resolved[DataTypeDefinition[Any]] = read(field, DataTypeDefinition, strategies)
-    values = fill_values_of(target, strategies)
-    modes = CAST_OUT_OF_RANGE_MODE
+    modes: tuple[CastOutOfRangeMode, ...] = CAST_OUT_OF_RANGE_MODE
     if read_name(target) in FLOATING_POINT:
         modes = tuple(mode for mode in modes if mode != "wrap")
-    encode = st.lists(st.tuples(sources, values), max_size=_MAX_SCALARS).map(tuple)
-    decode = st.lists(st.tuples(values, sources), max_size=_MAX_SCALARS).map(tuple)
-    scalar_map = st.fixed_dictionaries({}, optional={"encode": encode, "decode": decode})
-    optional: dict[str, st.SearchStrategy[Any]] = {
-        "rounding": st.sampled_from(CAST_ROUNDING_MODE),
-        "out_of_range": st.sampled_from(modes),
-        "scalar_map": scalar_map,
-    }
-    return draw(st.fixed_dictionaries({"data_type": st.just(field)}, optional=optional))
+    configuration = CastValueCodecConfiguration(data_type=field)
+    if draw(st.booleans()):
+        configuration["rounding"] = draw(st.sampled_from(CAST_ROUNDING_MODE))
+    if draw(st.booleans()):
+        configuration["out_of_range"] = draw(st.sampled_from(modes))
+    if draw(st.booleans()):
+        configuration["scalar_map"] = draw(
+            _scalar_maps(sources, fill_values_of(target, strategies))
+        )
+    return configuration
 
 
-def _cast_value(chunk: Chunk, strategies: Strategies) -> Configurations | None:
+def _cast_value(
+    chunk: Chunk, strategies: Strategies
+) -> st.SearchStrategy[CastValueCodecConfiguration] | None:
     """A cast to a data type that models real numbers, from one that does; None for a chunk of one that does not.
 
     The codec "is only defined for data types that model real numbers"
@@ -227,7 +297,7 @@ def _inner_chunk_shapes(lengths: Lengths | None) -> st.SearchStrategy[tuple[int,
 @st.composite
 def _sharding_configuration(
     draw: st.DrawFn, chunk: Chunk, strategies: Strategies, inner: Strategies
-) -> Mapping[str, JSONValue]:
+) -> ShardingIndexedCodecConfiguration:
     """Inner chunks that divide the shard, and the two pipelines, each drawn for what the shard's definition says it is handed.
 
     The inner codecs are drawn from `inner`, which says how a shard
@@ -244,13 +314,12 @@ def _sharding_configuration(
     index_codecs = pipelines_for(handed["index_codecs"], strategies, _STATIC)
     if codecs is None or index_codecs is None:
         reject()  # a codec that takes a chunk of the data type, but not of these lengths
-    configuration: dict[str, st.SearchStrategy[Any]] = {
-        "chunk_shape": st.just(chunk_shape),
-        "codecs": codecs,
-        "index_codecs": index_codecs,
-    }
-    optional = {"index_location": st.sampled_from(SHARDING_INDEX_LOCATION)}
-    return draw(st.fixed_dictionaries(configuration, optional=optional))
+    configuration = ShardingIndexedCodecConfiguration(
+        chunk_shape=chunk_shape, codecs=draw(codecs), index_codecs=draw(index_codecs)
+    )
+    if draw(st.booleans()):
+        configuration["index_location"] = draw(st.sampled_from(SHARDING_INDEX_LOCATION))
+    return configuration
 
 
 _NO_SHAPE: Final[ShardingIndexedCodecConfiguration] = {
@@ -261,7 +330,9 @@ _NO_SHAPE: Final[ShardingIndexedCodecConfiguration] = {
 """A shard configuration that says nothing but what its definition's `pipelines` reads: the data type each pipeline is handed."""
 
 
-def _sharding(chunk: Chunk, strategies: Strategies, *, depth: int) -> Configurations | None:
+def _sharding(
+    chunk: Chunk, strategies: Strategies, *, depth: int
+) -> st.SearchStrategy[ShardingIndexedCodecConfiguration] | None:
     """A shard of the chunk, holding shards `depth` deep at most; None when no pipeline is drawn for its inner chunks or its index.
 
     Each pipeline needs a codec that holds no pipelines and takes the
@@ -292,17 +363,14 @@ CODEC_STRATEGIES: Final[Mapping[CodecDefinition[Any], CodecStrategy]] = {
     BLOSC_CODEC: _unchunked(_blosc()),
     BYTES_CODEC: CodecStrategy(configurations=_bytes),
     CAST_VALUE_CODEC: CodecStrategy(configurations=_cast_value),
-    CRC32C_CODEC: _unchunked(st.just({})),
-    GZIP_CODEC: _unchunked(st.fixed_dictionaries({"level": st.integers(0, 9)})),
+    CRC32C_CODEC: _unchunked(st.just(Empty())),
+    GZIP_CODEC: _unchunked(
+        st.integers(0, 9).map(lambda level: GzipCodecConfiguration(level=level))
+    ),
     SCALE_OFFSET_CODEC: CodecStrategy(configurations=_scale_offset),
     SHARDING_INDEXED_CODEC: _shards(_MAX_SHARD_DEPTH),
     TRANSPOSE_CODEC: CodecStrategy(configurations=_transpose),
-    ZSTD_CODEC: _unchunked(
-        st.fixed_dictionaries(
-            {"level": st.integers(ZSTD_MIN_LEVEL, ZSTD_MAX_LEVEL)},
-            optional={"checksum": st.booleans()},
-        )
-    ),
+    ZSTD_CODEC: _unchunked(_zstd()),
 }
 """A strategy for each codec."""
 

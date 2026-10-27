@@ -37,14 +37,18 @@ from zarr_metadata.v3.data_type.int8 import INT8_DATA_TYPE
 from zarr_metadata.v3.data_type.int16 import INT16_DATA_TYPE
 from zarr_metadata.v3.data_type.int32 import INT32_DATA_TYPE
 from zarr_metadata.v3.data_type.int64 import INT64_DATA_TYPE
-from zarr_metadata.v3.data_type.numpy_datetime64 import NUMPY_DATETIME64_DATA_TYPE
+from zarr_metadata.v3.data_type.numpy_datetime64 import (
+    NUMPY_DATETIME64_DATA_TYPE,
+    NumpyDatetime64Configuration,
+)
 from zarr_metadata.v3.data_type.numpy_timedelta64 import (
     NUMPY_TIME_UNIT,
     NUMPY_TIMEDELTA64_DATA_TYPE,
+    NumpyTimedelta64Configuration,
 )
 from zarr_metadata.v3.data_type.raw import RAW_BYTES_DATA_TYPE, RawBytesConfiguration
 from zarr_metadata.v3.data_type.string import STRING_DATA_TYPE
-from zarr_metadata.v3.data_type.struct import STRUCT_DATA_TYPE, StructConfiguration
+from zarr_metadata.v3.data_type.struct import STRUCT_DATA_TYPE, StructConfiguration, StructField
 from zarr_metadata.v3.data_type.uint8 import UINT8_DATA_TYPE
 from zarr_metadata.v3.data_type.uint16 import UINT16_DATA_TYPE
 from zarr_metadata.v3.data_type.uint32 import UINT32_DATA_TYPE
@@ -54,7 +58,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from zarr_metadata._common import JSONValue
-    from zarr_metadata.testing._strategy import Configurations, Strategies
+    from zarr_metadata.testing._strategy import Strategies
     from zarr_metadata.v3.definition import ZarrV3MetadataFieldJSON
 
 FloatWidth = Literal[16, 32, 64]
@@ -163,18 +167,27 @@ _CHARACTERS: Final = st.characters(exclude_categories=("Cs",))
 
 _TEXT: Final = st.text(_CHARACTERS, max_size=16)
 
-_NUMPY_TIME: Final = DataTypeStrategy(
-    configurations=lambda _strategies: st.fixed_dictionaries(
-        {
-            "unit": st.sampled_from(NUMPY_TIME_UNIT),
-            "scale_factor": st.integers(1, NUMPY_TIME_MAX_SCALE_FACTOR),
-        }
+_TICKS: Final = st.integers(-(2**63), 2**63 - 1) | st.just("NaT")
+"""A numpy time's fill value: a signed 64-bit count of ticks, or `"NaT"`."""
+
+_UNITS: Final = st.sampled_from(NUMPY_TIME_UNIT)
+_SCALE_FACTORS: Final = st.integers(1, NUMPY_TIME_MAX_SCALE_FACTOR)
+
+_NUMPY_DATETIME64: Final = DataTypeStrategy(
+    configurations=lambda _strategies: st.tuples(_UNITS, _SCALE_FACTORS).map(
+        lambda pair: NumpyDatetime64Configuration(unit=pair[0], scale_factor=pair[1])
     ),
-    fill_values=lambda _configuration, _strategies: (
-        st.integers(-(2**63), 2**63 - 1) | st.just("NaT")
-    ),
+    fill_values=lambda _configuration, _strategies: _TICKS,
 )
-"""Both numpy time types: a unit, and how many of it one tick is; a signed 64-bit count of ticks, or `"NaT"`."""
+"""A unit, and how many of it one tick is."""
+
+_NUMPY_TIMEDELTA64: Final = DataTypeStrategy(
+    configurations=lambda _strategies: st.tuples(_UNITS, _SCALE_FACTORS).map(
+        lambda pair: NumpyTimedelta64Configuration(unit=pair[0], scale_factor=pair[1])
+    ),
+    fill_values=lambda _configuration, _strategies: _TICKS,
+)
+"""A unit, and how many of it one tick is."""
 
 
 def _fixed_size(strategies: Strategies) -> st.SearchStrategy[ZarrV3MetadataFieldJSON]:
@@ -189,7 +202,7 @@ def _fixed_size(strategies: Strategies) -> st.SearchStrategy[ZarrV3MetadataField
     )
 
 
-def _struct(strategies: Strategies, *, depth: int) -> Configurations:
+def _struct(strategies: Strategies, *, depth: int) -> st.SearchStrategy[StructConfiguration]:
     """Fields with distinct names, none empty, each of a data type of fixed size; structs among them `depth` deep at most.
 
     The field types are drawn from the same strategies but for a struct,
@@ -199,19 +212,13 @@ def _struct(strategies: Strategies, *, depth: int) -> Configurations:
     inner = {d: s for d, s in strategies.items() if d is not STRUCT_DATA_TYPE}
     if depth > 0:
         inner[STRUCT_DATA_TYPE] = _structs(depth - 1)
-    member = st.fixed_dictionaries(
-        {
-            "name": st.text(_CHARACTERS, min_size=1, max_size=16),
-            "data_type": _fixed_size(briefly(inner)),
-        }
-    )
+    member = st.tuples(
+        st.text(_CHARACTERS, min_size=1, max_size=16), _fixed_size(briefly(inner))
+    ).map(lambda pair: StructField(name=pair[0], data_type=pair[1]))
     members = st.lists(
-        member,
-        min_size=1,
-        max_size=_MAX_STRUCT_FIELDS,
-        unique_by=lambda entry: cast("str", entry["name"]),
+        member, min_size=1, max_size=_MAX_STRUCT_FIELDS, unique_by=lambda entry: entry["name"]
     )
-    return members.map(lambda entries: {"fields": tuple(entries)})
+    return members.map(lambda entries: StructConfiguration(fields=tuple(entries)))
 
 
 def _struct_fill_values(
@@ -256,8 +263,8 @@ DATA_TYPE_STRATEGIES: Final[Mapping[DataTypeDefinition[Any], DataTypeStrategy]] 
     ),
     BYTES_DATA_TYPE: _fill_values_of(_BYTES_FILL_VALUES),
     STRING_DATA_TYPE: _fill_values_of(_TEXT),
-    NUMPY_DATETIME64_DATA_TYPE: _NUMPY_TIME,
-    NUMPY_TIMEDELTA64_DATA_TYPE: _NUMPY_TIME,
+    NUMPY_DATETIME64_DATA_TYPE: _NUMPY_DATETIME64,
+    NUMPY_TIMEDELTA64_DATA_TYPE: _NUMPY_TIMEDELTA64,
     STRUCT_DATA_TYPE: _structs(_MAX_STRUCT_DEPTH),
 }
 """A strategy for each data type."""
