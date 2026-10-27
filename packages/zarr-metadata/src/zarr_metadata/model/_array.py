@@ -59,10 +59,30 @@ class ZarrV3NamedConfig:
     """
 
     name: str
+    """The extension's name, e.g. `"gzip"` or `"regular"`."""
     configuration: dict[str, JSONValue]
+    """The extension's parameters.
+
+    `{}` when the document gave a bare name or omitted `configuration`.
+    """
     must_understand: bool = True
+    """Whether a reader that does not recognize this extension must refuse the document.
+
+    Absent means `True`. The spec does not permit `False` for a data type,
+    chunk grid or chunk key encoding
+    (https://github.com/zarr-developers/zarr-specs/blob/fc7dd9c9beb5a50b87f9b08b00bf50fc0048482f/docs/v3/core/index.rst#L1580-L1581),
+    and `ZarrV3ArrayMetadata.from_json` refuses it at every extension point,
+    codecs and storage transformers included.
+    """
 
     def to_json(self) -> ZarrV3MetadataFieldJSON:
+        """Return the model as a v3 metadata field, in its shortest spelling.
+
+        The bare name when `configuration` is empty and `must_understand` is
+        `True`; otherwise an object with `name`, with `configuration` only when
+        it is not empty, and with `must_understand: false` only when it is
+        `False`. The result shares no mutable state with the model.
+        """
         if not self.configuration and self.must_understand:
             return self.name
         # `configuration` is ReadOnly, so it is set in the literal rather than
@@ -79,6 +99,17 @@ class ZarrV3NamedConfig:
 
     @classmethod
     def from_json(cls, data: object) -> ZarrV3NamedConfig:
+        """Return the model of the v3 metadata field `data`, or raise `MetadataValidationError`.
+
+        `data` is a bare name string, or an object with a string `name` and
+        optional `configuration` (an object of string keys and JSON values)
+        and boolean `must_understand` members; any other member is a problem,
+        and every problem found is raised together. A bare name or an absent
+        `configuration` reads as `{}`, and an absent `must_understand` as
+        `True`. Only the envelope is judged: the configuration is not read
+        through any definition, and `must_understand: false` is accepted. The
+        model shares no mutable state with `data`.
+        """
         field = parse_metadata_field_v3(data)
         if isinstance(field, str):
             return cls(name=field, configuration={}, must_understand=True)
@@ -141,15 +172,52 @@ class ZarrV3ArrayMetadataPartial(TypedDict, total=False):
     """
 
     shape: tuple[int, ...]
+    """The length of each dimension of the array."""
     fill_value: JSONValue
+    """The JSON value of an element no chunk has written.
+
+    Its permitted spellings depend on `data_type`; the model holds it as the
+    document wrote it, uninterpreted.
+    """
     data_type: ZarrV3MetadataField
+    """The array's data type."""
     chunk_grid: ZarrV3MetadataField
+    """How the array is divided into chunks."""
     codecs: tuple[ZarrV3MetadataField, ...]
+    """The codecs that encode each chunk, in the order they encode it.
+
+    A valid document holds an array-to-bytes codec, so this is not empty
+    (https://github.com/zarr-developers/zarr-specs/blob/fc7dd9c9beb5a50b87f9b08b00bf50fc0048482f/docs/v3/core/index.rst#L582-L583).
+    """
     chunk_key_encoding: ZarrV3MetadataField
+    """How a chunk's grid coordinates map to its store key."""
     dimension_names: tuple[str | None, ...] | UNSET
+    """A name, or `None` for an unnamed dimension, for each dimension of `shape`.
+
+    `UNSET` when the document omits the key, which leaves every dimension
+    unnamed.
+    """
     attributes: dict[str, JSONValue]
+    """User attributes.
+
+    A document without the key and one with an empty object both read as
+    `{}`, and `to_json` omits an empty mapping.
+    """
     storage_transformers: tuple[ZarrV3MetadataField, ...]
+    """The storage transformers, in order.
+
+    A document without the key and one with an empty list both read as `()`,
+    which the spec gives the same meaning
+    (https://github.com/zarr-developers/zarr-specs/blob/fc7dd9c9beb5a50b87f9b08b00bf50fc0048482f/docs/v3/core/index.rst#L627-L628),
+    and `to_json` omits an empty tuple.
+    """
     extra_fields: dict[str, ZarrV3ExtensionField]
+    """Each top-level member outside the standard array keys, by name, as the document wrote it.
+
+    A key in `ARRAY_METADATA_STANDARD_KEYS_V3` is refused on construction with
+    `MetadataValidationError`. `must_understand_fields` is the subset a reader
+    must recognize.
+    """
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -170,17 +238,56 @@ class ZarrV3ArrayMetadata:
     """
 
     zarr_format: Literal[3] = field(default=3, init=False)
+    """The Zarr format version, always `3`."""
     node_type: Literal["array"] = field(default="array", init=False)
+    """The node type, always `"array"`."""
     shape: tuple[int, ...]
+    """The length of each dimension of the array."""
     fill_value: JSONValue
+    """The JSON value of an element no chunk has written.
+
+    Its permitted spellings depend on `data_type`; the model holds it as the
+    document wrote it, uninterpreted.
+    """
     data_type: ZarrV3MetadataField
+    """The array's data type."""
     chunk_grid: ZarrV3MetadataField
+    """How the array is divided into chunks."""
     codecs: tuple[ZarrV3MetadataField, ...]
+    """The codecs that encode each chunk, in the order they encode it.
+
+    A valid document holds an array-to-bytes codec, so this is not empty
+    (https://github.com/zarr-developers/zarr-specs/blob/fc7dd9c9beb5a50b87f9b08b00bf50fc0048482f/docs/v3/core/index.rst#L582-L583).
+    """
     chunk_key_encoding: ZarrV3MetadataField
+    """How a chunk's grid coordinates map to its store key."""
     dimension_names: tuple[str | None, ...] | UNSET
+    """A name, or `None` for an unnamed dimension, for each dimension of `shape`.
+
+    `UNSET` when the document omits the key, which leaves every dimension
+    unnamed.
+    """
     attributes: dict[str, JSONValue]
+    """User attributes.
+
+    A document without the key and one with an empty object both read as
+    `{}`, and `to_json` omits an empty mapping.
+    """
     storage_transformers: tuple[ZarrV3MetadataField, ...]
+    """The storage transformers, in order.
+
+    A document without the key and one with an empty list both read as `()`,
+    which the spec gives the same meaning
+    (https://github.com/zarr-developers/zarr-specs/blob/fc7dd9c9beb5a50b87f9b08b00bf50fc0048482f/docs/v3/core/index.rst#L627-L628),
+    and `to_json` omits an empty tuple.
+    """
     extra_fields: dict[str, ZarrV3ExtensionField]
+    """Each top-level member outside the standard array keys, by name, as the document wrote it.
+
+    A key in `ARRAY_METADATA_STANDARD_KEYS_V3` is refused on construction with
+    `MetadataValidationError`. `must_understand_fields` is the subset a reader
+    must recognize.
+    """
 
     @classmethod
     def create_default(cls, **overrides: Unpack[ZarrV3ArrayMetadataPartial]) -> ZarrV3ArrayMetadata:
@@ -261,6 +368,15 @@ class ZarrV3ArrayMetadata:
             )
 
     def to_json(self) -> ZarrV3ArrayMetadataJSON:
+        """Return the model as a v3 array document.
+
+        Each extension point is written by `ZarrV3NamedConfig.to_json`, in its
+        shortest spelling. `dimension_names` is written unless it is `UNSET`,
+        `attributes` and `storage_transformers` only when they are not empty,
+        and each entry of `extra_fields` as a top-level member. The document is
+        not validated (`to_key_value` validates it) and shares no mutable
+        state with the model.
+        """
         # to_json output shares no mutable state with the model: every value
         # that can hold a mutable container is deep-copied.
         out: ZarrV3ArrayMetadataJSON = {
@@ -293,6 +409,15 @@ class ZarrV3ArrayMetadata:
     def from_json(
         cls, data: object, *, context: Context = CORE_AND_EXTENSIONS
     ) -> ZarrV3ArrayMetadata:
+        """Return the model of the v3 array document `data`, or raise `MetadataValidationError`.
+
+        `data` is a decoded `zarr.json` document. It is validated as
+        `parse_array_metadata_v3` validates it, each extension point read
+        through the definition that claims its name in `context`, and every
+        problem found is raised together. Each top-level member outside the
+        standard keys lands in `extra_fields`. The model shares no mutable
+        state with `data`.
+        """
         # A read model shares no mutable state with what it read.
         parsed = copy.deepcopy(parse_array_metadata_v3(data, context=context))
         extra_fields: dict[str, ZarrV3ExtensionField] = {
@@ -329,6 +454,14 @@ class ZarrV3ArrayMetadata:
     def from_key_value(
         cls, mapping: Mapping[StoreKey, bytes], *, context: Context = CORE_AND_EXTENSIONS
     ) -> ZarrV3ArrayMetadata:
+        """Return the model of the v3 array stored at `zarr.json` in `mapping`, or raise `MetadataValidationError`.
+
+        `mapping` maps store keys to the bytes stored there; other keys are
+        ignored. A missing `zarr.json` (a `missing_key` problem), a value that
+        is not `bytes` (`invalid_type`), or bytes that do not decode as JSON
+        (`invalid_json`) raise, as does every problem `from_json` finds with
+        the document in `context`.
+        """
         return cls.from_json(
             load_store_json(mapping, ZARR_V3_ARRAY_METADATA_STORE_KEY), context=context
         )
@@ -336,6 +469,14 @@ class ZarrV3ArrayMetadata:
     def to_key_value(
         self, *, indent: int | str | None = None, context: Context = CORE_AND_EXTENSIONS
     ) -> Mapping[ZarrV3ArrayMetadataStoreKey, bytes]:
+        """Return the model as the bytes of its `zarr.json` document, or raise `MetadataValidationError`.
+
+        The document `to_json` returns is validated as `from_json` validates
+        one in `context`, since a model built or updated by hand is not, and
+        every problem found is raised together. `indent` is `json.dumps`'s:
+        `None` writes the document on one line, and an int or a string
+        pretty-prints it with that indent.
+        """
         # A model built by hand is not validated: its document is written only
         # if it reads as `from_json` reads one in `context`, and every problem
         # is raised.
@@ -357,22 +498,48 @@ class ZarrV2ArrayMetadataPartial(TypedDict, total=False):
     """
 
     shape: tuple[int, ...]
+    """The length of each dimension of the array."""
     dtype: ZarrV2DataTypeMetadata
+    """The array's data type, as the document spells it.
+
+    A type string such as `"<f8"`, or field records for a structured type.
+    Only its shape is checked: whether it names a real data type is not.
+    """
     chunks: tuple[int, ...]
+    """The length of each dimension of a chunk, one for each dimension of `shape`."""
     fill_value: JSONValue
+    """The JSON value of an element no chunk has written, or `None` for no fill value."""
     order: ZarrV2ArrayOrder
+    """The layout of elements within a chunk: `"C"` (row-major) or `"F"` (column-major)."""
     compressor: ZarrV2CodecMetadata | None
+    """The compression codec's configuration, or `None` for no compressor."""
     filters: tuple[ZarrV2CodecMetadata, ...] | None
+    """The filter codecs' configurations, in order, or `None` for no filters.
+
+    `None` and `()` are different spellings, and the model keeps each.
+    """
     dimension_separator: ZarrV2ArrayDimensionSeparator
+    """The separator between a chunk's coordinates in its store key: `"."` or `"/"`.
+
+    A document without the key means `"."`
+    (https://github.com/zarr-developers/zarr-specs/blob/fc7dd9c9beb5a50b87f9b08b00bf50fc0048482f/docs/v2/v2.0.rst#L83-L86);
+    the model holds that value and `to_json` writes it.
+    """
     attributes: dict[str, JSONValue] | UNSET
+    """User attributes, from the sibling `.zattrs` document.
+
+    `UNSET` when there is no `.zattrs`; `{}` is an empty `.zattrs`, which
+    `to_key_value` writes.
+    """
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ZarrV2ArrayMetadata:
     """In-memory model of a v2 array metadata document.
 
-    A canonical, lossless representation of the `.zarray` content plus the
-    sibling `.zattrs` attributes. `dtype`, `compressor`, and `filters` are
+    A canonical, lossless representation of the spec-defined `.zarray`
+    members plus the sibling `.zattrs` attributes; other `.zarray` members,
+    which implementations "SHOULD" ignore, are dropped. `dtype`, `compressor`, and `filters` are
     held in their raw JSON forms and are never interpreted; `fill_value` is
     held verbatim in its JSON form. `attributes` is `UNSET` when no
     `.zattrs` file (or merged `attributes` key) exists — distinct from an
@@ -383,19 +550,45 @@ class ZarrV2ArrayMetadata:
     """
 
     zarr_format: Literal[2] = field(default=2, init=False)
+    """The Zarr format version, always `2`."""
     shape: tuple[int, ...]
+    """The length of each dimension of the array."""
     dtype: ZarrV2DataTypeMetadata
+    """The array's data type, as the document spells it.
+
+    A type string such as `"<f8"`, or field records for a structured type.
+    Only its shape is checked: whether it names a real data type is not.
+    """
     chunks: tuple[int, ...]
+    """The length of each dimension of a chunk, one for each dimension of `shape`."""
     fill_value: JSONValue
+    """The JSON value of an element no chunk has written, or `None` for no fill value."""
     order: ZarrV2ArrayOrder
+    """The layout of elements within a chunk: `"C"` (row-major) or `"F"` (column-major)."""
     compressor: ZarrV2CodecMetadata | None
+    """The compression codec's configuration, or `None` for no compressor."""
     filters: tuple[ZarrV2CodecMetadata, ...] | None
+    """The filter codecs' configurations, in order, or `None` for no filters.
+
+    `None` and `()` are different spellings, and the model keeps each.
+    """
     # "." is the v2 convention's default for an ABSENT dimension_separator key;
     # from_json normalizes absence to it (a semantics-preserving spelling
     # normalization, like the v3 bare-string metadata-field form). The value
     # is never None: the document grammar has no null spelling for this field.
     dimension_separator: ZarrV2ArrayDimensionSeparator = field(default=".")
+    """The separator between a chunk's coordinates in its store key: `"."` or `"/"`.
+
+    A document without the key means `"."`
+    (https://github.com/zarr-developers/zarr-specs/blob/fc7dd9c9beb5a50b87f9b08b00bf50fc0048482f/docs/v2/v2.0.rst#L83-L86);
+    the model holds that value and `to_json` writes it.
+    """
     attributes: dict[str, JSONValue] | UNSET
+    """User attributes, from the sibling `.zattrs` document.
+
+    `UNSET` when there is no `.zattrs`; `{}` is an empty `.zattrs`, which
+    `to_key_value` writes.
+    """
 
     def update(self, **kwargs: Unpack[ZarrV2ArrayMetadataPartial]) -> ZarrV2ArrayMetadata:
         """
@@ -466,6 +659,17 @@ class ZarrV2ArrayMetadata:
 
     @classmethod
     def from_json(cls, data: object) -> ZarrV2ArrayMetadata:
+        """Return the model of the merged v2 array document `data`, or raise `MetadataValidationError`.
+
+        `data` is a decoded `.zarray` document, with the `.zattrs` content
+        folded in as an `attributes` member when there is one (the
+        `ZarrV2ArrayMetadataJSON` form). It is validated as
+        `parse_array_metadata_v2` validates it, structure only, and every
+        problem found is raised together. An absent `dimension_separator`
+        reads as `"."` and an absent `attributes` as `UNSET`. Any other member
+        is checked to be JSON and then dropped: the model does not hold it.
+        The model shares no mutable state with `data`.
+        """
         # A read model shares no mutable state with what it read.
         parsed = copy.deepcopy(parse_array_metadata_v2(data))
         return cls(
@@ -482,6 +686,16 @@ class ZarrV2ArrayMetadata:
 
     @classmethod
     def from_key_value(cls, mapping: Mapping[StoreKey, bytes]) -> ZarrV2ArrayMetadata:
+        """Return the model of the v2 array stored at `.zarray` and `.zattrs` in `mapping`, or raise `MetadataValidationError`.
+
+        `mapping` maps store keys to the bytes stored there; other keys are
+        ignored. `.zattrs`, when present, becomes `attributes`; when absent,
+        `attributes` is `UNSET`. A missing `.zarray` (a `missing_key`
+        problem), a value that is not `bytes` (`invalid_type`), bytes that do
+        not decode as JSON (`invalid_json`), or an `attributes` member inside
+        `.zarray` (`invalid_value`) raise, as does every problem `from_json`
+        finds with the merged document.
+        """
         zarray_raw = load_store_json(mapping, ZARR_V2_ARRAY_METADATA_STORE_KEY)
         if not isinstance(zarray_raw, Mapping):
             return cls.from_json(zarray_raw)
@@ -504,6 +718,16 @@ class ZarrV2ArrayMetadata:
     def to_key_value(
         self, *, indent: int | str | None = None
     ) -> Mapping[ZarrV2ArrayMetadataStoreKey | ZarrV2AttributesStoreKey, bytes]:
+        """Return the model as the bytes of its `.zarray` and `.zattrs` documents, or raise `MetadataValidationError`.
+
+        The merged document `to_json` returns is validated as `from_json`
+        validates one, since a model built or updated by hand is not, and
+        every problem found is raised together. `.zarray` holds every member
+        but `attributes`; `.zattrs` holds `attributes`, and is present exactly
+        when `attributes` is not `UNSET`, even when it is empty. `indent` is
+        `json.dumps`'s: `None` writes each document on one line, and an int or
+        a string pretty-prints it with that indent.
+        """
         # Attributes live only in the sibling `.zattrs` file; the `.zarray`
         # document must exclude them. The `.zattrs` key is present exactly
         # when attributes are set (even empty) — UNSET emits no file. A model

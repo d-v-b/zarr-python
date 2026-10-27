@@ -37,18 +37,18 @@ ProblemKind = Literal["missing_key", "invalid_type", "invalid_value", "invalid_j
 
 @dataclass(frozen=True, slots=True)
 class ValidationProblem:
-    """A single problem found in a value: where it is, what is wrong, and what kind of wrong.
-
-    `loc` is the path from the root of what was judged to the offending
-    value, e.g. `("codecs", 0, "name")` in a document, and an empty `loc`
-    refers to that root.
-    `kind` classifies the failure mode for programmatic dispatch; `message`
-    is the human-readable description.
-    """
+    """A single problem found in a value: where it is, what is wrong, and what kind of wrong."""
 
     loc: tuple[str | int, ...]
+    """The path from the root of what was judged to the offending value.
+
+    Keys and indices, e.g. `("codecs", 0, "name")` in a document; an empty
+    `loc` refers to that root.
+    """
     message: str
+    """The human-readable description of what is wrong."""
     kind: ProblemKind
+    """What kind of wrong it is, for programmatic dispatch."""
 
     def __post_init__(self) -> None:
         # The runtime half of the annotations: a rule written without a type
@@ -84,6 +84,7 @@ class MetadataValidationError(ValueError):
     """
 
     problems: tuple[ValidationProblem, ...]
+    """Every problem found, in the order found."""
 
     def __init__(self, problems: Sequence[ValidationProblem]) -> None:
         self.problems = tuple(problems)

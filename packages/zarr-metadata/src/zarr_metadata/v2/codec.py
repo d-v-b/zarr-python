@@ -22,6 +22,7 @@ class ZarrV2CodecMetadata(TypedDict, extra_items=JSONValue):
     """
 
     id: str
+    """The codec's identifier, e.g. `"blosc"` or `"delta"`."""
 
 
 __all__ = [

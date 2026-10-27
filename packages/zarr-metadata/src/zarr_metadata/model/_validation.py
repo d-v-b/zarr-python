@@ -63,44 +63,63 @@ from zarr_metadata.v3.group import ZarrV3GroupMetadataJSON
 ARRAY_METADATA_REQUIRED_KEYS_V3: Final[frozenset[str]] = frozenset(
     ZarrV3ArrayMetadataJSON.__required_keys__
 )
+"""The top-level keys every v3 array document holds."""
 ARRAY_METADATA_OPTIONAL_KEYS_V3: Final[frozenset[str]] = frozenset(
     ZarrV3ArrayMetadataJSON.__optional_keys__
 )
+"""The top-level keys the v3 spec defines for an array document that it may omit."""
 ARRAY_METADATA_STANDARD_KEYS_V3: Final[frozenset[str]] = (
     ARRAY_METADATA_REQUIRED_KEYS_V3 | ARRAY_METADATA_OPTIONAL_KEYS_V3
 )
+"""Every top-level key the v3 spec defines for an array document.
+
+Any other top-level key is an extension field, held in `extra_fields`.
+"""
 
 ARRAY_METADATA_REQUIRED_KEYS_V2: Final[frozenset[str]] = frozenset(
     ZarrV2ArrayMetadataJSON.__required_keys__
 )
+"""The keys every v2 array document holds."""
 ARRAY_METADATA_OPTIONAL_KEYS_V2: Final[frozenset[str]] = frozenset(
     ZarrV2ArrayMetadataJSON.__optional_keys__
 )
+"""The keys of a merged v2 array document that it may omit: `dimension_separator` and `attributes`."""
 ARRAY_METADATA_STANDARD_KEYS_V2: Final[frozenset[str]] = (
     ARRAY_METADATA_REQUIRED_KEYS_V2 | ARRAY_METADATA_OPTIONAL_KEYS_V2
 )
+"""Every key of a merged v2 array document; any other is not held by the model."""
 
 # The standard top-level keys of a v3 group metadata document. Anything outside
 # this set is an extension field.
 GROUP_METADATA_REQUIRED_KEYS_V3: Final[frozenset[str]] = frozenset(
     ZarrV3GroupMetadataJSON.__required_keys__
 )
+"""The top-level keys every v3 group document holds."""
 GROUP_METADATA_OPTIONAL_KEYS_V3: Final[frozenset[str]] = frozenset(
     ZarrV3GroupMetadataJSON.__optional_keys__
 )
+"""The top-level keys the v3 spec defines for a group document that it may omit."""
 GROUP_METADATA_STANDARD_KEYS_V3: Final[frozenset[str]] = (
     GROUP_METADATA_REQUIRED_KEYS_V3 | GROUP_METADATA_OPTIONAL_KEYS_V3
 )
+"""Every top-level key the v3 spec defines for a group document.
+
+`consolidated_metadata` is not among them: `ZarrV3GroupMetadata` holds it in a
+field of its own, and any other top-level key in `extra_fields`.
+"""
 
 GROUP_METADATA_REQUIRED_KEYS_V2: Final[frozenset[str]] = frozenset(
     ZarrV2GroupMetadataJSON.__required_keys__
 )
+"""The keys every v2 group document holds."""
 GROUP_METADATA_OPTIONAL_KEYS_V2: Final[frozenset[str]] = frozenset(
     ZarrV2GroupMetadataJSON.__optional_keys__
 )
+"""The keys of a merged v2 group document that it may omit: `attributes`."""
 GROUP_METADATA_STANDARD_KEYS_V2: Final[frozenset[str]] = (
     GROUP_METADATA_REQUIRED_KEYS_V2 | GROUP_METADATA_OPTIONAL_KEYS_V2
 )
+"""Every key of a merged v2 group document; the document is closed, so any other is a problem."""
 
 
 def _missing_keys(

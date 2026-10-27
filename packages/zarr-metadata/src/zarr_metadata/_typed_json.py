@@ -199,20 +199,24 @@ def alias_value(alias: typing_extensions.TypeAliasType) -> object:
 
 @dataclass(frozen=True, slots=True)
 class TypedDictKeys:
-    """What a TypedDict says of an object's keys, read as the typing spec defines it.
-
-    `members` holds every key it declares, its bases' included, with the
-    type of the key's value -- qualifiers and `Annotated` metadata peeled
-    -- and whether the key is required. `extra_items` is what any other
-    key may hold: `Never` when the TypedDict is closed, `object` when it
-    is open, and the `extra_items` type otherwise. `declared` is whether
-    that was said, by the TypedDict or a base, rather than defaulted: a
-    TypedDict that says nothing is open.
-    """
+    """What a TypedDict says of an object's keys, read as the typing spec defines it."""
 
     members: Mapping[str, tuple[object, bool]]
+    """Every key it declares, its bases' included, with its value's type and whether it is required.
+
+    The type has its qualifiers and `Annotated` metadata peeled.
+    """
     extra_items: object
+    """What any other key may hold.
+
+    `Never` when the TypedDict is closed, `object` when it is open, and the
+    `extra_items` type otherwise.
+    """
     declared: bool
+    """Whether the TypedDict or a base said what other keys may hold, rather than defaulting.
+
+    It is said with `closed=` or `extra_items=`. A TypedDict that says nothing is open.
+    """
 
     @property
     def required(self) -> frozenset[str]:

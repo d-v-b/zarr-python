@@ -33,8 +33,14 @@ class ZarrV3ConsolidatedMetadataJSON(TypedDict, closed=True):
     """
 
     kind: Literal["inline"]
+    """How the entries are carried, `"inline"`: in the group's own document."""
     must_understand: Literal[False]
+    """Always `false`: a reader that does not recognize consolidated metadata may ignore it."""
     metadata: Mapping[str, ZarrV3ArrayMetadataJSON | ZarrV3GroupMetadataJSON]
+    """The metadata document of each node below the group, by its path from the group.
+
+    A path joins its segments with `"/"`, e.g. `"child/grandchild"`.
+    """
 
 
 ZARR_V3_CONSOLIDATED_METADATA_KEY: Final = "consolidated_metadata"

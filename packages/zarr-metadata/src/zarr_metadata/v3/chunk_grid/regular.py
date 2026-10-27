@@ -23,14 +23,26 @@ class RegularChunkGridConfiguration(TypedDict, closed=True):
     """Configuration for the regular chunk grid."""
 
     chunk_shape: tuple[int, ...]
+    """The length of every chunk along each dimension of the array.
+
+    One entry per dimension, each greater than zero
+    (https://github.com/zarr-developers/zarr-specs/blob/fc7dd9c9beb5a50b87f9b08b00bf50fc0048482f/docs/v3/chunk-grids/regular-grid/index.rst#L40).
+    """
 
 
 class RegularChunkGridObject(TypedDict, closed=True):
     """Regular chunk grid metadata in object form."""
 
     name: RegularChunkGridName
+    """The chunk grid's name, `"regular"`."""
     configuration: RegularChunkGridConfiguration
+    """The chunk grid's parameters."""
     must_understand: NotRequired[bool]
+    """Whether a reader that does not recognize this chunk grid must refuse the document.
+
+    Absent means `true`. The spec does not permit `false` for a chunk grid
+    (https://github.com/zarr-developers/zarr-specs/blob/fc7dd9c9beb5a50b87f9b08b00bf50fc0048482f/docs/v3/core/index.rst#L1580-L1581).
+    """
 
 
 RegularChunkGridMetadata = RegularChunkGridObject

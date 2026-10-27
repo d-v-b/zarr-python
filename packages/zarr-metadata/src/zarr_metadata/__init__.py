@@ -1,3 +1,14 @@
+"""Spec-defined metadata types, models, and validators for Zarr v2 and v3.
+
+The document types, models, and spec vocabulary — store keys, extension
+names, and the literal types of their fields — are re-exported here from the
+modules that define them, so `from zarr_metadata import ZarrV3ArrayMetadataJSON`
+and `from zarr_metadata.v3.array import ZarrV3ArrayMetadataJSON` are
+equivalent. Validators, parsers, and definitions are imported from their own
+modules: `zarr_metadata.model`, `zarr_metadata.typed_json`, and
+`zarr_metadata.v3.definition`.
+"""
+
 from importlib.metadata import version
 
 from zarr_metadata._common import JSONValue, ZarrV3NamedConfigJSON
@@ -227,6 +238,7 @@ from zarr_metadata.v3.data_type.uint64 import (
 from zarr_metadata.v3.group import ZarrV3GroupMetadataJSON, ZarrV3GroupMetadataJSONPartial
 
 __version__ = version("zarr-metadata")
+"""The installed version of the `zarr-metadata` distribution."""
 
 
 __all__ = [

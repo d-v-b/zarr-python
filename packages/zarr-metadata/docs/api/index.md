@@ -32,11 +32,13 @@ are re-exported at the top level, so
 The model layer's validators, parsers, type guards, and metadata key sets are
 imported from [`zarr_metadata.model`](model.md) directly.
 
-## Common types
+## Top-level names
 
-A few cross-cutting aliases are exported only from the top-level
-`zarr_metadata` namespace:
+A few names are exported only from the top-level `zarr_metadata`
+namespace: two cross-cutting aliases, and the package version.
 
 ::: zarr_metadata.JSONValue
 
 ::: zarr_metadata.ZarrV3NamedConfigJSON
+
+::: zarr_metadata.__version__

@@ -74,6 +74,7 @@ class Context:
     """
 
     tables: Tables
+    """The definitions in scope, by kind, then by the name each is filed under."""
 
     @classmethod
     def of(cls, *definitions: Definition[Any]) -> Context:

@@ -430,7 +430,18 @@ class CodecDefinition(Definition[C]):
     """
 
     kind: CodecKind
+    """What the codec does to what it is handed: array -> array, array -> bytes or bytes -> bytes.
+
+    It fixes where the codec may sit in a pipeline, and which of `chunk_rules`,
+    `transition` and `pipelines` it may be given: building a definition with
+    one its kind is never asked raises `TypeError`.
+    """
     size: CodecSize
+    """Whether the size of what the codec gives out is fixed by the size of what it is handed.
+
+    Where a member takes only codecs of static size, a codec of dynamic size
+    is a problem.
+    """
     chunk_rules: Callable[[C, Nested, Chunk], Iterable[ValidationProblem]] = no_rules
     """What the spec disallows in this codec handed a chunk, located in the configuration."""
     transition: Callable[[C, Nested, Chunk], Chunk] = unknown_chunk
@@ -760,10 +771,8 @@ def _nothing_nested() -> Nested:
 class Resolved(Generic[D]):
     """One metadata field, as read in a scope: its JSON, and what the scope made of it.
 
-    `resolution` is what became of the configuration: read by the
-    definition that claims the name, claimed by nothing, or not readable.
-    A problem with the envelope around it -- a stray member, a
-    `must_understand` of `false` -- is reported with the field, and leaves
+    A problem with the envelope around the configuration -- a stray member,
+    a `must_understand` of `false` -- is reported with the field, and leaves
     the resolution as it is; so is a problem of a field the configuration
     holds, which is that field's own, with its own resolution in `nested`.
     """
@@ -771,6 +780,11 @@ class Resolved(Generic[D]):
     json: JSONValue
     """The field as written, refined: arrays as tuples. `None` for a value that was not JSON, as for `null`."""
     resolution: Resolution
+    """What became of the configuration.
+
+    `"read"` by the definition that claims the name, `"out_of_scope"` when
+    nothing in scope claims it, or `"invalid"` when it could not be read.
+    """
     definition: D | None
     """The definition that claims the field's name; None when nothing in scope does, or it names none."""
     configuration: Mapping[str, JSONValue] | None
