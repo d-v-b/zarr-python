@@ -1,35 +1,13 @@
 """Zarr v2 array metadata types."""
 
 from collections.abc import Mapping
-from typing import Final, Literal, NotRequired
+from typing import Annotated, Final, Literal, NotRequired
 
-from typing_extensions import TypeAliasType, TypedDict
+from annotated_types import Ge
+from typing_extensions import TypedDict
 
 from zarr_metadata._common import JSONValue
-from zarr_metadata.v2.codec import ZarrV2CodecMetadata
-
-ZarrV2DataTypeMetadata = TypeAliasType(
-    "ZarrV2DataTypeMetadata",
-    str
-    | tuple[
-        tuple[str, "ZarrV2DataTypeMetadata"]
-        | tuple[str, "ZarrV2DataTypeMetadata", tuple[int, ...]],
-        ...,
-    ],
-)
-"""The v2 dtype representation.
-
-Either a numpy-style dtype string (e.g. `"<f8"`, `"|S10"`) or a tuple of
-field records describing a structured dtype. Each field record is either
-a 2-tuple `(name, datatype)` or a 3-tuple `(name, datatype, shape)`
-(the 3-tuple form indicates a subarray field). A field datatype may itself
-be another structured dtype.
-
-Endianness is encoded in the prefix character of the dtype string;
-parsing it out is a caller concern, not part of this type.
-
-See https://zarr-specs.readthedocs.io/en/latest/v2/v2.0.html#data-type-encoding
-"""
+from zarr_metadata.v2._field_json import ZarrV2CodecMetadata, ZarrV2DataTypeMetadata
 
 ZarrV2ArrayOrder = Literal["C", "F"]
 """Literal type of permitted values for the `order` field of v2 array metadata.
@@ -67,15 +45,8 @@ class ZarrV2ZArrayJSON(TypedDict):
     """
 
     zarr_format: Literal[2]
-    """The Zarr format version, `2`."""
-    shape: tuple[int, ...]
-    """The length of each dimension of the array."""
-    chunks: tuple[int, ...]
-    """The length of each dimension of a chunk.
-
-    Every chunk has this shape, so a chunk at the array's edge overhangs it
-    where a length does not divide evenly; what the overhang holds is undefined.
-    """
+    shape: tuple[Annotated[int, Ge(0)], ...]
+    chunks: tuple[Annotated[int, Ge(0)], ...]
     dtype: ZarrV2DataTypeMetadata
     """The data type of the array's elements.
 
@@ -115,7 +86,7 @@ class ZarrV2ArrayMetadataJSON(TypedDict, extra_items=JSONValue):
     real `.zarray` file should split / merge `attributes` accordingly,
     or use `ZarrV2ZArrayJSON` (strict on-disk) plus `ZarrV2ZAttrsJSON` directly.
 
-    Open: other keys "SHOULD NOT be present ... and SHOULD be ignored by
+    The type is open: other keys "SHOULD NOT be present ... and SHOULD be ignored by
     implementations" (https://github.com/zarr-developers/zarr-specs/blob/fc7dd9c9beb5a50b87f9b08b00bf50fc0048482f/docs/v2/v2.0.rst#L91-L92), and each
     other member is a JSON value.
 
@@ -123,84 +94,8 @@ class ZarrV2ArrayMetadataJSON(TypedDict, extra_items=JSONValue):
     """
 
     zarr_format: Literal[2]
-    """The Zarr format version, `2`."""
-    shape: tuple[int, ...]
-    """The length of each dimension of the array."""
-    chunks: tuple[int, ...]
-    """The length of each dimension of a chunk.
-
-    Every chunk has this shape, so a chunk at the array's edge overhangs it
-    where a length does not divide evenly; what the overhang holds is undefined.
-    """
-    dtype: ZarrV2DataTypeMetadata
-    """The data type of the array's elements.
-
-    A NumPy typestr such as `"<f8"`, or a list of `[name, datatype]` or
-    `[name, datatype, shape]` field records for a structured data type.
-    """
-    compressor: ZarrV2CodecMetadata | None
-    """The configuration of the codec that compresses each chunk, or `null` for none."""
-    fill_value: JSONValue
-    """The value of an element in a chunk that was never written, or `null` for none.
-
-    With `null`, what such a chunk holds is undefined. A non-finite float is
-    `"NaN"`, `"Infinity"` or `"-Infinity"`, and the fill value of a fixed-length
-    byte string or structured data type is a Base64 string
-    (https://github.com/zarr-developers/zarr-specs/blob/fc7dd9c9beb5a50b87f9b08b00bf50fc0048482f/docs/v2/v2.0.rst#L181-L194).
-    """
-    order: ZarrV2ArrayOrder
-    """The layout of elements within each chunk: `"C"` (row-major) or `"F"` (column-major)."""
-    filters: tuple[ZarrV2CodecMetadata, ...] | None
-    """Codecs applied to each chunk before the compressor, in order, or `null` for none."""
-    dimension_separator: NotRequired[ZarrV2ArrayDimensionSeparator]
-    """The separator between a chunk's grid coordinates in its key.
-
-    Absent means `"."`, giving keys like `0.0`; `"/"` gives keys like `0/0`.
-    """
-    attributes: NotRequired[Mapping[str, JSONValue]]
-    """User attributes from the sibling `.zattrs` file (not part of `.zarray`).
-
-    See the class docstring for the rationale behind the merged representation.
-    """
-
-
-class ZarrV2ArrayMetadataJSONPartial(TypedDict, total=False, extra_items=JSONValue):
-    """
-    Partial form of `ZarrV2ArrayMetadataJSON`: every field is `NotRequired`.
-
-    Field annotations mirror `ZarrV2ArrayMetadataJSON` exactly. The only difference is
-    `total=False`, which makes every key optional at the type level.
-
-    Use this when typing dicts that intentionally hold a subset of a complete
-    v2 array metadata document — e.g. test fixtures that override only a few
-    fields of a base template, or callers that build a fragment to be merged
-    into a complete document elsewhere.
-
-    The `NotRequired[...]` wrappers on `dimension_separator` and `attributes`
-    are intentional: keeping them preserves byte-identical `__annotations__`
-    with `ZarrV2ArrayMetadataJSON` so the `==` check in
-    `tests/test_partial_equivalence.py` passes without special-casing those
-    fields (PEP 655 explicitly permits `NotRequired` inside `total=False`).
-
-    Like `ZarrV2ArrayMetadataJSON`, it is open: the v2 spec has no
-    extension-field concept, and other `.zarray` keys "SHOULD be ignored by
-    implementations" (https://github.com/zarr-developers/zarr-specs/blob/fc7dd9c9beb5a50b87f9b08b00bf50fc0048482f/docs/v2/v2.0.rst#L91-L92), so each other member is a
-    JSON value and none is modeled further.
-
-    Drift between this type and `ZarrV2ArrayMetadataJSON` is prevented by
-    `tests/test_partial_equivalence.py`.
-    """
-
-    zarr_format: Literal[2]
-    """The Zarr format version, `2`."""
-    shape: tuple[int, ...]
-    """The length of each dimension of the array."""
-    chunks: tuple[int, ...]
-    """The length of each dimension of a chunk.
-
-    Every chunk has this shape, so a chunk at the array's edge overhangs it
-    where a length does not divide evenly; what the overhang holds is undefined.
-    """
+    shape: tuple[Annotated[int, Ge(0)], ...]
+    chunks: tuple[Annotated[int, Ge(0)], ...]
     dtype: ZarrV2DataTypeMetadata
     """The data type of the array's elements.
 
@@ -246,9 +141,7 @@ __all__ = [
     "ZARR_V2_ARRAY_ORDER",
     "ZarrV2ArrayDimensionSeparator",
     "ZarrV2ArrayMetadataJSON",
-    "ZarrV2ArrayMetadataJSONPartial",
     "ZarrV2ArrayMetadataStoreKey",
     "ZarrV2ArrayOrder",
-    "ZarrV2DataTypeMetadata",
     "ZarrV2ZArrayJSON",
 ]

@@ -5,12 +5,14 @@ See https://zarr-specs.readthedocs.io/en/latest/v3/codecs/blosc/index.html
 """
 
 from collections.abc import Iterator
-from typing import Final, Literal, NotRequired, cast
+from typing import Annotated, Final, Literal, NotRequired
 
+from annotated_types import Ge, Interval
 from typing_extensions import TypedDict
 
 from zarr_metadata._json import ValidationProblem
-from zarr_metadata.v3._definition import CodecDefinition, Nested
+from zarr_metadata.definition._definition import Nested
+from zarr_metadata.v3._definition import CodecDefinition
 
 BLOSC_CODEC_NAME: Final = "blosc"
 """The `name` field value of the `blosc` codec."""
@@ -35,24 +37,9 @@ class BloscCodecConfiguration(TypedDict, closed=True):
     """Configuration for the Zarr v3 `blosc` codec."""
 
     cname: BloscCName
-    """The compressor blosc applies to each block, one of `BLOSC_CNAME`."""
-    clevel: int
-    """The compression level, an integer from 0 to 9.
-
-    0 turns compression off; 1 is the fastest and compresses least, 9 the
-    slowest and compresses most.
-    """
+    clevel: Annotated[int, Interval(ge=0, le=9)]
     shuffle: BloscShuffle
-    """The shuffling applied before compression.
-
-    `"noshuffle"` for none, `"shuffle"` for byte-wise, `"bitshuffle"` for
-    bit-wise.
-    """
-    blocksize: int
-    """The size in bytes of the blocks the buffer is divided into before compression.
-
-    At least 0; 0 lets blosc choose the size.
-    """
+    blocksize: Annotated[int, Ge(0)]
     typesize: NotRequired[int]
     """The stride in bytes over which shuffling is performed.
 
@@ -97,21 +84,14 @@ another member is required.
 
 
 def _rules(configuration: BloscCodecConfiguration, nested: Nested) -> Iterator[ValidationProblem]:
-    """Bounds on `clevel` and `blocksize`; `typesize` against `shuffle`.
+    """Check `typesize` against `shuffle`.
 
-    Under `noshuffle` the spec says of `typesize` that "the value is
-    ignored", and the canonical form drops it; under either shuffle it is
-    required, and positive.
+    For `noshuffle`, the spec says of `typesize` that "the value is
+    ignored", and the canonical form drops it. For either other shuffle,
+    `typesize` is required and must be positive. The type cannot express
+    whether `typesize` is required, so it does not express the bound
+    either. These rules check both.
     """
-    clevel, blocksize = configuration["clevel"], configuration["blocksize"]
-    if not 0 <= clevel <= 9:
-        yield ValidationProblem(
-            ("clevel",), f"expected an integer in [0, 9], got {clevel}", "invalid_value"
-        )
-    if blocksize < 0:
-        yield ValidationProblem(
-            ("blocksize",), f"expected an integer >= 0, got {blocksize}", "invalid_value"
-        )
     shuffle = configuration["shuffle"]
     if shuffle != BLOSC_NO_SHUFFLE:
         typesize = configuration.get("typesize")
@@ -121,22 +101,24 @@ def _rules(configuration: BloscCodecConfiguration, nested: Nested) -> Iterator[V
             )
         elif typesize < 1:
             yield ValidationProblem(
-                ("typesize",), f"expected a positive integer, got {typesize}", "invalid_value"
+                ("typesize",),
+                f"expected a positive integer, got {typesize}",
+                "invalid_value",
+                ctx={"ge": 1},
             )
 
 
 def _canonical(configuration: BloscCodecConfiguration) -> BloscCodecConfiguration:
-    """Without a `typesize` that `noshuffle` renders meaningless.
+    """Remove `typesize` when `shuffle` is `noshuffle`, because it has no meaning there.
 
     The spec says of that case that "the value is ignored", so two
-    configurations differing only there describe the same codec.
+    configurations that differ only in `typesize` describe the same codec.
     """
     if configuration["shuffle"] != BLOSC_NO_SHUFFLE or "typesize" not in configuration:
         return configuration
-    return cast(
-        "BloscCodecConfiguration",
-        {key: value for key, value in configuration.items() if key != "typesize"},
-    )
+    simpler = configuration.copy()
+    del simpler["typesize"]
+    return simpler
 
 
 BLOSC_CODEC: Final = CodecDefinition(
