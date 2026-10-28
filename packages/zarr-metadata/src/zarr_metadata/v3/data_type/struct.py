@@ -34,7 +34,13 @@ class StructField(TypedDict, closed=True):
     """A single field entry inside a structured dtype."""
 
     name: ReadOnly[str]
+    """The field name (must be unique within a struct and non-empty)."""
     data_type: ReadOnly[ZarrV3DataTypeField]
+    """The field's data type.
+
+    Recursive: may be a bare-string primitive or a named-config envelope
+    including another `struct`.
+    """
 
 
 class StructConfiguration(TypedDict, closed=True):

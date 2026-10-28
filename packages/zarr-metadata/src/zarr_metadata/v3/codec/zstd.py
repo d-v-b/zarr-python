@@ -36,6 +36,11 @@ class ZstdCodecConfiguration(TypedDict, closed=True):
     """
 
     level: Annotated[int, Interval(ge=ZSTD_MIN_LEVEL, le=ZSTD_MAX_LEVEL)]
+    """The compression level, an integer from `ZSTD_MIN_LEVEL` (-131072) to `ZSTD_MAX_LEVEL` (22).
+
+    0 means zstd's default level; otherwise a higher level compresses more,
+    more slowly. It has no effect on decoding.
+    """
     checksum: NotRequired[bool]
     """Whether a checksum is stored when writing and verified when reading.
 

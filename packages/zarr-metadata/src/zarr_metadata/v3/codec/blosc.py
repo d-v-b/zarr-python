@@ -37,9 +37,24 @@ class BloscCodecConfiguration(TypedDict, closed=True):
     """Configuration for the Zarr v3 `blosc` codec."""
 
     cname: BloscCName
+    """The compressor blosc applies to each block, one of `BLOSC_CNAME`."""
     clevel: Annotated[int, Interval(ge=0, le=9)]
+    """The compression level, an integer from 0 to 9.
+
+    0 turns compression off; 1 is the fastest and compresses least, 9 the
+    slowest and compresses most.
+    """
     shuffle: BloscShuffle
+    """The shuffling applied before compression.
+
+    `"noshuffle"` for none, `"shuffle"` for byte-wise, `"bitshuffle"` for
+    bit-wise.
+    """
     blocksize: Annotated[int, Ge(0)]
+    """The size in bytes of the blocks the buffer is divided into before compression.
+
+    At least 0; 0 lets blosc choose the size.
+    """
     typesize: NotRequired[int]
     """The stride in bytes over which shuffling is performed.
 

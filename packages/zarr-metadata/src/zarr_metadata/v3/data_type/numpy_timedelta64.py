@@ -27,7 +27,16 @@ class NumpyTimedelta64Configuration(TypedDict, closed=True):
     """Configuration for the `numpy.timedelta64` data type."""
 
     unit: ReadOnly[NumpyTimeUnit]
+    """A string encoding a unit of time.
+
+    `"us"` and `"μs"` are equivalent spellings of microseconds; `"generic"`
+    means the unit is unspecified.
+    """
     scale_factor: ReadOnly[NumpyTimeScaleFactor]
+    """The multiplier relative to the unit.
+
+    An integer in `[1, 2147483647]`.
+    """
 
 
 class NumpyTimedelta64(TypedDict, closed=True):

@@ -30,7 +30,12 @@ class Crc32cCodecObject(TypedDict, closed=True):
     """
 
     name: Crc32cCodecName
+    """The codec's name, `"crc32c"`."""
     configuration: NotRequired[EmptyConfiguration]
+    """The codec's parameters, of which there are none.
+
+    Absent, or an empty mapping.
+    """
     must_understand: NotRequired[bool]
     """Whether a reader that does not recognize this codec must refuse the document.
 

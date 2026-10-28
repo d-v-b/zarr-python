@@ -138,12 +138,15 @@ class ValidationProblem:
     message: str
     """The human-readable description of what is wrong."""
     kind: ProblemKind
+    """The kind of problem, for programmatic dispatch."""
     input: JSONValue | UNSET = dataclasses.field(
         default=UNSET, kw_only=True, compare=False, repr=False
     )
+    """The JSON found at `loc`, or `UNSET` when nothing is there or it is not JSON."""
     ctx: Mapping[str, JSONValue] = dataclasses.field(
         default_factory=_no_ctx, kw_only=True, compare=False, repr=False
     )
+    """What was expected, e.g. bounds or a closed set of values; empty when only a type was."""
 
     def __post_init__(self) -> None:
         # Enforce the annotations at runtime. A rule written without a type

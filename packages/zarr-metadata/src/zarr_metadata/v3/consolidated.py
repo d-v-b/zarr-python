@@ -42,8 +42,11 @@ class ZarrV3ConsolidatedMetadataEnvelopeJSON(TypedDict, closed=True):
     """
 
     kind: Literal["inline"]
+    """How the entries are carried, `"inline"`: in the group's own document."""
     must_understand: Literal[False]
+    """Always `false`: a reader that does not recognize consolidated metadata may ignore it."""
     metadata: Mapping[str, UserJSONValue]
+    """The entries, by each node's path from the group, as any JSON."""
 
 
 class ZarrV3ConsolidatedMetadataJSON(TypedDict, closed=True):

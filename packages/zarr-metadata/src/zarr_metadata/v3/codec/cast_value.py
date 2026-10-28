@@ -95,6 +95,13 @@ class CastValueCodecConfiguration(TypedDict, closed=True):
     """
 
     data_type: ZarrV3DataTypeField
+    """The data type values are cast to when encoding, and the one the decoder is handed.
+
+    The codec is defined only for data types that model real numbers, the
+    integer and floating-point types: a boolean, raw-bits, string, bytes,
+    struct or complex type is refused, here and as the data type the codec
+    is handed.
+    """
     rounding: NotRequired[CastRoundingMode]
     """How a value `data_type` cannot represent exactly is rounded.
 

@@ -45,8 +45,14 @@ class ZarrV2ZArrayJSON(TypedDict):
     """
 
     zarr_format: Literal[2]
+    """The Zarr format version, `2`."""
     shape: tuple[Annotated[int, Ge(0)], ...]
+    """The length of each dimension of the array."""
     chunks: tuple[Annotated[int, Ge(0)], ...]
+    """The length of each dimension of a chunk.
+
+    Every chunk of the array has this shape, with one length per dimension of `shape`.
+    """
     dtype: ZarrV2DataTypeMetadata
     """The data type of the array's elements.
 
@@ -94,8 +100,14 @@ class ZarrV2ArrayMetadataJSON(TypedDict, extra_items=JSONValue):
     """
 
     zarr_format: Literal[2]
+    """The Zarr format version, `2`."""
     shape: tuple[Annotated[int, Ge(0)], ...]
+    """The length of each dimension of the array."""
     chunks: tuple[Annotated[int, Ge(0)], ...]
+    """The length of each dimension of a chunk.
+
+    Every chunk of the array has this shape, with one length per dimension of `shape`.
+    """
     dtype: ZarrV2DataTypeMetadata
     """The data type of the array's elements.
 

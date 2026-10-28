@@ -37,32 +37,11 @@ PUBLIC_MODULES = [
     if not any(part.startswith("_") for part in name.split("."))
 ]
 
-# A type whose fields mean what another type's same-named fields mean: a
-# partial form, or a strict on-disk form of a merged in-memory one. Their
-# field docstrings are the same text.
+# A strict on-disk v2 type whose fields mean what the merged in-memory
+# type's same-named fields mean. Their field docstrings are the same text.
 MIRRORS = [
-    (
-        "zarr_metadata.v2.array.ZarrV2ArrayMetadataJSON",
-        "zarr_metadata.v2.array.ZarrV2ArrayMetadataJSONPartial",
-    ),
     ("zarr_metadata.v2.array.ZarrV2ArrayMetadataJSON", "zarr_metadata.v2.array.ZarrV2ZArrayJSON"),
-    (
-        "zarr_metadata.v2.group.ZarrV2GroupMetadataJSON",
-        "zarr_metadata.v2.group.ZarrV2GroupMetadataJSONPartial",
-    ),
     ("zarr_metadata.v2.group.ZarrV2GroupMetadataJSON", "zarr_metadata.v2.group.ZarrV2ZGroupJSON"),
-    (
-        "zarr_metadata.v3.array.ZarrV3ArrayMetadataJSON",
-        "zarr_metadata.v3.array.ZarrV3ArrayMetadataJSONPartial",
-    ),
-    (
-        "zarr_metadata.v3.group.ZarrV3GroupMetadataJSON",
-        "zarr_metadata.v3.group.ZarrV3GroupMetadataJSONPartial",
-    ),
-    ("zarr_metadata.model.ZarrV2ArrayMetadata", "zarr_metadata.model.ZarrV2ArrayMetadataPartial"),
-    ("zarr_metadata.model.ZarrV2GroupMetadata", "zarr_metadata.model.ZarrV2GroupMetadataPartial"),
-    ("zarr_metadata.model.ZarrV3ArrayMetadata", "zarr_metadata.model.ZarrV3ArrayMetadataPartial"),
-    ("zarr_metadata.model.ZarrV3GroupMetadata", "zarr_metadata.model.ZarrV3GroupMetadataPartial"),
 ]
 
 

@@ -33,6 +33,11 @@ class GzipCodecConfiguration(TypedDict, closed=True):
     """
 
     level: Annotated[int, Interval(ge=0, le=9)]
+    """The compression level, an integer from 0 to 9.
+
+    0 turns compression off; 1 is the fastest and compresses least, 9 the
+    slowest and compresses most.
+    """
 
 
 class GzipCodecObject(TypedDict, closed=True):

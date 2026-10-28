@@ -38,6 +38,10 @@ class RegularChunkGridConfiguration(TypedDict, closed=True):
     """
 
     chunk_shape: tuple[Annotated[int, Ge(1)], ...]
+    """The length of every chunk along each dimension of the array.
+
+    One entry per dimension, each at least 1.
+    """
 
 
 class RegularChunkGridObject(TypedDict, closed=True):

@@ -60,8 +60,23 @@ class ShardingIndexedCodecConfiguration(TypedDict, closed=True):
     """
 
     chunk_shape: tuple[Annotated[int, Ge(1)], ...]
+    """The shape of the inner chunks a shard is divided into.
+
+    One length, at least 1, per axis of the shard the codec is handed, each
+    dividing the shard's length along that axis.
+    """
     codecs: tuple[ZarrV3CodecField, ...]
+    """The codec pipeline that encodes each inner chunk.
+
+    Like an array's `codecs`, it holds exactly one array -> bytes codec.
+    """
     index_codecs: tuple[ZarrV3StaticCodecField, ...]
+    """The codec pipeline that encodes the shard index.
+
+    It holds exactly one array -> bytes codec, and only codecs whose output
+    size is fixed by the size of their input, so no compressor. The spec
+    recommends a little-endian `bytes` codec followed by `crc32c`.
+    """
     index_location: NotRequired[ShardingIndexLocation]
     """Whether the shard index sits at the `"start"` or the `"end"` of the encoded shard.
 

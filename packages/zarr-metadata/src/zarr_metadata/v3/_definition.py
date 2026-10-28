@@ -188,7 +188,9 @@ class DataTypeDefinition(WithFillValue[C], kind=True, format=3):
     """
 
     label: ClassVar[str] = "data type"
+    """The name of the kind in error messages, `"data type"`."""
     field_aliases: ClassVar[tuple[TypeAliasType, ...]] = (ZarrV3DataTypeField,)
+    """The field alias that annotates a configuration member holding a data type, `ZarrV3DataTypeField`."""
 
     @classmethod
     def _filed_under(cls, name: str) -> tuple[str | None, dict[str, JSONValue] | None]:
@@ -246,7 +248,9 @@ class ChunkGridDefinition(Definition[C], kind=True, format=3):
     """
 
     label: ClassVar[str] = "chunk grid"
+    """The name of the kind in error messages, `"chunk grid"`."""
     field_aliases: ClassVar[tuple[TypeAliasType, ...]] = (ZarrV3ChunkGridField,)
+    """The field alias that annotates a configuration member holding a chunk grid, `ZarrV3ChunkGridField`."""
 
     shape_rules: Callable[[C, Nested, tuple[int, ...]], Iterable[ValidationProblem]] = no_rules
     """The spec violations in this grid over an array of a given shape, located in the configuration."""
@@ -259,7 +263,9 @@ class ChunkKeyEncodingDefinition(Definition[C], kind=True, format=3):
     """A chunk key encoding."""
 
     label: ClassVar[str] = "chunk key encoding"
+    """The name of the kind in error messages, `"chunk key encoding"`."""
     field_aliases: ClassVar[tuple[TypeAliasType, ...]] = (ZarrV3ChunkKeyEncodingField,)
+    """The field alias that annotates a configuration member holding a chunk key encoding, `ZarrV3ChunkKeyEncodingField`."""
 
 
 CodecKind = Literal["array_array", "array_bytes", "bytes_bytes"]
@@ -320,7 +326,13 @@ class CodecDefinition(Definition[C], kind=True, format=3):
     """
 
     label: ClassVar[str] = "codec"
+    """The name of the kind in error messages, `"codec"`."""
     field_aliases: ClassVar[tuple[TypeAliasType, ...]] = (ZarrV3CodecField, ZarrV3StaticCodecField)
+    """The field aliases that annotate a configuration member holding a codec.
+
+    `ZarrV3CodecField` admits any codec; `ZarrV3StaticCodecField` admits only
+    codecs of static size.
+    """
 
     kind: CodecKind
     """What the codec does to what it is handed: array -> array, array -> bytes or bytes -> bytes.
@@ -377,7 +389,9 @@ class StorageTransformerDefinition(Definition[C], kind=True, format=3):
     """A storage transformer."""
 
     label: ClassVar[str] = "storage transformer"
+    """The name of the kind in error messages, `"storage transformer"`."""
     field_aliases: ClassVar[tuple[TypeAliasType, ...]] = (ZarrV3StorageTransformerField,)
+    """The field alias that annotates a configuration member holding a storage transformer, `ZarrV3StorageTransformerField`."""
 
 
 @dataclass(frozen=True, kw_only=True, slots=True, repr=False)
@@ -560,9 +574,11 @@ class ArrayExtraFieldDefinition(ExtraFieldDefinition[C], kind=True, format=3):
     """An extra field of a v3 array document: a member the spec does not define, read by its key."""
 
     label: ClassVar[str] = "array extra field"
+    """The name of the kind in error messages, `"array extra field"`."""
     spec_members: ClassVar[frozenset[str]] = frozenset(
         typeddict_keys(ZarrV3ArrayMetadataJSON).members
     )
+    """The members the spec defines in an array document, the keys of `ZarrV3ArrayMetadataJSON`; never extra fields."""
 
 
 @dataclass(frozen=True, kw_only=True, slots=True, repr=False)
@@ -570,9 +586,11 @@ class GroupExtraFieldDefinition(ExtraFieldDefinition[C], kind=True, format=3):
     """An extra field of a v3 group document: a member the spec does not define, read by its key. `consolidated_metadata` is one."""
 
     label: ClassVar[str] = "group extra field"
+    """The name of the kind in error messages, `"group extra field"`."""
     spec_members: ClassVar[frozenset[str]] = frozenset(
         typeddict_keys(ZarrV3GroupMetadataJSON).members
     )
+    """The members the spec defines in a group document, the keys of `ZarrV3GroupMetadataJSON`; never extra fields."""
 
 
 STATIC_SIZE_ALIASES: Final[frozenset[TypeAliasType]] = frozenset({ZarrV3StaticCodecField})
