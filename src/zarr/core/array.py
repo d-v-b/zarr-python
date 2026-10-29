@@ -178,6 +178,7 @@ if TYPE_CHECKING:
 # Array and AsyncArray are defined in the base `zarr` namespace
 __all__ = [
     "DEFAULT_FILL_VALUE",
+    "build_array_metadata",
     "create_codec_pipeline",
     "parse_array_metadata",
 ]
@@ -4607,6 +4608,49 @@ async def init_array(
     AsyncArray
         The AsyncArray.
     """
+    meta = build_array_metadata(
+        shape=shape,
+        dtype=dtype,
+        chunks=chunks,
+        shards=shards,
+        filters=filters,
+        compressors=compressors,
+        serializer=serializer,
+        fill_value=fill_value,
+        order=order,
+        zarr_format=zarr_format,
+        attributes=attributes,
+        chunk_key_encoding=chunk_key_encoding,
+        dimension_names=dimension_names,
+    )
+    arr = AsyncArray(metadata=meta, store_path=store_path, config=config)
+    await save_new_metadata(store_path, meta, overwrite=overwrite, ensure_parents=True)
+    return arr
+
+
+def build_array_metadata(
+    *,
+    shape: ShapeLike,
+    dtype: ZDTypeLike,
+    chunks: ChunksLike | Literal["auto"] = "auto",
+    shards: ShardsLike | None = None,
+    filters: FiltersLike = "auto",
+    compressors: CompressorsLike = "auto",
+    serializer: SerializerLike = "auto",
+    fill_value: Any | None = DEFAULT_FILL_VALUE,
+    order: MemoryOrder | None = None,
+    zarr_format: ZarrFormat | None = 3,
+    attributes: dict[str, JSON] | None = None,
+    chunk_key_encoding: ChunkKeyEncodingLike | None = None,
+    dimension_names: DimensionNamesLike = None,
+) -> ArrayV2Metadata | ArrayV3Metadata:
+    """Build an array metadata document from creation-style keyword arguments.
+
+    This is the pure half of `init_array`: it normalizes the same keyword
+    arguments into an in-memory metadata object without touching any store.
+    The parameters have the same meaning as in
+    [`zarr.api.asynchronous.create_array`][].
+    """
 
     if zarr_format is None:
         zarr_format = _default_zarr_format()
@@ -4733,9 +4777,7 @@ async def init_array(
             attributes=attributes,
         )
 
-    arr = AsyncArray(metadata=meta, store_path=store_path, config=config)
-    await save_new_metadata(store_path, meta, overwrite=overwrite, ensure_parents=True)
-    return arr
+    return meta
 
 
 async def create_array(
