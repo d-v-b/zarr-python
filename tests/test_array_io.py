@@ -6,10 +6,12 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import pytest
+from zarr_metadata import ZarrV3ArrayMetadata
 
 from zarr import ArrayIO, AsyncArrayIO
 from zarr.api.asynchronous import open_array
-from zarr.errors import ArrayNotFoundError
+from zarr.core.buffer import default_buffer_prototype
+from zarr.errors import ArrayNotFoundError, UnknownCodecError
 from zarr.storage import MemoryStore
 
 if TYPE_CHECKING:
@@ -20,6 +22,20 @@ METADATA_DOCUMENTS = ("zarr.json", ".zarray", ".zattrs", ".zgroup")
 
 async def _store_keys(store: MemoryStore) -> set[str]:
     return {key async for key in store.list()}
+
+
+async def _store_foreign_codec_array(store: MemoryStore) -> None:
+    """Store a valid v3 array document whose codec this environment lacks."""
+    document = (
+        b'{"zarr_format": 3, "node_type": "array", "shape": [4], "data_type": "uint8",'
+        b' "fill_value": 0, "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [2]}},'
+        b' "chunk_key_encoding": {"name": "default"},'
+        b' "codecs": [{"name": "zarr-python-does-not-know-this-codec"}]}'
+    )
+    prototype = default_buffer_prototype()
+    await store.set("foo/zarr.json", prototype.buffer.from_bytes(document))
+    await store.set("foo/c/0", prototype.buffer.from_bytes(b"xx"))
+    await store.set("foo/c/1", prototype.buffer.from_bytes(b"yy"))
 
 
 @pytest.mark.parametrize("zarr_format", [2, 3])
@@ -48,6 +64,9 @@ async def test_chunks_before_metadata(zarr_format: ZarrFormat) -> None:
     await aio.store_metadata()
     # the default zarr_format=None auto-detects the format, like zarrs
     opened = await AsyncArrayIO.open(store, name="foo")
+    # the binding is a document; the stored and declared documents agree
+    assert opened.document == aio.document
+    assert opened.document.shape == data.shape
     assert opened.metadata.zarr_format == zarr_format
     assert opened.metadata.attributes == {"answer": 42}
     np.testing.assert_array_equal(await opened.getitem(Ellipsis), data)
@@ -124,6 +143,30 @@ def test_build_v2_shards_raises() -> None:
 async def test_open_missing_raises() -> None:
     with pytest.raises(ArrayNotFoundError):
         await AsyncArrayIO.open(MemoryStore(), name="foo")
+
+
+async def test_document_work_without_codec_resolution() -> None:
+    """An array whose codec this environment lacks still opens for document
+    work — reading the document, verifying it, erasing chunks and metadata —
+    and refuses only when the data path must be built."""
+    store = MemoryStore()
+    await _store_foreign_codec_array(store)
+
+    aio = await AsyncArrayIO.open(store, name="foo")
+    document = aio.document
+    assert isinstance(document, ZarrV3ArrayMetadata)
+    assert document.shape == (4,)
+    assert document.must_understand_fields == {}
+    await aio.verify()
+
+    with pytest.raises(UnknownCodecError, match="zarr-python-does-not-know-this-codec"):
+        await aio.getitem(Ellipsis)
+
+    await aio.erase_chunk((0,))
+    await aio.erase_chunks()
+    await aio.store_metadata()
+    await aio.erase_metadata()
+    assert await _store_keys(store) == set()
 
 
 async def test_verify_mismatch_raises() -> None:

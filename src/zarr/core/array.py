@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import json
 import math
 import warnings
 from asyncio import gather
@@ -21,6 +22,7 @@ from warnings import warn
 
 import numpy as np
 from typing_extensions import Sentinel, deprecated
+from zarr_metadata import ZarrV2ArrayMetadata, ZarrV3ArrayMetadata
 
 import zarr
 from zarr.abc.codec import ArrayArrayCodec, ArrayBytesCodec, BytesBytesCodec, Codec
@@ -121,6 +123,7 @@ from zarr.core.metadata import (
 )
 from zarr.core.metadata.io import (
     ARRAY_DOCUMENTS,
+    _write_metadata,
     encode_documents,
     parse_stored_array,
     read_documents,
@@ -138,7 +141,9 @@ from zarr.core.metadata.v2 import (
 from zarr.core.metadata.v3 import (
     ChunkGridMetadata,
     RectilinearChunkGridMetadata,
+    RectilinearChunkGridMetadataJSON,
     RegularChunkGridMetadata,
+    RegularChunkGridMetadataJSON,
     create_chunk_grid_metadata,
     parse_node_type_array,
 )
@@ -420,6 +425,9 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         config: ArrayConfigLike | None = None,
     ) -> None:
         object.__setattr__(self, "_io", AsyncArrayIO(metadata, store_path, config))
+        # An AsyncArray is the resolving layer: build its codec pipeline now, so
+        # pipeline-construction warnings fire at creation, as they always have.
+        _ = self._io._resolved_codec_pipeline
 
     @classmethod
     def _from_io(cls, io: AsyncArrayIO) -> AnyAsyncArray:
@@ -451,7 +459,7 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
     @property
     def codec_pipeline(self) -> CodecPipeline:
         """The codec pipeline used for encoding and decoding chunks."""
-        return self._io._codec_pipeline
+        return self._io._resolved_codec_pipeline
 
     @property
     def _chunk_grid(self) -> ChunkGrid:
@@ -6058,8 +6066,7 @@ async def _resize(
     array._stored_document_replaced()
 
     # Update the wrapped binding in place; the codec pipeline is kept, as before.
-    array._io._metadata = new_metadata
-    array._io._chunk_grid = new_chunk_grid
+    array._io._rebind_resolved(new_metadata, new_chunk_grid)
 
 
 async def _append(
@@ -6145,6 +6152,8 @@ async def _update_attributes(
         The array with the updated attributes.
     """
     array.metadata.attributes.update(new_attributes)
+    # The document the binding derives must re-derive from the changed metadata.
+    array._io._rebind_resolved(array.metadata, array._chunk_grid)
 
     # Write new metadata
     await array._save_metadata()
@@ -6180,12 +6189,50 @@ async def _delete_key(store_path: StorePath, key: str) -> None:
     await (store_path / key).delete()
 
 
+type ArrayDocumentModel = ZarrV2ArrayMetadata | ZarrV3ArrayMetadata
+"""A Zarr array metadata document, held as a `zarr_metadata` model: the JSON as
+written, validated, with extension names read but never resolved into classes."""
+
+
+def _document_json(document: ArrayDocumentModel) -> dict[str, Any]:
+    """The document as plain, mutable JSON. The model returns read-only forms —
+    arrays as tuples — while zarr's parsers take the stored forms, so the
+    document goes through JSON text."""
+    return cast("dict[str, Any]", json.loads(json.dumps(document.to_json())))
+
+
+def _array_document_model(data: dict[str, JSON]) -> ArrayDocumentModel:
+    """The model of an array metadata document in the form `get_array_metadata`
+    returns: the Zarr format 2 form carries its attributes merged in.
+
+    The read is strict: a document with problems — including one zarr can only
+    read as repaired — raises `zarr_metadata.MetadataValidationError` naming
+    each problem. A document whose extension names are unknown is not a
+    problem: the model reports them as unclaimed fields, and resolution
+    fails only when the data path is built.
+    """
+    if data.get("zarr_format") == 2:
+        return ZarrV2ArrayMetadata(data)
+    return ZarrV3ArrayMetadata(data)
+
+
 class AsyncArrayIO:
     """Explicit asynchronous IO for one Zarr array.
 
     An `AsyncArrayIO` binds an array metadata document to a location in a
-    store. Constructing one — directly, or with `build` — performs no IO:
-    nothing is read from or written to the store until an IO method is called.
+    store. The document is held as a `zarr_metadata` model — the JSON as
+    written, with extension names read but not resolved into codec or data
+    type classes — so every document operation (`store_metadata`,
+    `erase_metadata`, `erase_chunk`, `erase_chunks`, `verify`) works without
+    resolving anything: an array whose codecs this environment lacks can
+    still be opened, verified and erased. Reading and writing chunks
+    (`getitem` / `setitem`) resolves the document into classes on first use;
+    `metadata` is that resolved form, derived once from `document` — or, when
+    the instance was built from an already-resolved metadata object (as every
+    `AsyncArray` is), held directly, with `document` the derived one.
+
+    Constructing one — directly, or with `build` — performs no IO: nothing is
+    read from or written to the store until an IO method is called.
     `store_metadata` stores the metadata document, and `setitem` / `getitem`
     store and read chunks, in whatever order the caller chooses. Every write
     has an erasing inverse: `store_metadata` ↔ `erase_metadata`, and chunk
@@ -6199,9 +6246,9 @@ class AsyncArrayIO:
     be misread by a different array stored later at the same location;
     `erase_chunks` removes them.
 
-    Warning: the bound metadata is assumed, never verified against the store.
-    Reads and partial writes decode stored chunks under it, so binding
-    metadata that disagrees with how existing chunks at this location were
+    Warning: the bound document is assumed, never verified against the store.
+    Reads and partial writes decode stored chunks under it, so binding a
+    document that disagrees with how existing chunks at this location were
     encoded misreads or corrupts data — the hazard TensorStore documents for
     `assume_metadata`. One exception to "no implicit metadata IO": an array
     opened from a stored document that needed a repair stores that repair
@@ -6209,26 +6256,35 @@ class AsyncArrayIO:
     write explicit.
     """
 
-    _metadata: ArrayMetadata
     _store_path: StorePath
     _config: ArrayConfig
-    _codec_pipeline: CodecPipeline
-    _chunk_grid: ChunkGrid
+    _source: ArrayDocumentModel | ArrayMetadata
+    _document_cache: ArrayDocumentModel | None
+    _resolved_cache: ArrayMetadata | None
+    _chunk_grid_cache: ChunkGrid | None
+    _chunk_key_encoding_cache: ChunkKeyEncoding | None
+    _codec_pipeline_cache: CodecPipeline | None
 
     def __init__(
         self,
-        metadata: ArrayMetadata | ArrayMetadataDict,
+        document: ArrayDocumentModel | ArrayMetadata | ArrayMetadataDict,
         store_path: StorePath,
         config: ArrayConfigLike | None = None,
     ) -> None:
-        metadata_parsed = parse_array_metadata(metadata, str(store_path))
-        self._metadata = metadata_parsed
         self._store_path = store_path
         self._config = parse_array_config(config)
-        self._chunk_grid = ChunkGrid.from_metadata(metadata_parsed)
-        self._codec_pipeline = create_codec_pipeline(
-            metadata=metadata_parsed, store=store_path.store
-        )
+        self._document_cache = None
+        self._resolved_cache = None
+        self._chunk_grid_cache = None
+        self._chunk_key_encoding_cache = None
+        self._codec_pipeline_cache = None
+        if isinstance(document, ZarrV2ArrayMetadata | ZarrV3ArrayMetadata):
+            self._source = document
+        else:
+            # A resolved metadata object passes through; a raw document dict is
+            # read eagerly, as repaired when it needs that, warning as `AsyncArray`
+            # always has.
+            self._source = parse_array_metadata(document, str(store_path))
 
     @classmethod
     async def build(
@@ -6284,23 +6340,50 @@ class AsyncArrayIO:
         zarr_format: ZarrFormat | None = None,
         config: ArrayConfigLike | None = None,
     ) -> AsyncArrayIO:
-        """Read the metadata of an existing array and bind to it.
+        """Read the metadata document of an existing array and bind to it.
 
         This is the one classmethod constructor that performs IO: the array's
         stored metadata document is read from the store. `zarr_format=None`
         (the default) reads Zarr format 3 and falls back to format 2, as
-        `open` does in `zarrs`; pass 2 or 3 to require one format.
+        `open` does in `zarrs`; pass 2 or 3 to require one format. The read is
+        strict and does not resolve extension names: an array with unknown
+        codecs opens for document work, while a stored document zarr can only
+        read as repaired raises `zarr_metadata.MetadataValidationError` — open
+        such an array with [`zarr.api.asynchronous.open_array`][], which reads
+        it as repaired.
         """
         store_path = await make_store_path(store, path=name)
-        metadata = parse_array_metadata(
-            await get_array_metadata(store_path, zarr_format=zarr_format), str(store_path)
-        )
-        return cls(metadata, store_path, config)
+        data = await get_array_metadata(store_path, zarr_format=zarr_format)
+        return cls(_array_document_model(data), store_path, config)
+
+    @property
+    def document(self) -> ArrayDocumentModel:
+        """The metadata document this instance is bound to, as a `zarr_metadata` model."""
+        source = self._source
+        if isinstance(source, ZarrV2ArrayMetadata | ZarrV3ArrayMetadata):
+            return source
+        if self._document_cache is None:
+            buffers = source.to_buffer_dict(default_buffer_prototype())
+            key_value = {key: buffer.to_bytes() for key, buffer in buffers.items()}
+            if isinstance(source, ArrayV2Metadata):
+                self._document_cache = ZarrV2ArrayMetadata.from_key_value(key_value)
+            else:
+                self._document_cache = ZarrV3ArrayMetadata.from_key_value(key_value)
+        return self._document_cache
 
     @property
     def metadata(self) -> ArrayMetadata:
-        """The in-memory metadata this instance is bound to."""
-        return self._metadata
+        """The resolved metadata: the document with its codec and data type names
+        resolved into classes, derived from `document` on first use."""
+        source = self._source
+        if isinstance(source, ArrayV2Metadata | ArrayV3Metadata):
+            return source
+        if self._resolved_cache is None:
+            data = _document_json(source)
+            if isinstance(source, ZarrV2ArrayMetadata):
+                data["attributes"] = dict(source.attributes)
+            self._resolved_cache = parse_array_metadata(data, str(self._store_path))
+        return self._resolved_cache
 
     @property
     def store_path(self) -> StorePath:
@@ -6313,10 +6396,108 @@ class AsyncArrayIO:
         return self._config
 
     @property
+    def _zarr_format(self) -> ZarrFormat:
+        if isinstance(self._source, ZarrV2ArrayMetadata | ArrayV2Metadata):
+            return 2
+        return 3
+
+    @property
+    def _resolved_if_any(self) -> ArrayMetadata | None:
+        source = self._source
+        if isinstance(source, ArrayV2Metadata | ArrayV3Metadata):
+            return source
+        return self._resolved_cache
+
+    def _rebind_resolved(
+        self, resolved: ArrayMetadata, chunk_grid: ChunkGrid | None = None
+    ) -> None:
+        """Make `resolved` this binding's state; the document re-derives from it.
+        The codec pipeline is kept: rebinding is how `resize` swaps the shape,
+        which leaves the chunk encoding as it was."""
+        self._source = resolved
+        self._document_cache = None
+        self._resolved_cache = None
+        self._chunk_grid_cache = chunk_grid
+        self._chunk_key_encoding_cache = None
+
+    @property
+    def _chunk_grid(self) -> ChunkGrid:
+        """The stored chunk grid: from the resolved metadata when the instance
+        holds one, and otherwise from the document alone, so the storage-level
+        operations of a document-bound instance never resolve codecs."""
+        if self._chunk_grid_cache is None:
+            resolved = self._resolved_if_any
+            if resolved is not None:
+                self._chunk_grid_cache = ChunkGrid.from_metadata(resolved)
+                return self._chunk_grid_cache
+            document = self.document
+            doc = _document_json(document)
+            if isinstance(document, ZarrV2ArrayMetadata):
+                self._chunk_grid_cache = ChunkGrid.from_sizes(document.shape, tuple(doc["chunks"]))
+            else:
+                grid = doc["chunk_grid"]
+                # Through the same grid-metadata objects `ChunkGrid.from_metadata`
+                # dispatches on, so both derivations lay out chunks identically.
+                # A grid needs its configuration to lay out keys, so the v3.1
+                # bare-name shorthand cannot name a computable grid.
+                name = grid if isinstance(grid, str) else grid["name"]
+                sizes: Sequence[int | Sequence[int]]
+                if isinstance(grid, dict) and name == "regular":
+                    sizes = tuple(
+                        RegularChunkGridMetadata.from_dict(
+                            cast("RegularChunkGridMetadataJSON", grid)
+                        ).chunk_shape
+                    )
+                elif isinstance(grid, dict) and name == "rectilinear":
+                    sizes = RectilinearChunkGridMetadata.from_dict(
+                        cast("RectilinearChunkGridMetadataJSON", grid)
+                    ).chunk_shapes
+                else:
+                    raise ValueError(
+                        f"Array {str(self._store_path)!r}: unknown chunk grid "
+                        f"{name!r}; its stored chunk keys cannot be computed."
+                    )
+                self._chunk_grid_cache = ChunkGrid.from_sizes(document.shape, sizes)
+        return self._chunk_grid_cache
+
+    def _encode_chunk_key(self, chunk_coords: tuple[int, ...]) -> str:
+        """The store key of a stored chunk: from the resolved metadata when the
+        instance holds one, and otherwise from the document alone."""
+        resolved = self._resolved_if_any
+        if resolved is not None:
+            return resolved.encode_chunk_key(chunk_coords)
+        return self._chunk_key_encoding.encode_chunk_key(chunk_coords)
+
+    @property
+    def _chunk_key_encoding(self) -> ChunkKeyEncoding:
+        """The chunk key encoding, derived from the document alone."""
+        if self._chunk_key_encoding_cache is None:
+            document = self.document
+            doc = _document_json(document)
+            if isinstance(document, ZarrV2ArrayMetadata):
+                self._chunk_key_encoding_cache = V2ChunkKeyEncoding(
+                    separator=doc.get("dimension_separator", ".")
+                )
+            else:
+                encoding = doc["chunk_key_encoding"]
+                if isinstance(encoding, str):  # the v3.1 bare-name shorthand
+                    encoding = {"name": encoding}
+                self._chunk_key_encoding_cache = parse_chunk_key_encoding(encoding)
+        return self._chunk_key_encoding_cache
+
+    @property
     def _shard_grid_shape(self) -> tuple[int, ...]:
         # The stored chunk grid is the shard grid when sharding is used, the
         # chunk grid otherwise, so its keys are the stored chunk keys.
         return self._chunk_grid.grid_shape
+
+    @property
+    def _resolved_codec_pipeline(self) -> CodecPipeline:
+        if self._codec_pipeline_cache is None:
+            self._codec_pipeline_cache = create_codec_pipeline(
+                metadata=self.metadata, store=self._store_path.store
+            )
+        return self._codec_pipeline_cache
 
     def to_array(self) -> AnyAsyncArray:
         """Return an `AsyncArray` over this binding; both share one state."""
@@ -6333,38 +6514,53 @@ class AsyncArrayIO:
         new metadata; call `erase_chunks` first when repurposing a location.
         With `ensure_parents`, missing parent groups are stored first.
         """
-        await save_metadata(self._store_path, self._metadata, ensure_parents=ensure_parents)
-        _stored_document_replaced(self._metadata)
+        source = self._source
+        if isinstance(source, ArrayV2Metadata | ArrayV3Metadata):
+            await save_metadata(self._store_path, source, ensure_parents=ensure_parents)
+            _stored_document_replaced(source)
+        else:
+            prototype = default_buffer_prototype()
+            to_save = {
+                str(key): prototype.buffer.from_bytes(value)
+                for key, value in source.to_key_value().items()
+            }
+            await _write_metadata(
+                self._store_path, to_save, self._zarr_format, ensure_parents=ensure_parents
+            )
 
     async def verify(self) -> None:
         """Check that the stored metadata declares the array this instance is bound to.
 
-        Reads the metadata stored at this location — favoring Zarr format 3
-        when documents of both formats exist — and raises `ValueError` naming
-        each differing field when it does not equal the bound metadata.
-        Raises [`zarr.errors.ArrayNotFoundError`][] when nothing is stored.
-        This is the explicit counterpart of the verification TensorStore
-        performs against spec constraints on open: a writer that declared its
-        own metadata with `build` can assert, before writing chunks, that it
+        Reads the metadata document stored at this location — favoring Zarr
+        format 3 when documents of both formats exist — and raises
+        `ValueError` naming each differing field when it does not equal the
+        bound document. Document equality is semantic: a fill value is
+        compared in its canonical spelling. Raises
+        [`zarr.errors.ArrayNotFoundError`][] when nothing is stored. This is
+        the explicit counterpart of the verification TensorStore performs
+        against spec constraints on open: a writer that declared its own
+        metadata with `build` can assert, before writing chunks, that it
         agrees with what a coordinator stored.
         """
-        bound = self._metadata
-        stored = parse_array_metadata(
-            await get_array_metadata(self._store_path, zarr_format=None), str(self._store_path)
-        )
+        bound = self.document
+        stored = _array_document_model(await get_array_metadata(self._store_path, zarr_format=None))
         if stored == bound:
             return
         if type(stored) is not type(bound):
+            stored_format = 2 if isinstance(stored, ZarrV2ArrayMetadata) else 3
             raise ValueError(
                 f"Array {str(self.store_path)!r}: the stored array is Zarr format "
-                f"{stored.zarr_format}; the bound metadata is Zarr format "
-                f"{bound.zarr_format}."
+                f"{stored_format}; the bound document is Zarr format {self._zarr_format}."
             )
-        stored_dict, bound_dict = stored.to_dict(), bound.to_dict()
+        stored_json = dict(stored.to_json())
+        bound_json = dict(bound.to_json())
+        if isinstance(stored, ZarrV2ArrayMetadata) and isinstance(bound, ZarrV2ArrayMetadata):
+            stored_json["attributes"] = dict(stored.attributes)
+            bound_json["attributes"] = dict(bound.attributes)
         differing = sorted(
             key
-            for key in stored_dict.keys() | bound_dict.keys()
-            if stored_dict.get(key) != bound_dict.get(key)
+            for key in stored_json.keys() | bound_json.keys()
+            if stored_json.get(key) != bound_json.get(key)
         )
         raise ValueError(
             f"Array {str(self.store_path)!r}: the stored metadata does not match the "
@@ -6377,9 +6573,11 @@ class AsyncArrayIO:
         Succeeds if the documents do not exist, as `erase_metadata` does in
         `zarrs`. Stored chunks are kept; `erase_chunks` removes those.
         """
-        for document in ARRAY_DOCUMENTS[self._metadata.zarr_format]:
+        for document in ARRAY_DOCUMENTS[self._zarr_format]:
             await (self._store_path / document).delete()
-        _stored_document_replaced(self._metadata)
+        resolved = self._resolved_if_any
+        if resolved is not None:
+            _stored_document_replaced(resolved)
 
     async def erase_chunk(self, chunk_coords: tuple[int, ...]) -> None:
         """Erase one stored chunk by its chunk grid coordinates.
@@ -6395,7 +6593,7 @@ class AsyncArrayIO:
                 f"Chunk coordinates {chunk_coords} are outside the chunk grid "
                 f"of shape {grid_shape}."
             )
-        await _delete_key(self._store_path, self._metadata.encode_chunk_key(chunk_coords))
+        await _delete_key(self._store_path, self._encode_chunk_key(chunk_coords))
 
     async def erase_chunks(self) -> None:
         """Erase every stored chunk of this array, the inverse of its chunk writes.
@@ -6409,7 +6607,7 @@ class AsyncArrayIO:
         limit = zarr_config.get("async.concurrency") or 1000
         await concurrent_foreach(
             (
-                (self._store_path, self._metadata.encode_chunk_key(coords))
+                (self._store_path, self._encode_chunk_key(coords))
                 for coords in _iter_grid(grid_shape)
             ),
             _delete_key,
@@ -6426,8 +6624,8 @@ class AsyncArrayIO:
     ) -> NDArrayLikeOrScalar:
         return await _get_selection(
             self._store_path,
-            self._metadata,
-            self._codec_pipeline,
+            self.metadata,
+            self._resolved_codec_pipeline,
             self._config,
             self._chunk_grid,
             indexer,
@@ -6444,14 +6642,15 @@ class AsyncArrayIO:
         prototype: BufferPrototype,
         fields: Fields | None = None,
     ) -> None:
+        metadata = self.metadata
         if product(indexer.shape) > 0:
             # Chunks are about to be stored under the repaired metadata, so store it
             # first: every reader of the store then agrees with them.
-            await _store_repaired_document(self._store_path, self._metadata)
+            await _store_repaired_document(self._store_path, metadata)
         return await _set_selection(
             self._store_path,
-            self._metadata,
-            self._codec_pipeline,
+            metadata,
+            self._resolved_codec_pipeline,
             self._config,
             self._chunk_grid,
             indexer,
@@ -6469,7 +6668,7 @@ class AsyncArrayIO:
         """Read the selected region, reading absent chunks as the fill value."""
         if prototype is None:
             prototype = default_buffer_prototype()
-        indexer = BasicIndexer(selection, shape=self._metadata.shape, chunk_grid=self._chunk_grid)
+        indexer = BasicIndexer(selection, shape=self.metadata.shape, chunk_grid=self._chunk_grid)
         return await self._get_selection(indexer, prototype=prototype)
 
     async def setitem(
@@ -6481,28 +6680,28 @@ class AsyncArrayIO:
         """Encode `value` and store the chunks covering `selection`."""
         if prototype is None:
             prototype = default_buffer_prototype()
-        indexer = BasicIndexer(selection, shape=self._metadata.shape, chunk_grid=self._chunk_grid)
+        indexer = BasicIndexer(selection, shape=self.metadata.shape, chunk_grid=self._chunk_grid)
         return await self._set_selection(indexer, value, prototype=prototype)
 
     def __repr__(self) -> str:
-        return f"<AsyncArrayIO {self.store_path} shape={self.metadata.shape}>"
+        return f"<AsyncArrayIO {self.store_path} shape={self._source.shape}>"
 
     def __eq__(self, other: object) -> bool:
-        # Value equality over the full binding, matching what the dataclass-generated
-        # equality of AsyncArray compared when it held these as its own fields.
+        # Semantic equality over the binding: the document (canonically, via the
+        # model's own equality), the location and the runtime configuration.
         if not isinstance(other, AsyncArrayIO):
             return NotImplemented
-        return (
-            self._metadata == other._metadata
-            and self._store_path == other._store_path
-            and self._config == other._config
-            and self._codec_pipeline == other._codec_pipeline
-            and self._chunk_grid == other._chunk_grid
-        )
+        if self._store_path != other._store_path or self._config != other._config:
+            return False
+        resolved, other_resolved = self._resolved_if_any, other._resolved_if_any
+        if resolved is not None and other_resolved is not None:
+            return resolved == other_resolved
+        return self.document == other.document
 
     def __hash__(self) -> int:
-        # A subset of the equality fields: equal bindings hash equally.
-        return hash((type(self), self._metadata))
+        # A subset of the equality fields, available without deriving either
+        # form: equal bindings hash equally.
+        return hash((type(self), self._source.shape, self._store_path.path))
 
 
 class ArrayIO:
@@ -6512,11 +6711,11 @@ class ArrayIO:
 
     def __init__(
         self,
-        metadata: ArrayMetadata | ArrayMetadataDict,
+        document: ArrayDocumentModel | ArrayMetadata | ArrayMetadataDict,
         store_path: StorePath,
         config: ArrayConfigLike | None = None,
     ) -> None:
-        self._async_io = AsyncArrayIO(metadata, store_path, config)
+        self._async_io = AsyncArrayIO(document, store_path, config)
 
     @classmethod
     def _wrap(cls, async_io: AsyncArrayIO) -> ArrayIO:
@@ -6581,7 +6780,7 @@ class ArrayIO:
         zarr_format: ZarrFormat | None = None,
         config: ArrayConfigLike | None = None,
     ) -> ArrayIO:
-        """Read the metadata of an existing array and bind to it.
+        """Read the metadata document of an existing array and bind to it.
 
         See `AsyncArrayIO.open`.
         """
@@ -6590,8 +6789,13 @@ class ArrayIO:
         )
 
     @property
+    def document(self) -> ArrayDocumentModel:
+        """The metadata document this instance is bound to, as a `zarr_metadata` model."""
+        return self._async_io.document
+
+    @property
     def metadata(self) -> ArrayMetadata:
-        """The in-memory metadata this instance is bound to."""
+        """The resolved metadata. See `AsyncArrayIO.metadata`."""
         return self._async_io.metadata
 
     @property
@@ -6650,4 +6854,12 @@ class ArrayIO:
         sync(self._async_io.setitem(selection, value, prototype=prototype))
 
     def __repr__(self) -> str:
-        return f"<ArrayIO {self.store_path} shape={self.metadata.shape}>"
+        return f"<ArrayIO {self.store_path} shape={self._async_io._source.shape}>"
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, ArrayIO):
+            return NotImplemented
+        return self._async_io == other._async_io
+
+    def __hash__(self) -> int:
+        return hash((type(self), self._async_io))
