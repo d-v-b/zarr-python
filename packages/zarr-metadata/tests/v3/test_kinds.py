@@ -106,7 +106,7 @@ def test_error_a_scope_files_one_format() -> None:
     with pytest.raises(TypeError, match="v2 data type"):
         ZarrV3Context(data_types=[UINT_DATA_TYPE_V2])  # pyright: ignore[reportArgumentType]
     with pytest.raises(TypeError, match="v2 data type"):
-        CORE.update(data_types=[*CORE.data_types.values(), UINT_DATA_TYPE_V2])  # pyright: ignore[reportArgumentType]
+        CORE.union(ZarrV3Context(data_types=[UINT_DATA_TYPE_V2]))  # pyright: ignore[reportArgumentType]
     with pytest.raises(TypeError, match="format"):
         CORE.union(CORE_V2)  # pyright: ignore[reportArgumentType]
 
