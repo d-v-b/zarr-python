@@ -429,6 +429,11 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         return self
 
     @property
+    def io(self) -> AsyncArrayIO:
+        """The explicit-IO layer this array delegates to; both share one state."""
+        return self._io
+
+    @property
     def metadata(self) -> T_ArrayMetadata:
         """The in-memory metadata of this array."""
         return cast("T_ArrayMetadata", self._io.metadata)
@@ -1897,6 +1902,11 @@ class Array[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
             An asynchronous array whose metadata + store matches that of this synchronous array.
         """
         return self._async_array
+
+    @property
+    def io(self) -> ArrayIO:
+        """The explicit synchronous IO layer over this array's binding."""
+        return ArrayIO._wrap(self._async_array._io)
 
     @property
     def config(self) -> ArrayConfig:

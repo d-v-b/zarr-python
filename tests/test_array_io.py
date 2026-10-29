@@ -1,4 +1,4 @@
-"""Tests for the explicit-IO array layer in `zarr.experimental.array_io`."""
+"""Tests for the explicit-IO array layer, `zarr.ArrayIO` and `zarr.AsyncArrayIO`."""
 
 from __future__ import annotations
 
@@ -7,9 +7,9 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pytest
 
+from zarr import ArrayIO, AsyncArrayIO
 from zarr.api.asynchronous import open_array
 from zarr.errors import ArrayNotFoundError
-from zarr.experimental import ArrayIO, AsyncArrayIO
 from zarr.storage import MemoryStore
 
 if TYPE_CHECKING:
@@ -54,6 +54,9 @@ async def test_chunks_before_metadata(zarr_format: ZarrFormat) -> None:
 
     arr = await open_array(store=store, path="foo", mode="r", zarr_format=zarr_format)
     np.testing.assert_array_equal(await arr.getitem(Ellipsis), data)
+    # every AsyncArray is built on an AsyncArrayIO, reachable as .io
+    assert arr.io.metadata is arr.metadata
+    np.testing.assert_array_equal(await arr.io.getitem(Ellipsis), data)
 
     # a writer that declared the same array independently can verify its assumption
     worker = await AsyncArrayIO.build(
@@ -96,6 +99,8 @@ def test_chunks_before_metadata_sync() -> None:
     opened = ArrayIO.open(store, name="foo")
     np.testing.assert_array_equal(opened.getitem(Ellipsis), data)
     np.testing.assert_array_equal(opened.to_array()[:], data)
+    # every Array is built on the IO layer, reachable as .io
+    np.testing.assert_array_equal(opened.to_array().io.getitem(Ellipsis), data)
     opened.erase_chunk((0, 0))
     opened.erase_chunks()
     opened.erase_metadata()
