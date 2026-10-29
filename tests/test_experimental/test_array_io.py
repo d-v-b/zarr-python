@@ -46,12 +46,32 @@ async def test_chunks_before_metadata(zarr_format: ZarrFormat) -> None:
     np.testing.assert_array_equal(await aio.getitem(Ellipsis), data)
 
     await aio.store_metadata()
-    opened = await AsyncArrayIO.open(store, name="foo", zarr_format=zarr_format)
+    # the default zarr_format=None auto-detects the format, like zarrs
+    opened = await AsyncArrayIO.open(store, name="foo")
+    assert opened.metadata.zarr_format == zarr_format
     assert opened.metadata.attributes == {"answer": 42}
     np.testing.assert_array_equal(await opened.getitem(Ellipsis), data)
 
     arr = await open_array(store=store, path="foo", mode="r", zarr_format=zarr_format)
     np.testing.assert_array_equal(await arr.getitem(Ellipsis), data)
+
+    # every write has an erasing inverse: one chunk, all chunks, then metadata
+    await opened.erase_chunk((0, 0))
+    partially_erased = np.asarray(await opened.getitem(Ellipsis))
+    np.testing.assert_array_equal(partially_erased[:2, :2], np.zeros((2, 2), dtype="uint16"))
+    np.testing.assert_array_equal(partially_erased[2:, :], data[2:, :])
+
+    await opened.erase_chunks()
+    await opened.erase_chunks()  # erasing absent chunks succeeds
+    np.testing.assert_array_equal(await opened.getitem(Ellipsis), np.zeros_like(data))
+    keys = await _store_keys(store)
+    assert all(key.split("/")[-1] in METADATA_DOCUMENTS for key in keys)
+
+    await opened.erase_metadata()
+    await opened.erase_metadata()  # erasing absent metadata succeeds
+    assert await _store_keys(store) == set()
+    with pytest.raises(ArrayNotFoundError):
+        await AsyncArrayIO.open(store, name="foo")
 
 
 def test_chunks_before_metadata_sync() -> None:
@@ -64,6 +84,11 @@ def test_chunks_before_metadata_sync() -> None:
     opened = ArrayIO.open(store, name="foo")
     np.testing.assert_array_equal(opened.getitem(Ellipsis), data)
     np.testing.assert_array_equal(opened.to_array()[:], data)
+    opened.erase_chunk((0, 0))
+    opened.erase_chunks()
+    opened.erase_metadata()
+    with pytest.raises(ArrayNotFoundError):
+        ArrayIO.open(store, name="foo")
 
 
 def test_build_v2_shards_raises() -> None:
@@ -82,3 +107,11 @@ def test_build_v2_shards_raises() -> None:
 async def test_open_missing_raises() -> None:
     with pytest.raises(ArrayNotFoundError):
         await AsyncArrayIO.open(MemoryStore(), name="foo")
+
+
+async def test_erase_chunk_out_of_grid_raises() -> None:
+    aio = await AsyncArrayIO.build(MemoryStore(), shape=(4, 4), dtype="uint8", chunks=(2, 2))
+    with pytest.raises(IndexError, match="outside the chunk grid"):
+        await aio.erase_chunk((2, 0))
+    with pytest.raises(IndexError, match="outside the chunk grid"):
+        await aio.erase_chunk((0,))

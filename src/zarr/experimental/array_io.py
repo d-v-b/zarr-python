@@ -6,15 +6,36 @@ document to a location in a store, and every read or write of that store is an
 explicit method call. In particular, metadata is stored only when
 `store_metadata` is called, so chunks can be written before metadata — a
 pattern the eager creation API (`zarr.create_array`) cannot express. This
-mirrors the array APIs of `zarrs` and `zarrita`, where storing metadata is a
-separate step from storing chunks.
+mirrors the array API of `zarrs`, where storing, retrieving and erasing
+metadata and chunks are each explicit operations.
+
+Every write has an erasing inverse: `store_metadata` ↔ `erase_metadata`,
+and `setitem` ↔ `erase_chunk` / `erase_chunks`. `store_metadata` is the
+publication point: until it is called, no Zarr reader resolves the array, so
+a failed chunks-first run leaves no readable array. It does leave chunk keys
+in the store, which occupy space and would be misread by a different array
+stored later at the same location; `erase_chunks` removes them.
+
+One exception to "no implicit metadata IO": an array opened from a stored
+document that needed a repair stores that repair before its first chunk
+write, exactly as `AsyncArray` does. Call `store_metadata` first to make
+that write explicit.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Literal
 
-from zarr.core.array import DEFAULT_FILL_VALUE, Array, AsyncArray, build_array_metadata
+from zarr.core.array import (
+    DEFAULT_FILL_VALUE,
+    Array,
+    AsyncArray,
+    _iter_shard_keys,
+    build_array_metadata,
+)
+from zarr.core.common import concurrent_foreach, product
+from zarr.core.config import config as zarr_config
+from zarr.core.metadata.io import ARRAY_DOCUMENTS
 from zarr.core.sync import sync
 from zarr.storage._common import make_store_path
 
@@ -48,6 +69,10 @@ if TYPE_CHECKING:
 __all__ = ["ArrayIO", "AsyncArrayIO"]
 
 
+async def _delete_key(store_path: StorePath, key: str) -> None:
+    await (store_path / key).delete()
+
+
 class AsyncArrayIO:
     """Explicit asynchronous IO for one Zarr array.
 
@@ -56,6 +81,12 @@ class AsyncArrayIO:
     nothing is read from or written to the store until an IO method is called.
     `store_metadata` stores the metadata document, and `setitem` / `getitem`
     store and read chunks, in whatever order the caller chooses.
+
+    Warning: the bound metadata is assumed, never verified against the store.
+    Reads and partial writes decode stored chunks under it, so binding
+    metadata that disagrees with how existing chunks at this location were
+    encoded misreads or corrupts data — the hazard TensorStore documents for
+    `assume_metadata`.
     """
 
     _array: AsyncArray[ArrayV2Metadata] | AsyncArray[ArrayV3Metadata]
@@ -125,13 +156,15 @@ class AsyncArrayIO:
         store: StoreLike,
         *,
         name: str | None = None,
-        zarr_format: ZarrFormat | None = 3,
+        zarr_format: ZarrFormat | None = None,
         config: ArrayConfigLike | None = None,
     ) -> AsyncArrayIO:
         """Read the metadata of an existing array and bind to it.
 
         This is the one classmethod constructor that performs IO: the array's
-        stored metadata document is read from the store.
+        stored metadata document is read from the store. `zarr_format=None`
+        (the default) reads Zarr format 3 and falls back to format 2, as
+        `open` does in `zarrs`; pass 2 or 3 to require one format.
         """
         store_path = await make_store_path(store, path=name)
         array = await AsyncArray.open(store_path, zarr_format, config=config)
@@ -162,10 +195,55 @@ class AsyncArrayIO:
         The documents are written unconditionally, replacing the metadata of
         any existing node at this location, as `store_metadata` does in
         `zarrs`. Guarded creation, which raises when a node already exists,
-        is [`zarr.api.asynchronous.create_array`][]'s job. With
-        `ensure_parents`, missing parent groups are stored first.
+        is [`zarr.api.asynchronous.create_array`][]'s job. Chunks of any
+        previous array at this location are kept and would be read under the
+        new metadata; call `erase_chunks` first when repurposing a location.
+        With `ensure_parents`, missing parent groups are stored first.
         """
         await self._array._save_metadata(self._array.metadata, ensure_parents=ensure_parents)
+
+    async def erase_metadata(self) -> None:
+        """Erase this array's metadata document(s), the inverse of `store_metadata`.
+
+        Succeeds if the documents do not exist, as `erase_metadata` does in
+        `zarrs`. Stored chunks are kept; `erase_chunks` removes those.
+        """
+        store_path = self._array.store_path
+        for document in ARRAY_DOCUMENTS[self.metadata.zarr_format]:
+            await (store_path / document).delete()
+        self._array._stored_document_replaced()
+
+    async def erase_chunk(self, chunk_coords: tuple[int, ...]) -> None:
+        """Erase one stored chunk by its chunk grid coordinates.
+
+        When sharding is used, the stored chunk is the shard. Succeeds if the
+        chunk does not exist, as `erase_chunk` does in `zarrs`.
+        """
+        grid_shape = self._array._shard_grid_shape
+        if len(chunk_coords) != len(grid_shape) or any(
+            coord < 0 or coord >= size for coord, size in zip(chunk_coords, grid_shape, strict=True)
+        ):
+            raise IndexError(
+                f"Chunk coordinates {chunk_coords} are outside the chunk grid "
+                f"of shape {grid_shape}."
+            )
+        await _delete_key(self._array.store_path, self.metadata.encode_chunk_key(chunk_coords))
+
+    async def erase_chunks(self) -> None:
+        """Erase every stored chunk of this array, the inverse of its chunk writes.
+
+        Chunks that do not exist are skipped; the metadata documents are kept.
+        """
+        n_chunks = product(self._array._shard_grid_shape)
+        if n_chunks == 0:
+            return
+        limit = zarr_config.get("async.concurrency") or 1000
+        store_path = self._array.store_path
+        await concurrent_foreach(
+            ((store_path, key) for key in _iter_shard_keys(self._array)),
+            _delete_key,
+            min(limit, n_chunks),
+        )
 
     async def getitem(
         self,
@@ -262,7 +340,7 @@ class ArrayIO:
         store: StoreLike,
         *,
         name: str | None = None,
-        zarr_format: ZarrFormat | None = 3,
+        zarr_format: ZarrFormat | None = None,
         config: ArrayConfigLike | None = None,
     ) -> ArrayIO:
         """Read the metadata of an existing array and bind to it.
@@ -295,6 +373,18 @@ class ArrayIO:
     def store_metadata(self, *, ensure_parents: bool = False) -> None:
         """Store this array's metadata document(s). See `AsyncArrayIO.store_metadata`."""
         sync(self._async_io.store_metadata(ensure_parents=ensure_parents))
+
+    def erase_metadata(self) -> None:
+        """Erase this array's metadata document(s). See `AsyncArrayIO.erase_metadata`."""
+        sync(self._async_io.erase_metadata())
+
+    def erase_chunk(self, chunk_coords: tuple[int, ...]) -> None:
+        """Erase one stored chunk by its chunk grid coordinates. See `AsyncArrayIO.erase_chunk`."""
+        sync(self._async_io.erase_chunk(chunk_coords))
+
+    def erase_chunks(self) -> None:
+        """Erase every stored chunk of this array. See `AsyncArrayIO.erase_chunks`."""
+        sync(self._async_io.erase_chunks())
 
     def getitem(
         self,
