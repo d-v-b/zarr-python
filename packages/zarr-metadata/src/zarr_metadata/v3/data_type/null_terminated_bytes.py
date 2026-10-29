@@ -15,10 +15,9 @@ from typing import Final, Literal, NotRequired
 from typing_extensions import ReadOnly, TypedDict
 
 from zarr_metadata._json import ValidationProblem
-from zarr_metadata._numpy import Base64Bytes
+from zarr_metadata._numpy import Base64Bytes, base64_fill_value_rules
 from zarr_metadata.definition._definition import Nested
 from zarr_metadata.v3._definition import DataTypeDefinition, single_byte
-from zarr_metadata.v3.data_type._byte import base64_problems
 
 NULL_TERMINATED_BYTES_DATA_TYPE_NAME: Final = "null_terminated_bytes"
 """The `name` field value of the `null_terminated_bytes` data type."""
@@ -69,7 +68,7 @@ def _fill_value_rules(
     value: NullTerminatedBytesFillValue,
 ) -> Iterator[ValidationProblem]:
     """Check that the fill value is base64, and that the bytes it encodes fit in `length_bytes`."""
-    problems = list(base64_problems(value))
+    problems = list(base64_fill_value_rules(configuration, nested, value))
     if problems:
         yield from problems
         return
