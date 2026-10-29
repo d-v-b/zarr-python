@@ -32,6 +32,8 @@ from zarr.core.array import (
     AsyncArray,
     _iter_shard_keys,
     build_array_metadata,
+    get_array_metadata,
+    parse_array_metadata,
 )
 from zarr.core.common import concurrent_foreach, product
 from zarr.core.config import config as zarr_config
@@ -201,6 +203,42 @@ class AsyncArrayIO:
         With `ensure_parents`, missing parent groups are stored first.
         """
         await self._array._save_metadata(self._array.metadata, ensure_parents=ensure_parents)
+
+    async def verify(self) -> None:
+        """Check that the stored metadata declares the array this instance is bound to.
+
+        Reads the metadata stored at this location — favoring Zarr format 3
+        when documents of both formats exist — and raises `ValueError` naming
+        each differing field when it does not equal the bound metadata.
+        Raises [`zarr.errors.ArrayNotFoundError`][] when nothing is stored.
+        This is the explicit counterpart of the verification TensorStore
+        performs against spec constraints on open: a writer that declared its
+        own metadata with `build` can assert, before writing chunks, that it
+        agrees with what a coordinator stored.
+        """
+        bound = self.metadata
+        stored = parse_array_metadata(
+            await get_array_metadata(self._array.store_path, zarr_format=None),
+            str(self._array.store_path),
+        )
+        if stored == bound:
+            return
+        if type(stored) is not type(bound):
+            raise ValueError(
+                f"Array {str(self.store_path)!r}: the stored array is Zarr format "
+                f"{stored.zarr_format}; the bound metadata is Zarr format "
+                f"{bound.zarr_format}."
+            )
+        stored_dict, bound_dict = stored.to_dict(), bound.to_dict()
+        differing = sorted(
+            key
+            for key in stored_dict.keys() | bound_dict.keys()
+            if stored_dict.get(key) != bound_dict.get(key)
+        )
+        raise ValueError(
+            f"Array {str(self.store_path)!r}: the stored metadata does not match the "
+            f"bound metadata; differing fields: {', '.join(differing)}."
+        )
 
     async def erase_metadata(self) -> None:
         """Erase this array's metadata document(s), the inverse of `store_metadata`.
@@ -373,6 +411,13 @@ class ArrayIO:
     def store_metadata(self, *, ensure_parents: bool = False) -> None:
         """Store this array's metadata document(s). See `AsyncArrayIO.store_metadata`."""
         sync(self._async_io.store_metadata(ensure_parents=ensure_parents))
+
+    def verify(self) -> None:
+        """Check that the stored metadata declares the array this instance is bound to.
+
+        See `AsyncArrayIO.verify`.
+        """
+        sync(self._async_io.verify())
 
     def erase_metadata(self) -> None:
         """Erase this array's metadata document(s). See `AsyncArrayIO.erase_metadata`."""

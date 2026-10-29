@@ -55,6 +55,18 @@ async def test_chunks_before_metadata(zarr_format: ZarrFormat) -> None:
     arr = await open_array(store=store, path="foo", mode="r", zarr_format=zarr_format)
     np.testing.assert_array_equal(await arr.getitem(Ellipsis), data)
 
+    # a writer that declared the same array independently can verify its assumption
+    worker = await AsyncArrayIO.build(
+        store,
+        name="foo",
+        shape=data.shape,
+        dtype=data.dtype,
+        chunks=(2, 2),
+        zarr_format=zarr_format,
+        attributes={"answer": 42},
+    )
+    await worker.verify()
+
     # every write has an erasing inverse: one chunk, all chunks, then metadata
     await opened.erase_chunk((0, 0))
     partially_erased = np.asarray(await opened.getitem(Ellipsis))
@@ -107,6 +119,33 @@ def test_build_v2_shards_raises() -> None:
 async def test_open_missing_raises() -> None:
     with pytest.raises(ArrayNotFoundError):
         await AsyncArrayIO.open(MemoryStore(), name="foo")
+
+
+async def test_verify_mismatch_raises() -> None:
+    store = MemoryStore()
+    aio = await AsyncArrayIO.build(store, shape=(4, 4), dtype="uint8", chunks=(2, 2))
+    await aio.store_metadata()
+    other = await AsyncArrayIO.build(
+        store, shape=(4, 4), dtype="uint8", chunks=(4, 4), attributes={"a": 1}
+    )
+    with pytest.raises(ValueError, match="differing fields: attributes, chunk_grid"):
+        await other.verify()
+
+
+async def test_verify_format_mismatch_raises() -> None:
+    store = MemoryStore()
+    await (
+        await AsyncArrayIO.build(store, shape=(4,), dtype="uint8", zarr_format=2)
+    ).store_metadata()
+    bound_v3 = await AsyncArrayIO.build(store, shape=(4,), dtype="uint8", zarr_format=3)
+    with pytest.raises(ValueError, match="stored array is Zarr format 2"):
+        await bound_v3.verify()
+
+
+async def test_verify_missing_raises() -> None:
+    aio = await AsyncArrayIO.build(MemoryStore(), shape=(4,), dtype="uint8")
+    with pytest.raises(ArrayNotFoundError):
+        await aio.verify()
 
 
 async def test_erase_chunk_out_of_grid_raises() -> None:
