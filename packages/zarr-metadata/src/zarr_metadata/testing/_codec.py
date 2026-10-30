@@ -19,18 +19,19 @@ from typing import TYPE_CHECKING, Any, Final
 from hypothesis import reject
 from hypothesis import strategies as st
 
+from zarr_metadata.definition._definition import AcceptedField, EmptyConfiguration
 from zarr_metadata.testing._data_type import FLOAT_WIDTHS, INTEGER_RANGES, finite_floats
 from zarr_metadata.testing._draw import (
     briefly,
     data_type_fields,
-    data_types,
+    data_type_names,
     fill_values_of,
     pipelines_for,
     read,
 )
 from zarr_metadata.testing._strategy import CodecStrategy
 from zarr_metadata.v3._definition import Chunk, DataTypeDefinition, storage_of
-from zarr_metadata.v3.codec._arithmetic import FLOATING_POINT, NO_REAL_NUMBERS, read_name
+from zarr_metadata.v3.codec._arithmetic import FLOATING_POINT, NO_REAL_NUMBERS
 from zarr_metadata.v3.codec.blosc import (
     BLOSC_CNAME,
     BLOSC_CODEC,
@@ -47,7 +48,7 @@ from zarr_metadata.v3.codec.cast_value import (
     CastValueCodecConfiguration,
     ScalarMap,
 )
-from zarr_metadata.v3.codec.crc32c import CRC32C_CODEC, Empty
+from zarr_metadata.v3.codec.crc32c import CRC32C_CODEC
 from zarr_metadata.v3.codec.gzip import GZIP_CODEC, GzipCodecConfiguration
 from zarr_metadata.v3.codec.scale_offset import SCALE_OFFSET_CODEC, ScaleOffsetCodecConfiguration
 from zarr_metadata.v3.codec.sharding_indexed import (
@@ -67,8 +68,9 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from zarr_metadata._common import JSONValue
+    from zarr_metadata.definition._definition import ResolvedField
     from zarr_metadata.testing._strategy import Configurations, Strategies
-    from zarr_metadata.v3._definition import CodecDefinition, CodecSize, Lengths, Resolved
+    from zarr_metadata.v3._definition import CodecDefinition, CodecSize, Lengths
 
 _MAX_RANK: Final = 5
 """The most axes an `order` is drawn with, when the chunk does not say."""
@@ -176,8 +178,7 @@ def _scale_offset(
     are small non-negative integers, which every listed type holds.
     """
     data_type = chunk.data_type
-    is_read = data_type is not None and data_type.resolution == "read"
-    definition = data_type.definition if data_type is not None and is_read else None
+    definition = data_type.definition if isinstance(data_type, AcceptedField) else None
     if definition is None:
         offset: st.SearchStrategy[JSONValue] = _SMALL_NUMBERS
         scale: st.SearchStrategy[JSONValue] = st.integers(1, 127)
@@ -207,10 +208,15 @@ def _unchunked(configurations: Configurations) -> CodecStrategy:
     return CodecStrategy(configurations=lambda _chunk, _strategies: configurations)
 
 
+def _name_read(data_type: ResolvedField[DataTypeDefinition[Any]] | None) -> str | None:
+    """The name of the definition that accepted `data_type`; None when none did."""
+    return data_type.definition.name if isinstance(data_type, AcceptedField) else None
+
+
 def _source_scalars(chunk: Chunk, strategies: Strategies) -> st.SearchStrategy[JSONValue]:
     """Values of the chunk's data type: its fill values, or small numbers when no scope read it or no strategy draws for it."""
     source = chunk.data_type
-    if source is None or read_name(source) is None or source.definition not in strategies:
+    if not isinstance(source, AcceptedField) or source.definition not in strategies:
         return _SMALL_NUMBERS
     return fill_values_of(source, strategies)
 
@@ -235,15 +241,15 @@ def _scalar_maps(
 @st.composite
 def _cast_value_configuration(
     draw: st.DrawFn,
-    targets: list[DataTypeDefinition[Any]],
+    targets: list[str],
     sources: st.SearchStrategy[JSONValue],
     strategies: Strategies,
 ) -> CastValueCodecConfiguration:
     """A data type to cast to, a rounding, an out-of-range mode it allows, and a scalar map between the two types."""
     field = draw(data_type_fields(targets, strategies))
-    target: Resolved[DataTypeDefinition[Any]] = read(field, DataTypeDefinition, strategies)
+    target: ResolvedField[DataTypeDefinition[Any]] = read(field, DataTypeDefinition, strategies)
     modes: tuple[CastOutOfRangeMode, ...] = CAST_OUT_OF_RANGE_MODE
-    if read_name(target) in FLOATING_POINT:
+    if _name_read(target) in FLOATING_POINT:
         modes = tuple(mode for mode in modes if mode != "wrap")
     configuration = CastValueCodecConfiguration(data_type=field)
     if draw(st.booleans()):
@@ -269,9 +275,9 @@ def _cast_value(
     of its direction; `wrap` is drawn only for a type that is not
     floating-point.
     """
-    if read_name(chunk.data_type) in NO_REAL_NUMBERS:
+    if _name_read(chunk.data_type) in NO_REAL_NUMBERS:
         return None
-    targets = [d for d in data_types(strategies) if d.name not in NO_REAL_NUMBERS]
+    targets = [name for name in data_type_names(strategies) if name not in NO_REAL_NUMBERS]
     if len(targets) == 0:
         return None
     return _cast_value_configuration(targets, _source_scalars(chunk, strategies), strategies)
@@ -363,7 +369,7 @@ CODEC_STRATEGIES: Final[Mapping[CodecDefinition[Any], CodecStrategy]] = {
     BLOSC_CODEC: _unchunked(_blosc()),
     BYTES_CODEC: CodecStrategy(configurations=_bytes),
     CAST_VALUE_CODEC: CodecStrategy(configurations=_cast_value),
-    CRC32C_CODEC: _unchunked(st.just(Empty())),
+    CRC32C_CODEC: _unchunked(st.just(EmptyConfiguration())),
     GZIP_CODEC: _unchunked(
         st.integers(0, 9).map(lambda level: GzipCodecConfiguration(level=level))
     ),

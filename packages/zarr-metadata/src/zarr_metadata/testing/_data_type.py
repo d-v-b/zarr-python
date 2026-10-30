@@ -15,17 +15,19 @@ from typing import TYPE_CHECKING, Any, Final, Literal, cast, get_args
 
 from hypothesis import strategies as st
 
+from zarr_metadata._numpy import NUMPY_TIME_MAX_SCALE_FACTOR
+from zarr_metadata.definition._definition import EmptyConfiguration
 from zarr_metadata.testing._draw import (
     briefly,
     data_type_fields,
-    data_types,
+    data_type_names,
     fill_values_of,
     read,
 )
 from zarr_metadata.testing._strategy import DataTypeStrategy
-from zarr_metadata.v3._definition import DataTypeDefinition, EmptyConfiguration, storage_of
+from zarr_metadata.v3._definition import DataTypeDefinition, storage_of
 from zarr_metadata.v3.data_type._float import FloatSpecialFillValue
-from zarr_metadata.v3.data_type._numpy_time import NUMPY_TIME_MAX_SCALE_FACTOR
+from zarr_metadata.v3.data_type._numpy_time import NUMPY_TIME_UNIT
 from zarr_metadata.v3.data_type.bool import BOOL_DATA_TYPE
 from zarr_metadata.v3.data_type.bytes import BYTES_DATA_TYPE
 from zarr_metadata.v3.data_type.complex64 import COMPLEX64_DATA_TYPE
@@ -42,7 +44,6 @@ from zarr_metadata.v3.data_type.numpy_datetime64 import (
     NumpyDatetime64Configuration,
 )
 from zarr_metadata.v3.data_type.numpy_timedelta64 import (
-    NUMPY_TIME_UNIT,
     NUMPY_TIMEDELTA64_DATA_TYPE,
     NumpyTimedelta64Configuration,
 )
@@ -59,7 +60,7 @@ if TYPE_CHECKING:
 
     from zarr_metadata._common import JSONValue
     from zarr_metadata.testing._strategy import Strategies
-    from zarr_metadata.v3.definition import ZarrV3MetadataFieldJSON
+    from zarr_metadata.v3 import ZarrV3MetadataFieldJSON
 
 FloatWidth = Literal[16, 32, 64]
 
@@ -197,7 +198,7 @@ def _fixed_size(strategies: Strategies) -> st.SearchStrategy[ZarrV3MetadataField
     types"
     (https://github.com/zarr-developers/zarr-extensions/blob/4da7b37a84f76e660902f6d3de3eaef0e0febae6/data-types/struct/README.md?plain=1#L42-L49).
     """
-    return data_type_fields(data_types(strategies), strategies).filter(
+    return data_type_fields(data_type_names(strategies), strategies).filter(
         lambda field: storage_of(read(field, DataTypeDefinition, strategies)) != "variable_length"
     )
 

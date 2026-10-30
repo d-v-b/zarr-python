@@ -21,6 +21,14 @@ import pytest
 from hypothesis import event, find, given, settings
 from hypothesis import strategies as st
 
+from zarr_metadata._typed_json import typeddict_keys
+from zarr_metadata.definition import (
+    AcceptedField,
+    Definition,
+    fill_value_problems,
+    resolve,
+)
+from zarr_metadata.definition._definition import as_kind, canonicalize, kind_of, unchanged
 from zarr_metadata.testing.strategies import (
     DEFAULT_STRATEGIES,
     ChunkKeyEncodingStrategy,
@@ -35,8 +43,7 @@ from zarr_metadata.testing.strategies import (
     fill_values,
     pipelines,
 )
-from zarr_metadata.typed_json import typeddict_keys
-from zarr_metadata.v3._definition import as_kind, kind_of, no_pipelines, storage_of, unchanged
+from zarr_metadata.v3._definition import chunk_grid_lengths, no_pipelines, storage_of
 from zarr_metadata.v3._pipeline import read_pipeline
 from zarr_metadata.v3.chunk_grid.rectilinear import RECTILINEAR_CHUNK_GRID
 from zarr_metadata.v3.codec.bytes import BYTES_CODEC
@@ -63,23 +70,25 @@ from zarr_metadata.v3.definition import (
     ChunkGridDefinition,
     CodecDefinition,
     DataTypeDefinition,
-    Definition,
-    ZarrV3MetadataFieldJSON,
-    canonicalize,
-    chunk_grid_lengths,
-    fill_value_problems,
-    resolve,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from zarr_metadata._common import JSONValue
+    from zarr_metadata.v3 import ZarrV3MetadataFieldJSON
 
 _IN_SCOPE = frozenset(
-    definition for table in CORE_AND_EXTENSIONS.tables.values() for definition in table.values()
+    (
+        *CORE_AND_EXTENSIONS.data_types.values(),
+        *CORE_AND_EXTENSIONS.chunk_grids.values(),
+        *CORE_AND_EXTENSIONS.chunk_key_encodings.values(),
+        *CORE_AND_EXTENSIONS.codecs.values(),
+        *CORE_AND_EXTENSIONS.storage_transformers.values(),
+    )
 )
-_CORE_DATA_TYPES = frozenset(CORE.tables[DataTypeDefinition].values())
+"""The definitions at the spec's extension points that `CORE_AND_EXTENSIONS` holds; members of a document it defines are not fields."""
+_CORE_DATA_TYPES = frozenset(CORE.data_types.values())
 
 _DEFINITIONS = sorted(DEFAULT_STRATEGIES, key=lambda definition: definition.name)
 _DATA_TYPES = [d for d in _DEFINITIONS if isinstance(d, DataTypeDefinition)]
@@ -106,7 +115,7 @@ def _read(definition: Definition[Any], field: object) -> Any:  # noqa: ANN401
     """`field` read in `CORE_AND_EXTENSIONS`, asserted to read without a problem by `definition`."""
     resolved, problems = resolve(field, as_kind(kind_of(definition)), CORE_AND_EXTENSIONS)
     assert problems == ()
-    assert resolved.resolution == "read"
+    assert isinstance(resolved, AcceptedField)
     assert resolved.definition is definition
     return resolved
 

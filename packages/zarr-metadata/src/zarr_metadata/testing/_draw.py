@@ -16,22 +16,19 @@ from typing import TYPE_CHECKING, Any, Final, cast
 from hypothesis import reject
 from hypothesis import strategies as st
 
+from zarr_metadata.definition._definition import AcceptedField, resolve
 from zarr_metadata.testing._strategy import NOTHING_KNOWN
-from zarr_metadata.v3._definition import (
-    CodecDefinition,
-    DataTypeDefinition,
-    carrying_name,
-    no_pipelines,
-    resolve,
-)
-from zarr_metadata.v3._registry import CORE, Context
+from zarr_metadata.v3._context import ZarrV3Context
+from zarr_metadata.v3._core import CORE
+from zarr_metadata.v3._definition import CodecDefinition, DataTypeDefinition, no_pipelines
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import Iterable, Iterator, Sequence
 
     from hypothesis.strategies import SearchStrategy
 
     from zarr_metadata._common import JSONValue
+    from zarr_metadata.definition._definition import D, Definition, ResolvedField
     from zarr_metadata.testing._strategy import (
         CodecStrategy,
         Configurations,
@@ -39,15 +36,9 @@ if TYPE_CHECKING:
         DefinitionStrategy,
         Strategies,
     )
-    from zarr_metadata.v3._definition import (
-        Chunk,
-        CodecKind,
-        CodecSize,
-        D,
-        Definition,
-        Resolved,
-    )
-    from zarr_metadata.v3.definition import ZarrV3MetadataFieldJSON
+    from zarr_metadata.v3 import ZarrV3MetadataFieldJSON
+    from zarr_metadata.v3._context import ZarrV3ContextSlots
+    from zarr_metadata.v3._definition import Chunk, CodecKind, CodecSize
 
 _MAX_ARRAY_ARRAY: Final = 2
 """The most array -> array codecs a pipeline is drawn with."""
@@ -76,7 +67,7 @@ class _Brief(Mapping["Definition[Any]", "DefinitionStrategy"]):
 
     def __init__(self, strategies: Strategies) -> None:
         self._strategies = strategies
-        self.scope = Context.of(*strategies)
+        self.scope = _scope(strategies)
 
     def __getitem__(self, definition: Definition[Any]) -> DefinitionStrategy:
         return self._strategies[definition]
@@ -89,6 +80,17 @@ class _Brief(Mapping["Definition[Any]", "DefinitionStrategy"]):
 
     def __repr__(self) -> str:
         return f"<strategies for {len(self)} definitions>"
+
+
+def _scope(definitions: Iterable[Definition[Any]]) -> ZarrV3Context:
+    """The scope that claims `definitions` and nothing else, each filed in the slot of its kind."""
+    slots: dict[str, list[Definition[Any]]] = {}
+    for definition in definitions:
+        slot = next(
+            slot for slot, kind in ZarrV3Context.kinds.items() if isinstance(definition, kind)
+        )
+        slots.setdefault(slot, []).append(definition)
+    return ZarrV3Context(**cast("ZarrV3ContextSlots", slots))
 
 
 def briefly(strategies: Strategies) -> _Brief:
@@ -111,12 +113,12 @@ def strategy_for(definition: Definition[Any], strategies: Strategies) -> Definit
     return found
 
 
-def scope_of(strategies: Strategies) -> Context:
+def scope_of(strategies: Strategies) -> ZarrV3Context:
     """The scope a drawn field is read in: every definition the strategies draw for."""
     return briefly(strategies).scope
 
 
-def read(field: object, kind: type[D], strategies: Strategies) -> Resolved[D]:
+def read(field: object, kind: type[D], strategies: Strategies) -> ResolvedField[D]:
     """`field`, drawn from `strategies` or held by a configuration handed to one, read in their scope; a `ValueError` if it is refused.
 
     A strategy draws what its definition accepts, so a refused field is a
@@ -155,7 +157,7 @@ def any_spelling(
     spec defines itself, are written as the bare name.
     """
     configuration = cast("Mapping[str, JSONValue]", draw(configurations))
-    carried = carrying_name(definition, configuration)
+    carried = definition._carrying_name(configuration)  # pyright: ignore[reportPrivateUsage]
     if carried is not None:
         return carried
     if _written_bare(definition):
@@ -171,33 +173,35 @@ def any_spelling(
     return cast("ZarrV3MetadataFieldJSON", field)
 
 
-def data_types(strategies: Strategies) -> list[DataTypeDefinition[Any]]:
-    """The data types `strategies` draw for, by name."""
-    return sorted(
-        (d for d in strategies if isinstance(d, DataTypeDefinition)), key=lambda d: d.name
-    )
+def data_type_names(strategies: Strategies) -> list[str]:
+    """The names of the data types `strategies` draw for, in order.
+
+    Names, not definitions, are what the strategies built from them hold:
+    Hypothesis prints a definition with every member it has, so a list of
+    them would make the strategy's repr as long as the scope is wide.
+    """
+    return sorted(d.name for d in strategies if isinstance(d, DataTypeDefinition))
 
 
 @st.composite
 def data_type_fields(
-    draw: st.DrawFn, among: Sequence[DataTypeDefinition[Any]], strategies: Strategies
+    draw: st.DrawFn, among: Sequence[str], strategies: Strategies
 ) -> ZarrV3MetadataFieldJSON:
-    """A data type field, of one of the definitions `among`, drawn from `strategies`."""
-    definition = draw(st.sampled_from(among))
+    """A data type field, of one of the definitions named `among`, drawn from `strategies`."""
+    definition = scope_of(strategies).data_types[draw(st.sampled_from(among))]
     found = cast("DataTypeStrategy", strategy_for(definition, strategies))
     return draw(any_spelling(definition, found.configurations(strategies)))
 
 
 def fill_values_of(
-    data_type: Resolved[DataTypeDefinition[Any]], strategies: Strategies
+    data_type: ResolvedField[DataTypeDefinition[Any]], strategies: Strategies
 ) -> SearchStrategy[JSONValue]:
     """Fill values of `data_type`, a data type field read in the strategies' scope; a `LookupError` if no definition in it read the field."""
-    definition, configuration = data_type.definition, data_type.configuration
-    if definition is None or configuration is None:
-        msg = f"no strategy draws fill values of {data_type.json!r}, which no definition in `strategies` reads"
-        raise LookupError(msg)
-    found = cast("DataTypeStrategy", strategy_for(definition, strategies))
-    return found.fill_values(configuration, strategies)
+    if isinstance(data_type, AcceptedField):
+        found = cast("DataTypeStrategy", strategy_for(data_type.definition, strategies))
+        return found.fill_values(data_type.configuration, strategies)
+    msg = f"no strategy draws fill values of {data_type.json!r}, which no definition in `strategies` reads"
+    raise LookupError(msg)
 
 
 def _taking(
@@ -271,7 +275,7 @@ def _walk(
             break
         definition, field = draw(_codec(options))
         codec = read(field, CodecDefinition, strategies)
-        assert codec.configuration is not None
+        assert isinstance(codec, AcceptedField)
         handed = definition.transition(codec.configuration, codec.nested, handed)
         codecs.append(field)
     options = _taking(handed, "array_bytes", sizes, strategies)
@@ -290,7 +294,7 @@ __all__ = [
     "any_spelling",
     "briefly",
     "data_type_fields",
-    "data_types",
+    "data_type_names",
     "fill_values_of",
     "pipelines_for",
     "read",

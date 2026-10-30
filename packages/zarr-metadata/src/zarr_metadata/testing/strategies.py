@@ -45,7 +45,8 @@ from __future__ import annotations
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Final, Literal, TypeVar, cast
 
-from zarr_metadata.model._sentinel import UNSET
+from zarr_metadata._sentinel import UNSET
+from zarr_metadata.definition._definition import Definition, as_kind, canonicalize, kind_of
 from zarr_metadata.testing._chunk_grid import CHUNK_GRID_STRATEGIES
 from zarr_metadata.testing._chunk_key_encoding import CHUNK_KEY_ENCODING_STRATEGIES
 from zarr_metadata.testing._codec import CODEC_STRATEGIES
@@ -67,13 +68,6 @@ from zarr_metadata.testing._strategy import (
     DefinitionStrategy,
     Strategies,
 )
-from zarr_metadata.v3._definition import (
-    Chunk,
-    Definition,
-    as_kind,
-    canonicalize,
-    kind_of,
-)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -81,13 +75,14 @@ if TYPE_CHECKING:
     from hypothesis.strategies import SearchStrategy
 
     from zarr_metadata._common import JSONValue
+    from zarr_metadata.v3 import ZarrV3MetadataFieldJSON
     from zarr_metadata.v3._definition import (
+        Chunk,
         ChunkGridDefinition,
         ChunkKeyEncodingDefinition,
         CodecDefinition,
         DataTypeDefinition,
     )
-    from zarr_metadata.v3.definition import ZarrV3MetadataFieldJSON
 
 C = TypeVar("C")
 
