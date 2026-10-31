@@ -14,7 +14,9 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Literal,
+    Required,
     TypedDict,
+    Unpack,
     cast,
     overload,
 )
@@ -4601,7 +4603,7 @@ def build_array_metadata(
     filters: FiltersLike = "auto",
     compressors: CompressorsLike = "auto",
     serializer: SerializerLike = "auto",
-    fill_value: Any | None = DEFAULT_FILL_VALUE,
+    fill_value: Any = DEFAULT_FILL_VALUE,
     order: MemoryOrder | None = None,
     zarr_format: ZarrFormat | None = 3,
     attributes: dict[str, JSON] | None = None,
@@ -6216,6 +6218,27 @@ def _array_document_model(data: dict[str, JSON]) -> ArrayDocumentModel:
     return ZarrV3ArrayMetadata(data)
 
 
+class ArrayDeclarationKwargs(TypedDict, total=False):
+    """The keyword arguments that declare an array: what `build_array_metadata`
+    takes, with the same meanings as in [`zarr.api.asynchronous.create_array`][].
+    This is the one declaration of the surface; `ArrayIO.build` and
+    `AsyncArrayIO.build` take it as their keyword arguments."""
+
+    shape: Required[ShapeLike]
+    dtype: Required[ZDTypeLike]
+    chunks: ChunksLike | Literal["auto"]
+    shards: ShardsLike | None
+    filters: FiltersLike
+    compressors: CompressorsLike
+    serializer: SerializerLike
+    fill_value: Any
+    order: MemoryOrder | None
+    zarr_format: ZarrFormat
+    attributes: dict[str, JSON] | None
+    chunk_key_encoding: ChunkKeyEncodingLike | None
+    dimension_names: DimensionNamesLike
+
+
 class AsyncArrayIO:
     """Explicit asynchronous IO for one Zarr array.
 
@@ -6287,48 +6310,29 @@ class AsyncArrayIO:
             self._source = parse_array_metadata(document, str(store_path))
 
     @classmethod
-    async def build(
+    def build(
         cls,
-        store: StoreLike,
+        store: Store | StorePath,
         *,
         name: str | None = None,
-        shape: ShapeLike,
-        dtype: ZDTypeLike,
-        chunks: ChunksLike | Literal["auto"] = "auto",
-        shards: ShardsLike | None = None,
-        filters: FiltersLike = "auto",
-        compressors: CompressorsLike = "auto",
-        serializer: SerializerLike = "auto",
-        fill_value: Any | None = DEFAULT_FILL_VALUE,
-        order: MemoryOrder | None = None,
-        zarr_format: ZarrFormat | None = 3,
-        attributes: dict[str, JSON] | None = None,
-        chunk_key_encoding: ChunkKeyEncodingLike | None = None,
-        dimension_names: DimensionNamesLike = None,
         config: ArrayConfigLike | None = None,
-    ) -> AsyncArrayIO:
+        **kwargs: Unpack[ArrayDeclarationKwargs],
+    ) -> Self:
         """Declare an array bound to a location in a store, without storing anything.
 
-        The keyword arguments have the same meaning as in
-        [`zarr.api.asynchronous.create_array`][]. The returned instance holds
-        the normalized metadata in memory; `store_metadata` stores it.
+        Binding is pure, which is why this is the one synchronous constructor on
+        this class: `store` must already be a `Store` or `StorePath`, because
+        coercing a path or URL string opens a store, and that is
+        [`zarr.api.asynchronous.create_array`][]'s job. The declaration keyword
+        arguments have the same meaning as in `create_array`; unlike `zarrs`,
+        `fill_value` defaults to the data type's default fill value instead of
+        being required. The returned instance holds the normalized metadata in
+        memory; `store_metadata` stores it.
         """
-        metadata = build_array_metadata(
-            shape=shape,
-            dtype=dtype,
-            chunks=chunks,
-            shards=shards,
-            filters=filters,
-            compressors=compressors,
-            serializer=serializer,
-            fill_value=fill_value,
-            order=order,
-            zarr_format=zarr_format,
-            attributes=attributes,
-            chunk_key_encoding=chunk_key_encoding,
-            dimension_names=dimension_names,
-        )
-        store_path = await make_store_path(store, path=name)
+        metadata = build_array_metadata(**kwargs)
+        store_path = store if isinstance(store, StorePath) else StorePath(store)
+        if name is not None:
+            store_path = store_path / name
         return cls(metadata, store_path, config)
 
     @classmethod
@@ -6339,7 +6343,7 @@ class AsyncArrayIO:
         name: str | None = None,
         zarr_format: ZarrFormat | None = None,
         config: ArrayConfigLike | None = None,
-    ) -> AsyncArrayIO:
+    ) -> Self:
         """Read the metadata document of an existing array and bind to it.
 
         This is the one classmethod constructor that performs IO: the array's
@@ -6718,7 +6722,7 @@ class ArrayIO:
         self._async_io = AsyncArrayIO(document, store_path, config)
 
     @classmethod
-    def _wrap(cls, async_io: AsyncArrayIO) -> ArrayIO:
+    def _wrap(cls, async_io: AsyncArrayIO) -> Self:
         io = object.__new__(cls)
         io._async_io = async_io
         return io
@@ -6726,50 +6730,17 @@ class ArrayIO:
     @classmethod
     def build(
         cls,
-        store: StoreLike,
+        store: Store | StorePath,
         *,
         name: str | None = None,
-        shape: ShapeLike,
-        dtype: ZDTypeLike,
-        chunks: ChunksLike | Literal["auto"] = "auto",
-        shards: ShardsLike | None = None,
-        filters: FiltersLike = "auto",
-        compressors: CompressorsLike = "auto",
-        serializer: SerializerLike = "auto",
-        fill_value: Any | None = DEFAULT_FILL_VALUE,
-        order: MemoryOrder | None = None,
-        zarr_format: ZarrFormat | None = 3,
-        attributes: dict[str, JSON] | None = None,
-        chunk_key_encoding: ChunkKeyEncodingLike | None = None,
-        dimension_names: DimensionNamesLike = None,
         config: ArrayConfigLike | None = None,
-    ) -> ArrayIO:
+        **kwargs: Unpack[ArrayDeclarationKwargs],
+    ) -> Self:
         """Declare an array bound to a location in a store, without storing anything.
 
         See `AsyncArrayIO.build`.
         """
-        return cls._wrap(
-            sync(
-                AsyncArrayIO.build(
-                    store,
-                    name=name,
-                    shape=shape,
-                    dtype=dtype,
-                    chunks=chunks,
-                    shards=shards,
-                    filters=filters,
-                    compressors=compressors,
-                    serializer=serializer,
-                    fill_value=fill_value,
-                    order=order,
-                    zarr_format=zarr_format,
-                    attributes=attributes,
-                    chunk_key_encoding=chunk_key_encoding,
-                    dimension_names=dimension_names,
-                    config=config,
-                )
-            )
-        )
+        return cls._wrap(AsyncArrayIO.build(store, name=name, config=config, **kwargs))
 
     @classmethod
     def open(
@@ -6779,7 +6750,7 @@ class ArrayIO:
         name: str | None = None,
         zarr_format: ZarrFormat | None = None,
         config: ArrayConfigLike | None = None,
-    ) -> ArrayIO:
+    ) -> Self:
         """Read the metadata document of an existing array and bind to it.
 
         See `AsyncArrayIO.open`.

@@ -44,7 +44,7 @@ async def test_chunks_before_metadata(zarr_format: ZarrFormat) -> None:
     in that order, and the result is an ordinary readable array."""
     store = MemoryStore()
     data = np.arange(16, dtype="uint16").reshape(4, 4)
-    aio = await AsyncArrayIO.build(
+    aio = AsyncArrayIO.build(
         store,
         name="foo",
         shape=data.shape,
@@ -78,7 +78,7 @@ async def test_chunks_before_metadata(zarr_format: ZarrFormat) -> None:
     np.testing.assert_array_equal(await arr.io.getitem(Ellipsis), data)
 
     # a writer that declared the same array independently can verify its assumption
-    worker = await AsyncArrayIO.build(
+    worker = AsyncArrayIO.build(
         store,
         name="foo",
         shape=data.shape,
@@ -171,9 +171,9 @@ async def test_document_work_without_codec_resolution() -> None:
 
 async def test_verify_mismatch_raises() -> None:
     store = MemoryStore()
-    aio = await AsyncArrayIO.build(store, shape=(4, 4), dtype="uint8", chunks=(2, 2))
+    aio = AsyncArrayIO.build(store, shape=(4, 4), dtype="uint8", chunks=(2, 2))
     await aio.store_metadata()
-    other = await AsyncArrayIO.build(
+    other = AsyncArrayIO.build(
         store, shape=(4, 4), dtype="uint8", chunks=(4, 4), attributes={"a": 1}
     )
     with pytest.raises(ValueError, match="differing fields: attributes, chunk_grid"):
@@ -182,22 +182,20 @@ async def test_verify_mismatch_raises() -> None:
 
 async def test_verify_format_mismatch_raises() -> None:
     store = MemoryStore()
-    await (
-        await AsyncArrayIO.build(store, shape=(4,), dtype="uint8", zarr_format=2)
-    ).store_metadata()
-    bound_v3 = await AsyncArrayIO.build(store, shape=(4,), dtype="uint8", zarr_format=3)
+    await AsyncArrayIO.build(store, shape=(4,), dtype="uint8", zarr_format=2).store_metadata()
+    bound_v3 = AsyncArrayIO.build(store, shape=(4,), dtype="uint8", zarr_format=3)
     with pytest.raises(ValueError, match="stored array is Zarr format 2"):
         await bound_v3.verify()
 
 
 async def test_verify_missing_raises() -> None:
-    aio = await AsyncArrayIO.build(MemoryStore(), shape=(4,), dtype="uint8")
+    aio = AsyncArrayIO.build(MemoryStore(), shape=(4,), dtype="uint8")
     with pytest.raises(ArrayNotFoundError):
         await aio.verify()
 
 
 async def test_erase_chunk_out_of_grid_raises() -> None:
-    aio = await AsyncArrayIO.build(MemoryStore(), shape=(4, 4), dtype="uint8", chunks=(2, 2))
+    aio = AsyncArrayIO.build(MemoryStore(), shape=(4, 4), dtype="uint8", chunks=(2, 2))
     with pytest.raises(IndexError, match="outside the chunk grid"):
         await aio.erase_chunk((2, 0))
     with pytest.raises(IndexError, match="outside the chunk grid"):
