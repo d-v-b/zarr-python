@@ -6420,17 +6420,17 @@ class AsyncArrayIO:
         zarr_format: ZarrFormat | None = None,
         config: ArrayConfigLike | None = None,
     ) -> Self:
-        """Read the metadata document of an existing array and bind to it.
+        """Read the metadata of an existing array and bind to it.
 
         This is the one classmethod constructor that performs IO: the array's
-        stored metadata document is read from the store. `zarr_format=None`
-        (the default) reads Zarr format 3 and falls back to format 2, as
-        `open` does in `zarrs`; pass 2 or 3 to require one format. The read is
-        strict and does not resolve extension names: an array with unknown
-        codecs opens for document work, while a stored document zarr can only
-        read as repaired raises `zarr_metadata.MetadataValidationError` — open
-        such an array with [`zarr.api.asynchronous.open_array`][], which reads
-        it as repaired.
+        stored metadata is read from the store. `zarr_format=None` (the
+        default) reads Zarr format 3 and falls back to format 2, as `open`
+        does in `zarrs`; pass 2 or 3 to require one format. The read is strict
+        and does not resolve extension names: an array with unknown codecs
+        opens for metadata work, while stored metadata zarr can only read as
+        repaired raises `zarr_metadata.MetadataValidationError` — open such an
+        array with [`zarr.api.asynchronous.open_array`][], which reads it as
+        repaired.
         """
         store_path = await make_store_path(store, path=name)
         data = await get_array_metadata(store_path, zarr_format=zarr_format)
@@ -6610,7 +6610,7 @@ class AsyncArrayIO:
         return type(self)(self._source, self._store_path, new_config)
 
     async def store_metadata(self, *, ensure_parents: bool = False) -> None:
-        """Store this array's metadata document(s).
+        """Store this array's metadata.
 
         The documents are written unconditionally, replacing the metadata of
         any existing node at this location, as `store_metadata` does in
@@ -6637,10 +6637,10 @@ class AsyncArrayIO:
     async def verify(self) -> None:
         """Check that the stored metadata declares the array this instance is bound to.
 
-        Reads the metadata document stored at this location — favoring Zarr
-        format 3 when documents of both formats exist — and raises
+        Reads the metadata stored at this location — favoring Zarr format 3
+        when both formats' metadata exists — and raises
         `ValueError` naming each differing field when it does not equal the
-        bound document. Document equality is semantic: a fill value is
+        bound metadata. Metadata equality is semantic: a fill value is
         compared in its canonical spelling. Raises
         [`zarr.errors.ArrayNotFoundError`][] when nothing is stored. This is
         the explicit counterpart of the verification TensorStore performs
@@ -6656,7 +6656,7 @@ class AsyncArrayIO:
             stored_format = 2 if isinstance(stored, ZarrV2ArrayMetadata) else 3
             raise ValueError(
                 f"Array {str(self.store_path)!r}: the stored array is Zarr format "
-                f"{stored_format}; the bound document is Zarr format {self._zarr_format}."
+                f"{stored_format}; the bound metadata is Zarr format {self._zarr_format}."
             )
         stored_json = dict(stored.to_json())
         bound_json = dict(bound.to_json())
@@ -6674,9 +6674,9 @@ class AsyncArrayIO:
         )
 
     async def erase_metadata(self) -> None:
-        """Erase this array's metadata document(s), the inverse of `store_metadata`.
+        """Erase this array's stored metadata, the inverse of `store_metadata`.
 
-        Succeeds if the documents do not exist, as `erase_metadata` does in
+        Succeeds if the stored metadata does not exist, as `erase_metadata` does in
         `zarrs`. Stored chunks are kept; `erase_chunks` removes those.
         """
         for key in ARRAY_DOCUMENTS[self._zarr_format]:
@@ -6874,7 +6874,7 @@ class ArrayIO:
         zarr_format: ZarrFormat | None = None,
         config: ArrayConfigLike | None = None,
     ) -> Self:
-        """Read the metadata document of an existing array and bind to it.
+        """Read the metadata of an existing array and bind to it.
 
         See `AsyncArrayIO.open`.
         """
@@ -6922,7 +6922,7 @@ class ArrayIO:
         return self._wrap(self._async_io.with_config(config))
 
     def store_metadata(self, *, ensure_parents: bool = False) -> None:
-        """Store this array's metadata document(s). See `AsyncArrayIO.store_metadata`."""
+        """Store this array's metadata. See `AsyncArrayIO.store_metadata`."""
         sync(self._async_io.store_metadata(ensure_parents=ensure_parents))
 
     def verify(self) -> None:
@@ -6933,7 +6933,7 @@ class ArrayIO:
         sync(self._async_io.verify())
 
     def erase_metadata(self) -> None:
-        """Erase this array's metadata document(s). See `AsyncArrayIO.erase_metadata`."""
+        """Erase this array's stored metadata. See `AsyncArrayIO.erase_metadata`."""
         sync(self._async_io.erase_metadata())
 
     def erase_chunk(self, chunk_coords: tuple[int, ...]) -> None:
