@@ -32,7 +32,6 @@ from zarr_indexing.output_map import (
     ConstantMap,
     DimensionMap,
     OutputIndexMap,
-    array_map_or_constant,
 )
 from zarr_indexing.transform import IndexTransform
 
@@ -74,7 +73,8 @@ def compose(outer: IndexTransform, inner: IndexTransform) -> IndexTransform:
     _validate_outer_outputs(outer, inner)
 
     result_output = [
-        _compose_single(outer, inner_map, inner.domain.inclusive_min) for inner_map in inner.output
+        _compose_single(outer, inner_map, inner.domain.inclusive_min, output_dimension)
+        for output_dimension, inner_map in enumerate(inner.output)
     ]
 
     return IndexTransform(domain=outer.domain, output=tuple(result_output))
@@ -120,6 +120,9 @@ def _output_bounds(outer: IndexTransform, output_map: OutputIndexMap) -> tuple[i
         last = output_map.offset + output_map.stride * (input_hi - 1)
         return min(first, last), max(first, last)
 
+    # A proof about the inner domain, not a use of the values: the raw array is
+    # read so that a value inside the domain but outside the map's own declared
+    # range composes and stays deferred, as in TensorStore.
     index_lo = int(output_map.index_array.min())
     index_hi = int(output_map.index_array.max())
     first = output_map.offset + output_map.stride * index_lo
@@ -128,9 +131,16 @@ def _output_bounds(outer: IndexTransform, output_map: OutputIndexMap) -> tuple[i
 
 
 def _compose_single(
-    outer: IndexTransform, inner_map: OutputIndexMap, inner_origin: tuple[int, ...]
+    outer: IndexTransform,
+    inner_map: OutputIndexMap,
+    inner_origin: tuple[int, ...],
+    output_dimension: int,
 ) -> OutputIndexMap:
-    """Compose a single inner output map with the full outer transform."""
+    """Compose a single inner output map with the full outer transform.
+
+    `output_dimension` is the inner map's position, which names the map in a
+    `BoundsCheckError` when an index-array value is read against its range.
+    """
     if isinstance(inner_map, ConstantMap):
         return ConstantMap(offset=inner_map.offset)
 
@@ -138,7 +148,7 @@ def _compose_single(
         return _compose_dimension(outer, inner_map)
 
     # inner_map: ArrayMap (OutputIndexMap = ConstantMap | DimensionMap | ArrayMap)
-    return _compose_array(outer, inner_map, inner_origin)
+    return _compose_array(outer, inner_map, inner_origin, output_dimension)
 
 
 def _compose_dimension(outer: IndexTransform, inner_map: DimensionMap) -> OutputIndexMap:
@@ -164,11 +174,16 @@ def _compose_dimension(outer: IndexTransform, inner_map: DimensionMap) -> Output
 
     # outer_map: ArrayMap (OutputIndexMap = ConstantMap | DimensionMap | ArrayMap)
     # Affine post-composition leaves the index array (and hence its full
-    # input rank and dependency axes) untouched.
+    # input rank and dependency axes) and its declared range untouched.
+    # TensorStore additionally intersects the range with the affine preimage
+    # of the inner domain (compose_transforms.cc#L198-L211 at the pinned
+    # commit); `_validate_outer_outputs` has already proven every value inside
+    # that domain, so the narrowing would change nothing a value can fail.
     return ArrayMap(
         index_array=outer_map.index_array,
         offset=offset_i + stride_i * outer_map.offset,
         stride=stride_i * outer_map.stride,
+        index_range=outer_map.index_range,
     )
 
 
@@ -192,24 +207,38 @@ def _dimension_positions(
     return checked_affine(start, outer_map.stride, steps).reshape(shape)
 
 
-def _array_positions(outer_map: ArrayMap, inner_origin: int) -> np.ndarray[Any, np.dtype[np.intp]]:
-    """Build exact positional indices without fixed-width affine overflow."""
-    return checked_affine(outer_map.offset - inner_origin, outer_map.stride, outer_map.index_array)
+def _array_positions(
+    outer_map: ArrayMap, inner_origin: int, output_dimension: int
+) -> np.ndarray[Any, np.dtype[np.intp]]:
+    """Build exact positional indices without fixed-width affine overflow.
+
+    The outer map's values address the inner array, so they are read through
+    the checked accessor: an out-of-range value fails here, as it does when
+    TensorStore gathers through an index array.
+    """
+    return checked_affine(
+        outer_map.offset - inner_origin,
+        outer_map.stride,
+        outer_map.checked_index_array(output_dimension),
+    )
 
 
 def _positions_for_axis(
-    outer: IndexTransform, outer_map: OutputIndexMap, inner_origin: int
+    outer: IndexTransform, outer_map: OutputIndexMap, inner_origin: int, output_dimension: int
 ) -> int | np.ndarray[Any, np.dtype[np.intp]]:
     """Convert one intermediate coordinate map to inner-array positions."""
     if isinstance(outer_map, ConstantMap):
         return outer_map.offset - inner_origin
     if isinstance(outer_map, DimensionMap):
         return _dimension_positions(outer, outer_map, inner_origin)
-    return _array_positions(outer_map, inner_origin)
+    return _array_positions(outer_map, inner_origin, output_dimension)
 
 
 def _compose_array(
-    outer: IndexTransform, inner_map: ArrayMap, inner_origin: tuple[int, ...]
+    outer: IndexTransform,
+    inner_map: ArrayMap,
+    inner_origin: tuple[int, ...],
+    output_dimension: int,
 ) -> OutputIndexMap:
     """Compose when inner is an ArrayMap.
 
@@ -222,25 +251,26 @@ def _compose_array(
     one. The intermediate coordinates are read over the *outer* domain's own
     range, and the inner array is addressed positionally from the *inner*
     domain's origin.
+
+    The gathered map keeps the inner map's declared range: gathering selects
+    among its coordinates and asserts nothing new about them (TensorStore does
+    the same, `compose_transforms.cc#L244` at the pinned commit).
     """
     arr_i = inner_map.index_array
     if any(extent == 0 for extent in outer.domain.shape):
         # The empty map is singleton on every non-empty axis: it varies over no
         # axis at all, and the emptiness lives in the domain emitted alongside.
         empty_shape = tuple(0 if extent == 0 else 1 for extent in outer.domain.shape)
-        return ArrayMap(
-            index_array=np.empty(empty_shape, dtype=arr_i.dtype),
-            offset=inner_map.offset,
-            stride=inner_map.stride,
+        return inner_map.with_index_array(
+            np.empty(empty_shape, dtype=arr_i.dtype), output_dimension=output_dimension
         )
 
     positions = tuple(
-        0 if size == 1 else _positions_for_axis(outer, outer_map, origin)
-        for outer_map, origin, size in zip(outer.output, inner_origin, arr_i.shape, strict=True)
+        0 if size == 1 else _positions_for_axis(outer, outer_map, origin, outer_dim)
+        for outer_dim, (outer_map, origin, size) in enumerate(
+            zip(outer.output, inner_origin, arr_i.shape, strict=True)
+        )
     )
     # A gather narrowed to one coordinate — scalar or all-singleton — is the
-    # ConstantMap it equals; `array_map_or_constant` normalizes both.
-    gathered = np.asarray(arr_i[positions])
-    if gathered.ndim == 0:
-        return ConstantMap(offset=checked_affine(inner_map.offset, inner_map.stride, int(gathered)))
-    return array_map_or_constant(gathered, offset=inner_map.offset, stride=inner_map.stride)
+    # ConstantMap it equals; `with_index_array` normalizes both.
+    return inner_map.with_index_array(arr_i[positions], output_dimension=output_dimension)
