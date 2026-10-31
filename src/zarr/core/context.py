@@ -7,15 +7,22 @@ document, and the location in the document. It is re-positioned at every nested 
 threaded through the read by zarr. (The pair mirrors `referencing.Registry` and
 `referencing.Resolver` in python-jsonschema.)
 
-Both are internal: nothing in the public API takes a context yet.
+The explicit-IO array layer (`zarr.ArrayIO` and `zarr.AsyncArrayIO`) takes a context publicly;
+everywhere else, both remain internal.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from types import MappingProxyType
 from typing import TYPE_CHECKING
 
+from zarr.errors import UnknownCodecError
+
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from zarr.abc.codec import Codec, CodecPipeline
     from zarr.core.common import ZarrFormat
     from zarr.core.dtype.common import DTypeJSON
     from zarr.core.dtype.registry import DataTypeRegistry
@@ -27,13 +34,47 @@ class Context:
     """
     The extensions that Zarr metadata is read with, by kind.
 
+    A kind that is `None` resolves from the default registries, exactly as it
+    would with no context; a kind that is set is a closed world, and a name
+    outside it fails to resolve even when the default registries know it.
+    The scope governs top-level names: codecs nested inside a
+    `sharding_indexed` codec resolve through the default registry today.
+
     Attributes
     ----------
     data_types : DataTypeRegistry
         The data types a read may resolve.
+    codecs : Mapping[str, type[Codec]] | None
+        The codec class each codec name resolves to, or `None` for the
+        default codec registry. Codec instances are never resolved by name,
+        so they pass through any context.
+    codec_pipeline : type[CodecPipeline] | None
+        The codec pipeline class arrays are read and written with, or `None`
+        for the pipeline the global configuration selects.
     """
 
     data_types: DataTypeRegistry
+    codecs: Mapping[str, type[Codec]] | None = None
+    codec_pipeline: type[CodecPipeline] | None = None
+
+    def __post_init__(self) -> None:
+        # A read-only copy: the scope must not change under a binding that
+        # captured it. Contexts compare by their fields and are not hashable.
+        if self.codecs is not None:
+            object.__setattr__(self, "codecs", MappingProxyType(dict(self.codecs)))
+
+    def __getstate__(self) -> dict[str, object]:
+        # A mapping proxy does not pickle; carry the scope as a plain dict.
+        state = dict(self.__dict__)
+        if self.codecs is not None:
+            state["codecs"] = dict(self.codecs)
+        return state
+
+    def __setstate__(self, state: dict[str, object]) -> None:
+        self.__dict__.update(state)
+        codecs = state.get("codecs")
+        if codecs is not None:
+            object.__setattr__(self, "codecs", MappingProxyType(dict(codecs)))  # type: ignore[call-overload]
 
     @classmethod
     def default(cls) -> Context:
@@ -47,6 +88,31 @@ class Context:
         from zarr.core.dtype import data_type_registry
 
         return cls(data_types=data_type_registry)
+
+    def codec_class(self, name: str) -> type[Codec]:
+        """The codec class `name` resolves to in this context.
+
+        Raises [`zarr.errors.UnknownCodecError`][] naming the codecs in scope
+        when `name` is not among them.
+        """
+        if self.codecs is None:
+            from zarr.registry import get_codec_class
+
+            return get_codec_class(name)
+        try:
+            return self.codecs[name]
+        except KeyError:
+            raise UnknownCodecError(
+                f"Codec {name!r} is not in this context. Codecs in scope: {sorted(self.codecs)}."
+            ) from None
+
+    def pipeline_class(self) -> type[CodecPipeline]:
+        """The codec pipeline class this context resolves to."""
+        if self.codec_pipeline is None:
+            from zarr.registry import get_pipeline_class
+
+            return get_pipeline_class()
+        return self.codec_pipeline
 
 
 type JSONLocation = tuple[str | int, ...]

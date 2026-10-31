@@ -147,6 +147,7 @@ from zarr.core.metadata.v3 import (
     RegularChunkGridMetadata,
     RegularChunkGridMetadataJSON,
     create_chunk_grid_metadata,
+    parse_codecs,
     parse_node_type_array,
 )
 from zarr.core.sync import sync
@@ -177,6 +178,7 @@ if TYPE_CHECKING:
     from zarr.abc.store import Store
     from zarr.codecs.sharding import IndexLocation, ShardingCodec
     from zarr.core.buffer import Buffer
+    from zarr.core.context import Context
     from zarr.core.dtype.wrapper import TBaseDType, TBaseScalar
     from zarr.storage import StoreLike
     from zarr.types import AnyArray, AnyAsyncArray, ArrayV2, ArrayV3, AsyncArrayV2, AsyncArrayV3
@@ -223,9 +225,13 @@ def _chunk_sizes_from_shape(
     return tuple(result)
 
 
-def parse_array_metadata(data: Any, path: str | None = None) -> ArrayMetadata:
+def parse_array_metadata(
+    data: Any, path: str | None = None, *, context: Context | None = None
+) -> ArrayMetadata:
     """Array metadata from a metadata object or a metadata document, naming the array at
-    `path` in warnings about how an invalid document was read.
+    `path` in warnings about how an invalid document was read. With a `context`, stored
+    extension names resolve through it instead of the default registries; a metadata
+    object is already resolved and passes through any context.
 
     `ArrayV2Metadata` accepts a chunk size of 0, as it always has, though only an
     invalid document holds one: such metadata is read as the documents it would store
@@ -238,7 +244,7 @@ def parse_array_metadata(data: Any, path: str | None = None) -> ArrayMetadata:
     if isinstance(data, dict):
         zarr_format = data.get("zarr_format")
         if zarr_format == 3:
-            meta_out = ArrayV3Metadata.from_dict(data, path=path)
+            meta_out = ArrayV3Metadata.from_dict(data, path=path, context=context)
             if len(meta_out.storage_transformers) > 0:
                 msg = (
                     f"Array metadata contains storage transformers: {meta_out.storage_transformers}."
@@ -247,7 +253,7 @@ def parse_array_metadata(data: Any, path: str | None = None) -> ArrayMetadata:
                 raise ValueError(msg)
             return meta_out
         elif zarr_format == 2:
-            return ArrayV2Metadata.from_dict(data, path=path)
+            return ArrayV2Metadata.from_dict(data, path=path, context=context)
         else:
             raise ValueError(f"Invalid zarr_format: {zarr_format}. Expected 2 or 3")
     raise TypeError  # pragma: no cover
@@ -418,6 +424,7 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         metadata: ArrayV2Metadata | ArrayV2MetadataDict,
         store_path: StorePath,
         config: ArrayConfigLike | None = None,
+        context: Context | None = None,
     ) -> None: ...
 
     @overload
@@ -426,6 +433,7 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         metadata: ArrayV3Metadata | ArrayMetadataJSON_V3,
         store_path: StorePath,
         config: ArrayConfigLike | None = None,
+        context: Context | None = None,
     ) -> None: ...
 
     def __init__(
@@ -433,8 +441,9 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         metadata: ArrayMetadata | ArrayMetadataDict,
         store_path: StorePath,
         config: ArrayConfigLike | None = None,
+        context: Context | None = None,
     ) -> None:
-        object.__setattr__(self, "_io", AsyncArrayIO(metadata, store_path, config))
+        object.__setattr__(self, "_io", AsyncArrayIO(metadata, store_path, config, context))
         # An AsyncArray is the resolving layer: build its codec pipeline now, so
         # pipeline-construction warnings fire at creation, as they always have.
         _ = self._io._resolved_codec_pipeline
@@ -4686,8 +4695,10 @@ def build_array_metadata_v2(
     filters: Iterable[dict[str, JSON] | Numcodec] | None = None,
     compressor: CompressorLikev2 = None,
     attributes: dict[str, JSON] | None = None,
+    context: Context | None = None,
 ) -> ArrayV2Metadata:
-    """Build Zarr format 2 array metadata from its fields.
+    """Build Zarr format 2 array metadata from its fields. With a `context`,
+    the data type resolves through it instead of the default registry.
 
     Each keyword is a `.zarray` field; `attributes` is the `.zattrs` one.
     `fill_value` defaults to the data type's default scalar (an explicit
@@ -4695,7 +4706,7 @@ def build_array_metadata_v2(
     `array.order`. `filters` and `compressor` are numcodecs objects or their
     JSON, as stored. Nothing is guessed.
     """
-    zdtype = parse_dtype(dtype, zarr_format=2)
+    zdtype = parse_dtype(dtype, zarr_format=2, context=context)
     if order is None:
         order = zarr_config.get("array.order")
     if fill_value is DEFAULT_FILL_VALUE:
@@ -4727,8 +4738,11 @@ def build_array_metadata_v3(
     codecs: Iterable[Codec | dict[str, JSON]] | None = None,
     dimension_names: DimensionNamesLike = None,
     attributes: dict[str, JSON] | None = None,
+    context: Context | None = None,
 ) -> ArrayV3Metadata:
-    """Build Zarr format 3 array metadata from its fields.
+    """Build Zarr format 3 array metadata from its fields. With a `context`,
+    the data type and top-level codec names resolve through it instead of the
+    default registries.
 
     Each keyword is a `zarr.json` field. `chunk_grid` takes grid metadata,
     its JSON, or a chunk shape, which declares a regular grid. `codecs`
@@ -4736,7 +4750,7 @@ def build_array_metadata_v3(
     the default encoding with `/`; `fill_value` defaults to the data type's
     default scalar (`None` means the default too: the field is required).
     """
-    zdtype = parse_dtype(data_type, zarr_format=3)
+    zdtype = parse_dtype(data_type, zarr_format=3, context=context)
     grid: ChunkGridMetadata | dict[str, JSON]
     if isinstance(chunk_grid, RegularChunkGridMetadata | RectilinearChunkGridMetadata):
         grid = chunk_grid
@@ -4754,6 +4768,10 @@ def build_array_metadata_v3(
         compressors = default_compressors_v3(zdtype)
 
         codecs_parsed = (*filters, serializer, *compressors)
+    elif context is not None:
+        # Codec names resolve here, under the context; the metadata's own
+        # `parse_codecs` passes the resolved instances through untouched.
+        codecs_parsed = parse_codecs(tuple(codecs), context=context)
     else:
         codecs_parsed = tuple(codecs)
 
@@ -6311,6 +6329,7 @@ class AsyncArrayIO:
     _store_path: StorePath
     _config: ArrayConfig
     _pipeline_class: type[CodecPipeline]
+    _context: Context | None
     _source: ArrayMetadataModel | ArrayMetadata
     _metadata_model_cache: ArrayMetadataModel | None
     _resolved_cache: ArrayMetadata | None
@@ -6323,13 +6342,16 @@ class AsyncArrayIO:
         metadata: ArrayMetadataModel | ArrayMetadata | ArrayMetadataDict,
         store_path: StorePath,
         config: ArrayConfigLike | None = None,
+        context: Context | None = None,
     ) -> None:
         self._store_path = store_path
         self._config = parse_array_config(config)
-        # The pipeline implementation is chosen when the binding is made, from
-        # the global configuration, exactly as `AsyncArray` has always chosen
-        # it; the pipeline itself is built on first use.
-        self._pipeline_class = get_pipeline_class()
+        self._context = context
+        # Without a context, the pipeline implementation is chosen when the
+        # binding is made, from the global configuration, exactly as
+        # `AsyncArray` has always chosen it; a context's choice wins. The
+        # pipeline itself is built on first use.
+        self._pipeline_class = get_pipeline_class() if context is None else context.pipeline_class()
         self._metadata_model_cache = None
         self._resolved_cache = None
         self._chunk_grid_cache = None
@@ -6340,7 +6362,7 @@ class AsyncArrayIO:
         else:
             # A legacy resolved object passes through; raw JSON is read eagerly,
             # as repaired when it needs that, warning as `AsyncArray` always has.
-            self._source = parse_array_metadata(metadata, str(store_path))
+            self._source = parse_array_metadata(metadata, str(store_path), context=context)
 
     @classmethod
     def build_v2(
@@ -6349,6 +6371,7 @@ class AsyncArrayIO:
         *,
         name: str | None = None,
         config: ArrayConfigLike | None = None,
+        context: Context | None = None,
         **kwargs: Unpack[ArrayV2DeclarationKwargs],
     ) -> Self:
         """Declare a Zarr format 2 array bound to `store`, storing nothing.
@@ -6357,7 +6380,12 @@ class AsyncArrayIO:
         `store` must be a `Store` or `StorePath`: coercing strings opens
         stores. `store_metadata` stores the result.
         """
-        return cls(build_array_metadata_v2(**kwargs), _bound_store_path(store, name), config)
+        return cls(
+            build_array_metadata_v2(context=context, **kwargs),
+            _bound_store_path(store, name),
+            config,
+            context=context,
+        )
 
     @classmethod
     def build_v3(
@@ -6366,6 +6394,7 @@ class AsyncArrayIO:
         *,
         name: str | None = None,
         config: ArrayConfigLike | None = None,
+        context: Context | None = None,
         **kwargs: Unpack[ArrayV3DeclarationKwargs],
     ) -> Self:
         """Declare a Zarr format 3 array bound to `store`, storing nothing.
@@ -6374,7 +6403,12 @@ class AsyncArrayIO:
         `build_array_metadata_v3`). `store` must be a `Store` or `StorePath`:
         coercing strings opens stores. `store_metadata` stores the result.
         """
-        return cls(build_array_metadata_v3(**kwargs), _bound_store_path(store, name), config)
+        return cls(
+            build_array_metadata_v3(context=context, **kwargs),
+            _bound_store_path(store, name),
+            config,
+            context=context,
+        )
 
     @classmethod
     async def open(
@@ -6384,6 +6418,7 @@ class AsyncArrayIO:
         name: str | None = None,
         zarr_format: ZarrFormat | None = None,
         config: ArrayConfigLike | None = None,
+        context: Context | None = None,
     ) -> Self:
         """Read the stored metadata of an existing array and bind to it.
 
@@ -6394,7 +6429,7 @@ class AsyncArrayIO:
         """
         store_path = await make_store_path(store, path=name)
         data = await get_array_metadata(store_path, zarr_format=zarr_format)
-        return cls(_array_metadata_model(data), store_path, config)
+        return cls(_array_metadata_model(data), store_path, config, context=context)
 
     @property
     def metadata(self) -> ArrayMetadataModel:
@@ -6421,7 +6456,9 @@ class AsyncArrayIO:
             data = _metadata_model_json(source)
             if isinstance(source, ZarrV2ArrayMetadata):
                 data["attributes"] = dict(source.attributes)
-            self._resolved_cache = parse_array_metadata(data, str(self._store_path))
+            self._resolved_cache = parse_array_metadata(
+                data, str(self._store_path), context=self._context
+            )
         return self._resolved_cache
 
     @property
@@ -6554,10 +6591,11 @@ class AsyncArrayIO:
         store_path: StorePath,
         config: ArrayConfig,
     ) -> Self:
-        """A new binding over `source`, keeping this one's captured pipeline."""
+        """A new binding over `source`, keeping this one's context and captured pipeline."""
         derived = object.__new__(type(self))
         derived._store_path = store_path
         derived._config = config
+        derived._context = self._context
         derived._pipeline_class = self._pipeline_class
         derived._source = source
         derived._metadata_model_cache = None
@@ -6588,6 +6626,23 @@ class AsyncArrayIO:
         else:
             new_config = ArrayConfig(**{**self._config.to_dict(), **config})  # type: ignore[arg-type]
         return self._derive(self._derived_source(), self._store_path, new_config)
+
+    def with_context(self, context: Context | None) -> Self:
+        """This binding with its metadata resolving in `context`; the data path,
+        codec pipeline included, derives anew under it. A binding built from a
+        resolved metadata object is re-resolved there, so a stored name outside
+        the context fails. `None` rebinds under the default registries and the
+        globally configured pipeline."""
+        source = self._derived_source()
+        if isinstance(source, ArrayV2Metadata | ArrayV3Metadata):
+            resolved = parse_array_metadata(
+                source.to_dict(), str(self._store_path), context=context
+            )
+            # The re-resolution reads the repaired form, so the mark that the
+            # store still holds a document needing that repair carries over.
+            object.__setattr__(resolved, "_stored_document", source._stored_document)
+            source = resolved
+        return type(self)(source, self._store_path, self._config, context=context)
 
     async def store_metadata(self, *, ensure_parents: bool = False) -> None:
         """Store the metadata, unconditionally replacing any stored metadata here.
@@ -6787,8 +6842,9 @@ class ArrayIO:
         metadata: ArrayMetadataModel | ArrayMetadata | ArrayMetadataDict,
         store_path: StorePath,
         config: ArrayConfigLike | None = None,
+        context: Context | None = None,
     ) -> None:
-        self._async_io = AsyncArrayIO(metadata, store_path, config)
+        self._async_io = AsyncArrayIO(metadata, store_path, config, context=context)
 
     @classmethod
     def _wrap(cls, async_io: AsyncArrayIO) -> Self:
@@ -6803,10 +6859,13 @@ class ArrayIO:
         *,
         name: str | None = None,
         config: ArrayConfigLike | None = None,
+        context: Context | None = None,
         **kwargs: Unpack[ArrayV2DeclarationKwargs],
     ) -> Self:
         """Declare a Zarr format 2 array bound to `store`, storing nothing. See `AsyncArrayIO.build_v2`."""
-        return cls._wrap(AsyncArrayIO.build_v2(store, name=name, config=config, **kwargs))
+        return cls._wrap(
+            AsyncArrayIO.build_v2(store, name=name, config=config, context=context, **kwargs)
+        )
 
     @classmethod
     def build_v3(
@@ -6815,10 +6874,13 @@ class ArrayIO:
         *,
         name: str | None = None,
         config: ArrayConfigLike | None = None,
+        context: Context | None = None,
         **kwargs: Unpack[ArrayV3DeclarationKwargs],
     ) -> Self:
         """Declare a Zarr format 3 array bound to `store`, storing nothing. See `AsyncArrayIO.build_v3`."""
-        return cls._wrap(AsyncArrayIO.build_v3(store, name=name, config=config, **kwargs))
+        return cls._wrap(
+            AsyncArrayIO.build_v3(store, name=name, config=config, context=context, **kwargs)
+        )
 
     @classmethod
     def open(
@@ -6828,10 +6890,15 @@ class ArrayIO:
         name: str | None = None,
         zarr_format: ZarrFormat | None = None,
         config: ArrayConfigLike | None = None,
+        context: Context | None = None,
     ) -> Self:
         """Read the stored metadata of an existing array and bind to it. See `AsyncArrayIO.open`."""
         return cls._wrap(
-            sync(AsyncArrayIO.open(store, name=name, zarr_format=zarr_format, config=config))
+            sync(
+                AsyncArrayIO.open(
+                    store, name=name, zarr_format=zarr_format, config=config, context=context
+                )
+            )
         )
 
     @property
@@ -6869,6 +6936,10 @@ class ArrayIO:
     def with_config(self, config: ArrayConfigLike) -> Self:
         """This binding with `config` merged over its own. See `AsyncArrayIO.with_config`."""
         return self._wrap(self._async_io.with_config(config))
+
+    def with_context(self, context: Context | None) -> Self:
+        """This binding with its metadata resolving in `context`. See `AsyncArrayIO.with_context`."""
+        return self._wrap(self._async_io.with_context(context))
 
     def store_metadata(self, *, ensure_parents: bool = False) -> None:
         """Store the metadata. See `AsyncArrayIO.store_metadata`."""

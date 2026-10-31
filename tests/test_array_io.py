@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pickle
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -12,16 +13,27 @@ from zarr_metadata import ZarrV2ArrayMetadata as ModelV2
 import zarr
 from zarr import ArrayIO, AsyncArrayIO
 from zarr.api.asynchronous import open_array
+from zarr.codecs import BytesCodec, ZstdCodec
 from zarr.core.buffer import default_buffer_prototype
-from zarr.core.codec_pipeline import FusedCodecPipeline
+from zarr.core.codec_pipeline import BatchedCodecPipeline, FusedCodecPipeline
+from zarr.core.dtype import UInt16, data_type_registry
+from zarr.core.dtype.registry import DataTypeRegistry
 from zarr.core.metadata import ArrayV2Metadata
 from zarr.errors import ArrayNotFoundError, UnknownCodecError
+from zarr.experimental import Context
 from zarr.storage import MemoryStore
 
 if TYPE_CHECKING:
-    from zarr.core.common import ZarrFormat
+    from zarr.core.common import JSON, ZarrFormat
+
+BYTES_JSON: dict[str, JSON] = {"name": "bytes", "configuration": {"endian": "little"}}
+ZSTD_JSON: dict[str, JSON] = {"name": "zstd", "configuration": {"level": 0, "checksum": False}}
 
 METADATA_DOCUMENTS = ("zarr.json", ".zarray", ".zattrs", ".zgroup")
+
+
+class _MarkedPipeline(BatchedCodecPipeline):
+    """A pipeline class distinguishable from the default, for context tests."""
 
 
 async def _store_keys(store: MemoryStore) -> set[str]:
@@ -312,3 +324,154 @@ async def test_store_metadata_of_model_without_attributes_clears_zattrs() -> Non
     assert "foo/.zattrs" not in await _store_keys(store)
     reread = await AsyncArrayIO.open(store, name="foo")
     assert dict(reread.metadata.attributes) == {}
+
+
+async def test_context_scopes_resolution() -> None:
+    """Names resolve through the context when the data path is built, the
+    context's pipeline wins over the global choice, and with_context rebinds."""
+    store = MemoryStore()
+    data = np.arange(16, dtype="uint16").reshape(4, 4)
+    registry = DataTypeRegistry()
+    registry.register(UInt16._zarr_v3_name, UInt16)
+    context = Context(
+        data_types=registry,
+        codecs={"bytes": BytesCodec, "zstd": ZstdCodec},
+        codec_pipeline=_MarkedPipeline,
+    )
+    aio = AsyncArrayIO.build_v3(
+        store,
+        name="foo",
+        shape=data.shape,
+        data_type="uint16",
+        chunk_grid=(2, 2),
+        codecs=[BYTES_JSON, ZSTD_JSON],
+        context=context,
+    )
+    assert isinstance(aio.to_array().codec_pipeline, _MarkedPipeline)
+    await aio.setitem(Ellipsis, data)
+    await aio.store_metadata()
+
+    opened = await AsyncArrayIO.open(store, name="foo", context=context)
+    np.testing.assert_array_equal(await opened.getitem(Ellipsis), data)
+
+    # the context survives derivation on both layers
+    assert isinstance(opened.with_config({"order": "F"}).to_array().codec_pipeline, _MarkedPipeline)
+    assert isinstance(opened.to_array().with_config({"order": "F"}).codec_pipeline, _MarkedPipeline)
+
+    rebound = opened.with_context(None)
+    assert not isinstance(rebound.to_array().codec_pipeline, _MarkedPipeline)
+    np.testing.assert_array_equal(await rebound.getitem(Ellipsis), data)
+
+
+async def test_context_unknown_codec_resolution_raises() -> None:
+    """A stored codec name outside the context opens for metadata work and
+    fails to resolve when the data path is built, naming the scope."""
+    store = MemoryStore()
+    aio = AsyncArrayIO.build_v3(store, name="foo", shape=(4,), data_type="uint8", chunk_grid=(4,))
+    await aio.store_metadata()
+    context = Context(data_types=data_type_registry, codecs={"bytes": BytesCodec})
+    opened = await AsyncArrayIO.open(store, name="foo", context=context)
+    await opened.verify()  # metadata work needs no resolution
+    with pytest.raises(UnknownCodecError, match="Codecs in scope: \\['bytes'\\]"):
+        await opened.getitem(Ellipsis)
+
+
+def test_context_unknown_codec_on_build_raises() -> None:
+    context = Context(data_types=data_type_registry, codecs={"bytes": BytesCodec})
+    with pytest.raises(UnknownCodecError, match="'zstd' is not in this context"):
+        AsyncArrayIO.build_v3(
+            MemoryStore(),
+            shape=(4,),
+            data_type="uint8",
+            chunk_grid=(4,),
+            codecs=[BYTES_JSON, ZSTD_JSON],
+            context=context,
+        )
+
+
+def test_context_unknown_dtype_raises() -> None:
+    context = Context(data_types=DataTypeRegistry())
+    with pytest.raises(ValueError, match="No Zarr data type found"):
+        AsyncArrayIO.build_v3(
+            MemoryStore(), shape=(4,), data_type="uint16", chunk_grid=(4,), context=context
+        )
+    # the str shortcut goes through the registry too
+    with pytest.raises(ValueError, match="No Zarr data type found"):
+        AsyncArrayIO.build_v3(
+            MemoryStore(), shape=(4,), data_type=str, chunk_grid=(4,), context=context
+        )
+
+
+def test_context_pickles_with_codecs() -> None:
+    """An array bound to a context with a codec scope pickles and unpickles
+    with the scope intact."""
+    context = Context(
+        data_types=data_type_registry,
+        codecs={"bytes": BytesCodec, "zstd": ZstdCodec},
+        codec_pipeline=_MarkedPipeline,
+    )
+    arr = zarr.create_array(MemoryStore(), shape=(4,), dtype="uint8", chunks=(4,))
+    rebound = arr.io.with_context(context).to_array()
+    revived = pickle.loads(pickle.dumps(rebound))
+    revived_context = revived._async_array._io._context
+    assert revived_context is not None
+    assert revived_context.codecs is not None
+    assert set(revived_context.codecs) == {"bytes", "zstd"}
+    assert revived_context.codec_pipeline is _MarkedPipeline
+    np.testing.assert_array_equal(revived[:], np.zeros(4, dtype="uint8"))
+
+
+async def test_with_context_reresolves_a_legacy_source() -> None:
+    """A binding built from resolved metadata is re-resolved by with_context,
+    so its stored names are checked against the scope."""
+    arr = await zarr.api.asynchronous.create_array(
+        MemoryStore(), shape=(4,), dtype="uint16", chunks=(4,)
+    )
+    full = Context(
+        data_types=data_type_registry,
+        codecs={"bytes": BytesCodec, "zstd": ZstdCodec},
+        codec_pipeline=_MarkedPipeline,
+    )
+    rebound = arr.io.with_context(full)
+    assert isinstance(rebound.to_array().codec_pipeline, _MarkedPipeline)
+
+
+async def test_with_context_rejects_a_legacy_codec_outside_the_scope() -> None:
+    arr = await zarr.api.asynchronous.create_array(
+        MemoryStore(), shape=(4,), dtype="uint16", chunks=(4,)
+    )
+    narrow = Context(data_types=data_type_registry, codecs={"bytes": BytesCodec})
+    with pytest.raises(UnknownCodecError, match="is not in this context"):
+        arr.io.with_context(narrow)
+
+
+async def test_with_context_rejects_a_legacy_dtype_outside_the_scope() -> None:
+    arr = await zarr.api.asynchronous.create_array(
+        MemoryStore(), shape=(4,), dtype="uint16", chunks=(4,)
+    )
+    with pytest.raises(ValueError, match="No Zarr data type found"):
+        arr.io.with_context(Context(data_types=DataTypeRegistry()))
+
+
+async def test_context_v2_scopes_dtype_resolution() -> None:
+    """A v2 document resolves its dtype through the context on build and open."""
+    store = MemoryStore()
+    registry = DataTypeRegistry()
+    registry.register(UInt16._zarr_v3_name, UInt16)
+    context = Context(data_types=registry)
+    data = np.arange(4, dtype="uint16")
+    aio = AsyncArrayIO.build_v2(
+        store, name="foo", shape=(4,), dtype="uint16", chunks=(4,), context=context
+    )
+    await aio.store_metadata()
+    await aio.setitem(Ellipsis, data)
+    opened = await AsyncArrayIO.open(store, name="foo", context=context)
+    np.testing.assert_array_equal(await opened.getitem(Ellipsis), data)
+
+
+def test_context_v2_unknown_dtype_raises() -> None:
+    context = Context(data_types=DataTypeRegistry())
+    with pytest.raises(ValueError, match="No Zarr data type found"):
+        AsyncArrayIO.build_v2(
+            MemoryStore(), name="foo", shape=(4,), dtype="uint16", chunks=(4,), context=context
+        )

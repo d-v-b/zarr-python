@@ -51,12 +51,16 @@ from zarr.codecs.sharding import (
     SubchunkWriteOrder,
 )
 from zarr.codecs.transpose import TransposeCodec
-from zarr.core.config import config as zarr_config
+from zarr.core.codec_pipeline import BatchedCodecPipeline, FusedCodecPipeline
+from zarr.core.dtype import data_type_registry
 from zarr.errors import ZarrUserWarning
+from zarr.experimental import Context
 from zarr.storage import MemoryStore
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
+
+    from zarr.types import AnyArray
 
 
 # ---------------------------------------------------------------------------
@@ -254,6 +258,27 @@ def _ignore_sharding_combo_warning() -> Iterator[None]:
         yield
 
 
+_PIPELINE_CONTEXTS = {
+    "zarr.core.codec_pipeline.BatchedCodecPipeline": Context(
+        data_types=data_type_registry, codec_pipeline=BatchedCodecPipeline
+    ),
+    "zarr.core.codec_pipeline.FusedCodecPipeline": Context(
+        data_types=data_type_registry, codec_pipeline=FusedCodecPipeline
+    ),
+}
+
+
+def _under_pipeline(arr: AnyArray, pipeline_path: str) -> AnyArray:
+    """The same array binding running its IO under the chosen pipeline,
+    selected per binding through a context instead of the global config."""
+    with _ignore_sharding_combo_warning():
+        rebound = arr.io.with_context(_PIPELINE_CONTEXTS[pipeline_path]).to_array()
+        # The pipeline derives lazily; build it here, inside the suppression,
+        # so the sharding advisory does not fire from the first write.
+        _ = rebound.async_array.codec_pipeline
+    return rebound
+
+
 def _write_under_pipeline(
     pipeline_path: str,
     codec_kwargs: CodecConfig,
@@ -271,26 +296,25 @@ def _write_under_pipeline(
     # endian-sensitive int dtype). Merge so the override wins without a dup kwarg.
     create_kwargs = {"dtype": "float64", **array_layout, **codec_kwargs}
     store = MemoryStore()
-    with zarr_config.set({"codec_pipeline.path": pipeline_path}):
-        with _ignore_sharding_combo_warning():
-            arr = zarr.create_array(
-                store=store,
-                fill_value=0,
-                config={"write_empty_chunks": write_empty_chunks},
-                **create_kwargs,
-            )
-        for sel, val in sequence:
-            arr[sel] = val
-        contents = arr[...]
+    with _ignore_sharding_combo_warning():
+        arr = zarr.create_array(
+            store=store,
+            fill_value=0,
+            config={"write_empty_chunks": write_empty_chunks},
+            **create_kwargs,
+        )
+    arr = _under_pipeline(arr, pipeline_path)
+    for sel, val in sequence:
+        arr[sel] = val
+    contents = arr[...]
     return store, contents
 
 
 def _read_under_pipeline(pipeline_path: str, store: MemoryStore) -> Any:
     """Re-open an existing store under the chosen pipeline and read it whole."""
-    with zarr_config.set({"codec_pipeline.path": pipeline_path}):
-        with _ignore_sharding_combo_warning():
-            arr = zarr.open_array(store=store, mode="r")
-        return arr[...]
+    with _ignore_sharding_combo_warning():
+        arr = zarr.open_array(store=store, mode="r")
+    return _under_pipeline(arr, pipeline_path)[...]
 
 
 _BATCHED = "zarr.core.codec_pipeline.BatchedCodecPipeline"
@@ -407,20 +431,20 @@ def test_pipeline_parity_subchunk_write_order(
 
     def run(pipeline_path: str) -> tuple[dict[str, bytes], Any]:
         store = MemoryStore()
-        with zarr_config.set({"codec_pipeline.path": pipeline_path}):
-            arr = zarr.create_array(
-                store=store,
-                shape=shape,
-                chunks=shard_shape,  # array "chunks" == shard size for a ShardingCodec serializer
-                dtype="int32",
-                fill_value=-1,
-                serializer=serializer,
-                compressors=None,
-                config={"write_empty_chunks": True},
-            )
-            arr[:] = ref  # dense full write
-            arr[3:9, 1:6] = 777  # partial write INTO the dense shard
-            contents = arr[...]
+        arr = zarr.create_array(
+            store=store,
+            shape=shape,
+            chunks=shard_shape,  # array "chunks" == shard size for a ShardingCodec serializer
+            dtype="int32",
+            fill_value=-1,
+            serializer=serializer,
+            compressors=None,
+            config={"write_empty_chunks": True},
+        )
+        arr = _under_pipeline(arr, pipeline_path)
+        arr[:] = ref  # dense full write
+        arr[3:9, 1:6] = 777  # partial write INTO the dense shard
+        contents = arr[...]
         return _store_snapshot(store), contents
 
     batched_bytes, batched_contents = run(_BATCHED)
@@ -502,27 +526,27 @@ def test_pipeline_parity_outer_aa_bb_codecs(
     data = (np.arange(int(np.prod(shape))).reshape(shape) + 1).astype("uint16")
     store = MemoryStore()
 
-    with zarr_config.set({"codec_pipeline.path": writer}):
-        with _ignore_sharding_combo_warning():
-            arr = zarr.create_array(
-                store=store,
-                shape=shape,
-                chunks=(4, 4),
-                dtype=data.dtype,
-                fill_value=0,
-                **codec_kwargs,
-            )
-        arr[...] = data
-        arr[2:5, 1:3] = 99  # region write -- exercises the partial-encode branch
+    with _ignore_sharding_combo_warning():
+        arr = zarr.create_array(
+            store=store,
+            shape=shape,
+            chunks=(4, 4),
+            dtype=data.dtype,
+            fill_value=0,
+            **codec_kwargs,
+        )
+    arr = _under_pipeline(arr, writer)
+    arr[...] = data
+    arr[2:5, 1:3] = 99  # region write -- exercises the partial-encode branch
 
     expected = data.copy()
     expected[2:5, 1:3] = 99
 
-    with zarr_config.set({"codec_pipeline.path": reader}):
-        with _ignore_sharding_combo_warning():
-            arr2 = zarr.open_array(store=store, mode="r")
-        full = arr2[...]
-        partial = arr2[1:3, 2:7]  # region read -- exercises the partial-decode branch
+    with _ignore_sharding_combo_warning():
+        arr2 = zarr.open_array(store=store, mode="r")
+    arr2 = _under_pipeline(arr2, reader)
+    full = arr2[...]
+    partial = arr2[1:3, 2:7]  # region read -- exercises the partial-decode branch
 
     np.testing.assert_array_equal(full, expected)
     np.testing.assert_array_equal(partial, expected[1:3, 2:7])
