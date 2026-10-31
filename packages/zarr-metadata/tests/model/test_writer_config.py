@@ -105,3 +105,28 @@ def test_ensure_ascii_off_escapes_only_a_lone_surrogate() -> None:
     assert b'"\\ud800"' in written
     assert "µ".encode() in written
     assert ZarrV3GroupMetadata.from_key_value({"zarr.json": written}) == model
+
+
+def test_config_refuses_a_bool_indent() -> None:
+    """A `bool` is not an indent, though `json.dumps` would read `True` as an indent of 1."""
+    with pytest.raises(TypeError, match="indent must be an int, a str or None, got bool"):
+        JSONWriterConfig(indent=cast("Any", True))
+
+
+def test_config_refuses_an_indent_of_another_type() -> None:
+    """An indent that is not an `int`, a `str` or `None` is refused."""
+    with pytest.raises(TypeError, match="indent must be an int, a str or None, got float"):
+        JSONWriterConfig(indent=cast("Any", 2.0))
+
+
+def test_config_refuses_a_negative_indent() -> None:
+    """A negative indent is refused, though `json.dumps` would read it as 0."""
+    with pytest.raises(ValueError, match="indent must not be negative, got -3"):
+        JSONWriterConfig(indent=-3)
+
+
+@pytest.mark.parametrize("name", ["sort_keys", "ensure_ascii", "trailing_newline"])
+def test_config_refuses_a_flag_that_is_not_a_bool(name: str) -> None:
+    """Each flag takes only a `bool`: a truthy value such as `1` is refused."""
+    with pytest.raises(TypeError, match=f"{name} must be a bool, got int"):
+        JSONWriterConfig(**{name: cast("Any", 1)})

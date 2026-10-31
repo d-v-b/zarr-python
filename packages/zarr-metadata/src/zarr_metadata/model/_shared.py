@@ -333,6 +333,23 @@ class JSONWriterConfig:
     ensure_ascii: bool = True
     trailing_newline: bool = False
 
+    def __post_init__(self) -> None:
+        # Enforce the annotations at runtime: `json.dumps` reads `True` as an
+        # indent of 1 and a negative indent as 0, so a mistyped config would
+        # otherwise change the spelling silently.
+        indent = cast("object", self.indent)
+        if isinstance(indent, bool) or not isinstance(indent, int | str | None):
+            msg = f"indent must be an int, a str or None, got {type(indent).__name__}"
+            raise TypeError(msg)
+        if isinstance(indent, int) and indent < 0:
+            msg = f"indent must not be negative, got {indent}"
+            raise ValueError(msg)
+        for name in ("sort_keys", "ensure_ascii", "trailing_newline"):
+            flag = cast("object", getattr(self, name))
+            if not isinstance(flag, bool):
+                msg = f"{name} must be a bool, got {type(flag).__name__}"
+                raise TypeError(msg)
+
 
 DEFAULT_JSON_WRITER = JSONWriterConfig()
 """The config every writer defaults to: the spelling of `json.dumps` with its own defaults."""
