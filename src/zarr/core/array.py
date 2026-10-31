@@ -187,7 +187,8 @@ __all__ = [
     "DEFAULT_FILL_VALUE",
     "ArrayIO",
     "AsyncArrayIO",
-    "build_array_metadata",
+    "build_array_metadata_v2",
+    "build_array_metadata_v3",
     "create_codec_pipeline",
     "parse_array_metadata",
 ]
@@ -618,43 +619,16 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         dimension_names: DimensionNamesLike = None,
         attributes: dict[str, JSON] | None = None,
     ) -> ArrayV3Metadata:
-        """Create an instance of ArrayV3Metadata."""
-        filters: tuple[ArrayArrayCodec, ...]
-        compressors: tuple[BytesBytesCodec, ...]
-
-        shape = parse_shapelike(shape)
-        if codecs is None:
-            # no data types have default filters
-            filters = ()
-            serializer = default_serializer_v3(dtype)
-            compressors = default_compressors_v3(dtype)
-
-            codecs_parsed = (*filters, serializer, *compressors)
-        else:
-            codecs_parsed = tuple(codecs)
-
-        chunk_key_encoding_parsed: ChunkKeyEncodingLike
-        if chunk_key_encoding is None:
-            chunk_key_encoding_parsed = {"name": "default", "separator": "/"}
-        else:
-            chunk_key_encoding_parsed = chunk_key_encoding
-
-        if fill_value is DEFAULT_FILL_VALUE or fill_value is None:
-            # Use dtype's default scalar for the DEFAULT_FILL_VALUE sentinel
-            # For v3, None is converted to DEFAULT_FILL_VALUE behavior
-            fill_value_parsed = dtype.default_scalar()
-        else:
-            fill_value_parsed = fill_value
-
-        return ArrayV3Metadata(
+        """See the module-level `build_array_metadata_v3`."""
+        return build_array_metadata_v3(
             shape=shape,
-            data_type=dtype,
+            dtype=dtype,
             chunk_grid=chunk_grid,
-            chunk_key_encoding=chunk_key_encoding_parsed,
-            fill_value=fill_value_parsed,
-            codecs=codecs_parsed,  # type: ignore[arg-type]
-            dimension_names=tuple(dimension_names) if dimension_names else None,
-            attributes=attributes or {},
+            fill_value=fill_value,
+            chunk_key_encoding=chunk_key_encoding,
+            codecs=codecs,
+            dimension_names=dimension_names,
+            attributes=attributes,
         )
 
     @classmethod
@@ -711,25 +685,16 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         compressor: CompressorLikev2 = None,
         attributes: dict[str, JSON] | None = None,
     ) -> ArrayV2Metadata:
-        if dimension_separator is None:
-            dimension_separator = "."
-
-        # Handle the DEFAULT_FILL_VALUE sentinel
-        if fill_value is DEFAULT_FILL_VALUE:
-            fill_value_parsed: Any = dtype.default_scalar()
-        else:
-            # For v2, preserve None as-is (backward compatibility)
-            fill_value_parsed = fill_value
-
-        return ArrayV2Metadata(
+        """See the module-level `build_array_metadata_v2`."""
+        return build_array_metadata_v2(
             shape=shape,
             dtype=dtype,
             chunks=chunks,
             order=order,
-            dimension_separator=dimension_separator,
-            fill_value=fill_value_parsed,
-            compressor=compressor,
+            dimension_separator=dimension_separator if dimension_separator is not None else ".",
+            fill_value=fill_value,
             filters=filters,
+            compressor=compressor,
             attributes=attributes,
         )
 
@@ -4574,49 +4539,6 @@ async def init_array(
     AsyncArray
         The AsyncArray.
     """
-    meta = build_array_metadata(
-        shape=shape,
-        dtype=dtype,
-        chunks=chunks,
-        shards=shards,
-        filters=filters,
-        compressors=compressors,
-        serializer=serializer,
-        fill_value=fill_value,
-        order=order,
-        zarr_format=zarr_format,
-        attributes=attributes,
-        chunk_key_encoding=chunk_key_encoding,
-        dimension_names=dimension_names,
-    )
-    arr = AsyncArray(metadata=meta, store_path=store_path, config=config)
-    await save_new_metadata(store_path, meta, overwrite=overwrite, ensure_parents=True)
-    return arr
-
-
-def build_array_metadata(
-    *,
-    shape: ShapeLike,
-    dtype: ZDTypeLike,
-    chunks: ChunksLike | Literal["auto"] = "auto",
-    shards: ShardsLike | None = None,
-    filters: FiltersLike = "auto",
-    compressors: CompressorsLike = "auto",
-    serializer: SerializerLike = "auto",
-    fill_value: Any = DEFAULT_FILL_VALUE,
-    order: MemoryOrder | None = None,
-    zarr_format: ZarrFormat | None = 3,
-    attributes: dict[str, JSON] | None = None,
-    chunk_key_encoding: ChunkKeyEncodingLike | None = None,
-    dimension_names: DimensionNamesLike = None,
-) -> ArrayV2Metadata | ArrayV3Metadata:
-    """Build an array metadata document from creation-style keyword arguments.
-
-    This is the pure half of `init_array`: it normalizes the same keyword
-    arguments into an in-memory metadata object without touching any store.
-    The parameters have the same meaning as in
-    [`zarr.api.asynchronous.create_array`][].
-    """
 
     if zarr_format is None:
         zarr_format = _default_zarr_format()
@@ -4682,7 +4604,7 @@ def build_array_metadata(
             order_parsed = order
         chunk_key_encoding_parsed = cast("V2ChunkKeyEncoding", chunk_key_encoding_parsed)
 
-        meta = AsyncArray._create_metadata_v2(
+        meta = build_array_metadata_v2(
             shape=shape_parsed,
             dtype=zdtype,
             chunks=outer_chunks.chunk_shape,
@@ -4732,7 +4654,7 @@ def build_array_metadata(
 
         if order is not None:
             _warn_order_kwarg()
-        meta = AsyncArray._create_metadata_v3(
+        meta = build_array_metadata_v3(
             shape=shape_parsed,
             dtype=zdtype,
             fill_value=fill_value,
@@ -4743,7 +4665,118 @@ def build_array_metadata(
             attributes=attributes,
         )
 
-    return meta
+    arr = AsyncArray(metadata=meta, store_path=store_path, config=config)
+    await save_new_metadata(store_path, meta, overwrite=overwrite, ensure_parents=True)
+    return arr
+
+
+def build_array_metadata_v2(
+    *,
+    shape: ShapeLike,
+    dtype: ZDTypeLike | ZDType[TBaseDType, TBaseScalar],
+    chunks: ShapeLike,
+    fill_value: Any = DEFAULT_FILL_VALUE,
+    order: MemoryOrder = "C",
+    dimension_separator: Literal[".", "/"] = ".",
+    filters: Iterable[dict[str, JSON] | Numcodec] | None = None,
+    compressor: CompressorLikev2 = None,
+    attributes: dict[str, JSON] | None = None,
+) -> ArrayV2Metadata:
+    """Build a Zarr format 2 array metadata document from its fields.
+
+    Each keyword is a field of the `.zarray` document, with `attributes` the
+    `.zattrs` document. `fill_value` defaults to the data type's default
+    scalar, and an explicit `None` is kept, because the field is nullable in
+    Zarr format 2. `filters` and `compressor` are numcodecs objects or their
+    JSON, exactly as the format stores them — nothing is guessed; the
+    guessing creation API is [`zarr.api.asynchronous.create_array`][].
+    """
+    zdtype = parse_dtype(dtype, zarr_format=2)
+    if fill_value is DEFAULT_FILL_VALUE:
+        fill_value_parsed: Any = zdtype.default_scalar()
+    else:
+        # An explicit None is kept: the field is nullable in Zarr format 2.
+        fill_value_parsed = fill_value
+
+    return ArrayV2Metadata(
+        shape=parse_shapelike(shape),
+        dtype=zdtype,
+        chunks=parse_shapelike(chunks),
+        order=order,
+        dimension_separator=dimension_separator,
+        fill_value=fill_value_parsed,
+        compressor=compressor,
+        filters=filters,
+        attributes=attributes,
+    )
+
+
+def build_array_metadata_v3(
+    *,
+    shape: ShapeLike,
+    dtype: ZDTypeLike | ZDType[TBaseDType, TBaseScalar],
+    chunk_grid: ChunkGridMetadata | Mapping[str, JSON] | ShapeLike,
+    fill_value: Any = DEFAULT_FILL_VALUE,
+    chunk_key_encoding: ChunkKeyEncodingLike | None = None,
+    codecs: Iterable[Codec | dict[str, JSON]] | None = None,
+    dimension_names: DimensionNamesLike = None,
+    attributes: dict[str, JSON] | None = None,
+) -> ArrayV3Metadata:
+    """Build a Zarr format 3 array metadata document from its fields.
+
+    Each keyword is a field of the `zarr.json` document. `chunk_grid` takes
+    the grid's metadata or its JSON, or a chunk shape, which declares a
+    regular grid, as `ArrayBuilder` does in `zarrs`. `codecs` of `None`
+    declares the default chain for the data type (no filters, the default
+    serializer, the default compressors), and `chunk_key_encoding` of `None`
+    the default encoding with the `/` separator. `fill_value` defaults to the
+    data type's default scalar, and `None` also means that default, because
+    the field is required in Zarr format 3.
+    """
+    zdtype = parse_dtype(dtype, zarr_format=3)
+    grid: ChunkGridMetadata | dict[str, JSON]
+    if isinstance(chunk_grid, RegularChunkGridMetadata | RectilinearChunkGridMetadata):
+        grid = chunk_grid
+    elif isinstance(chunk_grid, Mapping):
+        grid = dict(chunk_grid)
+    else:
+        grid = RegularChunkGridMetadata(chunk_shape=parse_shapelike(chunk_grid))
+
+    filters: tuple[ArrayArrayCodec, ...]
+    compressors: tuple[BytesBytesCodec, ...]
+    if codecs is None:
+        # no data types have default filters
+        filters = ()
+        serializer = default_serializer_v3(zdtype)
+        compressors = default_compressors_v3(zdtype)
+
+        codecs_parsed = (*filters, serializer, *compressors)
+    else:
+        codecs_parsed = tuple(codecs)
+
+    chunk_key_encoding_parsed: ChunkKeyEncodingLike
+    if chunk_key_encoding is None:
+        chunk_key_encoding_parsed = {"name": "default", "separator": "/"}
+    else:
+        chunk_key_encoding_parsed = chunk_key_encoding
+
+    if fill_value is DEFAULT_FILL_VALUE or fill_value is None:
+        # The dtype's default scalar: the field is required in Zarr format 3,
+        # so None also means the default.
+        fill_value_parsed = zdtype.default_scalar()
+    else:
+        fill_value_parsed = fill_value
+
+    return ArrayV3Metadata(
+        shape=parse_shapelike(shape),
+        data_type=zdtype,
+        chunk_grid=grid,
+        chunk_key_encoding=chunk_key_encoding_parsed,
+        fill_value=fill_value_parsed,
+        codecs=codecs_parsed,  # type: ignore[arg-type]
+        dimension_names=tuple(dimension_names) if dimension_names else None,
+        attributes=attributes if attributes is not None else {},
+    )
 
 
 async def create_array(
@@ -6218,25 +6251,46 @@ def _array_document_model(data: dict[str, JSON]) -> ArrayDocumentModel:
     return ZarrV3ArrayMetadata(data)
 
 
-class ArrayDeclarationKwargs(TypedDict, total=False):
-    """The keyword arguments that declare an array: what `build_array_metadata`
-    takes, with the same meanings as in [`zarr.api.asynchronous.create_array`][].
-    This is the one declaration of the surface; `ArrayIO.build` and
-    `AsyncArrayIO.build` take it as their keyword arguments."""
+class ArrayV2DeclarationKwargs(TypedDict, total=False):
+    """The fields that declare a Zarr format 2 array: what
+    `build_array_metadata_v2` takes. This is the one declaration of the
+    surface; `ArrayIO.build_v2` and `AsyncArrayIO.build_v2` take it as their
+    keyword arguments."""
 
     shape: Required[ShapeLike]
-    dtype: Required[ZDTypeLike]
-    chunks: ChunksLike | Literal["auto"]
-    shards: ShardsLike | None
-    filters: FiltersLike
-    compressors: CompressorsLike
-    serializer: SerializerLike
+    dtype: Required[ZDTypeLike | ZDType[TBaseDType, TBaseScalar]]
+    chunks: Required[ShapeLike]
     fill_value: Any
-    order: MemoryOrder | None
-    zarr_format: ZarrFormat
+    order: MemoryOrder
+    dimension_separator: Literal[".", "/"]
+    filters: Iterable[dict[str, JSON] | Numcodec] | None
+    compressor: CompressorLikev2
     attributes: dict[str, JSON] | None
+
+
+class ArrayV3DeclarationKwargs(TypedDict, total=False):
+    """The fields that declare a Zarr format 3 array: what
+    `build_array_metadata_v3` takes. This is the one declaration of the
+    surface; `ArrayIO.build_v3` and `AsyncArrayIO.build_v3` take it as their
+    keyword arguments."""
+
+    shape: Required[ShapeLike]
+    dtype: Required[ZDTypeLike | ZDType[TBaseDType, TBaseScalar]]
+    chunk_grid: Required[ChunkGridMetadata | Mapping[str, JSON] | ShapeLike]
+    fill_value: Any
     chunk_key_encoding: ChunkKeyEncodingLike | None
+    codecs: Iterable[Codec | dict[str, JSON]] | None
     dimension_names: DimensionNamesLike
+    attributes: dict[str, JSON] | None
+
+
+def _bound_store_path(store: Store | StorePath, name: str | None) -> StorePath:
+    """The location `name` within `store`, bound without IO: a path or URL
+    string is not accepted, because coercing one opens a store."""
+    store_path = store if isinstance(store, StorePath) else StorePath(store)
+    if name is not None:
+        store_path = store_path / name
+    return store_path
 
 
 class AsyncArrayIO:
@@ -6310,30 +6364,52 @@ class AsyncArrayIO:
             self._source = parse_array_metadata(document, str(store_path))
 
     @classmethod
-    def build(
+    def build_v2(
         cls,
         store: Store | StorePath,
         *,
         name: str | None = None,
         config: ArrayConfigLike | None = None,
-        **kwargs: Unpack[ArrayDeclarationKwargs],
+        **kwargs: Unpack[ArrayV2DeclarationKwargs],
     ) -> Self:
-        """Declare an array bound to a location in a store, without storing anything.
+        """Declare a Zarr format 2 array bound to a location in a store, without
+        storing anything.
 
-        Binding is pure, which is why this is the one synchronous constructor on
-        this class: `store` must already be a `Store` or `StorePath`, because
-        coercing a path or URL string opens a store, and that is
-        [`zarr.api.asynchronous.create_array`][]'s job. The declaration keyword
-        arguments have the same meaning as in `create_array`; unlike `zarrs`,
-        `fill_value` defaults to the data type's default fill value instead of
-        being required. The returned instance holds the normalized metadata in
-        memory; `store_metadata` stores it.
+        Binding is pure, which is why the declaring constructors are the
+        synchronous methods on this class: `store` must already be a `Store`
+        or `StorePath`, because coercing a path or URL string opens a store,
+        and that is [`zarr.api.asynchronous.create_array`][]'s job — as is
+        guessing: every keyword here is a field of the `.zarray` document (see
+        `build_array_metadata_v2`). Unlike `zarrs`, `fill_value` defaults to
+        the data type's default fill value instead of being required. The
+        returned instance holds the metadata in memory; `store_metadata`
+        stores it.
         """
-        metadata = build_array_metadata(**kwargs)
-        store_path = store if isinstance(store, StorePath) else StorePath(store)
-        if name is not None:
-            store_path = store_path / name
-        return cls(metadata, store_path, config)
+        return cls(build_array_metadata_v2(**kwargs), _bound_store_path(store, name), config)
+
+    @classmethod
+    def build_v3(
+        cls,
+        store: Store | StorePath,
+        *,
+        name: str | None = None,
+        config: ArrayConfigLike | None = None,
+        **kwargs: Unpack[ArrayV3DeclarationKwargs],
+    ) -> Self:
+        """Declare a Zarr format 3 array bound to a location in a store, without
+        storing anything.
+
+        Binding is pure, which is why the declaring constructors are the
+        synchronous methods on this class: `store` must already be a `Store`
+        or `StorePath`, because coercing a path or URL string opens a store,
+        and that is [`zarr.api.asynchronous.create_array`][]'s job — as is
+        guessing: every keyword here is a field of the `zarr.json` document
+        (see `build_array_metadata_v3`). Unlike `zarrs`, `fill_value` defaults
+        to the data type's default fill value instead of being required. The
+        returned instance holds the metadata in memory; `store_metadata`
+        stores it.
+        """
+        return cls(build_array_metadata_v3(**kwargs), _bound_store_path(store, name), config)
 
     @classmethod
     async def open(
@@ -6728,19 +6804,36 @@ class ArrayIO:
         return io
 
     @classmethod
-    def build(
+    def build_v2(
         cls,
         store: Store | StorePath,
         *,
         name: str | None = None,
         config: ArrayConfigLike | None = None,
-        **kwargs: Unpack[ArrayDeclarationKwargs],
+        **kwargs: Unpack[ArrayV2DeclarationKwargs],
     ) -> Self:
-        """Declare an array bound to a location in a store, without storing anything.
+        """Declare a Zarr format 2 array bound to a location in a store, without
+        storing anything.
 
-        See `AsyncArrayIO.build`.
+        See `AsyncArrayIO.build_v2`.
         """
-        return cls._wrap(AsyncArrayIO.build(store, name=name, config=config, **kwargs))
+        return cls._wrap(AsyncArrayIO.build_v2(store, name=name, config=config, **kwargs))
+
+    @classmethod
+    def build_v3(
+        cls,
+        store: Store | StorePath,
+        *,
+        name: str | None = None,
+        config: ArrayConfigLike | None = None,
+        **kwargs: Unpack[ArrayV3DeclarationKwargs],
+    ) -> Self:
+        """Declare a Zarr format 3 array bound to a location in a store, without
+        storing anything.
+
+        See `AsyncArrayIO.build_v3`.
+        """
+        return cls._wrap(AsyncArrayIO.build_v3(store, name=name, config=config, **kwargs))
 
     @classmethod
     def open(

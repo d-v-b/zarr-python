@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pytest
@@ -22,6 +22,29 @@ METADATA_DOCUMENTS = ("zarr.json", ".zarray", ".zattrs", ".zgroup")
 
 async def _store_keys(store: MemoryStore) -> set[str]:
     return {key async for key in store.list()}
+
+
+def _declare_answer_array(
+    zarr_format: ZarrFormat, store: MemoryStore, data: np.ndarray[Any, np.dtype[Any]]
+) -> AsyncArrayIO:
+    """Declare the combo test's array with the builder of `zarr_format`."""
+    if zarr_format == 2:
+        return AsyncArrayIO.build_v2(
+            store,
+            name="foo",
+            shape=data.shape,
+            dtype=data.dtype,
+            chunks=(2, 2),
+            attributes={"answer": 42},
+        )
+    return AsyncArrayIO.build_v3(
+        store,
+        name="foo",
+        shape=data.shape,
+        dtype=data.dtype,
+        chunk_grid=(2, 2),
+        attributes={"answer": 42},
+    )
 
 
 async def _store_foreign_codec_array(store: MemoryStore) -> None:
@@ -44,15 +67,7 @@ async def test_chunks_before_metadata(zarr_format: ZarrFormat) -> None:
     in that order, and the result is an ordinary readable array."""
     store = MemoryStore()
     data = np.arange(16, dtype="uint16").reshape(4, 4)
-    aio = AsyncArrayIO.build(
-        store,
-        name="foo",
-        shape=data.shape,
-        dtype=data.dtype,
-        chunks=(2, 2),
-        zarr_format=zarr_format,
-        attributes={"answer": 42},
-    )
+    aio = _declare_answer_array(zarr_format, store, data)
     assert await _store_keys(store) == set()
 
     await aio.setitem(Ellipsis, data)
@@ -78,15 +93,7 @@ async def test_chunks_before_metadata(zarr_format: ZarrFormat) -> None:
     np.testing.assert_array_equal(await arr.io.getitem(Ellipsis), data)
 
     # a writer that declared the same array independently can verify its assumption
-    worker = AsyncArrayIO.build(
-        store,
-        name="foo",
-        shape=data.shape,
-        dtype=data.dtype,
-        chunks=(2, 2),
-        zarr_format=zarr_format,
-        attributes={"answer": 42},
-    )
+    worker = _declare_answer_array(zarr_format, store, data)
     await worker.verify()
 
     # every write has an erasing inverse: one chunk, all chunks, then metadata
@@ -112,7 +119,7 @@ def test_chunks_before_metadata_sync() -> None:
     """The synchronous `ArrayIO` supports the same chunks-first flow."""
     store = MemoryStore()
     data = np.arange(16, dtype="uint16").reshape(4, 4)
-    aio = ArrayIO.build(store, name="foo", shape=data.shape, dtype=data.dtype, chunks=(2, 2))
+    aio = ArrayIO.build_v3(store, name="foo", shape=data.shape, dtype=data.dtype, chunk_grid=(2, 2))
     aio.setitem(Ellipsis, data)
     aio.store_metadata()
     opened = ArrayIO.open(store, name="foo")
@@ -127,16 +134,14 @@ def test_chunks_before_metadata_sync() -> None:
         ArrayIO.open(store, name="foo")
 
 
-def test_build_v2_shards_raises() -> None:
-    with pytest.raises(ValueError, match="shard_shape"):
-        ArrayIO.build(
+def test_build_v3_unknown_chunk_grid_raises() -> None:
+    with pytest.raises(ValueError, match="chunk grid"):
+        ArrayIO.build_v3(
             MemoryStore(),
             name="foo",
             shape=(4,),
             dtype="uint8",
-            chunks=(2,),
-            shards=(4,),
-            zarr_format=2,
+            chunk_grid={"name": "diagonal", "configuration": {}},
         )
 
 
@@ -171,10 +176,10 @@ async def test_document_work_without_codec_resolution() -> None:
 
 async def test_verify_mismatch_raises() -> None:
     store = MemoryStore()
-    aio = AsyncArrayIO.build(store, shape=(4, 4), dtype="uint8", chunks=(2, 2))
+    aio = AsyncArrayIO.build_v3(store, shape=(4, 4), dtype="uint8", chunk_grid=(2, 2))
     await aio.store_metadata()
-    other = AsyncArrayIO.build(
-        store, shape=(4, 4), dtype="uint8", chunks=(4, 4), attributes={"a": 1}
+    other = AsyncArrayIO.build_v3(
+        store, shape=(4, 4), dtype="uint8", chunk_grid=(4, 4), attributes={"a": 1}
     )
     with pytest.raises(ValueError, match="differing fields: attributes, chunk_grid"):
         await other.verify()
@@ -182,20 +187,20 @@ async def test_verify_mismatch_raises() -> None:
 
 async def test_verify_format_mismatch_raises() -> None:
     store = MemoryStore()
-    await AsyncArrayIO.build(store, shape=(4,), dtype="uint8", zarr_format=2).store_metadata()
-    bound_v3 = AsyncArrayIO.build(store, shape=(4,), dtype="uint8", zarr_format=3)
+    await AsyncArrayIO.build_v2(store, shape=(4,), dtype="uint8", chunks=(4,)).store_metadata()
+    bound_v3 = AsyncArrayIO.build_v3(store, shape=(4,), dtype="uint8", chunk_grid=(4,))
     with pytest.raises(ValueError, match="stored array is Zarr format 2"):
         await bound_v3.verify()
 
 
 async def test_verify_missing_raises() -> None:
-    aio = AsyncArrayIO.build(MemoryStore(), shape=(4,), dtype="uint8")
+    aio = AsyncArrayIO.build_v3(MemoryStore(), shape=(4,), dtype="uint8", chunk_grid=(4,))
     with pytest.raises(ArrayNotFoundError):
         await aio.verify()
 
 
 async def test_erase_chunk_out_of_grid_raises() -> None:
-    aio = AsyncArrayIO.build(MemoryStore(), shape=(4, 4), dtype="uint8", chunks=(2, 2))
+    aio = AsyncArrayIO.build_v3(MemoryStore(), shape=(4, 4), dtype="uint8", chunk_grid=(2, 2))
     with pytest.raises(IndexError, match="outside the chunk grid"):
         await aio.erase_chunk((2, 0))
     with pytest.raises(IndexError, match="outside the chunk grid"):
