@@ -6,7 +6,8 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pytest
-from zarr_metadata import ZarrV3ArrayMetadata
+from zarr_metadata import UNSET, ZarrV3ArrayMetadata
+from zarr_metadata import ZarrV2ArrayMetadata as ModelV2
 
 import zarr
 from zarr import ArrayIO, AsyncArrayIO
@@ -257,3 +258,45 @@ def test_binding_follows_the_global_config() -> None:
     legacy = v2.metadata_legacy
     assert isinstance(legacy, ArrayV2Metadata)
     assert legacy.order == "F"
+
+
+async def test_array_state_propagates_to_the_shared_binding() -> None:
+    """A change through the array side (resize, update_attributes) is visible
+    on the shared binding's model, and a derived binding stays independent."""
+    store = MemoryStore()
+    aio = AsyncArrayIO.build_v3(store, name="foo", shape=(4,), data_type="uint8", chunk_grid=(2,))
+    await aio.store_metadata()
+    arr = aio.to_array()
+
+    derived = aio.with_config({"order": "F"})
+    moved = aio.with_store(MemoryStore())
+
+    await arr.resize((6,))
+    assert aio.metadata.shape == (6,)
+
+    await arr.update_attributes({"a": 1})
+    assert dict(aio.metadata.attributes) == {"a": 1}
+
+    # the derivatives were made before the changes and do not alias them
+    assert derived.metadata_legacy.shape == (4,)
+    assert dict(derived.metadata_legacy.attributes) == {}
+    assert dict(moved.metadata_legacy.attributes) == {}
+
+
+async def test_store_metadata_of_model_without_attributes_clears_zattrs() -> None:
+    """Storing a v2 model with no attributes removes a stale .zattrs."""
+    store = MemoryStore()
+    aio = AsyncArrayIO.build_v2(
+        store, name="foo", shape=(4,), dtype="uint8", chunks=(4,), attributes={"stale": 1}
+    )
+    await aio.store_metadata()
+    assert "foo/.zattrs" in await _store_keys(store)
+
+    opened = await AsyncArrayIO.open(store, name="foo")
+    model = opened.metadata
+    assert isinstance(model, ModelV2)
+    bare = opened.with_metadata(model.update(attributes=UNSET))
+    await bare.store_metadata()
+    assert "foo/.zattrs" not in await _store_keys(store)
+    reread = await AsyncArrayIO.open(store, name="foo")
+    assert dict(reread.metadata.attributes) == {}

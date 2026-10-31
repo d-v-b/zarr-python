@@ -1236,13 +1236,7 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         -------
         A new Array
         """
-        if isinstance(config, ArrayConfig):
-            new_config = config
-        else:
-            # Merge new config with existing config, so missing keys are inherited
-            # from the current array rather than from global defaults
-            new_config = ArrayConfig(**{**self.config.to_dict(), **config})  # type: ignore[arg-type]
-        return type(self)(metadata=self.metadata, store_path=self.store_path, config=new_config)
+        return cast("Self", self._io.with_config(config).to_array())
 
     async def nchunks_initialized(self) -> int:
         """
@@ -6531,16 +6525,40 @@ class AsyncArrayIO:
         """An `AsyncArray` over this binding; both share one state."""
         return AsyncArray._from_io(self)
 
+    def _derived_source(self) -> ArrayMetadataModel | ArrayMetadata:
+        """The source for a derived binding: a legacy object is copied, so the
+        repair mark and in-place attribute updates never alias across bindings;
+        a model is immutable and shared."""
+        source = self._source
+        if isinstance(source, ArrayV2Metadata | ArrayV3Metadata):
+            return copy.copy(source)
+        return source
+
+    def _derive(
+        self,
+        source: ArrayMetadataModel | ArrayMetadata | ArrayMetadataDict,
+        store_path: StorePath,
+        config: ArrayConfig,
+    ) -> Self:
+        """A new binding, keeping this one's captured pipeline implementation."""
+        derived = type(self)(source, store_path, config)
+        derived._pipeline_class = self._pipeline_class
+        derived._codec_pipeline_cache = None
+        return derived
+
     def with_metadata(self, metadata: ArrayMetadataModel | ArrayMetadata) -> Self:
-        """This binding with `metadata` in place of its own. Nothing is stored."""
-        return type(self)(metadata, self._store_path, self._config)
+        """This binding with `metadata` in place of its own. Nothing is stored;
+        a legacy `metadata` object is copied."""
+        if isinstance(metadata, ArrayV2Metadata | ArrayV3Metadata):
+            metadata = copy.copy(metadata)
+        return self._derive(metadata, self._store_path, self._config)
 
     def with_store(self, store: Store | StorePath) -> Self:
         """This binding at its path within `store`, or at a `StorePath` as given. Nothing is stored."""
         store_path = (
             store if isinstance(store, StorePath) else StorePath(store, self._store_path.path)
         )
-        return type(self)(self._source, store_path, self._config)
+        return self._derive(self._derived_source(), store_path, self._config)
 
     def with_config(self, config: ArrayConfigLike) -> Self:
         """This binding with `config` merged over its runtime configuration, as `AsyncArray.with_config` merges it."""
@@ -6548,7 +6566,7 @@ class AsyncArrayIO:
             new_config = config
         else:
             new_config = ArrayConfig(**{**self._config.to_dict(), **config})  # type: ignore[arg-type]
-        return type(self)(self._source, self._store_path, new_config)
+        return self._derive(self._derived_source(), self._store_path, new_config)
 
     async def store_metadata(self, *, ensure_parents: bool = False) -> None:
         """Store the metadata, unconditionally replacing any stored metadata here.
@@ -6563,13 +6581,17 @@ class AsyncArrayIO:
             _stored_document_replaced(source)
         else:
             prototype = default_buffer_prototype()
+            key_value = source.to_key_value(indent=zarr_config.get("json_indent"))
             to_save = {
-                str(key): prototype.buffer.from_bytes(value)
-                for key, value in source.to_key_value().items()
+                str(key): prototype.buffer.from_bytes(value) for key, value in key_value.items()
             }
             await _write_metadata(
                 self._store_path, to_save, self._zarr_format, ensure_parents=ensure_parents
             )
+            if self._zarr_format == 2 and ZATTRS_JSON not in to_save:
+                # An attribute-less model emits no .zattrs; a stale one must not
+                # survive an unconditional metadata write.
+                await (self._store_path / ZATTRS_JSON).delete()
 
     async def verify(self) -> None:
         """Check that the stored metadata equals the bound metadata.
@@ -6629,7 +6651,8 @@ class AsyncArrayIO:
         n_chunks = product(grid_shape)
         if n_chunks == 0:
             return
-        limit = zarr_config.get("async.concurrency") or 1000
+        concurrency = zarr_config.get("async.concurrency")
+        limit = concurrency if concurrency is not None else 1000
         await concurrent_foreach(
             (
                 (self._store_path, self._encode_chunk_key(coords))
