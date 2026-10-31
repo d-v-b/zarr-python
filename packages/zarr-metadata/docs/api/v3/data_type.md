@@ -40,6 +40,8 @@ title: data_type
 
 ::: zarr_metadata.v3.data_type.string
 
+::: zarr_metadata.v3.data_type.struct
+
 ::: zarr_metadata.v3.data_type.numpy_datetime64
 
 ::: zarr_metadata.v3.data_type.numpy_timedelta64

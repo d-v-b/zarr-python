@@ -1244,6 +1244,7 @@ docs = [
     { name = "ruff" },
 ]
 test = [
+    { name = "griffelib" },
     { name = "hypothesis" },
     { name = "jsonschema" },
     { name = "pydantic" },
@@ -1268,6 +1269,7 @@ docs = [
     { name = "ruff", specifier = "==0.16.8" },
 ]
 test = [
+    { name = "griffelib" },
     { name = "hypothesis" },
     { name = "jsonschema" },
     { name = "pydantic", specifier = ">=2.13" },
