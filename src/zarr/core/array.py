@@ -253,10 +253,17 @@ def parse_array_metadata(data: Any, path: str | None = None) -> ArrayMetadata:
     raise TypeError  # pragma: no cover
 
 
-def create_codec_pipeline(metadata: ArrayMetadata, *, store: Store | None = None) -> CodecPipeline:
+def create_codec_pipeline(
+    metadata: ArrayMetadata,
+    *,
+    store: Store | None = None,
+    pipeline_class: type[CodecPipeline] | None = None,
+) -> CodecPipeline:
+    if pipeline_class is None:
+        pipeline_class = get_pipeline_class()
     if store is not None:
         try:
-            return get_pipeline_class().from_array_metadata_and_store(
+            return pipeline_class.from_array_metadata_and_store(
                 array_metadata=metadata, store=store
             )
         except NotImplementedError:
@@ -269,7 +276,7 @@ def create_codec_pipeline(metadata: ArrayMetadata, *, store: Store | None = None
         # "disables partial reads" warning) fire here; `evolve_from_array_spec`
         # re-splits the same already-warned-about chain via
         # `codecs_from_list_unchecked`, so it does not re-emit them.
-        pipeline = get_pipeline_class().from_codecs(metadata.codecs)
+        pipeline = pipeline_class.from_codecs(metadata.codecs)
 
         # Use the regular chunk shape if available, otherwise use a
         # placeholder. The ChunkTransform is shape-agnostic — the actual
@@ -288,7 +295,7 @@ def create_codec_pipeline(metadata: ArrayMetadata, *, store: Store | None = None
         return pipeline.evolve_from_array_spec(chunk_spec)
     elif isinstance(metadata, ArrayV2Metadata):
         v2_codec = V2Codec(filters=metadata.filters, compressor=metadata.compressor)
-        pipeline = get_pipeline_class().from_codecs([v2_codec])
+        pipeline = pipeline_class.from_codecs([v2_codec])
         chunk_spec = ArraySpec(
             shape=metadata.chunks,
             dtype=metadata.dtype,
@@ -4676,7 +4683,7 @@ def build_array_metadata_v2(
     dtype: ZDTypeLike | ZDType[TBaseDType, TBaseScalar],
     chunks: ShapeLike,
     fill_value: Any = DEFAULT_FILL_VALUE,
-    order: MemoryOrder = "C",
+    order: MemoryOrder | None = None,
     dimension_separator: Literal[".", "/"] = ".",
     filters: Iterable[dict[str, JSON] | Numcodec] | None = None,
     compressor: CompressorLikev2 = None,
@@ -4687,11 +4694,14 @@ def build_array_metadata_v2(
     Each keyword is a field of the `.zarray` document, with `attributes` the
     `.zattrs` document. `fill_value` defaults to the data type's default
     scalar, and an explicit `None` is kept, because the field is nullable in
-    Zarr format 2. `filters` and `compressor` are numcodecs objects or their
+    Zarr format 2. `order` defaults to the global configuration's
+    `array.order`. `filters` and `compressor` are numcodecs objects or their
     JSON, exactly as the format stores them — nothing is guessed; the
     guessing creation API is [`zarr.api.asynchronous.create_array`][].
     """
     zdtype = parse_dtype(dtype, zarr_format=2)
+    if order is None:
+        order = zarr_config.get("array.order")
     if fill_value is DEFAULT_FILL_VALUE:
         fill_value_parsed: Any = zdtype.default_scalar()
     else:
@@ -6336,6 +6346,7 @@ class AsyncArrayIO:
 
     _store_path: StorePath
     _config: ArrayConfig
+    _pipeline_class: type[CodecPipeline]
     _source: ArrayMetadataModel | ArrayMetadata
     _metadata_model_cache: ArrayMetadataModel | None
     _resolved_cache: ArrayMetadata | None
@@ -6351,6 +6362,10 @@ class AsyncArrayIO:
     ) -> None:
         self._store_path = store_path
         self._config = parse_array_config(config)
+        # The pipeline implementation is chosen when the binding is made, from
+        # the global configuration, exactly as `AsyncArray` has always chosen
+        # it; the pipeline itself is built on first use.
+        self._pipeline_class = get_pipeline_class()
         self._metadata_model_cache = None
         self._resolved_cache = None
         self._chunk_grid_cache = None
@@ -6577,7 +6592,9 @@ class AsyncArrayIO:
     def _resolved_codec_pipeline(self) -> CodecPipeline:
         if self._codec_pipeline_cache is None:
             self._codec_pipeline_cache = create_codec_pipeline(
-                metadata=self.metadata_legacy, store=self._store_path.store
+                metadata=self.metadata_legacy,
+                store=self._store_path.store,
+                pipeline_class=self._pipeline_class,
             )
         return self._codec_pipeline_cache
 

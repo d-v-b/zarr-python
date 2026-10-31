@@ -8,9 +8,12 @@ import numpy as np
 import pytest
 from zarr_metadata import ZarrV3ArrayMetadata
 
+import zarr
 from zarr import ArrayIO, AsyncArrayIO
 from zarr.api.asynchronous import open_array
 from zarr.core.buffer import default_buffer_prototype
+from zarr.core.codec_pipeline import FusedCodecPipeline
+from zarr.core.metadata import ArrayV2Metadata
 from zarr.errors import ArrayNotFoundError, UnknownCodecError
 from zarr.storage import MemoryStore
 
@@ -233,3 +236,22 @@ async def test_with_methods_rebind() -> None:
     configured = aio.with_config({"order": "F"})
     assert configured.config.order == "F"
     assert configured.metadata == aio.metadata
+
+
+def test_binding_follows_the_global_config() -> None:
+    """ArrayIO responds to the global configuration the way Array always has:
+    the pipeline implementation is captured when the binding is made, and
+    build_v2's order defaults from array.order."""
+    with zarr.config.set(
+        {
+            "codec_pipeline.path": "zarr.core.codec_pipeline.FusedCodecPipeline",
+            "array.order": "F",
+        }
+    ):
+        v3 = ArrayIO.build_v3(MemoryStore(), shape=(2,), dtype="uint8", chunk_grid=(2,))
+        v2 = ArrayIO.build_v2(MemoryStore(), shape=(2,), dtype="uint8", chunks=(2,))
+    # outside the block, the choices made inside it hold
+    assert isinstance(v3.to_array().async_array.codec_pipeline, FusedCodecPipeline)
+    legacy = v2.metadata_legacy
+    assert isinstance(legacy, ArrayV2Metadata)
+    assert legacy.order == "F"
