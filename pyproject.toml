@@ -53,6 +53,7 @@ dependencies = [
     'typing_extensions>=4.14',
     'donfig>=0.8',
     'msgspec>=0.19',
+    'zarr-metadata>=0.6.0',
 ]
 
 dynamic = [

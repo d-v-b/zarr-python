@@ -2,18 +2,21 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import json
 import math
 import warnings
 from asyncio import gather
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from itertools import starmap
 from logging import getLogger
 from typing import (
     TYPE_CHECKING,
     Any,
     Literal,
+    Required,
     TypedDict,
+    Unpack,
     cast,
     overload,
 )
@@ -21,6 +24,7 @@ from warnings import warn
 
 import numpy as np
 from typing_extensions import Sentinel, deprecated
+from zarr_metadata import ZarrV2ArrayMetadata, ZarrV3ArrayMetadata
 
 import zarr
 from zarr.abc.codec import ArrayArrayCodec, ArrayBytesCodec, BytesBytesCodec, Codec
@@ -121,6 +125,7 @@ from zarr.core.metadata import (
 )
 from zarr.core.metadata.io import (
     ARRAY_DOCUMENTS,
+    _write_metadata,
     encode_documents,
     parse_stored_array,
     read_documents,
@@ -138,7 +143,9 @@ from zarr.core.metadata.v2 import (
 from zarr.core.metadata.v3 import (
     ChunkGridMetadata,
     RectilinearChunkGridMetadata,
+    RectilinearChunkGridMetadataJSON,
     RegularChunkGridMetadata,
+    RegularChunkGridMetadataJSON,
     create_chunk_grid_metadata,
     parse_node_type_array,
 )
@@ -178,6 +185,10 @@ if TYPE_CHECKING:
 # Array and AsyncArray are defined in the base `zarr` namespace
 __all__ = [
     "DEFAULT_FILL_VALUE",
+    "ArrayIO",
+    "AsyncArrayIO",
+    "build_array_metadata_v2",
+    "build_array_metadata_v3",
     "create_codec_pipeline",
     "parse_array_metadata",
 ]
@@ -242,10 +253,17 @@ def parse_array_metadata(data: Any, path: str | None = None) -> ArrayMetadata:
     raise TypeError  # pragma: no cover
 
 
-def create_codec_pipeline(metadata: ArrayMetadata, *, store: Store | None = None) -> CodecPipeline:
+def create_codec_pipeline(
+    metadata: ArrayMetadata,
+    *,
+    store: Store | None = None,
+    pipeline_class: type[CodecPipeline] | None = None,
+) -> CodecPipeline:
+    if pipeline_class is None:
+        pipeline_class = get_pipeline_class()
     if store is not None:
         try:
-            return get_pipeline_class().from_array_metadata_and_store(
+            return pipeline_class.from_array_metadata_and_store(
                 array_metadata=metadata, store=store
             )
         except NotImplementedError:
@@ -258,7 +276,7 @@ def create_codec_pipeline(metadata: ArrayMetadata, *, store: Store | None = None
         # "disables partial reads" warning) fire here; `evolve_from_array_spec`
         # re-splits the same already-warned-about chain via
         # `codecs_from_list_unchecked`, so it does not re-emit them.
-        pipeline = get_pipeline_class().from_codecs(metadata.codecs)
+        pipeline = pipeline_class.from_codecs(metadata.codecs)
 
         # Use the regular chunk shape if available, otherwise use a
         # placeholder. The ChunkTransform is shape-agnostic — the actual
@@ -277,7 +295,7 @@ def create_codec_pipeline(metadata: ArrayMetadata, *, store: Store | None = None
         return pipeline.evolve_from_array_spec(chunk_spec)
     elif isinstance(metadata, ArrayV2Metadata):
         v2_codec = V2Codec(filters=metadata.filters, compressor=metadata.compressor)
-        pipeline = get_pipeline_class().from_codecs([v2_codec])
+        pipeline = pipeline_class.from_codecs([v2_codec])
         chunk_spec = ArraySpec(
             shape=metadata.chunks,
             dtype=metadata.dtype,
@@ -392,11 +410,7 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         The runtime configuration of the array.
     """
 
-    metadata: T_ArrayMetadata
-    store_path: StorePath
-    codec_pipeline: CodecPipeline = field(init=False)
-    _chunk_grid: ChunkGrid = field(init=False)
-    config: ArrayConfig
+    _io: AsyncArrayIO
 
     @overload
     def __init__(
@@ -420,18 +434,46 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         store_path: StorePath,
         config: ArrayConfigLike | None = None,
     ) -> None:
-        metadata_parsed = parse_array_metadata(metadata, str(store_path))
-        config_parsed = parse_array_config(config)
+        object.__setattr__(self, "_io", AsyncArrayIO(metadata, store_path, config))
+        # An AsyncArray is the resolving layer: build its codec pipeline now, so
+        # pipeline-construction warnings fire at creation, as they always have.
+        _ = self._io._resolved_codec_pipeline
 
-        object.__setattr__(self, "metadata", metadata_parsed)
-        object.__setattr__(self, "store_path", store_path)
-        object.__setattr__(self, "config", config_parsed)
-        object.__setattr__(self, "_chunk_grid", ChunkGrid.from_metadata(metadata_parsed))
-        object.__setattr__(
-            self,
-            "codec_pipeline",
-            create_codec_pipeline(metadata=metadata_parsed, store=store_path.store),
-        )
+    @classmethod
+    def _from_io(cls, io: AsyncArrayIO) -> AnyAsyncArray:
+        """An array over an existing binding: the array and `io` share one state."""
+        self = object.__new__(cls)
+        object.__setattr__(self, "_io", io)
+        return self
+
+    @property
+    def io(self) -> AsyncArrayIO:
+        """The explicit-IO layer this array delegates to; both share one state."""
+        return self._io
+
+    @property
+    def metadata(self) -> T_ArrayMetadata:
+        """The in-memory metadata of this array."""
+        return cast("T_ArrayMetadata", self._io.metadata_legacy)
+
+    @property
+    def store_path(self) -> StorePath:
+        """The location in a store this array is bound to."""
+        return self._io.store_path
+
+    @property
+    def config(self) -> ArrayConfig:
+        """The runtime configuration of this array."""
+        return self._io.config
+
+    @property
+    def codec_pipeline(self) -> CodecPipeline:
+        """The codec pipeline used for encoding and decoding chunks."""
+        return self._io._resolved_codec_pipeline
+
+    @property
+    def _chunk_grid(self) -> ChunkGrid:
+        return self._io._chunk_grid
 
     @classmethod
     async def _create(
@@ -585,43 +627,16 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         dimension_names: DimensionNamesLike = None,
         attributes: dict[str, JSON] | None = None,
     ) -> ArrayV3Metadata:
-        """Create an instance of ArrayV3Metadata."""
-        filters: tuple[ArrayArrayCodec, ...]
-        compressors: tuple[BytesBytesCodec, ...]
-
-        shape = parse_shapelike(shape)
-        if codecs is None:
-            # no data types have default filters
-            filters = ()
-            serializer = default_serializer_v3(dtype)
-            compressors = default_compressors_v3(dtype)
-
-            codecs_parsed = (*filters, serializer, *compressors)
-        else:
-            codecs_parsed = tuple(codecs)
-
-        chunk_key_encoding_parsed: ChunkKeyEncodingLike
-        if chunk_key_encoding is None:
-            chunk_key_encoding_parsed = {"name": "default", "separator": "/"}
-        else:
-            chunk_key_encoding_parsed = chunk_key_encoding
-
-        if fill_value is DEFAULT_FILL_VALUE or fill_value is None:
-            # Use dtype's default scalar for the DEFAULT_FILL_VALUE sentinel
-            # For v3, None is converted to DEFAULT_FILL_VALUE behavior
-            fill_value_parsed = dtype.default_scalar()
-        else:
-            fill_value_parsed = fill_value
-
-        return ArrayV3Metadata(
+        """See the module-level `build_array_metadata_v3`."""
+        return build_array_metadata_v3(
             shape=shape,
             data_type=dtype,
             chunk_grid=chunk_grid,
-            chunk_key_encoding=chunk_key_encoding_parsed,
-            fill_value=fill_value_parsed,
-            codecs=codecs_parsed,  # type: ignore[arg-type]
-            dimension_names=tuple(dimension_names) if dimension_names else None,
-            attributes=attributes or {},
+            fill_value=fill_value,
+            chunk_key_encoding=chunk_key_encoding,
+            codecs=codecs,
+            dimension_names=dimension_names,
+            attributes=attributes,
         )
 
     @classmethod
@@ -678,25 +693,16 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         compressor: CompressorLikev2 = None,
         attributes: dict[str, JSON] | None = None,
     ) -> ArrayV2Metadata:
-        if dimension_separator is None:
-            dimension_separator = "."
-
-        # Handle the DEFAULT_FILL_VALUE sentinel
-        if fill_value is DEFAULT_FILL_VALUE:
-            fill_value_parsed: Any = dtype.default_scalar()
-        else:
-            # For v2, preserve None as-is (backward compatibility)
-            fill_value_parsed = fill_value
-
-        return ArrayV2Metadata(
+        """See the module-level `build_array_metadata_v2`."""
+        return build_array_metadata_v2(
             shape=shape,
             dtype=dtype,
             chunks=chunks,
             order=order,
-            dimension_separator=dimension_separator,
-            fill_value=fill_value_parsed,
-            compressor=compressor,
+            dimension_separator=dimension_separator if dimension_separator is not None else ".",
+            fill_value=fill_value,
             filters=filters,
+            compressor=compressor,
             attributes=attributes,
         )
 
@@ -1232,13 +1238,11 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         -------
         A new Array
         """
-        if isinstance(config, ArrayConfig):
-            new_config = config
-        else:
-            # Merge new config with existing config, so missing keys are inherited
-            # from the current array rather than from global defaults
-            new_config = ArrayConfig(**{**self.config.to_dict(), **config})  # type: ignore[arg-type]
-        return type(self)(metadata=self.metadata, store_path=self.store_path, config=new_config)
+        derived = self._io.with_config(config)
+        # Build the pipeline now, so construction warnings fire here, as they
+        # do in __init__.
+        _ = derived._resolved_codec_pipeline
+        return cast("Self", type(self)._from_io(derived))
 
     async def nchunks_initialized(self) -> int:
         """
@@ -1488,17 +1492,7 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         out: NDBuffer | None = None,
         fields: Fields | None = None,
     ) -> NDArrayLikeOrScalar:
-        return await _get_selection(
-            self.store_path,
-            self.metadata,
-            self.codec_pipeline,
-            self.config,
-            self._chunk_grid,
-            indexer,
-            prototype=prototype,
-            out=out,
-            fields=fields,
-        )
+        return await self._io._get_selection(indexer, prototype=prototype, out=out, fields=fields)
 
     async def getitem(
         self,
@@ -1542,15 +1536,7 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         np.int32(0)
         """
 
-        return await _getitem(
-            self.store_path,
-            self.metadata,
-            self.codec_pipeline,
-            self.config,
-            self._chunk_grid,
-            selection,
-            prototype=prototype,
-        )
+        return await self._io.getitem(selection, prototype=prototype)
 
     async def get_orthogonal_selection(
         self,
@@ -1625,57 +1611,20 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
             out_array = cast("NDArrayLikeOrScalar", np.array(out_array).reshape(indexer.sel_shape))
         return out_array
 
-    async def _save_metadata(self, metadata: ArrayMetadata, ensure_parents: bool = False) -> None:
-        """Store `metadata` as this array's own documents, then clear the
-        `_stored_document` mark (see `_stored_document_replaced`). `_resize` stores the
-        documents it encoded before deleting chunks directly, then clears the mark the
-        same way."""
-        await save_metadata(self.store_path, metadata, ensure_parents=ensure_parents)
-        self._stored_document_replaced()
+    async def _save_metadata(self, ensure_parents: bool = False) -> None:
+        """Store this array's metadata documents, delegating to the wrapped
+        `AsyncArrayIO`, which clears the `_stored_document` mark (see
+        `_stored_document_replaced`). `_resize` stores the documents it encoded before
+        deleting chunks directly, then clears the mark the same way."""
+        await self._io.store_metadata(ensure_parents=ensure_parents)
 
     def _stored_document_replaced(self) -> None:
-        """Record that the store no longer holds a document of this array that needs an
-        repair: it holds the repair, a valid document, or none. The metadata this handle
-        holds, which a consolidated group handle may share, then stops standing for the
-        document it was read from (see `mark_repaired`), so no later write through either
-        handle stores that document again."""
-        object.__setattr__(self.metadata, "_stored_document", None)
+        """See the module-level `_stored_document_replaced`."""
+        _stored_document_replaced(self.metadata)
 
     async def _store_repaired_document(self) -> None:
-        """Store the repair of this array's current stored document, if it needs one,
-        before chunks are written under this handle's metadata.
-
-        Only for metadata read from a document whose repair moves chunks (see
-        `zarr.core.metadata.repair`). The document is read again, because the store may
-        hold a newer one than this handle's metadata. If that one lays out chunks
-        differently (another writer stored a different chunk size since), this handle
-        would write chunks no reader finds, so it raises and stores nothing. If it needs
-        no repair (the array was re-saved since, possibly by another implementation), it
-        is left as written; if there is none, there is nothing to repair.
-
-        Storing the same repair twice is harmless, so handles that write chunks
-        concurrently need no coordination. The read and the store are not one atomic
-        step, though: a metadata write by another handle between them (a resize, an
-        attribute update) is replaced by the repair of the document read before it, as
-        with any two metadata writes that race.
-        """
-        if self.metadata._stored_document is None:
-            return
-        zarr_format = self.metadata.zarr_format
-        documents = await read_documents(self.store_path, ARRAY_DOCUMENTS[zarr_format])
-        try:
-            current = parse_stored_array(documents, zarr_format, str(self.store_path))
-        except ArrayNotFoundError:
-            pass
-        else:
-            if _chunk_layout(current) != _chunk_layout(self.metadata):
-                raise ValueError(
-                    f"Array {str(self.store_path)!r}: the metadata stored has changed since "
-                    "this array was opened; reopen the array to write to it. Nothing was stored."
-                )
-            if current._stored_document is not None:
-                await upsert_metadata(self.store_path, current, documents)
-        self._stored_document_replaced()
+        """See the module-level `_store_repaired_document`."""
+        await _store_repaired_document(self.store_path, self.metadata)
 
     async def _set_selection(
         self,
@@ -1685,21 +1634,7 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         prototype: BufferPrototype,
         fields: Fields | None = None,
     ) -> None:
-        if product(indexer.shape) > 0:
-            # Chunks are about to be stored under the repaired metadata, so store it
-            # first: every reader of the store then agrees with them.
-            await self._store_repaired_document()
-        return await _set_selection(
-            self.store_path,
-            self.metadata,
-            self.codec_pipeline,
-            self.config,
-            self._chunk_grid,
-            indexer,
-            value,
-            prototype=prototype,
-            fields=fields,
-        )
+        return await self._io._set_selection(indexer, value, prototype=prototype, fields=fields)
 
     async def setitem(
         self,
@@ -1740,10 +1675,7 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         - This method is asynchronous and should be awaited.
         - Supports basic indexing, where the selection is contiguous and does not involve advanced indexing.
         """
-        if prototype is None:
-            prototype = default_buffer_prototype()
-        indexer = BasicIndexer(selection, shape=self.metadata.shape, chunk_grid=self._chunk_grid)
-        return await self._set_selection(indexer, value, prototype=prototype)
+        return await self._io.setitem(selection, value, prototype=prototype)
 
     @property
     def oindex(self) -> AsyncOIndex[T_ArrayMetadata]:
@@ -1952,6 +1884,11 @@ class Array[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
             An asynchronous array whose metadata + store matches that of this synchronous array.
         """
         return self._async_array
+
+    @property
+    def io(self) -> ArrayIO:
+        """The explicit synchronous IO layer over this array's binding."""
+        return ArrayIO._wrap(self._async_array._io)
 
     @property
     def config(self) -> ArrayConfig:
@@ -4675,7 +4612,7 @@ async def init_array(
             order_parsed = order
         chunk_key_encoding_parsed = cast("V2ChunkKeyEncoding", chunk_key_encoding_parsed)
 
-        meta = AsyncArray._create_metadata_v2(
+        meta = build_array_metadata_v2(
             shape=shape_parsed,
             dtype=zdtype,
             chunks=outer_chunks.chunk_shape,
@@ -4725,9 +4662,9 @@ async def init_array(
 
         if order is not None:
             _warn_order_kwarg()
-        meta = AsyncArray._create_metadata_v3(
+        meta = build_array_metadata_v3(
             shape=shape_parsed,
-            dtype=zdtype,
+            data_type=zdtype,
             fill_value=fill_value,
             chunk_grid=grid,
             chunk_key_encoding=chunk_key_encoding_parsed,
@@ -4739,6 +4676,113 @@ async def init_array(
     arr = AsyncArray(metadata=meta, store_path=store_path, config=config)
     await save_new_metadata(store_path, meta, overwrite=overwrite, ensure_parents=True)
     return arr
+
+
+def build_array_metadata_v2(
+    *,
+    shape: ShapeLike,
+    dtype: ZDTypeLike | ZDType[TBaseDType, TBaseScalar],
+    chunks: ShapeLike,
+    fill_value: Any = DEFAULT_FILL_VALUE,
+    order: MemoryOrder | None = None,
+    dimension_separator: Literal[".", "/"] = ".",
+    filters: Iterable[dict[str, JSON] | Numcodec] | None = None,
+    compressor: CompressorLikev2 = None,
+    attributes: dict[str, JSON] | None = None,
+) -> ArrayV2Metadata:
+    """Build Zarr format 2 array metadata from its fields.
+
+    Each keyword is a `.zarray` field; `attributes` is the `.zattrs` one.
+    `fill_value` defaults to the data type's default scalar (an explicit
+    `None` is kept: the field is nullable); `order` defaults from the global
+    `array.order`. `filters` and `compressor` are numcodecs objects or their
+    JSON, as stored. Nothing is guessed.
+    """
+    zdtype = parse_dtype(dtype, zarr_format=2)
+    if order is None:
+        order = zarr_config.get("array.order")
+    if fill_value is DEFAULT_FILL_VALUE:
+        fill_value_parsed: Any = zdtype.default_scalar()
+    else:
+        # An explicit None is kept: the field is nullable in Zarr format 2.
+        fill_value_parsed = fill_value
+
+    return ArrayV2Metadata(
+        shape=parse_shapelike(shape),
+        dtype=zdtype,
+        chunks=parse_shapelike(chunks),
+        order=order,
+        dimension_separator=dimension_separator,
+        fill_value=fill_value_parsed,
+        compressor=compressor,
+        filters=filters,
+        attributes=attributes,
+    )
+
+
+def build_array_metadata_v3(
+    *,
+    shape: ShapeLike,
+    data_type: ZDTypeLike | ZDType[TBaseDType, TBaseScalar],
+    chunk_grid: ChunkGridMetadata | Mapping[str, JSON] | ShapeLike,
+    fill_value: Any = DEFAULT_FILL_VALUE,
+    chunk_key_encoding: ChunkKeyEncodingLike | None = None,
+    codecs: Iterable[Codec | dict[str, JSON]] | None = None,
+    dimension_names: DimensionNamesLike = None,
+    attributes: dict[str, JSON] | None = None,
+) -> ArrayV3Metadata:
+    """Build Zarr format 3 array metadata from its fields.
+
+    Each keyword is a `zarr.json` field. `chunk_grid` takes grid metadata,
+    its JSON, or a chunk shape, which declares a regular grid. `codecs`
+    `None` is the data type's default chain; `chunk_key_encoding` `None` is
+    the default encoding with `/`; `fill_value` defaults to the data type's
+    default scalar (`None` means the default too: the field is required).
+    """
+    zdtype = parse_dtype(data_type, zarr_format=3)
+    grid: ChunkGridMetadata | dict[str, JSON]
+    if isinstance(chunk_grid, RegularChunkGridMetadata | RectilinearChunkGridMetadata):
+        grid = chunk_grid
+    elif isinstance(chunk_grid, Mapping):
+        grid = dict(chunk_grid)
+    else:
+        grid = RegularChunkGridMetadata(chunk_shape=parse_shapelike(chunk_grid))
+
+    filters: tuple[ArrayArrayCodec, ...]
+    compressors: tuple[BytesBytesCodec, ...]
+    if codecs is None:
+        # no data types have default filters
+        filters = ()
+        serializer = default_serializer_v3(zdtype)
+        compressors = default_compressors_v3(zdtype)
+
+        codecs_parsed = (*filters, serializer, *compressors)
+    else:
+        codecs_parsed = tuple(codecs)
+
+    chunk_key_encoding_parsed: ChunkKeyEncodingLike
+    if chunk_key_encoding is None:
+        chunk_key_encoding_parsed = {"name": "default", "separator": "/"}
+    else:
+        chunk_key_encoding_parsed = chunk_key_encoding
+
+    if fill_value is DEFAULT_FILL_VALUE or fill_value is None:
+        # The dtype's default scalar: the field is required in Zarr format 3,
+        # so None also means the default.
+        fill_value_parsed = zdtype.default_scalar()
+    else:
+        fill_value_parsed = fill_value
+
+    return ArrayV3Metadata(
+        shape=parse_shapelike(shape),
+        data_type=zdtype,
+        chunk_grid=grid,
+        chunk_key_encoding=chunk_key_encoding_parsed,
+        fill_value=fill_value_parsed,
+        codecs=codecs_parsed,  # type: ignore[arg-type]
+        dimension_names=tuple(dimension_names) if dimension_names else None,
+        attributes=attributes if attributes is not None else {},
+    )
 
 
 async def create_array(
@@ -4962,6 +5006,52 @@ def _sharding_codec(metadata: ArrayMetadata) -> ShardingCodec | None:
     if isinstance(metadata, ArrayV3Metadata):
         return metadata.sharding_codec
     return None
+
+
+def _stored_document_replaced(metadata: ArrayMetadata) -> None:
+    """Record that the store no longer holds a document of this array that needs a
+    repair: it holds the repair, a valid document, or none. The metadata, which a
+    consolidated group handle may share with an array handle, then stops standing for
+    the document it was read from (see `mark_repaired`), so no later write through any
+    handle stores that document again."""
+    object.__setattr__(metadata, "_stored_document", None)
+
+
+async def _store_repaired_document(store_path: StorePath, metadata: ArrayMetadata) -> None:
+    """Store the repair of the array's current stored document, if it needs one,
+    before chunks are written under `metadata`.
+
+    Only for metadata read from a document whose repair moves chunks (see
+    `zarr.core.metadata.repair`). The document is read again, because the store may
+    hold a newer one than `metadata`. If that one lays out chunks differently
+    (another writer stored a different chunk size since), the caller would write
+    chunks no reader finds, so it raises and stores nothing. If it needs no repair
+    (the array was re-saved since, possibly by another implementation), it is left as
+    written; if there is none, there is nothing to repair.
+
+    Storing the same repair twice is harmless, so handles that write chunks
+    concurrently need no coordination. The read and the store are not one atomic
+    step, though: a metadata write by another handle between them (a resize, an
+    attribute update) is replaced by the repair of the document read before it, as
+    with any two metadata writes that race.
+    """
+    if metadata._stored_document is None:
+        return
+    zarr_format = metadata.zarr_format
+    documents = await read_documents(store_path, ARRAY_DOCUMENTS[zarr_format])
+    try:
+        current = parse_stored_array(documents, zarr_format, str(store_path))
+    except ArrayNotFoundError:
+        pass
+    else:
+        if _chunk_layout(current) != _chunk_layout(metadata):
+            raise ValueError(
+                f"Array {str(store_path)!r}: the metadata stored has changed since "
+                "this array was opened; reopen the array to write to it. Nothing was stored."
+            )
+        if current._stored_document is not None:
+            await upsert_metadata(store_path, current, documents)
+    _stored_document_replaced(metadata)
 
 
 def _stored_rectilinear_grid_or_none(
@@ -6017,9 +6107,8 @@ async def _resize(
     await store_documents(array.store_path, documents)
     array._stored_document_replaced()
 
-    # Update metadata and chunk_grid (in place)
-    object.__setattr__(array, "metadata", new_metadata)
-    object.__setattr__(array, "_chunk_grid", new_chunk_grid)
+    # Update the wrapped binding in place; the codec pipeline is kept, as before.
+    array._io._rebind_resolved(new_metadata, new_chunk_grid)
 
 
 async def _append(
@@ -6105,9 +6194,11 @@ async def _update_attributes(
         The array with the updated attributes.
     """
     array.metadata.attributes.update(new_attributes)
+    # The document the binding derives must re-derive from the changed metadata.
+    array._io._rebind_resolved(array.metadata, array._chunk_grid)
 
     # Write new metadata
-    await array._save_metadata(array.metadata)
+    await array._save_metadata()
 
     return array
 
@@ -6134,3 +6225,700 @@ async def _info_complete(
         await _nshards_initialized(array),
         await array.store_path.store.getsize_prefix(array.store_path.path),
     )
+
+
+async def _delete_key(store_path: StorePath, key: str) -> None:
+    await (store_path / key).delete()
+
+
+def _copied_legacy(source: ArrayMetadata) -> ArrayMetadata:
+    """A copy of a legacy metadata object that shares no mutable state with it:
+    the attributes dict is copied, and the `_stored_document` repair mark is
+    kept on the copy."""
+    copied = copy.copy(source)
+    if source.attributes is not None:
+        object.__setattr__(copied, "attributes", dict(source.attributes))
+    return copied
+
+
+type ArrayMetadataModel = ZarrV2ArrayMetadata | ZarrV3ArrayMetadata
+"""Array metadata as a `zarr_metadata` model: validated JSON, extension names unresolved."""
+
+
+def _metadata_model_json(document: ArrayMetadataModel) -> dict[str, Any]:
+    """The metadata as plain, mutable JSON, via JSON text: the model returns read-only forms."""
+    return cast("dict[str, Any]", json.loads(json.dumps(document.to_json())))
+
+
+def _array_metadata_model(data: dict[str, JSON]) -> ArrayMetadataModel:
+    """Model the metadata dict `get_array_metadata` returned.
+
+    The read is strict: metadata zarr can only read as repaired raises
+    `zarr_metadata.MetadataValidationError`. Unknown extension names read as
+    unclaimed fields, not errors.
+    """
+    if data.get("zarr_format") == 2:
+        return ZarrV2ArrayMetadata(data)
+    return ZarrV3ArrayMetadata(data)
+
+
+class ArrayV2DeclarationKwargs(TypedDict, total=False):
+    """The fields that declare a Zarr format 2 array: what `build_array_metadata_v2` and the `build_v2` methods take as keywords."""
+
+    shape: Required[ShapeLike]
+    dtype: Required[ZDTypeLike | ZDType[TBaseDType, TBaseScalar]]
+    chunks: Required[ShapeLike]
+    fill_value: Any
+    order: MemoryOrder
+    dimension_separator: Literal[".", "/"]
+    filters: Iterable[dict[str, JSON] | Numcodec] | None
+    compressor: CompressorLikev2
+    attributes: dict[str, JSON] | None
+
+
+class ArrayV3DeclarationKwargs(TypedDict, total=False):
+    """The fields that declare a Zarr format 3 array: what `build_array_metadata_v3` and the `build_v3` methods take as keywords."""
+
+    shape: Required[ShapeLike]
+    data_type: Required[ZDTypeLike | ZDType[TBaseDType, TBaseScalar]]
+    chunk_grid: Required[ChunkGridMetadata | Mapping[str, JSON] | ShapeLike]
+    fill_value: Any
+    chunk_key_encoding: ChunkKeyEncodingLike | None
+    codecs: Iterable[Codec | dict[str, JSON]] | None
+    dimension_names: DimensionNamesLike
+    attributes: dict[str, JSON] | None
+
+
+def _bound_store_path(store: Store | StorePath, name: str | None) -> StorePath:
+    """The location `name` within `store`, bound without IO."""
+    store_path = store if isinstance(store, StorePath) else StorePath(store)
+    if name is not None:
+        store_path = store_path / name
+    return store_path
+
+
+class AsyncArrayIO:
+    """Explicit asynchronous IO for one Zarr array.
+
+    Binds array metadata (`metadata`, a `zarr_metadata` model) to a location
+    in a store. Construction performs no IO; every read or write of the store
+    is an explicit method call, and every write has an erasing inverse. The
+    metadata operations (`store_metadata`, `erase_metadata`, `erase_chunk`,
+    `erase_chunks`, `verify`) never resolve extension names; `getitem` and
+    `setitem` resolve them into the legacy classes (`metadata_legacy`) on
+    first use. The bound metadata is assumed, never checked against the
+    store, and an array opened from metadata that needed a repair stores that
+    repair before its first chunk write. `AsyncArray` wraps an `AsyncArrayIO`
+    and delegates its metadata and selection IO to it.
+    """
+
+    _store_path: StorePath
+    _config: ArrayConfig
+    _pipeline_class: type[CodecPipeline]
+    _source: ArrayMetadataModel | ArrayMetadata
+    _metadata_model_cache: ArrayMetadataModel | None
+    _resolved_cache: ArrayMetadata | None
+    _chunk_grid_cache: ChunkGrid | None
+    _chunk_key_encoding_cache: ChunkKeyEncoding | None
+    _codec_pipeline_cache: CodecPipeline | None
+
+    def __init__(
+        self,
+        metadata: ArrayMetadataModel | ArrayMetadata | ArrayMetadataDict,
+        store_path: StorePath,
+        config: ArrayConfigLike | None = None,
+    ) -> None:
+        self._store_path = store_path
+        self._config = parse_array_config(config)
+        # The pipeline implementation is chosen when the binding is made, from
+        # the global configuration, exactly as `AsyncArray` has always chosen
+        # it; the pipeline itself is built on first use.
+        self._pipeline_class = get_pipeline_class()
+        self._metadata_model_cache = None
+        self._resolved_cache = None
+        self._chunk_grid_cache = None
+        self._chunk_key_encoding_cache = None
+        self._codec_pipeline_cache = None
+        if isinstance(metadata, ZarrV2ArrayMetadata | ZarrV3ArrayMetadata):
+            self._source = metadata
+        else:
+            # A legacy resolved object passes through; raw JSON is read eagerly,
+            # as repaired when it needs that, warning as `AsyncArray` always has.
+            self._source = parse_array_metadata(metadata, str(store_path))
+
+    @classmethod
+    def build_v2(
+        cls,
+        store: Store | StorePath,
+        *,
+        name: str | None = None,
+        config: ArrayConfigLike | None = None,
+        **kwargs: Unpack[ArrayV2DeclarationKwargs],
+    ) -> Self:
+        """Declare a Zarr format 2 array bound to `store`, storing nothing.
+
+        The keywords are the `.zarray` fields (see `build_array_metadata_v2`).
+        `store` must be a `Store` or `StorePath`: coercing strings opens
+        stores. `store_metadata` stores the result.
+        """
+        return cls(build_array_metadata_v2(**kwargs), _bound_store_path(store, name), config)
+
+    @classmethod
+    def build_v3(
+        cls,
+        store: Store | StorePath,
+        *,
+        name: str | None = None,
+        config: ArrayConfigLike | None = None,
+        **kwargs: Unpack[ArrayV3DeclarationKwargs],
+    ) -> Self:
+        """Declare a Zarr format 3 array bound to `store`, storing nothing.
+
+        The keywords are the `zarr.json` fields (see
+        `build_array_metadata_v3`). `store` must be a `Store` or `StorePath`:
+        coercing strings opens stores. `store_metadata` stores the result.
+        """
+        return cls(build_array_metadata_v3(**kwargs), _bound_store_path(store, name), config)
+
+    @classmethod
+    async def open(
+        cls,
+        store: StoreLike,
+        *,
+        name: str | None = None,
+        zarr_format: ZarrFormat | None = None,
+        config: ArrayConfigLike | None = None,
+    ) -> Self:
+        """Read the stored metadata of an existing array and bind to it.
+
+        `zarr_format=None` (the default) tries format 3, then format 2. The
+        read is strict and resolves nothing: metadata zarr can only read as
+        repaired raises `zarr_metadata.MetadataValidationError`; use
+        [`zarr.api.asynchronous.open_array`][] for the repairing read.
+        """
+        store_path = await make_store_path(store, path=name)
+        data = await get_array_metadata(store_path, zarr_format=zarr_format)
+        return cls(_array_metadata_model(data), store_path, config)
+
+    @property
+    def metadata(self) -> ArrayMetadataModel:
+        """The bound metadata, as a `zarr_metadata` model."""
+        source = self._source
+        if isinstance(source, ZarrV2ArrayMetadata | ZarrV3ArrayMetadata):
+            return source
+        if self._metadata_model_cache is None:
+            buffers = source.to_buffer_dict(default_buffer_prototype())
+            key_value = {key: buffer.to_bytes() for key, buffer in buffers.items()}
+            if isinstance(source, ArrayV2Metadata):
+                self._metadata_model_cache = ZarrV2ArrayMetadata.from_key_value(key_value)
+            else:
+                self._metadata_model_cache = ZarrV3ArrayMetadata.from_key_value(key_value)
+        return self._metadata_model_cache
+
+    @property
+    def metadata_legacy(self) -> ArrayMetadata:
+        """The metadata resolved into the legacy `ArrayV2Metadata` / `ArrayV3Metadata` classes, derived on first use."""
+        source = self._source
+        if isinstance(source, ArrayV2Metadata | ArrayV3Metadata):
+            return source
+        if self._resolved_cache is None:
+            data = _metadata_model_json(source)
+            if isinstance(source, ZarrV2ArrayMetadata):
+                data["attributes"] = dict(source.attributes)
+            self._resolved_cache = parse_array_metadata(data, str(self._store_path))
+        return self._resolved_cache
+
+    @property
+    def store_path(self) -> StorePath:
+        """The bound location in a store."""
+        return self._store_path
+
+    @property
+    def config(self) -> ArrayConfig:
+        """The runtime configuration."""
+        return self._config
+
+    @property
+    def _zarr_format(self) -> ZarrFormat:
+        if isinstance(self._source, ZarrV2ArrayMetadata | ArrayV2Metadata):
+            return 2
+        return 3
+
+    @property
+    def _resolved_if_any(self) -> ArrayMetadata | None:
+        source = self._source
+        if isinstance(source, ArrayV2Metadata | ArrayV3Metadata):
+            return source
+        return self._resolved_cache
+
+    def _rebind_resolved(
+        self, resolved: ArrayMetadata, chunk_grid: ChunkGrid | None = None
+    ) -> None:
+        """Make `resolved` this binding's state. The codec pipeline is kept: rebinding is how `resize` swaps the shape, which leaves the chunk encoding as it was."""
+        self._source = resolved
+        self._metadata_model_cache = None
+        self._resolved_cache = None
+        self._chunk_grid_cache = chunk_grid
+        self._chunk_key_encoding_cache = None
+
+    @property
+    def _chunk_grid(self) -> ChunkGrid:
+        """The stored chunk grid: from the resolved metadata when the instance holds one, otherwise from the metadata model alone."""
+        if self._chunk_grid_cache is None:
+            resolved = self._resolved_if_any
+            if resolved is not None:
+                self._chunk_grid_cache = ChunkGrid.from_metadata(resolved)
+                return self._chunk_grid_cache
+            document = self.metadata
+            doc = _metadata_model_json(document)
+            if isinstance(document, ZarrV2ArrayMetadata):
+                self._chunk_grid_cache = ChunkGrid.from_sizes(document.shape, tuple(doc["chunks"]))
+            else:
+                grid = doc["chunk_grid"]
+                # Through the same grid-metadata objects `ChunkGrid.from_metadata`
+                # dispatches on, so both derivations lay out chunks identically.
+                # A grid needs its configuration to lay out keys, so the v3.1
+                # bare-name shorthand cannot name a computable grid.
+                name = grid if isinstance(grid, str) else grid["name"]
+                sizes: Sequence[int | Sequence[int]]
+                if isinstance(grid, dict) and name == "regular":
+                    sizes = tuple(
+                        RegularChunkGridMetadata.from_dict(
+                            cast("RegularChunkGridMetadataJSON", grid)
+                        ).chunk_shape
+                    )
+                elif isinstance(grid, dict) and name == "rectilinear":
+                    sizes = RectilinearChunkGridMetadata.from_dict(
+                        cast("RectilinearChunkGridMetadataJSON", grid)
+                    ).chunk_shapes
+                else:
+                    raise ValueError(
+                        f"Array {str(self._store_path)!r}: unknown chunk grid "
+                        f"{name!r}; its stored chunk keys cannot be computed."
+                    )
+                self._chunk_grid_cache = ChunkGrid.from_sizes(document.shape, sizes)
+        return self._chunk_grid_cache
+
+    def _encode_chunk_key(self, chunk_coords: tuple[int, ...]) -> str:
+        """The store key of a stored chunk."""
+        resolved = self._resolved_if_any
+        if resolved is not None:
+            return resolved.encode_chunk_key(chunk_coords)
+        return self._chunk_key_encoding.encode_chunk_key(chunk_coords)
+
+    @property
+    def _chunk_key_encoding(self) -> ChunkKeyEncoding:
+        """The chunk key encoding, from the metadata model alone."""
+        if self._chunk_key_encoding_cache is None:
+            document = self.metadata
+            doc = _metadata_model_json(document)
+            if isinstance(document, ZarrV2ArrayMetadata):
+                self._chunk_key_encoding_cache = V2ChunkKeyEncoding(
+                    separator=doc.get("dimension_separator", ".")
+                )
+            else:
+                encoding = doc["chunk_key_encoding"]
+                if isinstance(encoding, str):  # the v3.1 bare-name shorthand
+                    encoding = {"name": encoding}
+                self._chunk_key_encoding_cache = parse_chunk_key_encoding(encoding)
+        return self._chunk_key_encoding_cache
+
+    @property
+    def _shard_grid_shape(self) -> tuple[int, ...]:
+        # The stored chunk grid is the shard grid when sharding is used, the
+        # chunk grid otherwise, so its keys are the stored chunk keys.
+        return self._chunk_grid.grid_shape
+
+    @property
+    def _resolved_codec_pipeline(self) -> CodecPipeline:
+        if self._codec_pipeline_cache is None:
+            self._codec_pipeline_cache = create_codec_pipeline(
+                metadata=self.metadata_legacy,
+                store=self._store_path.store,
+                pipeline_class=self._pipeline_class,
+            )
+        return self._codec_pipeline_cache
+
+    def to_array(self) -> AnyAsyncArray:
+        """An `AsyncArray` over this binding; both share one state."""
+        return AsyncArray._from_io(self)
+
+    def _derived_source(self) -> ArrayMetadataModel | ArrayMetadata:
+        """The source for a derived binding: a legacy object is copied, so the
+        repair mark and in-place attribute updates never alias across bindings;
+        a model is immutable and shared."""
+        source = self._source
+        if isinstance(source, ArrayV2Metadata | ArrayV3Metadata):
+            return _copied_legacy(source)
+        return source
+
+    def _derive(
+        self,
+        source: ArrayMetadataModel | ArrayMetadata,
+        store_path: StorePath,
+        config: ArrayConfig,
+    ) -> Self:
+        """A new binding over `source`, keeping this one's captured pipeline."""
+        derived = object.__new__(type(self))
+        derived._store_path = store_path
+        derived._config = config
+        derived._pipeline_class = self._pipeline_class
+        derived._source = source
+        derived._metadata_model_cache = None
+        derived._resolved_cache = None
+        derived._chunk_grid_cache = None
+        derived._chunk_key_encoding_cache = None
+        derived._codec_pipeline_cache = None
+        return derived
+
+    def with_metadata(self, metadata: ArrayMetadataModel | ArrayMetadata) -> Self:
+        """This binding with `metadata` in place of its own. Nothing is stored;
+        a legacy `metadata` object is copied."""
+        if isinstance(metadata, ArrayV2Metadata | ArrayV3Metadata):
+            metadata = _copied_legacy(metadata)
+        return self._derive(metadata, self._store_path, self._config)
+
+    def with_store(self, store: Store | StorePath) -> Self:
+        """This binding at its path within `store`, or at a `StorePath` as given. Nothing is stored."""
+        store_path = (
+            store if isinstance(store, StorePath) else StorePath(store, self._store_path.path)
+        )
+        return self._derive(self._derived_source(), store_path, self._config)
+
+    def with_config(self, config: ArrayConfigLike) -> Self:
+        """This binding with `config` merged over its runtime configuration, as `AsyncArray.with_config` merges it."""
+        if isinstance(config, ArrayConfig):
+            new_config = config
+        else:
+            new_config = ArrayConfig(**{**self._config.to_dict(), **config})  # type: ignore[arg-type]
+        return self._derive(self._derived_source(), self._store_path, new_config)
+
+    async def store_metadata(self, *, ensure_parents: bool = False) -> None:
+        """Store the metadata, unconditionally replacing any stored metadata here.
+
+        Chunks of a previous array at this location are kept; `erase_chunks`
+        removes them. With `ensure_parents`, missing parent groups are stored
+        first.
+        """
+        source = self._source
+        if isinstance(source, ArrayV2Metadata | ArrayV3Metadata):
+            await save_metadata(self._store_path, source, ensure_parents=ensure_parents)
+            _stored_document_replaced(source)
+        else:
+            prototype = default_buffer_prototype()
+            key_value = source.to_key_value(indent=zarr_config.get("json_indent"))
+            to_save = {
+                str(key): prototype.buffer.from_bytes(value) for key, value in key_value.items()
+            }
+            await _write_metadata(
+                self._store_path, to_save, self._zarr_format, ensure_parents=ensure_parents
+            )
+            if self._zarr_format == 2 and ZATTRS_JSON not in to_save:
+                # An attribute-less model emits no .zattrs; a stale one must not
+                # survive an unconditional metadata write.
+                await (self._store_path / ZATTRS_JSON).delete()
+
+    async def verify(self) -> None:
+        """Check that the stored metadata equals the bound metadata.
+
+        Favors format 3 when both formats exist, compares canonically, and
+        raises `ValueError` naming each differing field, or
+        [`zarr.errors.ArrayNotFoundError`][] when nothing is stored.
+        """
+        bound = self.metadata
+        stored = _array_metadata_model(await get_array_metadata(self._store_path, zarr_format=None))
+        if stored == bound:
+            return
+        if type(stored) is not type(bound):
+            stored_format = 2 if isinstance(stored, ZarrV2ArrayMetadata) else 3
+            raise ValueError(
+                f"Array {str(self.store_path)!r}: the stored array is Zarr format "
+                f"{stored_format}; the bound metadata is Zarr format {self._zarr_format}."
+            )
+        stored_json = dict(stored.to_json())
+        bound_json = dict(bound.to_json())
+        if isinstance(stored, ZarrV2ArrayMetadata) and isinstance(bound, ZarrV2ArrayMetadata):
+            stored_json["attributes"] = dict(stored.attributes)
+            bound_json["attributes"] = dict(bound.attributes)
+        differing = sorted(
+            key
+            for key in stored_json.keys() | bound_json.keys()
+            if stored_json.get(key) != bound_json.get(key)
+        )
+        raise ValueError(
+            f"Array {str(self.store_path)!r}: the stored metadata does not match the "
+            f"bound metadata; differing fields: {', '.join(differing)}."
+        )
+
+    async def erase_metadata(self) -> None:
+        """Delete the stored metadata; chunks are kept. Succeeds if absent."""
+        for key in ARRAY_DOCUMENTS[self._zarr_format]:
+            await (self._store_path / key).delete()
+        resolved = self._resolved_if_any
+        if resolved is not None:
+            _stored_document_replaced(resolved)
+
+    async def erase_chunk(self, chunk_coords: tuple[int, ...]) -> None:
+        """Delete one stored chunk by grid coordinates (the shard, under sharding). Succeeds if absent."""
+        grid_shape = self._shard_grid_shape
+        if len(chunk_coords) != len(grid_shape) or any(
+            coord < 0 or coord >= size for coord, size in zip(chunk_coords, grid_shape, strict=True)
+        ):
+            raise IndexError(
+                f"Chunk coordinates {chunk_coords} are outside the chunk grid "
+                f"of shape {grid_shape}."
+            )
+        await _delete_key(self._store_path, self._encode_chunk_key(chunk_coords))
+
+    async def erase_chunks(self) -> None:
+        """Delete every stored chunk; the metadata is kept."""
+        grid_shape = self._shard_grid_shape
+        n_chunks = product(grid_shape)
+        if n_chunks == 0:
+            return
+        concurrency = zarr_config.get("async.concurrency")
+        limit = concurrency if concurrency is not None else 1000
+        await concurrent_foreach(
+            (
+                (self._store_path, self._encode_chunk_key(coords))
+                for coords in _iter_grid(grid_shape)
+            ),
+            _delete_key,
+            min(limit, n_chunks),
+        )
+
+    async def _get_selection(
+        self,
+        indexer: Indexer,
+        *,
+        prototype: BufferPrototype,
+        out: NDBuffer | None = None,
+        fields: Fields | None = None,
+    ) -> NDArrayLikeOrScalar:
+        return await _get_selection(
+            self._store_path,
+            self.metadata_legacy,
+            self._resolved_codec_pipeline,
+            self._config,
+            self._chunk_grid,
+            indexer,
+            prototype=prototype,
+            out=out,
+            fields=fields,
+        )
+
+    async def _set_selection(
+        self,
+        indexer: Indexer,
+        value: npt.ArrayLike,
+        *,
+        prototype: BufferPrototype,
+        fields: Fields | None = None,
+    ) -> None:
+        metadata = self.metadata_legacy
+        if product(indexer.shape) > 0:
+            # Chunks are about to be stored under the repaired metadata, so store it
+            # first: every reader of the store then agrees with them.
+            await _store_repaired_document(self._store_path, metadata)
+        return await _set_selection(
+            self._store_path,
+            metadata,
+            self._resolved_codec_pipeline,
+            self._config,
+            self._chunk_grid,
+            indexer,
+            value,
+            prototype=prototype,
+            fields=fields,
+        )
+
+    async def getitem(
+        self,
+        selection: BasicSelection,
+        *,
+        prototype: BufferPrototype | None = None,
+    ) -> NDArrayLikeOrScalar:
+        """Read the selection, reading absent chunks as the fill value."""
+        if prototype is None:
+            prototype = default_buffer_prototype()
+        indexer = BasicIndexer(
+            selection, shape=self.metadata_legacy.shape, chunk_grid=self._chunk_grid
+        )
+        return await self._get_selection(indexer, prototype=prototype)
+
+    async def setitem(
+        self,
+        selection: BasicSelection,
+        value: npt.ArrayLike,
+        prototype: BufferPrototype | None = None,
+    ) -> None:
+        """Encode `value` and store the chunks covering `selection`."""
+        if prototype is None:
+            prototype = default_buffer_prototype()
+        indexer = BasicIndexer(
+            selection, shape=self.metadata_legacy.shape, chunk_grid=self._chunk_grid
+        )
+        return await self._set_selection(indexer, value, prototype=prototype)
+
+    def __repr__(self) -> str:
+        return f"<AsyncArrayIO {self.store_path} shape={self._source.shape}>"
+
+    def __eq__(self, other: object) -> bool:
+        # Semantic equality over the binding: the document (canonically, via the
+        # model's own equality), the location and the runtime configuration.
+        if not isinstance(other, AsyncArrayIO):
+            return NotImplemented
+        if self._store_path != other._store_path or self._config != other._config:
+            return False
+        resolved, other_resolved = self._resolved_if_any, other._resolved_if_any
+        if resolved is not None and other_resolved is not None:
+            return resolved == other_resolved
+        return self.metadata == other.metadata
+
+    def __hash__(self) -> int:
+        # A subset of the equality fields, available without deriving either
+        # form: equal bindings hash equally.
+        return hash((type(self), self._source.shape, self._store_path.path))
+
+
+class ArrayIO:
+    """Explicit synchronous IO for one Zarr array. See `AsyncArrayIO`."""
+
+    _async_io: AsyncArrayIO
+
+    def __init__(
+        self,
+        metadata: ArrayMetadataModel | ArrayMetadata | ArrayMetadataDict,
+        store_path: StorePath,
+        config: ArrayConfigLike | None = None,
+    ) -> None:
+        self._async_io = AsyncArrayIO(metadata, store_path, config)
+
+    @classmethod
+    def _wrap(cls, async_io: AsyncArrayIO) -> Self:
+        io = object.__new__(cls)
+        io._async_io = async_io
+        return io
+
+    @classmethod
+    def build_v2(
+        cls,
+        store: Store | StorePath,
+        *,
+        name: str | None = None,
+        config: ArrayConfigLike | None = None,
+        **kwargs: Unpack[ArrayV2DeclarationKwargs],
+    ) -> Self:
+        """Declare a Zarr format 2 array bound to `store`, storing nothing. See `AsyncArrayIO.build_v2`."""
+        return cls._wrap(AsyncArrayIO.build_v2(store, name=name, config=config, **kwargs))
+
+    @classmethod
+    def build_v3(
+        cls,
+        store: Store | StorePath,
+        *,
+        name: str | None = None,
+        config: ArrayConfigLike | None = None,
+        **kwargs: Unpack[ArrayV3DeclarationKwargs],
+    ) -> Self:
+        """Declare a Zarr format 3 array bound to `store`, storing nothing. See `AsyncArrayIO.build_v3`."""
+        return cls._wrap(AsyncArrayIO.build_v3(store, name=name, config=config, **kwargs))
+
+    @classmethod
+    def open(
+        cls,
+        store: StoreLike,
+        *,
+        name: str | None = None,
+        zarr_format: ZarrFormat | None = None,
+        config: ArrayConfigLike | None = None,
+    ) -> Self:
+        """Read the stored metadata of an existing array and bind to it. See `AsyncArrayIO.open`."""
+        return cls._wrap(
+            sync(AsyncArrayIO.open(store, name=name, zarr_format=zarr_format, config=config))
+        )
+
+    @property
+    def metadata(self) -> ArrayMetadataModel:
+        """The bound metadata, as a `zarr_metadata` model."""
+        return self._async_io.metadata
+
+    @property
+    def metadata_legacy(self) -> ArrayMetadata:
+        """The metadata resolved into the legacy classes. See `AsyncArrayIO.metadata_legacy`."""
+        return self._async_io.metadata_legacy
+
+    @property
+    def store_path(self) -> StorePath:
+        """The bound location in a store."""
+        return self._async_io.store_path
+
+    @property
+    def config(self) -> ArrayConfig:
+        """The runtime configuration."""
+        return self._async_io.config
+
+    def to_array(self) -> AnyArray:
+        """An `Array` over this binding; both share one state."""
+        return Array(self._async_io.to_array())
+
+    def with_metadata(self, metadata: ArrayMetadataModel | ArrayMetadata) -> Self:
+        """This binding with `metadata` in place of its own. See `AsyncArrayIO.with_metadata`."""
+        return self._wrap(self._async_io.with_metadata(metadata))
+
+    def with_store(self, store: Store | StorePath) -> Self:
+        """This binding in `store`. See `AsyncArrayIO.with_store`."""
+        return self._wrap(self._async_io.with_store(store))
+
+    def with_config(self, config: ArrayConfigLike) -> Self:
+        """This binding with `config` merged over its own. See `AsyncArrayIO.with_config`."""
+        return self._wrap(self._async_io.with_config(config))
+
+    def store_metadata(self, *, ensure_parents: bool = False) -> None:
+        """Store the metadata. See `AsyncArrayIO.store_metadata`."""
+        sync(self._async_io.store_metadata(ensure_parents=ensure_parents))
+
+    def verify(self) -> None:
+        """Check that the stored metadata equals the bound metadata. See `AsyncArrayIO.verify`."""
+        sync(self._async_io.verify())
+
+    def erase_metadata(self) -> None:
+        """Delete the stored metadata; chunks are kept. See `AsyncArrayIO.erase_metadata`."""
+        sync(self._async_io.erase_metadata())
+
+    def erase_chunk(self, chunk_coords: tuple[int, ...]) -> None:
+        """Delete one stored chunk by grid coordinates. See `AsyncArrayIO.erase_chunk`."""
+        sync(self._async_io.erase_chunk(chunk_coords))
+
+    def erase_chunks(self) -> None:
+        """Delete every stored chunk. See `AsyncArrayIO.erase_chunks`."""
+        sync(self._async_io.erase_chunks())
+
+    def getitem(
+        self,
+        selection: BasicSelection,
+        *,
+        prototype: BufferPrototype | None = None,
+    ) -> NDArrayLikeOrScalar:
+        """Read the selection, reading absent chunks as the fill value. See `AsyncArrayIO.getitem`."""
+        return sync(self._async_io.getitem(selection, prototype=prototype))
+
+    def setitem(
+        self,
+        selection: BasicSelection,
+        value: npt.ArrayLike,
+        prototype: BufferPrototype | None = None,
+    ) -> None:
+        """Encode `value` and store the chunks. See `AsyncArrayIO.setitem`."""
+        sync(self._async_io.setitem(selection, value, prototype=prototype))
+
+    def __repr__(self) -> str:
+        return f"<ArrayIO {self.store_path} shape={self._async_io._source.shape}>"
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, ArrayIO):
+            return NotImplemented
+        return self._async_io == other._async_io
+
+    def __hash__(self) -> int:
+        return hash((type(self), self._async_io))
