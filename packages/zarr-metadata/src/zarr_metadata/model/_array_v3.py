@@ -46,6 +46,8 @@ from zarr_metadata.definition._scope import ScopeConflictError, claims_of
 from zarr_metadata.definition._scope import refines as refines_field
 from zarr_metadata.model._keyed import Keyed
 from zarr_metadata.model._shared import (
+    DEFAULT_JSON_WRITER,
+    JSONWriterConfig,
     StoreKey,
     attributes_of,
     check_literal,
@@ -556,15 +558,15 @@ class ZarrV3ArrayMetadata(Keyed):
         return cast("ZarrV3ArrayMetadataJSON", copied(self._document))
 
     def to_key_value(
-        self, *, indent: int | str | None = None
+        self, config: JSONWriterConfig = DEFAULT_JSON_WRITER
     ) -> Mapping[ZarrV3ArrayMetadataStoreKey, bytes]:
-        """The document as a store holds it: JSON bytes at `zarr.json`, indented by `indent`.
+        """The document as a store holds it: JSON bytes at `zarr.json`, spelled as `config` directs.
 
         `NaN`, `Infinity` and `-Infinity` in `attributes` are written as
         bare tokens, as zarr-python writes them. A strict JSON parser
         rejects these tokens.
         """
-        return {ZARR_V3_ARRAY_METADATA_STORE_KEY: dump_store_json(self._document, indent=indent)}
+        return {ZARR_V3_ARRAY_METADATA_STORE_KEY: dump_store_json(self._document, config)}
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}({self._document!r}, context={self._context!r})"

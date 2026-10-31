@@ -296,7 +296,9 @@ A v3 model consists of its document and the scope it was read in.
 scope (`CORE_AND_EXTENSIONS` when none is given) and raises
 `MetadataValidationError` with every problem, so an invalid model is never
 built. `to_json` returns the document as it was written, and
-`to_key_value` writes that same document to store bytes.
+`to_key_value` writes that same document to store bytes, spelled as its
+`JSONWriterConfig` argument directs (indentation, key order, ASCII
+escaping, trailing newline); the default spells it as zarr-python does.
 
 Every typed member is a view of that read: each field as the scope read
 it (an `AcceptedField` or an `UnclaimedField`), and `shape`, `attributes`
