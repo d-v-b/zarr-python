@@ -20,7 +20,9 @@ from tests.conftest import Expect, ExpectFail
 from zarr import Array
 from zarr.core.buffer import default_buffer_prototype
 from zarr.core.chunk_grids import ChunkGrid
+from zarr.core.codec_pipeline import BatchedCodecPipeline, FusedCodecPipeline
 from zarr.core.common import ceildiv_int
+from zarr.core.dtype import data_type_registry
 from zarr.core.indexing import (
     BasicSelection,
     CoordinateIndexer,
@@ -38,6 +40,7 @@ from zarr.core.indexing import (
     oindex_set,
     replace_ellipsis,
 )
+from zarr.experimental import Context
 from zarr.registry import get_ndbuffer_class
 from zarr.storage import MemoryStore, StorePath
 
@@ -2401,10 +2404,18 @@ def test_set_selection_rejects_value_with_wrong_rank(
     """
     a = np.zeros((4, 4), dtype=np.int32)
     value = np.arange(np.prod(value_shape), dtype=np.int32).reshape(value_shape)
-    with zarr.config.set({"codec_pipeline.path": pipeline_path}):
-        z = zarr_array_from_numpy_array(store, a, chunk_shape=(2, 2), shards=shards)
-        with pytest.raises(ValueError, match="Attempting to set|shape mismatch"):
-            getattr(z, kind)[selection] = value
+    pipeline_contexts = {
+        "zarr.core.codec_pipeline.BatchedCodecPipeline": BatchedCodecPipeline,
+        "zarr.core.codec_pipeline.FusedCodecPipeline": FusedCodecPipeline,
+    }
+    context = Context(
+        data_types=data_type_registry, codec_pipeline=pipeline_contexts[pipeline_path]
+    )
+    z = zarr_array_from_numpy_array(store, a, chunk_shape=(2, 2), shards=shards)
+    # The pipeline is chosen per binding, not through the global config.
+    z = z.io.with_context(context).to_array()
+    with pytest.raises(ValueError, match="Attempting to set|shape mismatch"):
+        getattr(z, kind)[selection] = value
 
 
 def test_iter_chunk_regions():

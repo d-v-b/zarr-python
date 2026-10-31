@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 
     from zarr.core.buffer import Buffer, BufferPrototype
     from zarr.core.chunk_grids import ChunkGrid
+    from zarr.core.context import Context
     from zarr.core.dtype.wrapper import (
         TBaseDType,
         TBaseScalar,
@@ -152,10 +153,14 @@ class ArrayV2Metadata(Metadata):
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any], *, path: str | None = None) -> ArrayV2Metadata:
+    def from_dict(
+        cls, data: dict[str, Any], *, path: str | None = None, context: Context | None = None
+    ) -> ArrayV2Metadata:
         """Read a stored `.zarray` document (with its attributes). An invalid document
         that `zarr.core.metadata.repair` can read is read as repaired; a reading the user
-        must act on warns, naming the array at `path`."""
+        must act on warns, naming the array at `path`. With a `context`, the document's
+        data type resolves through it instead of the default registry; filters and the
+        compressor are numcodecs objects, which no context governs."""
         repaired, readings = repair_array_document(data, 2)
         # a new dict, because we are modifying it
         _data: dict[str, Any] = dict(repaired)
@@ -178,7 +183,7 @@ class ArrayV2Metadata(Metadata):
             "name": _data["dtype"],
             "object_codec_id": object_codec_id,
         }
-        dtype = get_data_type_from_json(dtype_spec, zarr_format=2)
+        dtype = get_data_type_from_json(dtype_spec, zarr_format=2, context=context)
 
         _data["dtype"] = dtype
         fill_value_encoded = _data.get("fill_value")

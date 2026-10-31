@@ -53,6 +53,7 @@ if TYPE_CHECKING:
     from zarr.codecs.sharding import ShardingCodec
     from zarr.core.buffer import Buffer, BufferPrototype
     from zarr.core.chunk_grids import ChunkGrid
+    from zarr.core.context import Context
     from zarr.core.dtype.wrapper import TBaseDType, TBaseScalar
     from zarr.core.metadata.repair import ArrayDocument
 
@@ -70,7 +71,7 @@ def parse_node_type_array(data: object) -> Literal["array"]:
     )
 
 
-def parse_codecs(data: object) -> tuple[Codec, ...]:
+def parse_codecs(data: object, *, context: Context | None = None) -> tuple[Codec, ...]:
     out: tuple[Codec, ...] = ()
 
     if not isinstance(data, Iterable):
@@ -84,7 +85,11 @@ def parse_codecs(data: object) -> tuple[Codec, ...]:
         else:
             name_parsed, _ = parse_named_configuration(c, require_configuration=False)
 
-            codec_cls = get_codec_class(name_parsed)
+            codec_cls = (
+                get_codec_class(name_parsed)
+                if context is None
+                else context.codec_class(name_parsed)
+            )
             try:
                 out += (codec_cls.from_dict(c),)
             except KeyError as e:
@@ -665,11 +670,14 @@ class ArrayV3Metadata(Metadata):
         return {ZARR_JSON: json_to_buffer(self.to_dict(), prototype=prototype, indent=indent)}
 
     @classmethod
-    def from_dict(cls, data: dict[str, JSON], *, path: str | None = None) -> Self:
+    def from_dict(
+        cls, data: dict[str, JSON], *, path: str | None = None, context: Context | None = None
+    ) -> Self:
         """Read a stored `zarr.json` array document. An invalid document that
         `zarr.core.metadata.repair` can read is read as repaired; a reading the user
         must act on warns, and a document the rectilinear chunks flag refuses raises,
-        naming the array at `path`."""
+        naming the array at `path`. With a `context`, the document's data type and
+        codec names resolve through it instead of the default registries."""
         # The flag gates what the document declares, so it is checked before repairs.
         chunk_grid = data.get("chunk_grid")
         if isinstance(chunk_grid, Mapping) and chunk_grid.get("name") == "rectilinear":
@@ -691,7 +699,7 @@ class ArrayV3Metadata(Metadata):
         data_type_json = _data.pop("data_type")
         if not check_dtype_spec_v3(data_type_json):
             raise ValueError(f"Invalid data_type: {data_type_json!r}")
-        data_type = get_data_type_from_json(data_type_json, zarr_format=3)
+        data_type = get_data_type_from_json(data_type_json, zarr_format=3, context=context)
 
         # check that the fill value is consistent with the data type
         try:
@@ -713,7 +721,9 @@ class ArrayV3Metadata(Metadata):
             shape=_data_typed["shape"],
             chunk_grid=_data_typed["chunk_grid"],  # type: ignore[arg-type]
             chunk_key_encoding=_data_typed["chunk_key_encoding"],  # type: ignore[arg-type]
-            codecs=_data_typed["codecs"],
+            # Codec names resolve here, under the context; `__init__`'s own
+            # `parse_codecs` passes the resolved instances through untouched.
+            codecs=parse_codecs(_data_typed["codecs"], context=context),
             # Attribute values are arbitrary JSON, so they have no field-specific
             # schema to validate. `__init__` checks the outer dict via `parse_attributes`.
             attributes=_data_typed.get("attributes", {}),  # type: ignore[arg-type]

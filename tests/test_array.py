@@ -56,6 +56,7 @@ from zarr.core.chunk_grids import (
     resolve_outer_and_inner_chunks,
 )
 from zarr.core.chunk_key_encodings import ChunkKeyEncodingParams
+from zarr.core.codec_pipeline import FusedCodecPipeline
 from zarr.core.common import JSON, ChunksLike, ZarrFormat, ceildiv
 from zarr.core.dtype import (
     DateTime64,
@@ -68,6 +69,7 @@ from zarr.core.dtype import (
     VariableLengthBytes,
     VariableLengthUTF8,
     ZDType,
+    data_type_registry,
     parse_dtype,
 )
 from zarr.core.dtype.common import ENDIANNESS_STR, EndiannessStr
@@ -81,6 +83,7 @@ from zarr.errors import (
     ContainsGroupError,
     ZarrUserWarning,
 )
+from zarr.experimental import Context
 from zarr.storage import LocalStore, MemoryStore, StorePath
 from zarr.storage._logging import LoggingStore
 from zarr.types import AnyArray, AnyAsyncArray
@@ -2171,20 +2174,22 @@ def test_multiprocessing_fork_codec_pipeline_pool(store: Store) -> None:
     pool entirely.
     """
     data = np.arange(100).reshape(10, 10)
-    with zarr.config.set({"codec_pipeline.path": "zarr.core.codec_pipeline.FusedCodecPipeline"}):
-        arr = zarr.create_array(store=store, shape=data.shape, chunks=(5, 5), dtype=data.dtype)
-        arr[:] = data
-        # Two multi-chunk reads: spawn 4 pool threads and leave all of their
-        # idle-semaphore permits released before the fork.
-        arr[:]
-        arr[:]
-        ctx = mp.get_context("fork")
-        with ctx.Pool() as pool:
-            # [:5] spans 2 chunks — below the ~4 inherited idle permits, so on
-            # unfixed code both submissions are swallowed by the dead pool.
-            result = pool.starmap_async(_index_array, [(arr, np.s_[:5])])
-            (read_back,) = result.get(timeout=30)
-        assert np.array_equal(read_back, data[:5])
+    fused = Context(data_types=data_type_registry, codec_pipeline=FusedCodecPipeline)
+    arr = zarr.create_array(store=store, shape=data.shape, chunks=(5, 5), dtype=data.dtype)
+    # The pipeline is chosen per binding, not through the global config.
+    arr = arr.io.with_context(fused).to_array()
+    arr[:] = data
+    # Two multi-chunk reads: spawn 4 pool threads and leave all of their
+    # idle-semaphore permits released before the fork.
+    arr[:]
+    arr[:]
+    ctx = mp.get_context("fork")
+    with ctx.Pool() as pool:
+        # [:5] spans 2 chunks — below the ~4 inherited idle permits, so on
+        # unfixed code both submissions are swallowed by the dead pool.
+        result = pool.starmap_async(_index_array, [(arr, np.s_[:5])])
+        (read_back,) = result.get(timeout=30)
+    assert np.array_equal(read_back, data[:5])
 
 
 def test_create_array_method_signature() -> None:
