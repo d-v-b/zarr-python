@@ -57,7 +57,7 @@ MY_BYTES = CodecDefinition(
     name="bytes", configuration=EmptyConfiguration, kind="array_bytes", size="static"
 )
 """A private `bytes` definition: a different meaning under the core name, with no configuration."""
-PRIVATE = CORE.update(codecs={**CORE.codecs, "bytes": MY_BYTES})
+PRIVATE = CORE.copy(update={"codecs": {**CORE.codecs, "bytes": MY_BYTES}})
 SPELLED_OUT: dict[str, Any] = {
     **ARRAY,
     "data_type": {"name": "uint8"},
@@ -183,7 +183,7 @@ def test_error_a_model_whose_scope_does_not_pickle_says_so() -> None:
     )
     model = ZarrV3ArrayMetadata(
         {**ARRAY, "codecs": ["bytes", "acme.c"]},
-        context=CORE.update(codecs=[*CORE.codecs.values(), local]),
+        context=CORE.union(ZarrV3Context(codecs=[local])),
     )
     with pytest.raises((pickle.PicklingError, AttributeError)):
         pickle.dumps(model)
@@ -415,8 +415,8 @@ def test_consolidated_metadata_reads_each_nested_field_once() -> None:
         calls.append(1)
         return iter(())
 
-    context = CORE.update(
-        codecs={**CORE.codecs, "bytes": dataclasses.replace(BYTES_CODEC, rules=counted)}
+    context = CORE.copy(
+        update={"codecs": {**CORE.codecs, "bytes": dataclasses.replace(BYTES_CODEC, rules=counted)}}
     )
     ZarrV3GroupMetadata(CONSOLIDATED, context=context)
     assert calls == []
@@ -612,7 +612,7 @@ def test_with_context_moves_every_listed_model_without_reading_again(
     assert held.reading.metadata is held
     for node in held.metadata.values():
         assert node.reading.metadata is node
-    context = CORE.update(codecs=[*CORE.codecs.values(), ZSTD_CODEC])
+    context = CORE.union(ZarrV3Context(codecs=[ZSTD_CODEC]))
     moved = held.with_context(context)
     assert moved.context is context
     before = held.metadata["a"]

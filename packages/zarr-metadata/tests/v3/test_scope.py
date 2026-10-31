@@ -466,7 +466,9 @@ def test_a_conflict_names_the_field_as_the_document_writes_it_and_tells_the_defi
     other = dataclasses.replace(RAW_BYTES_DATA_TYPE, configuration=EmptyConfiguration)
     with pytest.raises(ScopeConflictError) as raised:
         model.refined_in(
-            CORE_AND_EXTENSIONS.update(data_types={**CORE_AND_EXTENSIONS.data_types, "r*": other})
+            CORE_AND_EXTENSIONS.copy(
+                update={"data_types": {**CORE_AND_EXTENSIONS.data_types, "r*": other}}
+            )
         )
     message = str(raised.value)
     assert message.startswith("data type 'r16'")

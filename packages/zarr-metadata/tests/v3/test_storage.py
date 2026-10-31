@@ -21,6 +21,7 @@ from zarr_metadata.v3.definition import (
     CORE_AND_EXTENSIONS,
     DataTypeDefinition,
     StorageClass,
+    ZarrV3Context,
     storage_of,
 )
 
@@ -85,7 +86,7 @@ def test_a_data_type_that_says_nothing_of_its_storage_leaves_it_unknown() -> Non
     resolved, _ = resolve(
         "acme.quiet",
         DataTypeDefinition,
-        CORE_AND_EXTENSIONS.update(data_types=[*CORE_AND_EXTENSIONS.data_types.values(), quiet]),
+        CORE_AND_EXTENSIONS.union(ZarrV3Context(data_types=[quiet])),
     )
     assert storage_of(resolved) is None
 
@@ -99,7 +100,7 @@ def test_error_a_storage_that_gives_something_else() -> None:
     resolved, _ = resolve(
         "acme.lying",
         DataTypeDefinition,
-        CORE_AND_EXTENSIONS.update(data_types=[*CORE_AND_EXTENSIONS.data_types.values(), lying]),
+        CORE_AND_EXTENSIONS.union(ZarrV3Context(data_types=[lying])),
     )
     with pytest.raises(TypeError, match="'acme.lying': its storage gives one of"):
         storage_of(resolved)
@@ -115,7 +116,7 @@ def test_error_a_storage_that_raises_says_whose_it_is() -> None:
     resolved, _ = resolve(
         "acme.raising",
         DataTypeDefinition,
-        CORE_AND_EXTENSIONS.update(data_types=[*CORE_AND_EXTENSIONS.data_types.values(), raising]),
+        CORE_AND_EXTENSIONS.union(ZarrV3Context(data_types=[raising])),
     )
     with pytest.raises(KeyError) as raised:
         storage_of(resolved)
