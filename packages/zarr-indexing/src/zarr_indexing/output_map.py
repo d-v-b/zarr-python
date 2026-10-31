@@ -219,10 +219,13 @@ class ArrayMap:
         )
 
     def _with_affine(self, offset: int, stride: int) -> ArrayMap:
-        """Return a map with a different affine adjustment.
+        """This map's coordinates under a different affine adjustment.
 
-        Share the immutable index array while replacing the offset and stride.
-        This preserves coordinate ownership without copying the array."""
+        The frozen index array is shared rather than copied: it is already
+        owned by immutable bytes and read-only, so the ownership invariant
+        `__post_init__` establishes holds for the new map too. Chunk
+        resolution translates every restricted map once per chunk, and
+        re-copying the array there dominated the cost of small selections."""
         new = object.__new__(ArrayMap)
         object.__setattr__(new, "index_array", self.index_array)
         object.__setattr__(new, "offset", offset)

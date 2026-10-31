@@ -12,19 +12,29 @@ from zarr_indexing.writer import write_into
 
 
 class BasicSource:
-    """Reject source reads and advanced writes, recording basic writes."""
+    """Accept only basic, positive-step keys, recording every read and write."""
 
     def __init__(self, data: np.ndarray[Any, Any]) -> None:
         self.data = data
         self.shape = data.shape
         self.dtype = data.dtype
+        self.reads: list[tuple[int | slice, ...]] = []
         self.calls: list[tuple[int | slice, ...]] = []
 
-    def __setitem__(self, key: tuple[int | slice, ...], value: Any) -> None:
+    @staticmethod
+    def _check(key: tuple[int | slice, ...]) -> None:
         assert all(isinstance(item, (int, slice)) for item in key)
         assert all(
             not isinstance(item, slice) or item.step is None or item.step > 0 for item in key
         )
+
+    def __getitem__(self, key: tuple[int | slice, ...]) -> Any:
+        self._check(key)
+        self.reads.append(key)
+        return self.data[key]
+
+    def __setitem__(self, key: tuple[int | slice, ...], value: Any) -> None:
+        self._check(key)
         self.calls.append(key)
         self.data[key] = value
 
@@ -133,21 +143,27 @@ def test_write_constant_repeated_destination() -> None:
     transform = IndexTransform(IndexDomain.from_shape((2, 3)), (ConstantMap(1),))
     write_into(source, transform, [[1], [9]])
     np.testing.assert_array_equal(source.data, [0, 9, 0])
-    assert len(source.calls) == 6
+    # One cell, and its hull is the single destination coordinate.
+    assert source.reads == source.calls == [(slice(1, 2),)]
 
 
-@pytest.mark.parametrize("scalar", [False, True])
-def test_write_scalar_source_and_shared_dimensions(scalar: bool) -> None:
-    if scalar:
-        source = BasicSource(np.array(0))
-        transform = IndexTransform.from_shape(())
-        expected = np.array(7)
-    else:
-        source = BasicSource(np.zeros((3, 3), dtype=np.int64))
-        transform = IndexTransform(IndexDomain.from_shape((3,)), (DimensionMap(0), DimensionMap(0)))
-        expected = np.diag([7, 7, 7])
-    write_into(source, transform, 7)
-    np.testing.assert_array_equal(source.data, expected)
+def test_write_zero_rank_source() -> None:
+    source = BasicSource(np.array(0))
+    write_into(source, IndexTransform.from_shape(()), 7)
+    np.testing.assert_array_equal(source.data, 7)
+
+
+@pytest.mark.parametrize("gridded", [False, True])
+def test_write_rejects_a_transform_reading_one_input_axis_twice(gridded: bool) -> None:
+    """A diagonal has no factored form; the planner rejects it before any cell is written."""
+    from zarr_indexing.grid import dimension_grids_from_chunks
+
+    source = BasicSource(np.zeros((4, 4), dtype=np.int64))
+    diagonal = IndexTransform(IndexDomain.from_shape((4,)), (DimensionMap(0), DimensionMap(0)))
+    write_grid = dimension_grids_from_chunks((2, 2), (4, 4)) if gridded else None
+    with pytest.raises(ValueError, match="two output maps read input axis 0"):
+        write_into(source, diagonal, np.arange(1, 5), write_grid=write_grid)
+    assert source.calls == []
 
 
 def test_write_rank_error_before_mutation() -> None:
@@ -360,16 +376,6 @@ def test_write_grid_prefers_write_chunk_sizes_over_chunks() -> None:
     assert all(box[0] == slice(0, 6) for box in source.boxes)
 
 
-def test_write_only_source_falls_back_to_element_assignment() -> None:
-    source = BasicSource(np.zeros((3, 4), dtype=np.int64))
-    transform = IndexTransform.from_shape(source.shape).oindex[[2, 0], [1, 3]]
-    write_into(source, transform, np.array([[1, 2], [3, 4]]))
-    assert len(source.calls) == 4
-    expected = np.zeros((3, 4), dtype=np.int64)
-    expected[np.ix_([2, 0], [1, 3])] = [[1, 2], [3, 4]]
-    np.testing.assert_array_equal(source.data, expected)
-
-
 def test_masked_zero_rank_affine_write_keeps_payload() -> None:
     from zarr_indexing.lazy_array import LazyArray
 
@@ -396,46 +402,22 @@ def test_empty_selection_still_validates_values() -> None:
     np.testing.assert_array_equal(source, 0)
 
 
-def test_gridless_readable_source_never_reads() -> None:
-    """Without a write grid the hull could be the whole array, so elements are assigned."""
+def test_gridless_source_is_one_cell_bounded_by_the_selection_hull() -> None:
+    """A source with no advertised grid (a contiguous HDF5 dataset, say) is one cell.
+
+    Its touched hull, the selection's bounding box, is read once and written
+    back once, rather than one assignment per selected element.
+    """
     from zarr_indexing.lazy_array import LazyArray
 
-    class ReadableSource(BasicSource):
-        def __getitem__(self, key: Any) -> Any:
-            raise AssertionError("gridless writes must not read the source")
-
-    source = ReadableSource(np.zeros((4, 4), dtype=np.int64))
-    LazyArray(source).vindex[[0, 3], [3, 0]] = [1, 2]
+    source = BasicSource(np.zeros((4, 4), dtype=np.int64))
+    LazyArray(source).vindex[[1, 3], [3, 1]] = [1, 2]
     expected = np.zeros((4, 4), dtype=np.int64)
-    expected[[0, 3], [3, 0]] = [1, 2]
+    expected[[1, 3], [3, 1]] = [1, 2]
     np.testing.assert_array_equal(source.data, expected)
-    assert len(source.calls) == 2
-
-
-def test_unfactorable_transform_falls_back_to_elements_on_a_gridded_source() -> None:
-    """A diagonal reads one input axis twice, which the planner rejects; it is still written."""
-
-    class GriddedSource(BasicSource):
-        chunks = ((2, 2), (2, 2))
-
-        def __getitem__(self, key: Any) -> Any:
-            return self.data[key]
-
-    source = GriddedSource(np.zeros((4, 4), dtype=np.int64))
-    diagonal = IndexTransform(IndexDomain.from_shape((4,)), (DimensionMap(0), DimensionMap(0)))
-    write_into(source, diagonal, np.arange(1, 5), write_grid=None)
-    from zarr_indexing.grid import dimension_grids_from_chunks
-
-    source.data[:] = 0
-    source.calls.clear()
-    write_into(
-        source,
-        diagonal,
-        np.arange(1, 5),
-        write_grid=dimension_grids_from_chunks(source.chunks, (4, 4)),
-    )
-    np.testing.assert_array_equal(source.data, np.diag([1, 2, 3, 4]))
-    assert len(source.calls) == 4
+    hull = (slice(1, 4), slice(1, 4))
+    assert source.reads == [hull]
+    assert source.calls == [hull]
 
 
 def test_writes_bypass_the_reader_so_a_caching_reader_serves_stale_values() -> None:
