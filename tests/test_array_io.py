@@ -79,17 +79,17 @@ async def test_chunks_before_metadata(zarr_format: ZarrFormat) -> None:
     await aio.store_metadata()
     # the default zarr_format=None auto-detects the format, like zarrs
     opened = await AsyncArrayIO.open(store, name="foo")
-    # the binding is a document; the stored and declared documents agree
-    assert opened.document == aio.document
-    assert opened.document.shape == data.shape
-    assert opened.metadata.zarr_format == zarr_format
-    assert opened.metadata.attributes == {"answer": 42}
+    # the binding is metadata; the stored and declared metadata agree
+    assert opened.metadata == aio.metadata
+    assert opened.metadata.shape == data.shape
+    assert opened.metadata_legacy.zarr_format == zarr_format
+    assert dict(opened.metadata.attributes) == {"answer": 42}
     np.testing.assert_array_equal(await opened.getitem(Ellipsis), data)
 
     arr = await open_array(store=store, path="foo", mode="r", zarr_format=zarr_format)
     np.testing.assert_array_equal(await arr.getitem(Ellipsis), data)
     # every AsyncArray is built on an AsyncArrayIO, reachable as .io
-    assert arr.io.metadata is arr.metadata
+    assert arr.io.metadata_legacy is arr.metadata
     np.testing.assert_array_equal(await arr.io.getitem(Ellipsis), data)
 
     # a writer that declared the same array independently can verify its assumption
@@ -158,10 +158,10 @@ async def test_document_work_without_codec_resolution() -> None:
     await _store_foreign_codec_array(store)
 
     aio = await AsyncArrayIO.open(store, name="foo")
-    document = aio.document
-    assert isinstance(document, ZarrV3ArrayMetadata)
-    assert document.shape == (4,)
-    assert document.must_understand_fields == {}
+    model = aio.metadata
+    assert isinstance(model, ZarrV3ArrayMetadata)
+    assert model.shape == (4,)
+    assert model.must_understand_fields == {}
     await aio.verify()
 
     with pytest.raises(UnknownCodecError, match="zarr-python-does-not-know-this-codec"):
@@ -205,3 +205,31 @@ async def test_erase_chunk_out_of_grid_raises() -> None:
         await aio.erase_chunk((2, 0))
     with pytest.raises(IndexError, match="outside the chunk grid"):
         await aio.erase_chunk((0,))
+
+
+async def test_with_methods_rebind() -> None:
+    """with_metadata, with_store and with_config return new bindings with one
+    part replaced and everything else kept."""
+    store, other_store = MemoryStore(), MemoryStore()
+    data = np.arange(4, dtype="uint8")
+    aio = AsyncArrayIO.build_v3(store, name="foo", shape=(4,), dtype="uint8", chunk_grid=(2,))
+    await aio.setitem(Ellipsis, data)
+    await aio.store_metadata()
+
+    relabeled = aio.with_metadata(aio.metadata.update(attributes={"a": 1}))
+    assert relabeled.store_path == aio.store_path
+    assert dict(relabeled.metadata.attributes) == {"a": 1}
+    await relabeled.store_metadata()
+    reread = await AsyncArrayIO.open(store, name="foo")
+    assert reread.metadata == relabeled.metadata
+
+    moved = aio.with_store(other_store)
+    assert moved.store_path.path == aio.store_path.path
+    await moved.setitem(Ellipsis, data)
+    await moved.store_metadata()
+    copied = await AsyncArrayIO.open(other_store, name="foo")
+    np.testing.assert_array_equal(await copied.getitem(Ellipsis), data)
+
+    configured = aio.with_config({"order": "F"})
+    assert configured.config.order == "F"
+    assert configured.metadata == aio.metadata
