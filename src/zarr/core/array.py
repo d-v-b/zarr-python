@@ -1236,7 +1236,11 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         -------
         A new Array
         """
-        return cast("Self", self._io.with_config(config).to_array())
+        derived = self._io.with_config(config)
+        # Build the pipeline now, so construction warnings fire here, as they
+        # do in __init__.
+        _ = derived._resolved_codec_pipeline
+        return cast("Self", type(self)._from_io(derived))
 
     async def nchunks_initialized(self) -> int:
         """
@@ -6223,6 +6227,16 @@ async def _delete_key(store_path: StorePath, key: str) -> None:
     await (store_path / key).delete()
 
 
+def _copied_legacy(source: ArrayMetadata) -> ArrayMetadata:
+    """A copy of a legacy metadata object that shares no mutable state with it:
+    the attributes dict is copied, and the `_stored_document` repair mark is
+    kept on the copy."""
+    copied = copy.copy(source)
+    if source.attributes is not None:
+        object.__setattr__(copied, "attributes", dict(source.attributes))
+    return copied
+
+
 type ArrayMetadataModel = ZarrV2ArrayMetadata | ZarrV3ArrayMetadata
 """Array metadata as a `zarr_metadata` model: validated JSON, extension names unresolved."""
 
@@ -6531,18 +6545,25 @@ class AsyncArrayIO:
         a model is immutable and shared."""
         source = self._source
         if isinstance(source, ArrayV2Metadata | ArrayV3Metadata):
-            return copy.copy(source)
+            return _copied_legacy(source)
         return source
 
     def _derive(
         self,
-        source: ArrayMetadataModel | ArrayMetadata | ArrayMetadataDict,
+        source: ArrayMetadataModel | ArrayMetadata,
         store_path: StorePath,
         config: ArrayConfig,
     ) -> Self:
-        """A new binding, keeping this one's captured pipeline implementation."""
-        derived = type(self)(source, store_path, config)
+        """A new binding over `source`, keeping this one's captured pipeline."""
+        derived = object.__new__(type(self))
+        derived._store_path = store_path
+        derived._config = config
         derived._pipeline_class = self._pipeline_class
+        derived._source = source
+        derived._metadata_model_cache = None
+        derived._resolved_cache = None
+        derived._chunk_grid_cache = None
+        derived._chunk_key_encoding_cache = None
         derived._codec_pipeline_cache = None
         return derived
 
@@ -6550,7 +6571,7 @@ class AsyncArrayIO:
         """This binding with `metadata` in place of its own. Nothing is stored;
         a legacy `metadata` object is copied."""
         if isinstance(metadata, ArrayV2Metadata | ArrayV3Metadata):
-            metadata = copy.copy(metadata)
+            metadata = _copied_legacy(metadata)
         return self._derive(metadata, self._store_path, self._config)
 
     def with_store(self, store: Store | StorePath) -> Self:

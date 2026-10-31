@@ -282,6 +282,18 @@ async def test_array_state_propagates_to_the_shared_binding() -> None:
     assert dict(derived.metadata_legacy.attributes) == {}
     assert dict(moved.metadata_legacy.attributes) == {}
 
+    # the same independence holds for a legacy-sourced binding, whose mutable
+    # attributes dict must be copied, not shared
+    legacy_arr = await zarr.api.asynchronous.create_array(
+        MemoryStore(), shape=(4,), dtype="uint8", chunks=(2,)
+    )
+    legacy_derived = legacy_arr.io.with_config({"order": "F"})
+    _ = legacy_derived.metadata  # fill the model cache before the mutation
+    await legacy_arr.update_attributes({"b": 2})
+    assert dict(legacy_arr.io.metadata.attributes) == {"b": 2}
+    assert dict(legacy_derived.metadata_legacy.attributes) == {}
+    assert dict(legacy_derived.metadata.attributes) == {}
+
 
 async def test_store_metadata_of_model_without_attributes_clears_zattrs() -> None:
     """Storing a v2 model with no attributes removes a stale .zattrs."""
