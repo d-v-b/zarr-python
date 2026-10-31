@@ -629,7 +629,7 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         """See the module-level `build_array_metadata_v3`."""
         return build_array_metadata_v3(
             shape=shape,
-            dtype=dtype,
+            data_type=dtype,
             chunk_grid=chunk_grid,
             fill_value=fill_value,
             chunk_key_encoding=chunk_key_encoding,
@@ -4663,7 +4663,7 @@ async def init_array(
             _warn_order_kwarg()
         meta = build_array_metadata_v3(
             shape=shape_parsed,
-            dtype=zdtype,
+            data_type=zdtype,
             fill_value=fill_value,
             chunk_grid=grid,
             chunk_key_encoding=chunk_key_encoding_parsed,
@@ -4724,7 +4724,7 @@ def build_array_metadata_v2(
 def build_array_metadata_v3(
     *,
     shape: ShapeLike,
-    dtype: ZDTypeLike | ZDType[TBaseDType, TBaseScalar],
+    data_type: ZDTypeLike | ZDType[TBaseDType, TBaseScalar],
     chunk_grid: ChunkGridMetadata | Mapping[str, JSON] | ShapeLike,
     fill_value: Any = DEFAULT_FILL_VALUE,
     chunk_key_encoding: ChunkKeyEncodingLike | None = None,
@@ -4743,7 +4743,7 @@ def build_array_metadata_v3(
     data type's default scalar, and `None` also means that default, because
     the field is required in Zarr format 3.
     """
-    zdtype = parse_dtype(dtype, zarr_format=3)
+    zdtype = parse_dtype(data_type, zarr_format=3)
     grid: ChunkGridMetadata | dict[str, JSON]
     if isinstance(chunk_grid, RegularChunkGridMetadata | RectilinearChunkGridMetadata):
         grid = chunk_grid
@@ -6285,7 +6285,7 @@ class ArrayV3DeclarationKwargs(TypedDict, total=False):
     keyword arguments."""
 
     shape: Required[ShapeLike]
-    dtype: Required[ZDTypeLike | ZDType[TBaseDType, TBaseScalar]]
+    data_type: Required[ZDTypeLike | ZDType[TBaseDType, TBaseScalar]]
     chunk_grid: Required[ChunkGridMetadata | Mapping[str, JSON] | ShapeLike]
     fill_value: Any
     chunk_key_encoding: ChunkKeyEncodingLike | None

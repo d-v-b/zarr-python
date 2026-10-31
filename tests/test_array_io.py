@@ -44,7 +44,7 @@ def _declare_answer_array(
         store,
         name="foo",
         shape=data.shape,
-        dtype=data.dtype,
+        data_type=data.dtype,
         chunk_grid=(2, 2),
         attributes={"answer": 42},
     )
@@ -122,7 +122,9 @@ def test_chunks_before_metadata_sync() -> None:
     """The synchronous `ArrayIO` supports the same chunks-first flow."""
     store = MemoryStore()
     data = np.arange(16, dtype="uint16").reshape(4, 4)
-    aio = ArrayIO.build_v3(store, name="foo", shape=data.shape, dtype=data.dtype, chunk_grid=(2, 2))
+    aio = ArrayIO.build_v3(
+        store, name="foo", shape=data.shape, data_type=data.dtype, chunk_grid=(2, 2)
+    )
     aio.setitem(Ellipsis, data)
     aio.store_metadata()
     opened = ArrayIO.open(store, name="foo")
@@ -143,7 +145,7 @@ def test_build_v3_unknown_chunk_grid_raises() -> None:
             MemoryStore(),
             name="foo",
             shape=(4,),
-            dtype="uint8",
+            data_type="uint8",
             chunk_grid={"name": "diagonal", "configuration": {}},
         )
 
@@ -179,10 +181,10 @@ async def test_document_work_without_codec_resolution() -> None:
 
 async def test_verify_mismatch_raises() -> None:
     store = MemoryStore()
-    aio = AsyncArrayIO.build_v3(store, shape=(4, 4), dtype="uint8", chunk_grid=(2, 2))
+    aio = AsyncArrayIO.build_v3(store, shape=(4, 4), data_type="uint8", chunk_grid=(2, 2))
     await aio.store_metadata()
     other = AsyncArrayIO.build_v3(
-        store, shape=(4, 4), dtype="uint8", chunk_grid=(4, 4), attributes={"a": 1}
+        store, shape=(4, 4), data_type="uint8", chunk_grid=(4, 4), attributes={"a": 1}
     )
     with pytest.raises(ValueError, match="differing fields: attributes, chunk_grid"):
         await other.verify()
@@ -191,19 +193,19 @@ async def test_verify_mismatch_raises() -> None:
 async def test_verify_format_mismatch_raises() -> None:
     store = MemoryStore()
     await AsyncArrayIO.build_v2(store, shape=(4,), dtype="uint8", chunks=(4,)).store_metadata()
-    bound_v3 = AsyncArrayIO.build_v3(store, shape=(4,), dtype="uint8", chunk_grid=(4,))
+    bound_v3 = AsyncArrayIO.build_v3(store, shape=(4,), data_type="uint8", chunk_grid=(4,))
     with pytest.raises(ValueError, match="stored array is Zarr format 2"):
         await bound_v3.verify()
 
 
 async def test_verify_missing_raises() -> None:
-    aio = AsyncArrayIO.build_v3(MemoryStore(), shape=(4,), dtype="uint8", chunk_grid=(4,))
+    aio = AsyncArrayIO.build_v3(MemoryStore(), shape=(4,), data_type="uint8", chunk_grid=(4,))
     with pytest.raises(ArrayNotFoundError):
         await aio.verify()
 
 
 async def test_erase_chunk_out_of_grid_raises() -> None:
-    aio = AsyncArrayIO.build_v3(MemoryStore(), shape=(4, 4), dtype="uint8", chunk_grid=(2, 2))
+    aio = AsyncArrayIO.build_v3(MemoryStore(), shape=(4, 4), data_type="uint8", chunk_grid=(2, 2))
     with pytest.raises(IndexError, match="outside the chunk grid"):
         await aio.erase_chunk((2, 0))
     with pytest.raises(IndexError, match="outside the chunk grid"):
@@ -215,7 +217,7 @@ async def test_with_methods_rebind() -> None:
     part replaced and everything else kept."""
     store, other_store = MemoryStore(), MemoryStore()
     data = np.arange(4, dtype="uint8")
-    aio = AsyncArrayIO.build_v3(store, name="foo", shape=(4,), dtype="uint8", chunk_grid=(2,))
+    aio = AsyncArrayIO.build_v3(store, name="foo", shape=(4,), data_type="uint8", chunk_grid=(2,))
     await aio.setitem(Ellipsis, data)
     await aio.store_metadata()
 
@@ -248,7 +250,7 @@ def test_binding_follows_the_global_config() -> None:
             "array.order": "F",
         }
     ):
-        v3 = ArrayIO.build_v3(MemoryStore(), shape=(2,), dtype="uint8", chunk_grid=(2,))
+        v3 = ArrayIO.build_v3(MemoryStore(), shape=(2,), data_type="uint8", chunk_grid=(2,))
         v2 = ArrayIO.build_v2(MemoryStore(), shape=(2,), dtype="uint8", chunks=(2,))
     # outside the block, the choices made inside it hold
     assert isinstance(v3.to_array().async_array.codec_pipeline, FusedCodecPipeline)
