@@ -28,6 +28,7 @@ from zarr_indexing._selector import as_scalar_index, is_bool_scalar, require_ind
 
 if TYPE_CHECKING:
     from zarr_indexing.domain import IndexDomain
+    from zarr_indexing.transform import IndexTransform
 
 SelectionMode = Literal["basic", "orthogonal", "vectorized"]
 
@@ -376,3 +377,27 @@ def normalize_positional_selection(
     # Axes the selection did not mention are left to `selection_to_transform`,
     # which pads them with whole-axis slices in every mode.
     return tuple(result)
+
+
+def select_positional(
+    transform: IndexTransform, selection: Any, mode: SelectionMode
+) -> IndexTransform:
+    """Compose a positional (NumPy-dialect) selection onto `transform`.
+
+    This is the package's indexing dialect, shared by `LazyArray` and any
+    other front door: in the orthogonal and vectorized modes scalar integers
+    are applied first so their axes drop, then the remaining selection is
+    translated to literal coordinates and composed in `mode`. The basic mode
+    goes through `IndexTransform.__getitem__`, which accepts NumPy's
+    `None`/newaxis where `IndexTransform.select` deliberately does not.
+    """
+    if mode not in ("basic", "orthogonal", "vectorized"):
+        raise ValueError(f"unknown indexing mode: {mode!r}")
+    if mode != "basic":
+        scalars, selection = split_scalar_axes(selection, transform.domain, mode)
+        if scalars is not None:
+            transform = transform.select(scalars, "basic")
+    literal = normalize_positional_selection(selection, transform.domain, mode)
+    if mode == "basic":
+        return transform[literal]
+    return transform.select(literal, mode)
