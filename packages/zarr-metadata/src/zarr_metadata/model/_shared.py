@@ -316,7 +316,8 @@ class JSONWriterConfig:
     equivalent of `JSONWriterConfig(indent=2)`.
 
     `indent` is passed to `json.dumps`: `None` writes one line, an `int`
-    nests by that many spaces, and a `str` nests by that string. The
+    nests by that many spaces, and a `str` of JSON whitespace (spaces,
+    tabs, line feeds and carriage returns) nests by that string. The
     separators are those of Python's `json` module: `", "` between items
     and `": "` after a key, with the item separator becoming `","` (the
     space replaced by the line break) when `indent` is set. `sort_keys`
@@ -336,13 +337,17 @@ class JSONWriterConfig:
     def __post_init__(self) -> None:
         # Enforce the annotations at runtime: `json.dumps` reads `True` as an
         # indent of 1 and a negative indent as 0, so a mistyped config would
-        # otherwise change the spelling silently.
+        # otherwise change the spelling silently, and it writes a str indent
+        # verbatim, so one that is not whitespace writes invalid JSON.
         indent = cast("object", self.indent)
         if isinstance(indent, bool) or not isinstance(indent, int | str | None):
             msg = f"indent must be an int, a str or None, got {type(indent).__name__}"
             raise TypeError(msg)
         if isinstance(indent, int) and indent < 0:
             msg = f"indent must not be negative, got {indent}"
+            raise ValueError(msg)
+        if isinstance(indent, str) and indent.strip(" \t\n\r") != "":
+            msg = f"indent must hold only JSON whitespace, got {indent!r}"
             raise ValueError(msg)
         for name in ("sort_keys", "ensure_ascii", "trailing_newline"):
             flag = cast("object", getattr(self, name))

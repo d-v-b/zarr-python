@@ -125,6 +125,12 @@ def test_config_refuses_a_negative_indent() -> None:
         JSONWriterConfig(indent=-3)
 
 
+def test_config_refuses_an_indent_that_is_not_json_whitespace() -> None:
+    """A `str` indent must hold only JSON whitespace: `json.dumps` writes it verbatim, so any other character writes bytes no JSON reader parses."""
+    with pytest.raises(ValueError, match="indent must hold only JSON whitespace, got 'x'"):
+        JSONWriterConfig(indent="x")
+
+
 @pytest.mark.parametrize("name", ["sort_keys", "ensure_ascii", "trailing_newline"])
 def test_config_refuses_a_flag_that_is_not_a_bool(name: str) -> None:
     """Each flag takes only a `bool`: a truthy value such as `1` is refused."""
