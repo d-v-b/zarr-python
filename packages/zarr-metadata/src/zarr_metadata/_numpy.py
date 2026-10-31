@@ -5,9 +5,12 @@ values the same way, so each encoding is defined once here.
 """
 
 import re
+from collections.abc import Iterator
 from typing import Annotated, Final, Literal, NewType
 
 from annotated_types import Interval
+
+from zarr_metadata._json import ValidationProblem, shown
 
 NUMPY_TIME_UNITS: Final = (
     "Y",
@@ -75,6 +78,29 @@ def base64_bytes(value: str) -> Base64Bytes:
     return Base64Bytes(value)
 
 
+def base64_fill_value_rules(
+    configuration: object, nested: object, value: object
+) -> Iterator[ValidationProblem]:
+    """Check that a fill value written as a string is standard-alphabet base64: a data type's `fill_value_rules`.
+
+    `Base64Bytes` is a `NewType` of `str`, so a fill value annotated with
+    it accepts any string. Pass this rule as the data type's
+    `fill_value_rules` to reject a string that is not base64. A value of
+    any other shape is not checked here, so the rule also serves a fill
+    value that may be written another way, such as
+    `tuple[ByteValue, ...] | Base64Bytes`. A rule that checks more, such
+    as the number of bytes, yields from this one first.
+    """
+    if not isinstance(value, str):
+        return
+    try:
+        base64_bytes(value)
+    except ValueError:
+        yield ValidationProblem(
+            (), f"expected standard-alphabet base64, got {shown(value)}", "invalid_value"
+        )
+
+
 __all__ = [
     "NOT_A_TIME_TICKS",
     "NUMPY_TIME_MAX_SCALE_FACTOR",
@@ -83,5 +109,6 @@ __all__ = [
     "NumpyTimeScaleFactor",
     "NumpyTimeTicks",
     "base64_bytes",
+    "base64_fill_value_rules",
     "numpy_time_fill_value_canonical",
 ]
