@@ -44,6 +44,8 @@ from zarr_metadata.definition._scope import ScopeConflictError, claims_of
 from zarr_metadata.definition._scope import refines as refines_field
 from zarr_metadata.model._keyed import Keyed
 from zarr_metadata.model._shared import (
+    DEFAULT_JSON_WRITER,
+    JSONWriterConfig,
     StoreKey,
     attributes_of,
     check_literal,
@@ -570,16 +572,16 @@ class ZarrV2ArrayMetadata(Keyed):
         return cast("ZarrV2ArrayMetadataJSON", copied(self._document))
 
     def to_key_value(
-        self, *, indent: int | str | None = None
+        self, config: JSONWriterConfig = DEFAULT_JSON_WRITER
     ) -> Mapping[ZarrV2ArrayMetadataStoreKey | ZarrV2AttributesStoreKey, bytes]:
-        """The document as a store holds it: `.zarray` without the attributes, and `.zattrs` with the attributes when they are set, even if empty."""
+        """The document as a store holds it, spelled as `config` directs: `.zarray` without the attributes, and `.zattrs` with the attributes when they are set, even if empty."""
         zarray = {key: value for key, value in self._document.items() if key != "attributes"}
         out: dict[ZarrV2ArrayMetadataStoreKey | ZarrV2AttributesStoreKey, bytes] = {
-            ZARR_V2_ARRAY_METADATA_STORE_KEY: dump_store_json(zarray, indent=indent)
+            ZARR_V2_ARRAY_METADATA_STORE_KEY: dump_store_json(zarray, config)
         }
         if "attributes" in self._document:
             out[ZARR_V2_ATTRIBUTES_STORE_KEY] = dump_store_json(
-                self._document["attributes"], indent=indent
+                self._document["attributes"], config
             )
         return out
 

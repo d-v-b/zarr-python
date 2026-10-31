@@ -305,15 +305,54 @@ def load_store_json(mapping: Mapping[StoreKey, bytes], key: str) -> object:
         ) from exc
 
 
-def dump_store_json(value: object, *, indent: int | str | None = None) -> bytes:
-    """Encode a document that its reader has accepted as JSON bytes.
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class JSONWriterConfig:
+    """How `to_key_value` encodes a document as JSON bytes.
+
+    The defaults spell out what the writers decide when nothing is asked
+    of them, which is how zarr-python writes metadata: everything on one
+    line, keys in document order, non-ASCII characters escaped, and no
+    trailing newline.
+
+    `indent` is passed to `json.dumps`: `None` writes one line, an `int`
+    nests by that many spaces, and a `str` nests by that string. The
+    separators are those of Python's `json` module: `", "` between items
+    and `": "` after a key, with the item separator becoming `","` (the
+    space replaced by the line break) when `indent` is set. `sort_keys`
+    writes the keys of every object in sorted order instead of document
+    order. `ensure_ascii` escapes every non-ASCII character (`"\\u00b5"`);
+    turning it off writes UTF-8 text. `trailing_newline` ends the bytes
+    with `"\\n"`, for stores whose files are read by line-oriented tools.
+    """
+
+    indent: int | str | None = None
+    sort_keys: bool = False
+    ensure_ascii: bool = True
+    trailing_newline: bool = False
+
+
+DEFAULT_JSON_WRITER = JSONWriterConfig()
+"""The config every writer defaults to: the spelling of `json.dumps` with its own defaults."""
+
+
+def dump_store_json(value: object, config: JSONWriterConfig = DEFAULT_JSON_WRITER) -> bytes:
+    """Encode a document that its reader has accepted as JSON bytes, spelled as `config` directs.
 
     A non-finite number is written as Python's `json` module writes it
     (`NaN`, `Infinity`, `-Infinity`), which matches how zarr-python
     writes attributes. The reader keeps such numbers out of every
     other place in the document.
     """
-    return json.dumps(value, indent=indent, allow_nan=True).encode("utf-8")
+    text = json.dumps(
+        value,
+        indent=config.indent,
+        sort_keys=config.sort_keys,
+        ensure_ascii=config.ensure_ascii,
+        allow_nan=True,
+    )
+    if config.trailing_newline:
+        text += "\n"
+    return text.encode("utf-8")
 
 
 def located_conflicts(
