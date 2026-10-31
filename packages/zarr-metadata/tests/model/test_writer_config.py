@@ -3,8 +3,7 @@
 The config changes only the spelling of the JSON text, never the document:
 whatever the config, the bytes decode to the same document and
 `from_key_value` reads them back to an equal model. The default config
-spells the document exactly as `json.dumps` does with its own defaults,
-which is how zarr-python writes metadata.
+spells the document exactly as `json.dumps` does with its own defaults.
 """
 
 from __future__ import annotations
@@ -87,8 +86,22 @@ def test_config_governs_spelling_and_round_trips(model: object, config: JSONWrit
 
 @pytest.mark.parametrize("model", MODELS, ids=MODEL_IDS)
 def test_default_config_writes_what_json_dumps_writes(model: object) -> None:
-    """A bare `to_key_value()` writes each document with the defaults of Python's `json` module, byte for byte, as zarr-python does. `ensure_ascii` escapes the non-ASCII attribute."""
+    """A bare `to_key_value()` writes each document with the defaults of Python's `json` module, byte for byte. `ensure_ascii` escapes the non-ASCII attribute."""
     written: Mapping[str, bytes] = cast("Any", model).to_key_value()
     for key, raw in written.items():
         assert raw == json.dumps(json.loads(raw)).encode("utf-8"), key
     assert any(b"\\u00b5m" in raw for raw in written.values())
+
+
+def test_ensure_ascii_off_escapes_only_a_lone_surrogate() -> None:
+    """With `ensure_ascii` off, a lone surrogate the reader accepted from an escape is written back as that escape, since UTF-8 cannot encode it, while every other non-ASCII character is written as UTF-8. The store reads back to an equal model."""
+    stored = {
+        "zarr.json": json.dumps(
+            {"zarr_format": 3, "node_type": "group", "attributes": {"x": "\ud800", "y": "µ"}}
+        ).encode("utf-8")
+    }
+    model = ZarrV3GroupMetadata.from_key_value(stored)
+    written = model.to_key_value(JSONWriterConfig(ensure_ascii=False))["zarr.json"]
+    assert b'"\\ud800"' in written
+    assert "µ".encode() in written
+    assert ZarrV3GroupMetadata.from_key_value({"zarr.json": written}) == model

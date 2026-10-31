@@ -309,10 +309,11 @@ def load_store_json(mapping: Mapping[StoreKey, bytes], key: str) -> object:
 class JSONWriterConfig:
     """How `to_key_value` encodes a document as JSON bytes.
 
-    The defaults spell out what the writers decide when nothing is asked
-    of them, which is how zarr-python writes metadata: everything on one
-    line, keys in document order, non-ASCII characters escaped, and no
-    trailing newline.
+    The defaults are those of `json.dumps`: everything on one line, keys
+    in document order, non-ASCII characters escaped, and no trailing
+    newline. zarr-python indents its metadata by its `json_indent`
+    setting, which is 2 unless configured otherwise, so it writes the
+    equivalent of `JSONWriterConfig(indent=2)`.
 
     `indent` is passed to `json.dumps`: `None` writes one line, an `int`
     nests by that many spaces, and a `str` nests by that string. The
@@ -321,7 +322,9 @@ class JSONWriterConfig:
     space replaced by the line break) when `indent` is set. `sort_keys`
     writes the keys of every object in sorted order instead of document
     order. `ensure_ascii` escapes every non-ASCII character (`"\\u00b5"`);
-    turning it off writes UTF-8 text. `trailing_newline` ends the bytes
+    turning it off writes UTF-8 text, in which only a lone surrogate (a
+    string the reader accepts from an escape such as `"\\ud800"`, but
+    which UTF-8 cannot encode) is still escaped. `trailing_newline` ends the bytes
     with `"\\n"`, for stores whose files are read by line-oriented tools.
     """
 
@@ -352,7 +355,10 @@ def dump_store_json(value: object, config: JSONWriterConfig = DEFAULT_JSON_WRITE
     )
     if config.trailing_newline:
         text += "\n"
-    return text.encode("utf-8")
+    # `json.dumps` writes non-ASCII characters only inside strings, and the
+    # only ones UTF-8 cannot encode are lone surrogates, so the replacement
+    # writes each as the JSON escape `ensure_ascii` would have written.
+    return text.encode("utf-8", "backslashreplace")
 
 
 def located_conflicts(

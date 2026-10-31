@@ -40,8 +40,9 @@ invalid model is never built. `to_json` returns the document as written.
 `refined_in` read the document in another scope. `to_key_value` writes
 the model as it is, encoding the JSON bytes as its `JSONWriterConfig`
 argument directs (indentation, key order, ASCII escaping, trailing
-newline); the default spells the document as zarr-python does. A v3 group reads its `consolidated_metadata` as an
-envelope and does not read the documents it lists, because consolidated
+newline); the default is that of `json.dumps`. A v3 group reads its
+`consolidated_metadata` as an envelope and does not read the documents
+it lists, because consolidated
 metadata is a convention of the reference implementation, not core
 metadata. `ZarrV3ConsolidatedMetadata` and
 `read_consolidated_metadata_v3` read those documents. The model also
