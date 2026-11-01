@@ -6241,11 +6241,11 @@ async def _delete_key(store_path: StorePath, key: str) -> None:
 
 
 def _copied_legacy(source: ArrayMetadata) -> ArrayMetadata:
-    """A copy of a legacy metadata object that shares no mutable state with it:
-    the attributes dict is copied."""
+    """A copy of a legacy metadata object with its own attributes dict, so an
+    attribute update through one binding (which replaces top-level keys in
+    place) never reaches another."""
     copied = copy.copy(source)
-    if source.attributes is not None:
-        object.__setattr__(copied, "attributes", dict(source.attributes))
+    object.__setattr__(copied, "attributes", dict(source.attributes))
     return copied
 
 
@@ -6336,23 +6336,34 @@ class AsyncArrayIO:
         store_path: StorePath,
         config: ArrayConfigLike | None = None,
     ) -> None:
-        self._store_path = store_path
-        self._config = parse_array_config(config)
+        source: ArrayMetadataModel | ArrayMetadata
+        if isinstance(metadata, ZarrV2ArrayMetadata | ZarrV3ArrayMetadata):
+            source = metadata
+        else:
+            # A legacy resolved object passes through; raw JSON is read eagerly,
+            # as repaired when it needs that, warning as `AsyncArray` always has.
+            source = parse_array_metadata(metadata, str(store_path))
         # The pipeline implementation is chosen when the binding is made, from
         # the global configuration, exactly as `AsyncArray` has always chosen
         # it; the pipeline itself is built on first use.
-        self._pipeline_class = get_pipeline_class()
+        self._bind(source, store_path, parse_array_config(config), get_pipeline_class())
+
+    def _bind(
+        self,
+        source: ArrayMetadataModel | ArrayMetadata,
+        store_path: StorePath,
+        config: ArrayConfig,
+        pipeline_class: type[CodecPipeline],
+    ) -> None:
+        self._store_path = store_path
+        self._config = config
+        self._pipeline_class = pipeline_class
+        self._source = source
         self._metadata_model_cache = None
         self._resolved_cache = None
         self._chunk_grid_cache = None
         self._chunk_key_encoding_cache = None
         self._codec_pipeline_cache = None
-        if isinstance(metadata, ZarrV2ArrayMetadata | ZarrV3ArrayMetadata):
-            self._source = metadata
-        else:
-            # A legacy resolved object passes through; raw JSON is read eagerly,
-            # as repaired when it needs that, warning as `AsyncArray` always has.
-            self._source = parse_array_metadata(metadata, str(store_path))
 
     @classmethod
     def build_v2(
@@ -6589,15 +6600,7 @@ class AsyncArrayIO:
     ) -> Self:
         """A new binding over `source`, keeping this one's captured pipeline."""
         derived = object.__new__(type(self))
-        derived._store_path = store_path
-        derived._config = config
-        derived._pipeline_class = self._pipeline_class
-        derived._source = source
-        derived._metadata_model_cache = None
-        derived._resolved_cache = None
-        derived._chunk_grid_cache = None
-        derived._chunk_key_encoding_cache = None
-        derived._codec_pipeline_cache = None
+        derived._bind(source, store_path, config, self._pipeline_class)
         return derived
 
     def with_metadata(self, metadata: ArrayMetadataModel | ArrayMetadata) -> Self:

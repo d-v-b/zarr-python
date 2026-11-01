@@ -253,8 +253,12 @@ def test_binding_follows_the_global_config() -> None:
     ):
         v3 = ArrayIO.build_v3(MemoryStore(), shape=(2,), data_type="uint8", chunk_grid=(2,))
         v2 = ArrayIO.build_v2(MemoryStore(), shape=(2,), dtype="uint8", chunks=(2,))
-    # outside the block, the choices made inside it hold
+    # outside the block, the choices made inside it hold, also for a binding
+    # derived while the global configuration names a pipeline that cannot load
     assert isinstance(v3.to_array().async_array.codec_pipeline, FusedCodecPipeline)
+    with zarr.config.set({"codec_pipeline.path": "nonexistent.module.Pipeline"}):
+        derived = v3.with_config({"order": "C"})
+    assert isinstance(derived.to_array().async_array.codec_pipeline, FusedCodecPipeline)
     legacy = v2.metadata_legacy
     assert isinstance(legacy, ArrayV2Metadata)
     assert legacy.order == "F"
@@ -287,12 +291,18 @@ async def test_array_state_propagates_to_the_shared_binding() -> None:
     legacy_arr = await zarr.api.asynchronous.create_array(
         MemoryStore(), shape=(4,), dtype="uint8", chunks=(2,)
     )
-    legacy_derived = legacy_arr.io.with_config({"order": "F"})
-    _ = legacy_derived.metadata  # fill the model cache before the mutation
+    legacy_derivatives = [
+        legacy_arr.io.with_config({"order": "F"}),
+        legacy_arr.io.with_store(MemoryStore()),
+        legacy_arr.io.with_metadata(legacy_arr.io.metadata_legacy),
+    ]
+    for legacy_derived in legacy_derivatives:
+        _ = legacy_derived.metadata  # fill the model cache before the mutation
     await legacy_arr.update_attributes({"b": 2})
     assert dict(legacy_arr.io.metadata.attributes) == {"b": 2}
-    assert dict(legacy_derived.metadata_legacy.attributes) == {}
-    assert dict(legacy_derived.metadata.attributes) == {}
+    for legacy_derived in legacy_derivatives:
+        assert dict(legacy_derived.metadata_legacy.attributes) == {}
+        assert dict(legacy_derived.metadata.attributes) == {}
 
 
 async def test_store_metadata_of_model_without_attributes_clears_zattrs() -> None:

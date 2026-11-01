@@ -73,7 +73,7 @@ class StoredDocuments:
     def restore(self, path: str, zarr_format: ZarrFormat, document: ArrayDocument | None) -> None:
         """Record `document` as `needing_repair(path, zarr_format)` returned it from
         another store object's cache (a binding carries it when pickled), unless this
-        cache already knows the document: what it learned itself is newer."""
+        cache already knows the document: it keeps what it learned itself."""
         self._arrays.setdefault((path, zarr_format), document)
 
     def observe(self, path: str, document: ArrayDocument | None, zarr_format: ZarrFormat) -> None:

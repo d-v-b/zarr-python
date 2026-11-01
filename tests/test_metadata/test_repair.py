@@ -1818,3 +1818,17 @@ def test_pickled_array_carries_what_its_store_knows(
 
     assert not [key for _, key in accesses if key.endswith("zarr.json")]
     np.testing.assert_array_equal(_open_strictly(path)[...], [1, 2, 3])
+
+
+def test_restore_keeps_what_the_cache_learned_itself() -> None:
+    """A carried entry fills only a document the cache does not know: what the
+    cache recorded itself, such as a repair it stored, stays."""
+    cache = StoredDocuments()
+    broken = _v2_doc([3], [0])
+    cache.observe("a", None, 2)
+
+    cache.restore("a", 2, broken)
+    cache.restore("b", 2, broken)
+
+    assert cache.needing_repair("a", 2) is None
+    assert cache.needing_repair("b", 2) == broken
