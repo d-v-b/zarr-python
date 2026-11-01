@@ -6519,7 +6519,12 @@ type ArrayMetadataModelJSON = ZarrV2ArrayMetadataJSON | ZarrV3ArrayMetadataJSON
 
 def _metadata_model_json(document: ArrayMetadataModel) -> dict[str, Any]:
     """The metadata as plain, mutable JSON, via JSON text: the model returns read-only forms."""
-    return cast("dict[str, Any]", json.loads(json.dumps(document.to_json())))
+    return cast("dict[str, Any]", _plain_json(document.to_json()))
+
+
+def _plain_json(value: object) -> Any:
+    """`value`, a model's read-only JSON (mapping proxies at any depth), as plain JSON."""
+    return json.loads(json.dumps(value, default=dict))
 
 
 def _array_metadata_model(data: dict[str, JSON]) -> ArrayMetadataModel:
@@ -6529,10 +6534,26 @@ def _array_metadata_model(data: dict[str, JSON]) -> ArrayMetadataModel:
     `zarr_metadata.MetadataValidationError`. Unknown extension names read as
     unclaimed fields, not errors.
     """
+    from zarr_metadata import MetadataValidationError, ValidationProblem
+
     model_v2, model_v3 = _model_classes()
-    if data.get("zarr_format") == 2:
-        return model_v2(data)
-    return model_v3(data)
+    if data.get("zarr_format") != 2:
+        return model_v3(data)
+    if moves_chunks(data, 2):
+        # The v2 model accepts a chunk size of 0, which zarr reads as repaired.
+        raise MetadataValidationError(
+            [
+                ValidationProblem(
+                    ("chunks", index),
+                    f"expected an integer >= 1, got {size!r}",
+                    "invalid_value",
+                    input=size,
+                )
+                for index, size in enumerate(cast("list[JSON]", data["chunks"]))
+                if not (type(size) is int and size >= 1)
+            ]
+        )
+    return model_v2(data)
 
 
 @functools.cache
@@ -6937,10 +6958,15 @@ class AsyncArrayIO:
         source: ArrayMetadataModel | ArrayMetadata
         if isinstance(metadata, ArrayV2Metadata | ArrayV3Metadata):
             source = _copied_legacy(parse_array_metadata(metadata, str(self._store_path)))
-        elif isinstance(metadata, Mapping) and not isinstance(metadata, _model_classes()):
+        elif isinstance(metadata, _model_classes()):
+            source = metadata
+        elif isinstance(metadata, Mapping):
             source = _bound_metadata_dict(dict(metadata), self._store_path)
         else:
-            source = metadata
+            raise TypeError(
+                "Expected array metadata (a zarr_metadata model, ArrayV2Metadata or "
+                f"ArrayV3Metadata) or a metadata mapping, got {type(metadata).__name__}."
+            )
         return self._derive(source, self._store_path, self._config)
 
     def with_store(self, store: Store | StorePath) -> Self:
@@ -7011,11 +7037,11 @@ class AsyncArrayIO:
                 f"Array {str(self.store_path)!r}: the stored array is Zarr format "
                 f"{stored_format}; the bound metadata is Zarr format {self._zarr_format}."
             )
-        stored_json = dict(stored.to_json())
-        bound_json = dict(bound.to_json())
+        stored_json = _metadata_model_json(stored)
+        bound_json = _metadata_model_json(bound)
         if isinstance(stored, _model_classes()[0]) and isinstance(bound, _model_classes()[0]):
-            stored_json["attributes"] = dict(stored.attributes)
-            bound_json["attributes"] = dict(bound.attributes)
+            stored_json["attributes"] = _plain_json(stored.attributes)
+            bound_json["attributes"] = _plain_json(bound.attributes)
         differing = _differing_fields(stored, stored_json, bound_json)
         raise ValueError(
             f"Array {str(self.store_path)!r}: the stored metadata does not match the "

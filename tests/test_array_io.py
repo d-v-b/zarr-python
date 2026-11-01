@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import pytest
-from zarr_metadata import UNSET, ZarrV3ArrayMetadata
+from zarr_metadata import UNSET, MetadataValidationError, ZarrV3ArrayMetadata
 from zarr_metadata import ZarrV2ArrayMetadata as ModelV2
 
 import zarr
@@ -445,6 +445,32 @@ async def test_v2_model_binding_without_attributes() -> None:
     assert (await open_array(store=store, path="foo")).metadata.attributes == {"x": 1}
 
 
+async def test_open_rejects_a_v2_chunk_size_zarr_reads_as_repaired() -> None:
+    """The strict read rejects a v2 chunk size of 0, as it does a v3 one, though
+    the v2 model accepts it."""
+    store = MemoryStore()
+    document = {
+        "zarr_format": 2,
+        "shape": [4],
+        "chunks": [0],
+        "dtype": "<i4",
+        "fill_value": 0,
+        "order": "C",
+        "filters": None,
+        "compressor": None,
+    }
+    prototype = default_buffer_prototype()
+    await store.set("a/.zarray", prototype.buffer.from_bytes(json.dumps(document).encode()))
+    with pytest.raises(MetadataValidationError, match="chunks"):
+        await AsyncArrayIO.open(store, name="a")
+
+
+def test_with_metadata_rejects_what_is_not_metadata() -> None:
+    aio = AsyncArrayIO.build_v3(MemoryStore(), shape=(4,), data_type="uint8", chunk_grid=(4,))
+    with pytest.raises(TypeError, match="got str"):
+        aio.with_metadata(cast("Any", "nonsense"))
+
+
 def test_open_a_missing_path_creates_nothing(tmp_path: Path) -> None:
     missing = tmp_path / "missing.zarr"
     with pytest.raises(FileNotFoundError):
@@ -552,10 +578,31 @@ async def test_metadata_dict_of_a_repaired_document_stores_its_repair() -> None:
     assert json.loads(buffer.to_bytes())["chunks"] == [1]
 
 
-async def test_verify_names_the_fields_that_differ() -> None:
+@pytest.mark.parametrize("zarr_format", [2, 3])
+async def test_verify_names_the_fields_that_differ(zarr_format: ZarrFormat) -> None:
+    """Nested attributes (read-only in the model) do not stop the field naming."""
     store = MemoryStore()
-    aio = AsyncArrayIO.build_v3(
-        store, name="foo", shape=(4,), data_type="float32", chunk_grid=(4,), fill_value=0.0
+    attributes: dict[str, JSON] = {"units": {"name": "m", "scale": [1, 2]}}
+    aio = (
+        AsyncArrayIO.build_v2(
+            store,
+            name="foo",
+            shape=(4,),
+            dtype="float32",
+            chunks=(4,),
+            fill_value=0.0,
+            attributes=attributes,
+        )
+        if zarr_format == 2
+        else AsyncArrayIO.build_v3(
+            store,
+            name="foo",
+            shape=(4,),
+            data_type="float32",
+            chunk_grid=(4,),
+            fill_value=0.0,
+            attributes=attributes,
+        )
     )
     await aio.store_metadata()
     other = aio.with_metadata(aio.metadata.update(fill_value=-0.0))
