@@ -728,7 +728,8 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         compressor: CompressorLikev2 = None,
         attributes: dict[str, JSON] | None = None,
     ) -> ArrayV2Metadata:
-        """See the module-level `build_array_metadata_v2`."""
+        """See the module-level `build_array_metadata_v2`; this legacy path makes
+        no object codec check, as it never has (see `_array_metadata_v2`)."""
         return _array_metadata_v2(
             shape=shape,
             dtype=dtype,
@@ -5126,11 +5127,12 @@ async def _store_repaired_document(store_path: StorePath, metadata: ArrayMetadat
     moves chunks, before chunks are written under `metadata`.
 
     The store's cache (see `zarr.core.metadata.stored`) says whether the document
-    needs such a repair. While it has not seen the document, a consolidated copy it
-    has seen stands for it, as consolidated metadata does for every reader; with
-    neither, nothing is known to need a repair, and nothing is read: metadata built
-    in code, or bound to a store that never read the document, writes its chunks
-    as any array does. Only a document whose repair
+    needs such a repair. Where it records nothing for the document (it records a
+    valid one only where that replaces a broken one), a consolidated copy it has
+    seen that needs a repair stands for it, as consolidated metadata does for every
+    reader, and the document is read to check; with neither, nothing is known to
+    need a repair, and nothing is read: metadata built in code, or bound to a store
+    that never read the document, writes its chunks as any array does. Only a document whose repair
     lays out chunks as `metadata` does is acted on: one that lays them out otherwise
     describes another array, and chunks written under `metadata` are its caller's
     declaration, as over any document. The document is read again, because the store
@@ -6380,6 +6382,9 @@ def _bound_metadata_dict(data: dict[str, Any], path: str) -> ArrayMetadataModel 
     has."""
     from zarr_metadata import MetadataValidationError
 
+    if data.get("storage_transformers"):
+        # Bound as legacy metadata, which rejects them, as AsyncArray always has.
+        return parse_array_metadata(data, path)
     try:
         return _array_metadata_model(data)
     except MetadataValidationError:
@@ -6599,8 +6604,9 @@ class AsyncArrayIO:
         source = self._source
         if not isinstance(source, ArrayV2Metadata | ArrayV3Metadata):
             return source
-        # Derived on every access, not cached: a legacy object may be changed in
-        # place through another handle that shares it (as `AsyncArray` copies do).
+        # Derived on every access, not cached: a legacy object's attributes may be
+        # changed in place through another handle that shares it (as `AsyncArray`
+        # copies do); the chunk grid and key encoding such changes cannot touch.
         buffers = source.to_buffer_dict(default_buffer_prototype())
         key_value = {key: buffer.to_bytes() for key, buffer in buffers.items()}
         model_v2, model_v3 = _model_classes()

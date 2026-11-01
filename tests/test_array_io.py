@@ -447,3 +447,19 @@ def test_open_a_missing_path_creates_nothing(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         ArrayIO.open(str(missing))
     assert not missing.exists()
+
+
+def test_metadata_dict_with_storage_transformers_raises() -> None:
+    doc: dict[str, Any] = {
+        "zarr_format": 3,
+        "node_type": "array",
+        "shape": [4],
+        "data_type": "uint8",
+        "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [4]}},
+        "chunk_key_encoding": {"name": "default"},
+        "fill_value": 0,
+        "codecs": [{"name": "bytes"}],
+        "storage_transformers": [{"name": "nope"}],
+    }
+    with pytest.raises(ValueError, match="storage transformers"):
+        AsyncArrayIO(cast("Any", doc), StorePath(MemoryStore()))

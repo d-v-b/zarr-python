@@ -65,7 +65,11 @@ class StoredDocuments:
         self._copies: dict[tuple[str, ZarrFormat], ArrayDocument] = {}
 
     def knows(self, path: str, zarr_format: ZarrFormat) -> bool:
-        """Whether zarr has read or stored the array document of `zarr_format` at `path`."""
+        """Whether this cache records the array document of `zarr_format` at `path`:
+        one that needs a repair that moves chunks, or a valid one that replaced such
+        a document or stands against a consolidated copy that needs one. A valid
+        document read with nothing to replace is not recorded, so whether it is
+        known depends on what was read first; either way it means no repair."""
         return (path, zarr_format) in self._arrays
 
     def needing_repair(self, path: str, zarr_format: ZarrFormat) -> ArrayDocument | None:

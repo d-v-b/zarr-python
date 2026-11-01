@@ -2737,10 +2737,20 @@ def test_pickled_array_keeps_the_pipeline_class_it_chose() -> None:
     """A pickled array keeps the pipeline class its binding chose, also when that
     class built an instance of another one (as zarrs-python does for stores it
     cannot use)."""
-    from zarr.core.codec_pipeline import BatchedCodecPipeline
-
     aa = zarr.create_array(MemoryStore(), shape=(4,), dtype="uint8", chunks=(2,)).async_array
     aa.io._pipeline_class = _ChosenPipeline
     revived = pickle.loads(pickle.dumps(aa))
-    assert revived.io._pipeline_class is _ChosenPipeline
     assert type(revived.codec_pipeline) is BatchedCodecPipeline
+    # A binding derived from the revived one builds its pipeline from the class.
+    derived = revived.io.with_store(MemoryStore())
+    assert type(derived.to_array().codec_pipeline) is _ChosenPipeline
+
+
+def test_import_zarr_leaves_zarr_metadata_unimported() -> None:
+    """`zarr_metadata` is imported when a binding first holds a model, not by
+    `import zarr`, whose cost stays what it was."""
+    import subprocess
+    import sys
+
+    code = "import sys, zarr; assert 'zarr_metadata' not in sys.modules"
+    subprocess.run([sys.executable, "-c", code], check=True)

@@ -1910,3 +1910,52 @@ def test_array_from_a_stored_document_dict_stores_its_repair(
     array[:] = [7, 8, 9]
 
     assert _stored_chunks(json.loads((path / doc_name).read_text())) == [1]
+
+
+@pytest.mark.filterwarnings("ignore:Consolidated metadata is currently not part:UserWarning")
+@pytest.mark.filterwarnings("ignore:.*is read as:zarr.errors.ZarrUserWarning")
+@pytest.mark.parametrize("zarr_format", [2, 3])
+def test_member_read_valid_then_from_a_broken_copy_keeps_the_copy(
+    tmp_path: Path, zarr_format: Literal[2, 3]
+) -> None:
+    """A member whose own document was read valid, then read again from a broken
+    consolidated copy, is kept as that copy stored by a group write, as a member
+    read from such a copy always was."""
+    path = tmp_path / "group.zarr"
+    _flagged_consolidated_group(path, zarr_format, "a")
+    stored = json.dumps(_consolidated_member(path, zarr_format, "a"))
+    store = LocalStore(path)
+    zarr.open_array(store=store, path="a", mode="r")
+    group = zarr.open_group(store, mode="r+", use_consolidated=True)
+
+    group.attrs["x"] = 1
+
+    assert json.dumps(_consolidated_member(path, zarr_format, "a")) == stored
+
+
+@pytest.mark.filterwarnings("ignore:Consolidated metadata is currently not part:UserWarning")
+@pytest.mark.filterwarnings("ignore:.*is read as:zarr.errors.ZarrUserWarning")
+@pytest.mark.parametrize("zarr_format", [2, 3])
+def test_pickled_subgroup_keeps_nested_members_as_stored(
+    tmp_path: Path, zarr_format: Literal[2, 3]
+) -> None:
+    """A subgroup read from a consolidated parent carries its members' entries under
+    its own path when pickled, so a write through the copy stores what a write
+    through the subgroup itself stores, nested members kept as stored."""
+
+    def write_through(sub_of: Callable[[zarr.Group], zarr.Group], name: str) -> dict[str, bytes]:
+        path = tmp_path / name
+        _flagged_consolidated_group(path, zarr_format, "g/a")
+        group = zarr.open_group(LocalStore(path), mode="r+", use_consolidated=True)
+        sub = group["g"]
+        assert isinstance(sub, zarr.Group)
+        sub_of(sub).attrs["x"] = 1
+        return {
+            str(p.relative_to(path)): p.read_bytes()
+            for p in sorted(path.rglob("*"))
+            if p.is_file() and p.name in ("zarr.json", ".zmetadata", ".zattrs", ".zgroup")
+        }
+
+    assert write_through(lambda sub: pickle.loads(pickle.dumps(sub)), "pickled") == write_through(
+        lambda sub: sub, "original"
+    )
