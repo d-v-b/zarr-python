@@ -6605,9 +6605,10 @@ class AsyncArrayIO:
 
     def with_metadata(self, metadata: ArrayMetadataModel | ArrayMetadata) -> Self:
         """This binding with `metadata` in place of its own. Nothing is stored;
-        a legacy `metadata` object is copied."""
+        a legacy `metadata` object is read as the constructor reads it, then
+        copied."""
         if isinstance(metadata, ArrayV2Metadata | ArrayV3Metadata):
-            metadata = _copied_legacy(metadata)
+            metadata = _copied_legacy(parse_array_metadata(metadata, str(self._store_path)))
         return self._derive(metadata, self._store_path, self._config)
 
     def with_store(self, store: Store | StorePath) -> Self:

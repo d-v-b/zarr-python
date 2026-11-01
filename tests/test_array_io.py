@@ -15,8 +15,9 @@ from zarr.api.asynchronous import open_array
 from zarr.core.buffer import default_buffer_prototype
 from zarr.core.codec_pipeline import FusedCodecPipeline
 from zarr.core.metadata import ArrayV2Metadata
+from zarr.dtype import Int16
 from zarr.errors import ArrayNotFoundError, UnknownCodecError
-from zarr.storage import MemoryStore
+from zarr.storage import MemoryStore, StorePath
 
 if TYPE_CHECKING:
     from zarr.core.common import ZarrFormat
@@ -322,3 +323,28 @@ async def test_store_metadata_of_model_without_attributes_clears_zattrs() -> Non
     assert "foo/.zattrs" not in await _store_keys(store)
     reread = await AsyncArrayIO.open(store, name="foo")
     assert dict(reread.metadata.attributes) == {}
+
+
+def _bind_zero_chunk_by_constructor(metadata: ArrayV2Metadata) -> AsyncArrayIO:
+    return AsyncArrayIO(metadata, StorePath(MemoryStore()))
+
+
+def _bind_zero_chunk_by_build(metadata: ArrayV2Metadata) -> AsyncArrayIO:
+    return AsyncArrayIO.build_v2(MemoryStore(), shape=metadata.shape, dtype="int16", chunks=(0,))
+
+
+def _bind_zero_chunk_by_with_metadata(metadata: ArrayV2Metadata) -> AsyncArrayIO:
+    declared = AsyncArrayIO.build_v2(MemoryStore(), shape=(3,), dtype="int16", chunks=(3,))
+    return declared.with_metadata(metadata)
+
+
+@pytest.mark.parametrize(
+    "bind",
+    [_bind_zero_chunk_by_constructor, _bind_zero_chunk_by_build, _bind_zero_chunk_by_with_metadata],
+    ids=["constructor", "build_v2", "with_metadata"],
+)
+def test_zero_chunk_v2_metadata_binds_repaired(bind: Any) -> None:
+    """`ArrayV2Metadata` with a chunk size of 0 is read as repaired however it
+    reaches a binding, as `parse_array_metadata` reads it."""
+    metadata = ArrayV2Metadata(shape=(3,), chunks=(0,), dtype=Int16(), fill_value=0, order="C")
+    assert bind(metadata).metadata_legacy.chunks == (1,)
