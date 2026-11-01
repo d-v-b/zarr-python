@@ -2750,10 +2750,13 @@ def test_import_zarr_leaves_zarr_metadata_unimported() -> None:
     """`zarr_metadata` is imported when a binding first holds a model, not by
     `import zarr`, whose cost stays what it was."""
     import subprocess
-    import sys
 
-    code = "import sys, zarr; assert 'zarr_metadata' not in sys.modules"
-    subprocess.run([sys.executable, "-c", code], check=True)
+    code = "import sys, zarr; print('zarr_metadata' in sys.modules)"
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "False"
 
 
 def test_async_array_rejects_metadata_that_is_not_a_mapping() -> None:

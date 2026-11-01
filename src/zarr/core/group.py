@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import unicodedata
 import warnings
@@ -141,6 +142,28 @@ def _parse_async_node(
         return Group(node)
     else:
         raise TypeError(f"Unknown node type, got {type(node)}")
+
+
+def _with_member_marks(
+    consolidated: ConsolidatedMetadata, prefix: str, marks: Mapping[str, ArrayDocument]
+) -> ConsolidatedMetadata:
+    """A copy of `consolidated` whose array members at the paths in `marks` (relative
+    to the group, below `prefix`) are copies carrying their mark as the
+    `_stored_document` attribute zarr 3.4.1 and 3.4.2 read."""
+    members: dict[str, ArrayV2Metadata | ArrayV3Metadata | GroupMetadata] = {}
+    for name, member in consolidated.metadata.items():
+        key = f"{prefix}{name}"
+        if isinstance(member, GroupMetadata):
+            nested = member.consolidated_metadata
+            if nested is not None:
+                member = replace(
+                    member, consolidated_metadata=_with_member_marks(nested, f"{key}/", marks)
+                )
+        elif key in marks:
+            member = copy.copy(member)
+            object.__setattr__(member, "_stored_document", copy.deepcopy(marks[key]))
+        members[name] = member
+    return replace(consolidated, metadata=members)
 
 
 @dataclass(frozen=True)
@@ -705,6 +728,19 @@ class AsyncGroup:
             )
             if entries:
                 state["_stored_members"] = entries
+                # zarr 3.4.1 and 3.4.2 read a member's repair from a mark on the
+                # member itself: pickle marked copies for them to read.
+                prefix = f"{self.store_path.path}/" if self.store_path.path else ""
+                marks = {
+                    path.removeprefix(prefix): entry[1]
+                    for path, entry in entries.items()
+                    if entry[1] is not None
+                }
+                if marks:
+                    state["metadata"] = replace(
+                        self.metadata,
+                        consolidated_metadata=_with_member_marks(consolidated, "", marks),
+                    )
         return state
 
     def __setstate__(self, state: dict[str, object]) -> None:
@@ -713,6 +749,7 @@ class AsyncGroup:
         self.__dict__.update(state)
         if entries is None:
             entries = self._legacy_member_marks()
+        self._clear_member_marks()
         if entries:
             stored_documents(self.store_path.store).restore_entries(
                 entries, self.metadata.zarr_format
@@ -730,6 +767,16 @@ class AsyncGroup:
             if mark is not None:
                 marks[_join_paths([self.store_path.path, key])] = ("copy", mark)
         return marks
+
+    def _clear_member_marks(self) -> None:
+        """Drop the marks a pickle leaves on consolidated members: once read, the
+        store's cache holds them."""
+        consolidated = self.metadata.consolidated_metadata
+        if consolidated is None:
+            return
+        for member in consolidated.flattened_metadata.values():
+            if "_stored_document" in vars(member):
+                object.__delattr__(member, "_stored_document")
 
     @classmethod
     def _from_bytes_v2(

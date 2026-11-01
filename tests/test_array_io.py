@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import pickle
+import tempfile
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
@@ -19,7 +20,7 @@ from zarr.core.codec_pipeline import FusedCodecPipeline
 from zarr.core.metadata import ArrayV2Metadata
 from zarr.dtype import Int16
 from zarr.errors import ArrayNotFoundError, UnknownCodecError
-from zarr.storage import MemoryStore, StorePath
+from zarr.storage import LocalStore, MemoryStore, StorePath
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -482,13 +483,16 @@ async def test_bindings_take_metadata_json() -> None:
 
 
 async def test_pickled_binding_rebuilds_its_pipeline() -> None:
+    """A pickled binding drops its built pipeline (a pipeline assigned to it is not
+    carried either) and builds its class's pipeline on first use."""
     aio = AsyncArrayIO.build_v3(
-        MemoryStore(), name="foo", shape=(4,), data_type="uint8", chunk_grid=(2,)
+        LocalStore(tempfile.mkdtemp()), name="foo", shape=(4,), data_type="uint8", chunk_grid=(2,)
     )
-    _ = await aio.getitem(Ellipsis)
+    await aio.setitem(Ellipsis, np.arange(4, dtype="uint8"))
     revived = pickle.loads(pickle.dumps(aio))
     assert revived._codec_pipeline_cache is None
-    assert revived == aio
+    np.testing.assert_array_equal(await revived.getitem(Ellipsis), np.arange(4))
+    assert isinstance(revived._resolved_codec_pipeline, revived._pipeline_class)
 
 
 @pytest.mark.parametrize("zarr_format", [2, 3])
@@ -580,12 +584,89 @@ async def test_erase_chunk_takes_integer_coordinates() -> None:
     assert "foo/c/1" not in await _store_keys(store)
 
 
-def test_equality_does_not_depend_on_resolution() -> None:
-    doc = AsyncArrayIO.build_v3(
+def test_equality_is_canonical_whatever_is_resolved() -> None:
+    """Bindings compare by canonical metadata, before and after resolving, and
+    whatever they were built from: a fill value of -0.0 differs from 0.0."""
+    store_path = StorePath(MemoryStore(), "foo")
+    positive = AsyncArrayIO.build_v3(
+        store_path, shape=(4,), data_type="float32", chunk_grid=(4,), fill_value=0.0
+    )
+    negative = positive.with_metadata(positive.metadata.update(fill_value=-0.0))
+    legacy_negative = AsyncArrayIO(negative.metadata_legacy, store_path)
+    assert positive != negative
+    assert positive != legacy_negative
+    assert negative == legacy_negative
+    _ = (positive.metadata_legacy, negative.metadata_legacy)
+    assert positive != negative
+    assert negative == legacy_negative
+
+
+@pytest.mark.parametrize("bind", ["open", "model"])
+async def test_storage_transformers_are_rejected_when_bound(bind: str) -> None:
+    store = MemoryStore()
+    doc: dict[str, Any] = {
+        "zarr_format": 3,
+        "node_type": "array",
+        "shape": [4],
+        "data_type": "uint8",
+        "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [4]}},
+        "chunk_key_encoding": {"name": "default"},
+        "fill_value": 0,
+        "codecs": [{"name": "bytes"}],
+        "storage_transformers": [{"name": "nope"}],
+    }
+    if bind == "open":
+        prototype = default_buffer_prototype()
+        await store.set("foo/zarr.json", prototype.buffer.from_bytes(json.dumps(doc).encode()))
+        with pytest.raises(ValueError, match="storage transformers"):
+            await AsyncArrayIO.open(store, name="foo")
+    else:
+        model = ZarrV3ArrayMetadata(doc)
+        with pytest.raises(ValueError, match="storage transformers"):
+            AsyncArrayIO(model, StorePath(store, "foo"))
+
+
+@pytest.mark.parametrize(
+    ("documents", "left"),
+    [
+        ({"foo/zarr.json": b"not json"}, set()),
+        ({"foo/zarr.json": b'{"zarr_format": 3}'}, set()),
+        ({"foo/zarr.json": b'{"zarr_format": 3, "node_type": "group"}'}, {"foo/zarr.json"}),
+        ({"foo/.zattrs": b"{}"}, set()),
+        (
+            {"foo/.zarray": b"{}", "foo/.zattrs": b"{}", "foo/.zgroup": b"{}"},
+            {"foo/.zattrs", "foo/.zgroup"},
+        ),
+    ],
+    ids=["corrupt-v3", "v3-without-node-type", "v3-group", "stray-v2-zattrs", "v2-array-and-group"],
+)
+async def test_erase_metadata_removes_array_documents_however_written(
+    documents: dict[str, bytes], left: set[str]
+) -> None:
+    """erase_metadata removes array documents even when they are corrupt, and
+    leaves only a group's documents in place."""
+    store = MemoryStore()
+    prototype = default_buffer_prototype()
+    for key, value in documents.items():
+        await store.set(key, prototype.buffer.from_bytes(value))
+    zarr_format: ZarrFormat = 3 if "foo/zarr.json" in documents else 2
+    declared = (
+        AsyncArrayIO.build_v2(store, name="foo", shape=(4,), dtype="uint8", chunks=(4,))
+        if zarr_format == 2
+        else AsyncArrayIO.build_v3(
+            store, name="foo", shape=(4,), data_type="uint8", chunk_grid=(4,)
+        )
+    )
+    await declared.erase_metadata()
+    assert await _store_keys(store) == left
+
+
+async def test_with_metadata_takes_any_mapping() -> None:
+    from types import MappingProxyType
+
+    aio = AsyncArrayIO.build_v3(
         MemoryStore(), name="foo", shape=(4,), data_type="uint8", chunk_grid=(4,)
-    ).metadata.to_json()
-    a, b = (AsyncArrayIO(doc, StorePath(MemoryStore(), "foo")) for _ in "ab")
-    a = b.with_store(a.store_path)
-    before = a == b
-    _ = a.metadata_legacy
-    assert (a == b) is before
+    )
+    rebound = aio.with_metadata(cast("Any", MappingProxyType(dict(aio.metadata.to_json()))))
+    assert rebound == aio
+    await rebound.store_metadata()

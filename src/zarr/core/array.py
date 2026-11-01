@@ -266,7 +266,7 @@ def parse_array_metadata(data: Any, path: str | None = None) -> ArrayMetadata:
             return ArrayV2Metadata.from_dict(data, path=path)
         else:
             raise ValueError(f"Invalid zarr_format: {zarr_format}. Expected 2 or 3")
-    raise TypeError  # pragma: no cover
+    raise TypeError
 
 
 def create_codec_pipeline(
@@ -497,13 +497,12 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         # The pickled state is the fields', as it has always been, so a pickle
         # loads in either version; what the store's cache knows rides along.
         carried = self._io._carried_cache_entry()
-        metadata = self.metadata
+        metadata: ArrayMetadata = self.metadata
         mark = carried.get("_stored_entry", carried.get("_stored_copy"))
-        if mark is not None:
+        if mark is not None or "_stored_document" in vars(metadata):
             # zarr 3.4.1 and 3.4.2 read the repair a stored document needs from
             # this mark on the metadata itself; this version reads the carried entry.
-            metadata = copy.copy(metadata)
-            object.__setattr__(metadata, "_stored_document", copy.deepcopy(mark))
+            metadata = _with_legacy_mark(metadata, cast("ArrayDocument | None", mark))
         state: dict[str, object] = {
             "metadata": metadata,
             "store_path": self.store_path,
@@ -530,6 +529,9 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
             legacy_mark = vars(metadata).get("_stored_document")
             if legacy_mark is not None:
                 state = {**state, "_stored_entry": legacy_mark}
+        if "_stored_document" in vars(metadata):
+            # Read once; the cache holds it from here on.
+            object.__delattr__(metadata, "_stored_document")
         io._restore_cache_entry(state)
         object.__setattr__(self, "_io", io)
 
@@ -6439,7 +6441,6 @@ def _record_given_document(
 
 
 def _differing_fields(
-    model_class: type[ArrayMetadataModel],
     stored: ArrayMetadataModel,
     stored_json: dict[str, Any],
     bound_json: dict[str, Any],
@@ -6461,12 +6462,44 @@ def _differing_fields(
         else:
             patched.pop(key)
         try:
-            unchanged = model_class(patched) == stored
+            unchanged = type(stored)(patched) == stored
         except MetadataValidationError:
             unchanged = False
         if not unchanged:
             differing.append(key)
     return differing
+
+
+def _reject_storage_transformers(model: ArrayMetadataModel) -> None:
+    """Raise, as `parse_array_metadata` does, for a model that declares storage
+    transformers: zarr-python cannot read or write chunks through them."""
+    transformers = getattr(model, "storage_transformers", ())
+    if transformers:
+        raise ValueError(
+            f"Array metadata contains storage transformers: {transformers}."
+            "Arrays with storage transformers are not supported in zarr-python at this time."
+        )
+
+
+def _is_group_document(document: Buffer) -> bool:
+    """Whether a stored `zarr.json` is a group's; one that is not JSON is not."""
+    try:
+        decoded = buffer_to_json_object(document)
+    except (ValueError, TypeError):
+        return False
+    return decoded.get("node_type") == "group"
+
+
+def _with_legacy_mark(metadata: ArrayMetadata, mark: ArrayDocument | None) -> ArrayMetadata:
+    """A copy of `metadata` carrying `mark` as the `_stored_document` attribute zarr
+    3.4.1 and 3.4.2 read the repair a stored document needs from (none: no mark)."""
+    marked = copy.copy(metadata)
+    if mark is None:
+        if "_stored_document" in vars(marked):
+            object.__delattr__(marked, "_stored_document")
+    else:
+        object.__setattr__(marked, "_stored_document", copy.deepcopy(mark))
+    return marked
 
 
 def _copied_legacy(source: ArrayMetadata) -> ArrayMetadata:
@@ -6479,9 +6512,9 @@ def _copied_legacy(source: ArrayMetadata) -> ArrayMetadata:
 
 
 type ArrayMetadataModel = ZarrV2ArrayMetadata | ZarrV3ArrayMetadata
+"""Array metadata as a `zarr_metadata` model: validated JSON, extension names unresolved."""
 type ArrayMetadataModelJSON = ZarrV2ArrayMetadataJSON | ZarrV3ArrayMetadataJSON
 """Array metadata as `zarr_metadata` types it in JSON (zarrista's metadata type)."""
-"""Array metadata as a `zarr_metadata` model: validated JSON, extension names unresolved."""
 
 
 def _metadata_model_json(document: ArrayMetadataModel) -> dict[str, Any]:
@@ -6591,8 +6624,12 @@ class AsyncArrayIO:
         elif isinstance(metadata, Mapping):
             source = _bound_metadata_dict(cast("dict[str, Any]", metadata), store_path)
         else:
-            # Raises the TypeError AsyncArray always raised for such input.
-            source = parse_array_metadata(metadata, str(store_path))
+            raise TypeError(
+                "Expected array metadata (a zarr_metadata model, ArrayV2Metadata or "
+                f"ArrayV3Metadata) or a metadata mapping, got {type(metadata).__name__}."
+            )
+        if not isinstance(source, ArrayV2Metadata | ArrayV3Metadata):
+            _reject_storage_transformers(source)
         # The pipeline implementation is chosen when the binding is made, from
         # the global configuration, exactly as `AsyncArray` has always chosen
         # it; the pipeline itself is built on first use.
@@ -6891,7 +6928,8 @@ class AsyncArrayIO:
         return derived
 
     def with_metadata(
-        self, metadata: ArrayMetadataModel | ArrayMetadata | ArrayMetadataModelJSON
+        self,
+        metadata: ArrayMetadataModel | ArrayMetadata | ArrayMetadataDict | ArrayMetadataModelJSON,
     ) -> Self:
         """This binding with `metadata` in place of its own. Nothing is stored;
         a legacy `metadata` object or a metadata dict is read as the
@@ -6899,8 +6937,8 @@ class AsyncArrayIO:
         source: ArrayMetadataModel | ArrayMetadata
         if isinstance(metadata, ArrayV2Metadata | ArrayV3Metadata):
             source = _copied_legacy(parse_array_metadata(metadata, str(self._store_path)))
-        elif isinstance(metadata, dict):
-            source = _bound_metadata_dict(cast("dict[str, Any]", metadata), self._store_path)
+        elif isinstance(metadata, Mapping) and not isinstance(metadata, _model_classes()):
+            source = _bound_metadata_dict(dict(metadata), self._store_path)
         else:
             source = metadata
         return self._derive(source, self._store_path, self._config)
@@ -6978,7 +7016,7 @@ class AsyncArrayIO:
         if isinstance(stored, _model_classes()[0]) and isinstance(bound, _model_classes()[0]):
             stored_json["attributes"] = dict(stored.attributes)
             bound_json["attributes"] = dict(bound.attributes)
-        differing = _differing_fields(type(stored), stored, stored_json, bound_json)
+        differing = _differing_fields(stored, stored_json, bound_json)
         raise ValueError(
             f"Array {str(self.store_path)!r}: the stored metadata does not match the "
             f"bound metadata; differing fields: {', '.join(differing)}."
@@ -6988,10 +7026,14 @@ class AsyncArrayIO:
         """Delete the stored array metadata of this array's format; chunks are
         kept. Succeeds if absent; a group's documents here are left in place."""
         zarr_format = self._zarr_format
-        keys = ARRAY_DOCUMENTS[zarr_format]
-        if stored_array_document(await read_documents(self._store_path, keys), zarr_format):
-            for key in keys:
-                await (self._store_path / key).delete()
+        if zarr_format == 2:
+            await (self._store_path / ZARRAY_JSON).delete()
+            if not await (self._store_path / ZGROUP_JSON).exists():
+                await (self._store_path / ZATTRS_JSON).delete()
+        else:
+            document = await (self._store_path / ZARR_JSON).get(prototype=cpu_buffer_prototype)
+            if document is not None and not _is_group_document(document):
+                await (self._store_path / ZARR_JSON).delete()
         stored_documents(self._store_path.store).observe(self._store_path.path, None, zarr_format)
 
     async def erase_chunk(self, chunk_coords: Sequence[int], /) -> None:
@@ -7108,9 +7150,6 @@ class AsyncArrayIO:
             return NotImplemented
         if self._store_path != other._store_path or self._config != other._config:
             return False
-        legacy = (ArrayV2Metadata, ArrayV3Metadata)
-        if isinstance(self._source, legacy) and isinstance(other._source, legacy):
-            return self._source == other._source
         return self.metadata == other.metadata
 
     def __hash__(self) -> int:
@@ -7201,7 +7240,8 @@ class ArrayIO:
         return Array(self._async_io.to_array())
 
     def with_metadata(
-        self, metadata: ArrayMetadataModel | ArrayMetadata | ArrayMetadataModelJSON
+        self,
+        metadata: ArrayMetadataModel | ArrayMetadata | ArrayMetadataDict | ArrayMetadataModelJSON,
     ) -> Self:
         """This binding with `metadata` in place of its own. See `AsyncArrayIO.with_metadata`."""
         return self._wrap(self._async_io.with_metadata(metadata))

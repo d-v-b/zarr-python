@@ -13,8 +13,10 @@ import warnings
 import zipfile
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+import hypothesis.strategies as st
 import numpy as np
 import pytest
+from hypothesis import given, settings
 
 import zarr
 from zarr.codecs import ShardingCodec
@@ -25,6 +27,7 @@ from zarr.core.metadata import ArrayV2Metadata, ArrayV3Metadata
 from zarr.core.metadata.repair import (
     RECREATE_HINT,
     RESAVE_HINT,
+    may_move_chunks,
     repair_array_document,
 )
 from zarr.core.metadata.stored import _CACHES, StoredDocuments, moves_chunks, stored_documents
@@ -1936,29 +1939,24 @@ def test_member_read_valid_then_from_a_broken_copy_keeps_the_copy(
 @pytest.mark.filterwarnings("ignore:Consolidated metadata is currently not part:UserWarning")
 @pytest.mark.filterwarnings("ignore:.*is read as:zarr.errors.ZarrUserWarning")
 @pytest.mark.parametrize("zarr_format", [2, 3])
-def test_pickled_subgroup_keeps_nested_members_as_stored(
-    tmp_path: Path, zarr_format: Literal[2, 3]
+@pytest.mark.parametrize("pickled", [False, True])
+def test_subgroup_write_keeps_nested_members_as_stored(
+    tmp_path: Path, zarr_format: Literal[2, 3], pickled: bool
 ) -> None:
-    """A subgroup read from a consolidated parent carries its members' entries under
-    its own path when pickled, so a write through the copy stores what a write
-    through the subgroup itself stores, nested members kept as stored."""
+    """A subgroup read from a consolidated parent keeps a nested member read from a
+    repaired copy as it was stored when it writes its own documents, also once
+    pickled: the copy carries the members' entries under the subgroup's path."""
+    path = tmp_path / "group.zarr"
+    _flagged_consolidated_group(path, zarr_format, "g/a")
+    group = zarr.open_group(LocalStore(path), mode="r+", use_consolidated=True)
+    sub = group["g"]
+    assert isinstance(sub, zarr.Group)
+    if pickled:
+        sub = pickle.loads(pickle.dumps(sub))
 
-    def write_through(sub_of: Callable[[zarr.Group], zarr.Group], name: str) -> dict[str, bytes]:
-        path = tmp_path / name
-        _flagged_consolidated_group(path, zarr_format, "g/a")
-        group = zarr.open_group(LocalStore(path), mode="r+", use_consolidated=True)
-        sub = group["g"]
-        assert isinstance(sub, zarr.Group)
-        sub_of(sub).attrs["x"] = 1
-        return {
-            str(p.relative_to(path)): p.read_bytes()
-            for p in sorted(path.rglob("*"))
-            if p.is_file() and p.name in ("zarr.json", ".zmetadata", ".zattrs", ".zgroup")
-        }
+    sub.attrs["x"] = 1
 
-    assert write_through(lambda sub: pickle.loads(pickle.dumps(sub)), "pickled") == write_through(
-        lambda sub: sub, "original"
-    )
+    assert _stored_chunks(_consolidated_member(path / "g", zarr_format, "a")) == [0]
 
 
 @pytest.mark.filterwarnings("ignore:.*is read as:zarr.errors.ZarrUserWarning")
@@ -1989,3 +1987,62 @@ def test_pickles_cross_versions_with_the_repair(tmp_path: Path, zarr_format: Lit
     )
     sync(revived.setitem(slice(None), np.array([7, 8, 9], dtype="int16")))
     assert _stored_chunks(json.loads((path / doc_name).read_text())) == [1]
+
+
+@pytest.mark.filterwarnings("ignore:Consolidated metadata is currently not part:UserWarning")
+@pytest.mark.filterwarnings("ignore:.*is read as:zarr.errors.ZarrUserWarning")
+@pytest.mark.parametrize("zarr_format", [2, 3])
+def test_group_pickles_cross_versions_with_member_marks(
+    tmp_path: Path, zarr_format: Literal[2, 3]
+) -> None:
+    """A consolidated group pickled here marks its repaired members as zarr 3.4.1
+    and 3.4.2 read them, and a group pickled by them, with marked members, keeps
+    those members as stored when it writes."""
+    path = tmp_path / "group.zarr"
+    _flagged_consolidated_group(path, zarr_format, "a")
+    stored = _consolidated_member(path, zarr_format, "a")
+    group = zarr.open_group(LocalStore(path), mode="r+", use_consolidated=True)
+
+    state = group._async_group.__getstate__()
+    member = state["metadata"].consolidated_metadata.metadata["a"]  # type: ignore[attr-defined]
+    assert _stored_chunks(dict(vars(member)["_stored_document"])) == [0]
+    live = group.metadata.consolidated_metadata
+    assert live is not None
+    assert "_stored_document" not in vars(live.metadata["a"])
+
+    old_state = {k: v for k, v in state.items() if k != "_stored_members"}
+    old_state["store_path"] = StorePath(LocalStore(path))
+    revived = object.__new__(type(group._async_group))
+    revived.__setstate__(pickle.loads(pickle.dumps(old_state)))
+    sync(revived.update_attributes({"x": 1}))
+    assert json.dumps(_consolidated_member(path, zarr_format, "a")) == json.dumps(stored)
+
+
+chunk_sizes = st.one_of(
+    st.integers(min_value=-2, max_value=4),
+    st.booleans(),
+    st.floats(allow_nan=False),
+    st.just([2, 2]),
+)
+
+
+@settings(deadline=None, max_examples=300)
+@given(
+    zarr_format=st.sampled_from([2, 3]),
+    sizes=st.lists(chunk_sizes, max_size=3),
+    grid_name=st.sampled_from(["regular", "rectilinear", "other"]),
+)
+def test_may_move_chunks_agrees_with_the_repairs(
+    zarr_format: Literal[2, 3], sizes: list[Any], grid_name: str
+) -> None:
+    """`may_move_chunks` answers no only where no repair moves chunks."""
+    shape = [3] * len(sizes)
+    if zarr_format == 2:
+        doc: dict[str, Any] = {**_v2_doc(shape, sizes)}
+    else:
+        doc = {**_v3_doc(shape, sizes)}
+        if grid_name != "regular":
+            doc["chunk_grid"] = {"name": grid_name, "configuration": {"chunk_shapes": sizes}}
+    _, readings = repair_array_document(doc, zarr_format)
+    if any(reading.moves_chunks for reading in readings):
+        assert may_move_chunks(doc, zarr_format)
