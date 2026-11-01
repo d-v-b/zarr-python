@@ -21,6 +21,7 @@ from typing import (
     ClassVar,
     Final,
     Literal,
+    Protocol,
     Required,
     TypedDict,
     Unpack,
@@ -87,12 +88,17 @@ from zarr.core.common import (
     product,
 )
 from zarr.core.config import config as zarr_config
+from zarr.core.context import Context
 from zarr.core.dtype import (
     Structured,
     VariableLengthBytes,
     VariableLengthUTF8,
     ZDType,
     ZDTypeLike,
+    _json_to_reread,
+    _matched_in_scope,
+    _with_byte_order_of,
+    get_data_type_from_json,
     parse_dtype,
 )
 from zarr.core.dtype.common import HasEndianness, HasItemSize, HasObjectCodec
@@ -156,7 +162,10 @@ from zarr.core.metadata.v3 import (
     RectilinearChunkGridMetadataJSON,
     RegularChunkGridMetadata,
     RegularChunkGridMetadataJSON,
+    _codec_in_scope,
+    _rescoped,
     create_chunk_grid_metadata,
+    parse_codecs,
     parse_node_type_array,
 )
 from zarr.core.sync import sync
@@ -242,26 +251,33 @@ def _chunk_sizes_from_shape(
     return tuple(result)
 
 
-def parse_array_metadata(data: Any, path: str | None = None) -> ArrayMetadata:
+def parse_array_metadata(
+    data: Any, path: str | None = None, *, context: Context | None = None
+) -> ArrayMetadata:
     """Array metadata from a metadata object or a metadata document, naming the array at
-    `path` in warnings about how an invalid document was read.
+    `path` in warnings about how an invalid document was read. With a `context`, stored
+    extension names resolve through it instead of the default registries; a metadata
+    object is already resolved and passes through any context (an `AsyncArrayIO`
+    binding re-resolves one it is given under its context).
 
     `ArrayV2Metadata` accepts a chunk size of 0, as it always has, though only an
     invalid document holds one: such metadata is read as the documents it would store
     are (see `zarr.core.metadata.repair`), so an array can be built from it. No data
     was read or written under that chunk size, so the reading is silent."""
     if isinstance(data, ArrayV2Metadata) and 0 in data.chunks:
-        return parse_stored_array(data.to_buffer_dict(default_buffer_prototype()), 2)
+        return parse_stored_array(
+            data.to_buffer_dict(default_buffer_prototype()), 2, context=context
+        )
     if isinstance(data, ArrayMetadata):
         return data
     if isinstance(data, dict):
         zarr_format = data.get("zarr_format")
         if zarr_format == 3:
-            meta_out = ArrayV3Metadata.from_dict(data, path=path)
+            meta_out = ArrayV3Metadata.from_dict(data, path=path, context=context)
             _reject_storage_transformers(meta_out)
             return meta_out
         elif zarr_format == 2:
-            return ArrayV2Metadata.from_dict(data, path=path)
+            return ArrayV2Metadata.from_dict(data, path=path, context=context)
         else:
             raise ValueError(f"Invalid zarr_format: {zarr_format}. Expected 2 or 3")
     raise TypeError(
@@ -453,6 +469,8 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         metadata: ArrayV2Metadata | ArrayV2MetadataDict,
         store_path: StorePath,
         config: ArrayConfigLike | None = None,
+        *,
+        context: Context | None = None,
     ) -> None: ...
 
     @overload
@@ -461,6 +479,8 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         metadata: ArrayV3Metadata | ArrayMetadataJSON_V3,
         store_path: StorePath,
         config: ArrayConfigLike | None = None,
+        *,
+        context: Context | None = None,
     ) -> None: ...
 
     def __init__(
@@ -468,16 +488,30 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         metadata: ArrayMetadata | ArrayMetadataDict,
         store_path: StorePath,
         config: ArrayConfigLike | None = None,
+        *,
+        context: Context | None = None,
     ) -> None:
-        # An AsyncArray reads metadata into the legacy classes, as it always has.
-        metadata_parsed = parse_array_metadata(metadata, str(store_path))
         if isinstance(metadata, dict):
-            # A document given as a dict stands for what the store holds, as the
-            # document an array is opened from does.
+            # An AsyncArray reads a dict into the legacy classes, as it always has,
+            # once, under its context; the dict stands for what the store holds, as
+            # the document an array is opened from does.
+            metadata_parsed = parse_array_metadata(metadata, str(store_path), context=context)
             _record_given_document(store_path, metadata, metadata_parsed.zarr_format)
-        object.__setattr__(
-            self, "_io", AsyncArrayIO._from_resolved(metadata_parsed, store_path, config)
-        )
+            io = AsyncArrayIO._from_resolved(metadata_parsed, store_path, config, context)
+        elif (
+            context is not None
+            and context.limits_names
+            and isinstance(metadata, ArrayV2Metadata | ArrayV3Metadata)
+        ):
+            # Re-resolved under the context, so the scope checks its names; the
+            # object itself is bound when the scope changes nothing, as with no
+            # context.
+            resolved = _legacy_resolved_in_context(metadata, str(store_path), context)
+            io = AsyncArrayIO._from_resolved(resolved, store_path, config, context)
+        else:
+            # The object itself is bound, as AsyncArray always bound it.
+            io = AsyncArrayIO._from_resolved(metadata, store_path, config, context)
+        object.__setattr__(self, "_io", io)
         # An AsyncArray is the resolving layer: build its codec pipeline now, so
         # pipeline-construction warnings fire at creation, as they always have.
         _ = self._io._resolved_codec_pipeline
@@ -496,8 +530,21 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         append gives the array a binding of its own, so a binding taken before keeps
         the shape it had; an attribute update changes the metadata in place, as it
         always has, so it shows through a binding taken before, and through copies
-        of the array that share its metadata."""
+        of the array that share its metadata.
+
+        An array made by the legacy API (`zarr.open_array`, `zarr.create_array`) or
+        by `dataclasses.replace` holds legacy metadata, so this binding's `metadata`
+        is that metadata as zarr writes it, which may differ from the stored document
+        (a NaN payload, a codec's configuration): `ArrayIO.open(...).to_array()`
+        keeps the document as stored."""
         return self._io
+
+    @property
+    def context(self) -> Context | None:
+        """The context this array resolves in, or `None` for the defaults. It is not a
+        dataclass field: `dataclasses.replace` builds from the fields, so its result
+        has no context; `with_config` keeps it."""
+        return self._io._context
 
     def __getstate__(self) -> dict[str, object] | tuple[dict[str, object], dict[str, object]]:
         # The pickled state is the fields', as it has always been, so a pickle
@@ -520,7 +567,10 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
             "_chunk_grid": self._chunk_grid,
             "config": self.config,
         }
-        binding_state: dict[str, object] = {"pipeline_class": self._io._pipeline_class}
+        binding_state: dict[str, object] = {
+            "pipeline_class": self._io._pipeline_class,
+            "context": self._io._context,
+        }
         if type(self._io) is not AsyncArrayIO:
             # Carried only when it is a subclass, so the pickle stays loadable where
             # that class is not importable only if it is used.
@@ -567,6 +617,7 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
             metadata if model is None else model,
             state["store_path"],
             state["config"],
+            binding_state.get("context"),
             pipeline_class,
         )
         if model is not None:
@@ -1364,6 +1415,12 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         Returns
         -------
         A new Array
+
+        Notes
+        -----
+        A subclass's own `__init__` runs without a context, as it always has, so
+        under a context it builds the globally configured pipeline first: that
+        pipeline must be buildable, though the array then runs its context's.
         """
         if isinstance(config, ArrayConfig):
             new_config = config
@@ -1371,11 +1428,29 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
             # Merge new config with existing config, so missing keys are inherited
             # from the current array rather than from global defaults
             new_config = ArrayConfig(**{**self.config.to_dict(), **config})  # type: ignore[arg-type]
-        # Built through the constructor, as it always was, so a subclass's own
-        # __init__ runs; then over this array's kind of binding (its class, and
-        # its model, so the document stays as stored).
-        rebuilt = type(self)(metadata=self.metadata, store_path=self.store_path, config=new_config)
-        object.__setattr__(rebuilt, "_io", self._io._rebound_like(rebuilt._io, rebuilt.metadata))
+        # Then bound over this array's kind of binding: its class, context and
+        # model, so the document stays as stored.
+        binding = self._io
+        if binding._context is not None and type(self).__init__ is AsyncArray.__init__:
+            # Under a context, AsyncArray's own __init__ would bind this metadata
+            # object as it is: bind it so directly, checking no names again and
+            # building no other pipeline. Without one, the constructor runs, as it
+            # always has.
+            rebuilt = object.__new__(type(self))
+            built = AsyncArrayIO._from_resolved(
+                self.metadata, self.store_path, new_config, binding._context
+            )
+            kept = self.metadata
+        else:
+            # The constructor runs, as it always has; a subclass's own __init__ runs
+            # without a context (one written before contexts takes none), so under
+            # one it builds the globally configured pipeline before the array is
+            # bound under its context.
+            rebuilt = type(self)(
+                metadata=self.metadata, store_path=self.store_path, config=new_config
+            )
+            built, kept = rebuilt._io, rebuilt.metadata
+        object.__setattr__(rebuilt, "_io", binding._rebound_like(built, kept))
         return rebuilt
 
     async def nchunks_initialized(self) -> int:
@@ -4950,11 +5025,12 @@ def _array_metadata_v2(
     filters: Iterable[dict[str, JSON] | Numcodec] | None = None,
     compressor: CompressorLikev2 = None,
     attributes: dict[str, JSON] | None = None,
+    context: Context | None = None,
 ) -> ArrayV2Metadata:
     """`build_array_metadata_v2` without its object codec check, which the
     callers that create arrays from user arguments make (or, for the legacy
     `create` path, have never made) themselves."""
-    zdtype = parse_dtype(dtype, zarr_format=2)
+    zdtype = parse_dtype(dtype, zarr_format=2, context=context)
     if order is None:
         order = zarr_config.get("array.order")
     if fill_value is DEFAULT_FILL_VALUE:
@@ -4987,8 +5063,10 @@ def build_array_metadata_v2(
     filters: Iterable[dict[str, JSON] | Numcodec] | None = None,
     compressor: CompressorLikev2 = None,
     attributes: dict[str, JSON] | None = None,
+    context: Context | None = None,
 ) -> ArrayV2Metadata:
-    """Build Zarr format 2 array metadata from its fields.
+    """Build Zarr format 2 array metadata from its fields. With a `context`,
+    the data type resolves through it instead of the default registry.
 
     Each keyword is a `.zarray` field; `attributes` is the `.zattrs` one.
     `fill_value` defaults to the data type's default scalar (an explicit
@@ -5006,6 +5084,7 @@ def build_array_metadata_v2(
         filters=filters,
         compressor=compressor,
         attributes=attributes,
+        context=context,
     )
     _check_object_codec_v2(metadata.dtype, metadata.filters, metadata.compressor)
     return metadata
@@ -5021,8 +5100,11 @@ def build_array_metadata_v3(
     codecs: Iterable[Codec | dict[str, JSON]] | None = None,
     dimension_names: DimensionNamesLike = None,
     attributes: dict[str, JSON] | None = None,
+    context: Context | None = None,
 ) -> ArrayV3Metadata:
-    """Build Zarr format 3 array metadata from its fields.
+    """Build Zarr format 3 array metadata from its fields. With a `context`,
+    the data type and top-level codec names resolve through it instead of the
+    default registries.
 
     Each keyword is a `zarr.json` field. `chunk_grid` takes grid metadata,
     its JSON, or a chunk shape, which declares a regular grid. `codecs`
@@ -5030,7 +5112,7 @@ def build_array_metadata_v3(
     the default encoding with `/`; `fill_value` defaults to the data type's
     default scalar (`None` means the default too: the field is required).
     """
-    zdtype = parse_dtype(data_type, zarr_format=3)
+    zdtype = parse_dtype(data_type, zarr_format=3, context=context)
     grid: ChunkGridMetadata | dict[str, JSON]
     if isinstance(chunk_grid, RegularChunkGridMetadata | RectilinearChunkGridMetadata):
         grid = chunk_grid
@@ -5041,13 +5123,26 @@ def build_array_metadata_v3(
 
     filters: tuple[ArrayArrayCodec, ...]
     compressors: tuple[BytesBytesCodec, ...]
+    codecs_parsed: tuple[Codec | dict[str, JSON], ...]
     if codecs is None:
         # no data types have default filters
         filters = ()
         serializer = default_serializer_v3(zdtype)
         compressors = default_compressors_v3(zdtype)
 
-        codecs_parsed = (*filters, serializer, *compressors)
+        default_chain: tuple[Codec, ...] = (*filters, serializer, *compressors)
+        codecs_parsed = default_chain
+        if context is not None and context.codecs is not None:
+            # The defaults resolve under the context too: a closed codec scope
+            # must not store a chain it could not read back.
+            codecs_parsed = parse_codecs(
+                tuple(_codec_in_scope(codec, context) for codec in default_chain),
+                context=context,
+            )
+    elif context is not None and context.codecs is not None:
+        # Codec names resolve here, under the context; the metadata's own
+        # `parse_codecs` passes the resolved instances through untouched.
+        codecs_parsed = parse_codecs(tuple(codecs), context=context)
     else:
         codecs_parsed = tuple(codecs)
 
@@ -5064,16 +5159,17 @@ def build_array_metadata_v3(
     else:
         fill_value_parsed = fill_value
 
-    return ArrayV3Metadata(
+    metadata = ArrayV3Metadata(
         shape=parse_shapelike(shape),
         data_type=zdtype,
         chunk_grid=grid,
         chunk_key_encoding=chunk_key_encoding_parsed,
         fill_value=fill_value_parsed,
-        codecs=codecs_parsed,  # type: ignore[arg-type]
+        codecs=codecs_parsed,
         dimension_names=tuple(dimension_names) if dimension_names is not None else None,
         attributes=attributes if attributes is not None else {},
     )
+    return _rescoped(metadata, context)
 
 
 async def create_array(
@@ -5298,7 +5394,39 @@ def _sharding_codec(metadata: ArrayMetadata) -> ShardingCodec | None:
     return None
 
 
-async def _store_repaired_document(store_path: StorePath, metadata: ArrayMetadata) -> None:
+_SCOPED_READ_ERRORS: Final = (ValueError, TypeError, KeyError)
+"""What a document read under a scope raises when the scope cannot read it: a name
+outside it, or a scope class that refuses the configuration the document holds. A
+codec's `from_dict` refuses an unexpected keyword with `TypeError` and a missing one
+with `KeyError` as readily as a bad value with `ValueError`, so all three are a
+scope that cannot read the document; the defaults then read it, as with no context."""
+
+
+class _ScopedRead[T](Protocol):
+    """A read of stored metadata under a context."""
+
+    def __call__(self, *, context: Context | None) -> T: ...
+
+
+def _read_in_scope_or_defaults[T](read: _ScopedRead[T], context: Context | None) -> T:
+    """`read(context=...)` under `context`. A document a name-limiting scope cannot
+    read is read under the defaults, as with no context: its layout decides, not its
+    names. One they cannot read either raises the scope's error, which names what it
+    lacks."""
+    try:
+        return read(context=context)
+    except _SCOPED_READ_ERRORS as scoped:
+        if context is None or not context.limits_names:
+            raise
+        try:
+            return read(context=None)
+        except _SCOPED_READ_ERRORS:
+            raise scoped from None
+
+
+async def _store_repaired_document(
+    store_path: StorePath, metadata: ArrayMetadata, context: Context | None = None
+) -> None:
     """Store the repair of the array document at `store_path`, if it needs one that
     moves chunks, before chunks are written under `metadata`.
 
@@ -5341,16 +5469,22 @@ async def _store_repaired_document(store_path: StorePath, metadata: ArrayMetadat
         stored = cache.needing_repair(path, zarr_format)
     else:
         stored = cache.copy_needing_repair(path, zarr_format)
-    if stored is None or _chunk_layout(read_repaired(stored, zarr_format)) != _chunk_layout(
-        metadata
-    ):
+    if stored is None:
+        return
+    recorded = _read_in_scope_or_defaults(
+        functools.partial(read_repaired, stored, zarr_format), context
+    )
+    if _chunk_layout(recorded) != _chunk_layout(metadata):
         return
     documents = await read_documents(store_path, keys)
     document = stored_array_document(documents, zarr_format)
     if document is None:
         cache.observe(path, None, zarr_format)
         return
-    current = parse_stored_array(documents, zarr_format, str(store_path))
+    current = _read_in_scope_or_defaults(
+        functools.partial(parse_stored_array, documents, zarr_format, str(store_path)),
+        context,
+    )
     if _chunk_layout(current) != _chunk_layout(metadata):
         raise ValueError(
             f"Array {str(store_path)!r}: the metadata stored has changed since "
@@ -6546,6 +6680,9 @@ async def _delete_key(store_path: StorePath, key: str) -> None:
     await (store_path / key).delete()
 
 
+_NO_CONTEXT: Final = Context()
+"""A context that sets nothing, which binds as no context."""
+
 _CARRIED_KEYS: Final = ("_stored_entry", "_stored_copy")
 """The keys a pickled binding carries its store cache's entry under."""
 
@@ -6565,7 +6702,7 @@ an attribute of the instance's own."""
 
 
 def _bound_metadata_dict(
-    data: dict[str, Any], store_path: StorePath
+    data: dict[str, Any], store_path: StorePath, context: Context | None
 ) -> ArrayMetadataModel | ArrayMetadata:
     """A metadata dict given to a binding: read as a model when it is valid
     JSON metadata, so names resolve only when chunks are read or written;
@@ -6581,7 +6718,7 @@ def _bound_metadata_dict(
     zarr_format: ZarrFormat = 2 if data.get("zarr_format") == 2 else 3
     if data.get("storage_transformers"):
         # Bound as legacy metadata, which rejects them, as AsyncArray always has.
-        return parse_array_metadata(data, path)
+        return parse_array_metadata(data, path, context=context)
     if not moves_chunks(data, zarr_format):
         # A document zarr reads as repaired, moving chunks, is never bound as a
         # model, also where the model accepts it.
@@ -6589,7 +6726,7 @@ def _bound_metadata_dict(
             return _array_metadata_model(data)
         except MetadataValidationError:
             pass
-    legacy = parse_array_metadata(data, path)
+    legacy = parse_array_metadata(data, path, context=context)
     # An invalid document given as a dict stands for what the store holds, as
     # one given to AsyncArray does.
     _record_given_document(store_path, data, legacy.zarr_format)
@@ -6676,6 +6813,85 @@ def _with_legacy_mark(metadata: ArrayMetadata, mark: ArrayDocument | None) -> Ar
     else:
         object.__setattr__(marked, "_stored_document", copy.deepcopy(mark))
     return marked
+
+
+def _legacy_resolved_in_context(
+    source: ArrayMetadata, path: str, context: Context | None
+) -> ArrayMetadata:
+    """`source` as `parse_array_metadata` takes a metadata object: v2 metadata
+    with a chunk size of 0 is read as repaired, silently, under `context`, and
+    any other object is returned itself, or, when `context` limits names, with
+    each kind it limits resolved through it (see `_checked_in_scope`), so the scope
+    checks those names."""
+    v2_chunk_zero = isinstance(source, ArrayV2Metadata) and 0 in source.chunks
+    if context is None or not context.limits_names or v2_chunk_zero:
+        return parse_array_metadata(source, path, context=context)
+    return _checked_in_scope(source, context)
+
+
+def _dtype_field(source: ArrayMetadata) -> str:
+    return "dtype" if isinstance(source, ArrayV2Metadata) else "data_type"
+
+
+def _checked_in_scope(source: ArrayMetadata, context: Context) -> ArrayMetadata:
+    """`source` with each kind `context` limits resolved through it, so an instance
+    outside the scope fails and the scope's class for a name is the one bound; the
+    kinds it leaves unset are kept. A copy (with its attributes copied) when that
+    changes a class, else `source` itself."""
+    zarr_format = source.zarr_format
+    changes: dict[str, Any] = {}
+    if context.data_types is not None:
+        dtype = _matched_in_scope(source.dtype, context, zarr_format)
+        if dtype != source.dtype:
+            changes[_dtype_field(source)] = dtype
+    if context.codecs is not None and isinstance(source, ArrayV3Metadata):
+        # Each is the scope's class for the name it writes once `_codec_in_scope`
+        # returns it.
+        codecs = tuple(_codec_in_scope(codec, context) for codec in source.codecs)
+        if any(new is not old for new, old in zip(codecs, source.codecs, strict=True)):
+            changes["codecs"] = codecs
+    if not changes:
+        # Everything is the scope's already: the object itself, shared as one
+        # given with no context is.
+        return source
+    return replace(source, attributes=dict(source.attributes), **changes)
+
+
+def _reread_in_defaults(source: ArrayMetadata, *, data_types: bool, codecs: bool) -> ArrayMetadata:
+    """A copy of `source` with its data type (`data_types`) and its top-level codecs
+    (`codecs`, Zarr format 3 only) read again from their JSON in the default
+    registries, dropping the classes a scope bound; the rest, and the attributes
+    (copied), are kept."""
+    zarr_format = source.zarr_format
+    changes: dict[str, Any] = {"attributes": dict(source.attributes)}
+    if data_types:
+        reread = get_data_type_from_json(
+            _json_to_reread(source.dtype, zarr_format), zarr_format=zarr_format
+        )
+        changes[_dtype_field(source)] = _with_byte_order_of(reread, source.dtype)
+    if codecs and isinstance(source, ArrayV3Metadata):
+        # An instance of the default class for its name is kept whole (with the
+        # codecs nested in it, which no scope governed).
+        changes["codecs"] = parse_codecs(
+            [_codec_in_scope(codec, _NO_CONTEXT) for codec in source.codecs]
+        )
+    return replace(source, **changes)
+
+
+def _context_kwargs(context: Context | None) -> dict[str, Context]:
+    """`context` as a keyword for a binding class's constructor, or none for `None`:
+    a subclass constructor written without one still builds and opens with no
+    context, and one given (`Context()` included) reaches it as given. A subclass whose
+    constructor defaults `context` to a scope gets that scope only when the
+    metadata it is given is read there: a builder declares under the context
+    passed to it."""
+    return {} if context is None else {"context": context}
+
+
+def _pipeline_class_for(context: Context | None) -> type[CodecPipeline]:
+    """The codec pipeline class a binding made now uses: the context's choice,
+    or else the one the global configuration names."""
+    return get_pipeline_class() if context is None else context.pipeline_class()
 
 
 def _copied_legacy(source: ArrayMetadata) -> ArrayMetadata:
@@ -6853,10 +7069,13 @@ class AsyncArrayIO:
     the legacy classes (`metadata_legacy`) on first use. The bound metadata is assumed, never checked against the
     store, and an array opened from metadata that needed a repair stores that
     repair before its first chunk write. The codec pipeline implementation is
-    chosen from the global configuration when the binding is made; the
-    pipeline itself, with any options it reads from the configuration, is
-    built at the first data operation. `AsyncArray` wraps an `AsyncArrayIO`
-    and delegates its metadata and selection IO to it.
+    chosen when the binding is made, by its `context` or else the global
+    configuration; the pipeline itself, with any options it reads from the
+    configuration, is built at the first data operation. Under a `context`, a
+    resolved legacy metadata object given to the constructor or to
+    `with_metadata` is re-resolved there, so the scope checks its names.
+    `AsyncArray` wraps an `AsyncArrayIO` and delegates its metadata and
+    selection IO to it.
 
     Every way a binding is made or changed (construction, the builders,
     `open`, the `with_*` methods, pickling, and the resize or attribute update
@@ -6872,6 +7091,7 @@ class AsyncArrayIO:
     _store_path: StorePath
     _config: ArrayConfig
     _pipeline_class: type[CodecPipeline]
+    _context: Context | None
     _source: ArrayMetadataModel | ArrayMetadata
     _resolved_cache: ArrayMetadata | None
     _chunk_grid_cache: ChunkGrid | None
@@ -6884,37 +7104,47 @@ class AsyncArrayIO:
         metadata: ArrayMetadataModel | ArrayMetadata | ArrayMetadataDict | ArrayMetadataModelJSON,
         store_path: StorePath,
         config: ArrayConfigLike | None = None,
+        *,
+        context: Context | None = None,
     ) -> None:
         source: ArrayMetadataModel | ArrayMetadata
-        if isinstance(metadata, ArrayMetadata):
-            # A resolved object is read (v2 with a chunk size of 0 as repaired)
-            # and never shared with the caller.
-            source = parse_array_metadata(metadata, str(store_path))
+        if isinstance(metadata, ArrayV2Metadata | ArrayV3Metadata):
+            # A resolved object given from outside is re-resolved under a context
+            # that limits names, so the scope checks them; otherwise it is read
+            # (v2 with a chunk size of 0 as repaired). Either way it is never
+            # shared with the caller.
+            source = _legacy_resolved_in_context(metadata, str(store_path), context)
             if source is metadata:
                 source = _copied_legacy(source)
         elif isinstance(metadata, _model_classes()):
             source = _checked_model(metadata)
         elif isinstance(metadata, Mapping):
-            source = _bound_metadata_dict(cast("dict[str, Any]", metadata), store_path)
+            source = _bound_metadata_dict(cast("dict[str, Any]", metadata), store_path, context)
         else:
             raise TypeError(
                 "Expected array metadata (a zarr_metadata model, ArrayV2Metadata or "
                 f"ArrayV3Metadata) or a metadata mapping, got {type(metadata).__name__}."
             )
-        # The pipeline implementation is chosen when the binding is made, from
-        # the global configuration, exactly as `AsyncArray` has always chosen
-        # it; the pipeline itself is built on first use.
-        self._bind(source, store_path, parse_array_config(config), get_pipeline_class())
+        # Without a context, the pipeline implementation is chosen when the
+        # binding is made, from the global configuration, exactly as
+        # `AsyncArray` has always chosen it; a context's choice wins. The
+        # pipeline itself is built on first use.
+        self._bind(
+            source, store_path, parse_array_config(config), context, _pipeline_class_for(context)
+        )
 
     def _bind(
         self,
         source: ArrayMetadataModel | ArrayMetadata,
         store_path: StorePath,
         config: ArrayConfig,
+        context: Context | None,
         pipeline_class: type[CodecPipeline],
     ) -> None:
         self._store_path = store_path
         self._config = config
+        # A context that sets nothing is no context: they resolve alike.
+        self._context = None if context == _NO_CONTEXT else context
         self._pipeline_class = pipeline_class
         self._source = source
         self._resolved_cache = None
@@ -6925,17 +7155,20 @@ class AsyncArrayIO:
 
     @classmethod
     def _from_resolved(
-        cls, source: ArrayMetadata, store_path: StorePath, config: ArrayConfigLike | None
+        cls,
+        source: ArrayMetadata,
+        store_path: StorePath,
+        config: ArrayConfigLike | None,
+        context: Context | None,
     ) -> Self:
-        """A binding over `source` itself, already resolved (as `AsyncArray` binds the
-        metadata it is given): read as `parse_array_metadata` reads a metadata
-        object, but not copied."""
+        """A binding over `source`, which was just resolved under `context`, so its
+        names are not resolved again; it is still read as `parse_array_metadata`
+        reads a metadata object (v2 metadata with a chunk size of 0 as repaired,
+        under `context`)."""
+        source = parse_array_metadata(source, str(store_path), context=context)
         binding = object.__new__(cls)
         binding._bind(
-            parse_array_metadata(source, str(store_path)),
-            store_path,
-            parse_array_config(config),
-            get_pipeline_class(),
+            source, store_path, parse_array_config(config), context, _pipeline_class_for(context)
         )
         return binding
 
@@ -6946,6 +7179,7 @@ class AsyncArrayIO:
         *,
         name: str | None = None,
         config: ArrayConfigLike | None = None,
+        context: Context | None = None,
         **kwargs: Unpack[ArrayV2DeclarationKwargs],
     ) -> Self:
         """Declare a Zarr format 2 array bound to `store`, storing nothing.
@@ -6954,7 +7188,12 @@ class AsyncArrayIO:
         `store` must be a `Store` or `StorePath`: coercing strings opens
         stores. `store_metadata` stores the result.
         """
-        return cls(build_array_metadata_v2(**kwargs), _bound_store_path(store, name), config)
+        return cls(
+            build_array_metadata_v2(context=context, **kwargs),
+            _bound_store_path(store, name),
+            config,
+            **_context_kwargs(context),
+        )
 
     @classmethod
     def build_v3(
@@ -6963,6 +7202,7 @@ class AsyncArrayIO:
         *,
         name: str | None = None,
         config: ArrayConfigLike | None = None,
+        context: Context | None = None,
         **kwargs: Unpack[ArrayV3DeclarationKwargs],
     ) -> Self:
         """Declare a Zarr format 3 array bound to `store`, storing nothing.
@@ -6971,7 +7211,12 @@ class AsyncArrayIO:
         `build_array_metadata_v3`). `store` must be a `Store` or `StorePath`:
         coercing strings opens stores. `store_metadata` stores the result.
         """
-        return cls(build_array_metadata_v3(**kwargs), _bound_store_path(store, name), config)
+        return cls(
+            build_array_metadata_v3(context=context, **kwargs),
+            _bound_store_path(store, name),
+            config,
+            **_context_kwargs(context),
+        )
 
     @classmethod
     async def open(
@@ -6981,6 +7226,7 @@ class AsyncArrayIO:
         name: str | None = None,
         zarr_format: ZarrFormat | None = None,
         config: ArrayConfigLike | None = None,
+        context: Context | None = None,
     ) -> Self:
         """Read the stored metadata of an existing array and bind to it.
 
@@ -6993,7 +7239,7 @@ class AsyncArrayIO:
         mode: AccessModeLiteral | None = "r+" if isinstance(store, str | os.PathLike) else None
         store_path = await make_store_path(store, path=name, mode=mode)
         data = await get_array_metadata(store_path, zarr_format=zarr_format)
-        binding = cls(_array_metadata_model(data), store_path, config)
+        binding = cls(_array_metadata_model(data), store_path, config, **_context_kwargs(context))
         observe_read(store_path, data)
         return binding
 
@@ -7031,7 +7277,7 @@ class AsyncArrayIO:
             data = _metadata_model_json(source)
             if isinstance(source, _model_classes()[0]):
                 data.setdefault("attributes", {})
-            resolved = parse_array_metadata(data, str(self._store_path))
+            resolved = parse_array_metadata(data, str(self._store_path), context=self._context)
             # Threads resolving at once all keep the first object stored: an
             # `AsyncArray` changes its attributes in place, so they must share it.
             # (A rebind of this binding racing the read is a write racing a read,
@@ -7055,32 +7301,54 @@ class AsyncArrayIO:
 
     def _rebound_like(self, built: AsyncArrayIO, metadata: ArrayMetadata) -> Self:
         """How an array rebuilt through its constructor (`built`, which bound
-        `metadata`) keeps the binding it had: a binding of this binding's class, at
-        `built`'s location, with its configuration, pipeline class and caches, over
-        this binding's model when `metadata` is still this binding's resolved form
-        (shared), else over `metadata` itself (a subclass `__init__` substituted it).
-        A `_bind` that runs another pipeline class wins over any pipeline `built`
-        holds, also one a subclass `__init__` assigned."""
+        `metadata`) keeps the binding it had: a binding of this binding's class and
+        context, at `built`'s location and configuration, over this binding's model
+        when `metadata` is still this binding's resolved form (shared), else over
+        `metadata` itself (a subclass `__init__` substituted it). Its pipeline class
+        is `built`'s, chosen anew as a rebuilt array always chose it, unless this
+        binding's context chose it. A `_bind` that runs another pipeline class wins
+        over any pipeline `built` holds, also one a subclass `__init__` assigned."""
         rebound = object.__new__(type(self))
         source = self._source
-        keeps_model = (
-            not isinstance(source, ArrayV2Metadata | ArrayV3Metadata)
-            and metadata is self._resolved_if_any
-        )
+        context = self._context
+        substituted = metadata is not self._resolved_if_any
+        keeps_model = not substituted and not isinstance(source, ArrayV2Metadata | ArrayV3Metadata)
+        if substituted and context is not None and context.limits_names:
+            # Resolved under this binding's context, as a constructor given it
+            # under that context resolves it.
+            metadata = _legacy_resolved_in_context(metadata, str(built._store_path), context)
+        chosen_anew = context is None or context.codec_pipeline is None
+        pipeline_class = built._pipeline_class if chosen_anew else self._given_pipeline_class()
         rebound._bind(
             source if keeps_model else metadata,
             built._store_path,
             built._config,
-            built._pipeline_class,
+            self._context,
+            pipeline_class,
         )
         if keeps_model:
             rebound._resolved_cache = metadata
-        if built._pipeline_class is rebound._pipeline_class:
-            # The pipeline the constructor built is the one this binding runs; a
-            # `_bind` that chose another pipeline class builds its own.
+        if (
+            built._pipeline_class is rebound._pipeline_class
+            and built._resolved_if_any is rebound._resolved_if_any
+        ):
+            # The pipeline the constructor built is the one this binding runs,
+            # over the same metadata; a `_bind` that chose another pipeline class,
+            # or metadata resolved again under the context, builds its own.
             rebound._codec_pipeline_cache = built._codec_pipeline_cache
         rebound._chunk_grid_cache = built._chunk_grid_cache
+        # Built now, as the constructor builds it, so its warnings fire here.
+        _ = rebound._resolved_codec_pipeline
         return rebound
+
+    def _given_pipeline_class(self) -> type[CodecPipeline]:
+        """The pipeline class a binding made from this one is given: its context's
+        choice when it made one, else this binding's own (which a `_bind` that
+        chose another class records, so derived bindings run that class too)."""
+        context = self._context
+        if context is not None and context.codec_pipeline is not None:
+            return context.codec_pipeline
+        return self._pipeline_class
 
     @property
     def store_path(self) -> StorePath:
@@ -7091,6 +7359,12 @@ class AsyncArrayIO:
     def config(self) -> ArrayConfig:
         """The runtime configuration."""
         return self._config
+
+    @property
+    def context(self) -> Context | None:
+        """The context this binding resolves extension names and its codec pipeline
+        under, or `None` for the defaults; `with_context` rebinds it."""
+        return self._context
 
     @property
     def _zarr_format(self) -> ZarrFormat:
@@ -7111,30 +7385,30 @@ class AsyncArrayIO:
     def _rebind_at(self, store_path: StorePath, config: ArrayConfig) -> None:
         """Bind this binding again, through `_bind`, at `store_path` with `config`,
         keeping its caches: setting an array's location or configuration never
-        rebuilt its pipeline."""
-        caches = (
-            self._resolved_cache,
-            self._chunk_grid_cache,
-            self._chunk_key_encoding_cache,
-            self._codec_pipeline_cache,
-        )
-        self._bind(self._source, store_path, config, self._pipeline_class)
-        (
-            self._resolved_cache,
-            self._chunk_grid_cache,
-            self._chunk_key_encoding_cache,
-            self._codec_pipeline_cache,
-        ) = caches
+        rebuilt its pipeline (unless `_bind` chose another pipeline class, which is
+        then built on first use: the store may already hold the change, so a
+        pipeline that refuses to build fails the next read or write, not this)."""
+        caches = (self._resolved_cache, self._chunk_grid_cache, self._chunk_key_encoding_cache)
+        pipeline, pipeline_class = self._codec_pipeline_cache, self._pipeline_class
+        self._bind(self._source, store_path, config, self._context, self._given_pipeline_class())
+        self._resolved_cache, self._chunk_grid_cache, self._chunk_key_encoding_cache = caches
+        if self._pipeline_class is pipeline_class:
+            self._codec_pipeline_cache = pipeline
 
     def _rebind_resolved(
         self, resolved: ArrayMetadata, chunk_grid: ChunkGrid | None = None
     ) -> None:
         """Make `resolved` this binding's state, through `_bind`. The codec pipeline is
         kept: rebinding is how `resize` swaps the shape, which leaves the chunk
-        encoding as it was."""
-        pipeline = self._codec_pipeline_cache
-        self._bind(resolved, self._store_path, self._config, self._pipeline_class)
-        self._codec_pipeline_cache = pipeline
+        encoding as it was (unless `_bind` chose another pipeline class, which is
+        then built on first use: `resize` has already stored the new shape, so a
+        pipeline that refuses to build fails the next read or write, not the resize)."""
+        pipeline, pipeline_class = self._codec_pipeline_cache, self._pipeline_class
+        self._bind(
+            resolved, self._store_path, self._config, self._context, self._given_pipeline_class()
+        )
+        if self._pipeline_class is pipeline_class:
+            self._codec_pipeline_cache = pipeline
         self._chunk_grid_cache = chunk_grid
 
     @property
@@ -7277,9 +7551,9 @@ class AsyncArrayIO:
         store_path: StorePath,
         config: ArrayConfig,
     ) -> Self:
-        """A new binding over `source`, keeping this one's captured pipeline."""
+        """A new binding over `source`, keeping this one's context and captured pipeline."""
         derived = object.__new__(type(self))
-        derived._bind(source, store_path, config, self._pipeline_class)
+        derived._bind(source, store_path, config, self._context, self._given_pipeline_class())
         return derived
 
     def with_metadata(
@@ -7287,15 +7561,17 @@ class AsyncArrayIO:
         metadata: ArrayMetadataModel | ArrayMetadata | ArrayMetadataDict | ArrayMetadataModelJSON,
     ) -> Self:
         """This binding with `metadata` in place of its own. Nothing is stored;
-        a legacy `metadata` object or a metadata dict is read as the
-        constructor reads it, and a legacy object is copied."""
+        a legacy `metadata` object or a metadata dict is read as the constructor
+        reads it, under this binding's context when there is one (so the scope
+        checks its names), and a legacy object is never shared with the caller."""
         source: ArrayMetadataModel | ArrayMetadata
         if isinstance(metadata, ArrayV2Metadata | ArrayV3Metadata):
-            source = _copied_legacy(parse_array_metadata(metadata, str(self._store_path)))
+            resolved = _legacy_resolved_in_context(metadata, str(self._store_path), self._context)
+            source = _copied_legacy(resolved) if resolved is metadata else resolved
         elif isinstance(metadata, _model_classes()):
             source = _checked_model(metadata)
         elif isinstance(metadata, Mapping):
-            source = _bound_metadata_dict(dict(metadata), self._store_path)
+            source = _bound_metadata_dict(dict(metadata), self._store_path, self._context)
         else:
             raise TypeError(
                 "Expected array metadata (a zarr_metadata model, ArrayV2Metadata or "
@@ -7317,6 +7593,44 @@ class AsyncArrayIO:
         else:
             new_config = ArrayConfig(**{**self._config.to_dict(), **config})  # type: ignore[arg-type]
         return self._derive(self._derived_source(), self._store_path, new_config)
+
+    def with_context(self, context: Context | None) -> Self:
+        """This binding with its metadata resolving in `context`; the data path,
+        codec pipeline included, derives anew under it. A binding built from a
+        resolved metadata object is re-resolved there, so a stored name outside
+        the context fails. `None` rebinds under the default registries and the
+        globally configured pipeline: each codec or data type whose class is not
+        the default registry's for its name is read again there from its JSON
+        (a binding keeps no record of what it held before a context). A name the
+        defaults do not know fails there, as it would on opening the array: to
+        change only the pipeline of a binding whose scope holds such a name,
+        give a context that keeps that scope. A binding over a model (one
+        `open` made) resolves no names until its data path is built, so a stored
+        name outside the context fails there instead."""
+        # A legacy source is copied once it is resolved, unless resolving made it anew.
+        source = (
+            self._source
+            if isinstance(self._source, ArrayV2Metadata | ArrayV3Metadata)
+            else self._derived_source()
+        )
+        old = self._context
+        if old is not None and isinstance(source, ArrayV2Metadata | ArrayV3Metadata):
+            # Kinds the old context limited and the new one does not are read
+            # again in the default registries; kinds the new one limits are
+            # checked through it when the binding is made.
+            left_data_types = old.data_types is not None and (
+                context is None or context.data_types is None
+            )
+            left_codecs = old.codecs is not None and (context is None or context.codecs is None)
+            if left_data_types or left_codecs:
+                source = _reread_in_defaults(source, data_types=left_data_types, codecs=left_codecs)
+        if isinstance(source, ArrayV2Metadata | ArrayV3Metadata):
+            resolved = _legacy_resolved_in_context(source, str(self._store_path), context)
+            source = _copied_legacy(resolved) if resolved is self._source else resolved
+        # Made as the other derivations are, without the subclass's `__init__`.
+        derived = object.__new__(type(self))
+        derived._bind(source, self._store_path, self._config, context, _pipeline_class_for(context))
+        return derived
 
     async def store_metadata(self, *, ensure_parents: bool = False) -> None:
         """Store the metadata documents of this array's Zarr format, unconditionally
@@ -7459,7 +7773,7 @@ class AsyncArrayIO:
         if product(indexer.shape) > 0:
             # Chunks are about to be stored under the repaired metadata, so store it
             # first: every reader of the store then agrees with them.
-            await _store_repaired_document(self._store_path, metadata)
+            await _store_repaired_document(self._store_path, metadata, self._context)
         return await _set_selection(
             self._store_path,
             metadata,
@@ -7506,10 +7820,15 @@ class AsyncArrayIO:
 
     def __eq__(self, other: object) -> bool:
         # Semantic equality over the binding: the document (canonically, via the
-        # model's own equality), the location and the runtime configuration.
+        # model's own equality), the location, the runtime configuration, and
+        # what it resolves with (its context and captured pipeline class, which
+        # without a context is the one the global configuration named when the
+        # binding was made). `AsyncArray` keeps the field equality it always had.
         if not isinstance(other, AsyncArrayIO):
             return NotImplemented
         if self._store_path != other._store_path or self._config != other._config:
+            return False
+        if self._context != other._context or self._pipeline_class is not other._pipeline_class:
             return False
         try:
             return self.metadata == other.metadata
@@ -7537,8 +7856,10 @@ class ArrayIO:
         metadata: ArrayMetadataModel | ArrayMetadata | ArrayMetadataDict | ArrayMetadataModelJSON,
         store_path: StorePath,
         config: ArrayConfigLike | None = None,
+        *,
+        context: Context | None = None,
     ) -> None:
-        self._async_io = AsyncArrayIO(metadata, store_path, config)
+        self._async_io = AsyncArrayIO(metadata, store_path, config, context=context)
 
     @classmethod
     def _wrap(cls, async_io: AsyncArrayIO) -> Self:
@@ -7553,10 +7874,13 @@ class ArrayIO:
         *,
         name: str | None = None,
         config: ArrayConfigLike | None = None,
+        context: Context | None = None,
         **kwargs: Unpack[ArrayV2DeclarationKwargs],
     ) -> Self:
         """Declare a Zarr format 2 array bound to `store`, storing nothing. See `AsyncArrayIO.build_v2`."""
-        return cls._wrap(AsyncArrayIO.build_v2(store, name=name, config=config, **kwargs))
+        return cls._wrap(
+            AsyncArrayIO.build_v2(store, name=name, config=config, context=context, **kwargs)
+        )
 
     @classmethod
     def build_v3(
@@ -7565,10 +7889,13 @@ class ArrayIO:
         *,
         name: str | None = None,
         config: ArrayConfigLike | None = None,
+        context: Context | None = None,
         **kwargs: Unpack[ArrayV3DeclarationKwargs],
     ) -> Self:
         """Declare a Zarr format 3 array bound to `store`, storing nothing. See `AsyncArrayIO.build_v3`."""
-        return cls._wrap(AsyncArrayIO.build_v3(store, name=name, config=config, **kwargs))
+        return cls._wrap(
+            AsyncArrayIO.build_v3(store, name=name, config=config, context=context, **kwargs)
+        )
 
     @classmethod
     def open(
@@ -7578,10 +7905,15 @@ class ArrayIO:
         name: str | None = None,
         zarr_format: ZarrFormat | None = None,
         config: ArrayConfigLike | None = None,
+        context: Context | None = None,
     ) -> Self:
         """Read the stored metadata of an existing array and bind to it. See `AsyncArrayIO.open`."""
         return cls._wrap(
-            sync(AsyncArrayIO.open(store, name=name, zarr_format=zarr_format, config=config))
+            sync(
+                AsyncArrayIO.open(
+                    store, name=name, zarr_format=zarr_format, config=config, context=context
+                )
+            )
         )
 
     @property
@@ -7604,6 +7936,12 @@ class ArrayIO:
         """The runtime configuration."""
         return self._async_io.config
 
+    @property
+    def context(self) -> Context | None:
+        """The context this binding resolves extension names and its codec pipeline
+        under, or `None` for the defaults; `with_context` rebinds it."""
+        return self._async_io.context
+
     def to_array(self) -> AnyArray:
         """An `Array` over a copy of this binding: nothing done through the array (a
         resize, an attribute update) changes this binding."""
@@ -7623,6 +7961,10 @@ class ArrayIO:
     def with_config(self, config: ArrayConfigLike) -> Self:
         """This binding with `config` merged over its own. See `AsyncArrayIO.with_config`."""
         return self._wrap(self._async_io.with_config(config))
+
+    def with_context(self, context: Context | None) -> Self:
+        """This binding with its metadata resolving in `context`. See `AsyncArrayIO.with_context`."""
+        return self._wrap(self._async_io.with_context(context))
 
     def store_metadata(self, *, ensure_parents: bool = False) -> None:
         """Store the metadata. See `AsyncArrayIO.store_metadata`."""
