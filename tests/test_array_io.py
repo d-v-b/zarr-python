@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import pickle
 import tempfile
@@ -13,13 +14,14 @@ from zarr_metadata import UNSET, MetadataValidationError, ZarrV3ArrayMetadata
 from zarr_metadata import ZarrV2ArrayMetadata as ModelV2
 
 import zarr
-from zarr import ArrayIO, AsyncArrayIO
+from zarr import ArrayIO, AsyncArray, AsyncArrayIO
 from zarr.api.asynchronous import open_array
 from zarr.core.buffer import default_buffer_prototype
 from zarr.core.codec_pipeline import FusedCodecPipeline
 from zarr.core.metadata import ArrayV2Metadata
+from zarr.core.metadata.stored import stored_documents
 from zarr.dtype import Int16
-from zarr.errors import ArrayNotFoundError, UnknownCodecError
+from zarr.errors import ArrayNotFoundError, UnknownCodecError, ZarrUserWarning
 from zarr.storage import LocalStore, MemoryStore, StorePath
 
 if TYPE_CHECKING:
@@ -717,3 +719,68 @@ async def test_with_metadata_takes_any_mapping() -> None:
     rebound = aio.with_metadata(cast("Any", MappingProxyType(dict(aio.metadata.to_json()))))
     assert rebound == aio
     await rebound.store_metadata()
+
+
+class _TaggedAsyncArray(AsyncArray[Any]):
+    """An `AsyncArray` subclass with an instance attribute of its own."""
+
+    tag: str
+
+    def __init__(self, metadata: Any, store_path: StorePath, tag: str = "default") -> None:
+        super().__init__(metadata, store_path)
+        object.__setattr__(self, "tag", tag)
+
+
+def test_async_array_subclass_state_survives_pickle_and_copy() -> None:
+    """A subclass's own instance attributes pickle and copy with it, as they did
+    when the dataclass fields were an array's only state."""
+    created = zarr.create_array(MemoryStore(), shape=(4,), dtype="uint8", chunks=(2,))
+    tagged = _TaggedAsyncArray(created.metadata, created.store_path, tag="mine")
+    for restored in (pickle.loads(pickle.dumps(tagged)), copy.copy(tagged), copy.deepcopy(tagged)):
+        assert type(restored) is _TaggedAsyncArray
+        assert restored.tag == "mine"
+        assert restored == tagged
+
+
+async def test_copying_an_array_shares_its_metadata() -> None:
+    """A shallow copy shares the metadata object, also for an array opened from a
+    document that needs a repair; rebinding one (resize) leaves the other."""
+    store = MemoryStore()
+    doc: dict[str, Any] = {
+        "zarr_format": 3,
+        "node_type": "array",
+        "shape": [4],
+        "data_type": "int32",
+        "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [0]}},
+        "chunk_key_encoding": {"name": "default"},
+        "fill_value": 0,
+        "codecs": [{"name": "bytes", "configuration": {"endian": "little"}}],
+    }
+    prototype = default_buffer_prototype()
+    await store.set("r/zarr.json", prototype.buffer.from_bytes(json.dumps(doc).encode()))
+    with pytest.warns(ZarrUserWarning):
+        opened = await open_array(store=store, path="r")
+    copied = copy.copy(opened)
+    assert copied.metadata is opened.metadata
+    assert "_stored_document" not in vars(copied.metadata)
+    await opened.resize((8,))
+    assert copied.shape == (4,)
+    assert opened.shape == (8,)
+
+
+async def test_writing_valid_metadata_parses_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Storing metadata that cannot move chunks, at a path the store's cache knows
+    nothing about, records nothing and parses no document."""
+    import zarr.core.metadata.stored as stored_module
+
+    def refuse(_: object) -> None:
+        raise AssertionError("a written document was parsed")
+
+    monkeypatch.setattr(stored_module, "buffer_to_json_object", refuse)
+    store = MemoryStore()
+    arr = zarr.create_array(store, name="a", shape=(4,), dtype="uint8", attributes={"x": 1})
+    arr.attrs["y"] = 2
+    arr.resize((8,))
+    v2 = zarr.create_array(store, name="b", shape=(4,), dtype="uint8", zarr_format=2)
+    v2.attrs["y"] = 2
+    assert not stored_documents(store).knows("a", 3)

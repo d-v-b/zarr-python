@@ -14,9 +14,10 @@ from the store when the answer is needed.
 from __future__ import annotations
 
 import copy
+import threading
 import weakref
 from functools import partial
-from typing import TYPE_CHECKING, Final, Literal
+from typing import TYPE_CHECKING, Final, Literal, cast
 
 from zarr.core._json import buffer_to_json_object
 from zarr.core.common import ZARR_JSON, ZARRAY_JSON, ZATTRS_JSON
@@ -25,10 +26,15 @@ from zarr.core.metadata.repair import may_move_chunks, repair_array_document
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
+    from zarr_metadata import ZarrV2ArrayMetadata, ZarrV3ArrayMetadata
+
     from zarr.abc.store import Store
     from zarr.core.buffer import Buffer
     from zarr.core.common import JSON, ZarrFormat
+    from zarr.core.metadata import ArrayMetadata
     from zarr.core.metadata.repair import ArrayDocument
+
+    type WrittenArrayMetadata = ArrayMetadata | ZarrV2ArrayMetadata | ZarrV3ArrayMetadata
 
 
 type CarriedEntry = (
@@ -125,9 +131,16 @@ class StoredDocuments:
             else:
                 self.restore_copy(path, zarr_format, entry[1])
 
-    def observe_written(self, path: str, documents: Mapping[str, Buffer | None]) -> None:
-        """Record the array metadata documents just stored under `path`, by key
-        (`None`: deleted), as `store_documents` takes them."""
+    def observe_written(
+        self, path: str, documents: Mapping[str, Buffer | None], written: WrittenArrayMetadata
+    ) -> None:
+        """Record the array metadata documents of `written` just stored under `path`, by
+        key (`None`: deleted), as `store_documents` takes them. They are parsed only
+        when this cache knows the path or `written` might move chunks, so a write of
+        valid metadata to a path the cache knows nothing about costs no parse."""
+        key = (path, written.zarr_format)
+        if key not in self._arrays and key not in self._copies and not _may_move(written):
+            return
         if ZARR_JSON in documents:
             zarr_json = documents[ZARR_JSON]
             document = None if zarr_json is None else buffer_to_json_object(zarr_json)
@@ -162,11 +175,29 @@ class StoredDocuments:
                 self._copies.pop((path, zarr_format), None)
 
 
+def _may_move(written: WrittenArrayMetadata) -> bool:
+    """`may_move_chunks` for the document `written` encodes, read from its chunk sizes."""
+    from zarr.core.metadata import ArrayV2Metadata, ArrayV3Metadata
+
+    if isinstance(written, ArrayV2Metadata):
+        return may_move_chunks({"chunks": list(written.chunks)}, 2)
+    if isinstance(written, ArrayV3Metadata):
+        return may_move_chunks(
+            cast("ArrayDocument", {"chunk_grid": written.chunk_grid.to_dict()}), 3
+        )
+    if written.zarr_format == 2:
+        return may_move_chunks({"chunks": list(written.chunks)}, 2)
+    return may_move_chunks(cast("ArrayDocument", {"chunk_grid": written.chunk_grid.json}), 3)
+
+
 def _forget(key: int, ref: weakref.ref[Store]) -> None:
     entry = _CACHES.get(key)
     if entry is not None and entry[0] is ref:
         del _CACHES[key]
 
+
+_CREATING: Final = threading.Lock()
+"""Held while a cache is created, so two threads first touching one store object share one."""
 
 _CACHES: Final[dict[int, tuple[weakref.ref[Store], StoredDocuments]]] = {}
 """The cache of each live store object, by its `id`: stores define `__eq__`, so they
@@ -180,6 +211,10 @@ def stored_documents(store: Store) -> StoredDocuments:
     entry = _CACHES.get(key)
     if entry is not None and entry[0]() is store:
         return entry[1]
-    documents = StoredDocuments()
-    _CACHES[key] = (weakref.ref(store, partial(_forget, key)), documents)
-    return documents
+    with _CREATING:
+        entry = _CACHES.get(key)
+        if entry is not None and entry[0]() is store:
+            return entry[1]
+        documents = StoredDocuments()
+        _CACHES[key] = (weakref.ref(store, partial(_forget, key)), documents)
+        return documents

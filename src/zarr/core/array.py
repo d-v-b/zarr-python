@@ -503,7 +503,10 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
             # zarr 3.4.1 and 3.4.2 read the repair a stored document needs from
             # this mark on the metadata itself; this version reads the carried entry.
             metadata = _with_legacy_mark(metadata, cast("ArrayDocument | None", mark))
-        state: dict[str, object] = {
+        # Attributes of the instance's own (a subclass's) pickle with it, as
+        # they did when the fields were its only state.
+        state: dict[str, object] = {key: v for key, v in vars(self).items() if key != "_io"}
+        state |= {
             "metadata": metadata,
             "store_path": self.store_path,
             "codec_pipeline": self.codec_pipeline,
@@ -534,6 +537,19 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
             object.__delattr__(metadata, "_stored_document")
         io._restore_cache_entry(state)
         object.__setattr__(self, "_io", io)
+        for key, value in state.items():
+            if key not in _ASYNC_ARRAY_STATE_KEYS:
+                object.__setattr__(self, key, value)
+
+    def __copy__(self) -> Self:
+        # A shallow copy shares the field values, as a dataclass copy does; the
+        # binding is copied so that rebinding one (resize) leaves the other.
+        io = object.__new__(AsyncArrayIO)
+        io.__dict__.update(vars(self._io))
+        copied = object.__new__(type(self))
+        copied.__dict__.update(vars(self))
+        object.__setattr__(copied, "_io", io)
+        return copied
 
     @classmethod
     async def _create(
@@ -6270,7 +6286,7 @@ async def _resize(
             )
 
     # Write new metadata
-    await store_documents(array.store_path, documents, array=True)
+    await store_documents(array.store_path, documents, written=new_metadata)
 
     # Update the wrapped binding in place; the codec pipeline is kept, as before.
     array._io._rebind_resolved(new_metadata, new_chunk_grid)
@@ -6398,6 +6414,13 @@ async def _delete_key(store_path: StorePath, key: str) -> None:
 
 _CARRIED_KEYS: Final = ("_stored_entry", "_stored_copy")
 """The keys a pickled binding carries its store cache's entry under."""
+
+_ASYNC_ARRAY_STATE_KEYS: Final = frozenset(
+    {"metadata", "store_path", "codec_pipeline", "_chunk_grid", "config", "_pipeline_class"}
+    | set(_CARRIED_KEYS)
+)
+"""The keys of a pickled `AsyncArray`'s state that rebuild its binding; any other key is
+an attribute of the instance's own."""
 
 
 def _bound_metadata_dict(
@@ -7009,7 +7032,7 @@ class AsyncArrayIO:
                 to_save,
                 self._zarr_format,
                 ensure_parents=ensure_parents,
-                array=True,
+                written=source,
             )
             if (
                 self._zarr_format == 2

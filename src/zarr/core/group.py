@@ -14,6 +14,9 @@ import numpy as np
 
 import zarr.api.asynchronous as async_api
 from zarr.abc.metadata import Metadata
+
+# Importable from here, as they have been, though this module no longer uses them.
+from zarr.abc.store import Store, set_or_delete  # noqa: F401, TC001
 from zarr.core._info import GroupInfo
 from zarr.core._json import buffer_to_json_object, json_to_buffer
 from zarr.core.array import (
@@ -83,7 +86,6 @@ if TYPE_CHECKING:
     )
     from typing import Any
 
-    from zarr.abc.store import Store
     from zarr.core.array_spec import ArrayConfigLike
     from zarr.core.buffer import Buffer, BufferPrototype
     from zarr.core.chunk_key_encodings import ChunkKeyEncodingLike
@@ -983,9 +985,7 @@ class AsyncGroup:
         # In place, so every handle sharing this consolidated metadata (a parent's or a
         # subgroup's) sees the deletion.
         consolidated.metadata.pop(key, None)
-        await store_documents(
-            self.store_path, encode_documents(self.store_path, self.metadata), array=False
-        )
+        await store_documents(self.store_path, encode_documents(self.store_path, self.metadata))
 
     async def get[DefaultT](
         self, key: str, default: DefaultT | None = None
@@ -2370,9 +2370,7 @@ class Group(SyncMixin):
         new_metadata = replace(self.metadata, attributes=new_attributes)
 
         # Write new metadata
-        await store_documents(
-            self.store_path, encode_documents(self.store_path, new_metadata), array=False
-        )
+        await store_documents(self.store_path, encode_documents(self.store_path, new_metadata))
 
         async_group = replace(self._async_group, metadata=new_metadata)
         return replace(self, _async_group=async_group)
@@ -3564,7 +3562,7 @@ async def _store_nodes(
             meta_out = nodes[node_name]
         if meta_out.zarr_format == 3:
             if not isinstance(meta_out, GroupMetadata):
-                cache.observe_written(node_name, node_documents[node_name])
+                cache.observe_written(node_name, node_documents[node_name], meta_out)
             yield node_name, built[node_name]
         else:
             # For zarr v2
@@ -3581,7 +3579,7 @@ async def _store_nodes(
 
             if meta_done and attrs_done:
                 if not isinstance(meta_out, GroupMetadata):
-                    cache.observe_written(node_name, node_documents[node_name])
+                    cache.observe_written(node_name, node_documents[node_name], meta_out)
                 yield node_name, built[node_name]
 
             continue

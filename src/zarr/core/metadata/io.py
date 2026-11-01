@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from enum import Enum
 from itertools import zip_longest
-from typing import TYPE_CHECKING, Final, NamedTuple
+from typing import TYPE_CHECKING, Final, NamedTuple, cast
 
 from zarr.abc.store import set_or_delete
 from zarr.core._json import buffer_to_json_object, json_equal
@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from zarr.core.group import GroupMetadata
     from zarr.core.metadata import ArrayMetadata
     from zarr.core.metadata.repair import ArrayDocument
+    from zarr.core.metadata.stored import WrittenArrayMetadata
 
 
 class _Absent(Enum):
@@ -98,15 +99,19 @@ def encode_documents(
 
 
 async def store_documents(
-    store_path: StorePath, documents: Mapping[str, Buffer], *, array: bool
+    store_path: StorePath,
+    documents: Mapping[str, Buffer],
+    *,
+    written: WrittenArrayMetadata | None = None,
 ) -> None:
-    """Store metadata documents encoded by `encode_documents` under `store_path`; an
-    array's are recorded in the store's cache (see `stored_documents`)."""
+    """Store metadata documents encoded by `encode_documents` under `store_path`; those
+    of the array metadata `written` (none: a group's) are recorded in the store's cache
+    (see `stored_documents`)."""
     await asyncio.gather(
         *(set_or_delete(store_path / key, value) for key, value in documents.items())
     )
-    if array:
-        stored_documents(store_path.store).observe_written(store_path.path, documents)
+    if written is not None:
+        stored_documents(store_path.store).observe_written(store_path.path, documents, written)
 
 
 def members_as_stored(store_path: StorePath, metadata: GroupMetadata) -> dict[str, ArrayDocument]:
@@ -200,7 +205,7 @@ async def upsert_metadata(
     await store_documents(
         store_path,
         {k: v for k, v in documents.items() if k in changed},
-        array=not _is_group(metadata),
+        written=_written_array(metadata),
     )
     return changes
 
@@ -282,7 +287,7 @@ async def save_metadata(
         to_save,
         metadata.zarr_format,
         ensure_parents=ensure_parents,
-        array=not _is_group(metadata),
+        written=_written_array(metadata),
     )
 
 
@@ -321,8 +326,13 @@ async def save_new_metadata(
         to_save,
         metadata.zarr_format,
         ensure_parents=ensure_parents,
-        array=not _is_group(metadata),
+        written=_written_array(metadata),
     )
+
+
+def _written_array(metadata: ArrayMetadata | GroupMetadata) -> ArrayMetadata | None:
+    """`metadata` as the array metadata a write records, or `None` for a group."""
+    return None if _is_group(metadata) else cast("ArrayMetadata", metadata)
 
 
 def _is_group(metadata: ArrayMetadata | GroupMetadata) -> bool:
@@ -337,7 +347,7 @@ async def _write_metadata(
     zarr_format: ZarrFormat,
     *,
     ensure_parents: bool,
-    array: bool,
+    written: WrittenArrayMetadata | None,
 ) -> None:
     set_awaitables = [set_or_delete(store_path / key, value) for key, value in to_save.items()]
 
@@ -377,5 +387,5 @@ async def _write_metadata(
             ) from e
 
     await asyncio.gather(*set_awaitables)
-    if array:
-        stored_documents(store_path.store).observe_written(store_path.path, to_save)
+    if written is not None:
+        stored_documents(store_path.store).observe_written(store_path.path, to_save, written)
