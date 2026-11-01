@@ -7,12 +7,14 @@ import math
 import warnings
 from asyncio import gather
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from itertools import starmap
 from logging import getLogger
 from typing import (
     TYPE_CHECKING,
     Any,
+    ClassVar,
+    Final,
     Literal,
     Required,
     TypedDict,
@@ -421,7 +423,18 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         The runtime configuration of the array.
     """
 
-    _io: AsyncArrayIO
+    # The dataclass fields are the ones this class has always had, so equality,
+    # hashing, `dataclasses.replace`/`fields`/`asdict`, pickling and dask tokens
+    # see the same array they always did. Each reads (and, under
+    # `object.__setattr__`, writes) the wrapped binding; see the properties
+    # attached after the class.
+    metadata: T_ArrayMetadata
+    store_path: StorePath
+    codec_pipeline: CodecPipeline = field(init=False)
+    _chunk_grid: ChunkGrid = field(init=False)
+    config: ArrayConfig
+    # Not a dataclass field: the binding every field reads.
+    _io: ClassVar[AsyncArrayIO]
 
     @overload
     def __init__(
@@ -462,29 +475,32 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         """The explicit-IO layer this array delegates to; both share one state."""
         return self._io
 
-    @property
-    def metadata(self) -> T_ArrayMetadata:
-        """The in-memory metadata of this array."""
-        return cast("T_ArrayMetadata", self._io.metadata_legacy)
+    def __getstate__(self) -> dict[str, object]:
+        # The pickled state is the fields', as it has always been, so a pickle
+        # loads in either version; what the store's cache knows rides along.
+        state: dict[str, object] = {
+            "metadata": self.metadata,
+            "store_path": self.store_path,
+            "codec_pipeline": self.codec_pipeline,
+            "_chunk_grid": self._chunk_grid,
+            "config": self.config,
+        }
+        state.update(self._io._carried_cache_entry())
+        return state
 
-    @property
-    def store_path(self) -> StorePath:
-        """The location in a store this array is bound to."""
-        return self._io.store_path
-
-    @property
-    def config(self) -> ArrayConfig:
-        """The runtime configuration of this array."""
-        return self._io.config
-
-    @property
-    def codec_pipeline(self) -> CodecPipeline:
-        """The codec pipeline used for encoding and decoding chunks."""
-        return self._io._resolved_codec_pipeline
-
-    @property
-    def _chunk_grid(self) -> ChunkGrid:
-        return self._io._chunk_grid
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        metadata = state["metadata"]
+        pipeline = state["codec_pipeline"]
+        io = object.__new__(AsyncArrayIO)
+        io._bind(metadata, state["store_path"], state["config"], type(pipeline))
+        io._codec_pipeline_cache = pipeline
+        io._chunk_grid_cache = state["_chunk_grid"]
+        # A pickle from before the store's cache held this carries it on the metadata.
+        legacy_mark = metadata.__dict__.pop("_stored_document", None)
+        if legacy_mark is not None:
+            state = {**state, "_stored_entry": legacy_mark}
+        io._restore_cache_entry(state)
+        object.__setattr__(self, "_io", io)
 
     @classmethod
     async def _create(
@@ -1249,11 +1265,13 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         -------
         A new Array
         """
-        derived = self._io.with_config(config)
-        # Build the pipeline now, so construction warnings fire here, as they
-        # do in __init__.
-        _ = derived._resolved_codec_pipeline
-        return cast("Self", type(self)._from_io(derived))
+        if isinstance(config, ArrayConfig):
+            new_config = config
+        else:
+            # Merge new config with existing config, so missing keys are inherited
+            # from the current array rather than from global defaults
+            new_config = ArrayConfig(**{**self.config.to_dict(), **config})  # type: ignore[arg-type]
+        return type(self)(metadata=self.metadata, store_path=self.store_path, config=new_config)
 
     async def nchunks_initialized(self) -> int:
         """
@@ -1622,9 +1640,13 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
             out_array = cast("NDArrayLikeOrScalar", np.array(out_array).reshape(indexer.sel_shape))
         return out_array
 
-    async def _save_metadata(self, ensure_parents: bool = False) -> None:
-        """Store this array's metadata documents, delegating to the wrapped `AsyncArrayIO`."""
-        await self._io.store_metadata(ensure_parents=ensure_parents)
+    async def _save_metadata(self, metadata: ArrayMetadata, ensure_parents: bool = False) -> None:
+        """Store `metadata` as this array's own documents: through the wrapped
+        `AsyncArrayIO` when it is this array's metadata."""
+        if metadata is self.metadata:
+            await self._io.store_metadata(ensure_parents=ensure_parents)
+        else:
+            await save_metadata(self.store_path, metadata, ensure_parents=ensure_parents)
 
     async def _set_selection(
         self,
@@ -1864,6 +1886,60 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
             _count_bytes_stored=count_bytes_stored,
             _count_chunks_initialized=count_chunks_initialized,
         )
+
+
+def _get_metadata(self: AsyncArray[Any]) -> ArrayMetadata:
+    """The in-memory metadata of this array."""
+    return self._io.metadata_legacy
+
+
+def _set_metadata(self: AsyncArray[Any], value: ArrayMetadata) -> None:
+    self._io._rebind_resolved(value)
+
+
+def _get_store_path(self: AsyncArray[Any]) -> StorePath:
+    """The location in a store this array is bound to."""
+    return self._io.store_path
+
+
+def _set_store_path(self: AsyncArray[Any], value: StorePath) -> None:
+    self._io._store_path = value
+
+
+def _get_config(self: AsyncArray[Any]) -> ArrayConfig:
+    """The runtime configuration of this array."""
+    return self._io.config
+
+
+def _set_config(self: AsyncArray[Any], value: ArrayConfig) -> None:
+    self._io._config = value
+
+
+def _get_codec_pipeline(self: AsyncArray[Any]) -> CodecPipeline:
+    """The codec pipeline used for encoding and decoding chunks."""
+    return self._io._resolved_codec_pipeline
+
+
+def _set_codec_pipeline(self: AsyncArray[Any], value: CodecPipeline) -> None:
+    self._io._codec_pipeline_cache = value
+
+
+def _get_chunk_grid(self: AsyncArray[Any]) -> ChunkGrid:
+    return self._io._chunk_grid
+
+
+def _set_chunk_grid(self: AsyncArray[Any], value: ChunkGrid) -> None:
+    self._io._chunk_grid_cache = value
+
+
+# The dataclass fields of `AsyncArray` read the wrapped binding. They are
+# attached once the dataclass is made, so `@dataclass` sees fields, not
+# defaults; the setters keep `object.__setattr__(array, name, value)` working.
+setattr(AsyncArray, "metadata", property(_get_metadata, _set_metadata))  # noqa: B010
+setattr(AsyncArray, "store_path", property(_get_store_path, _set_store_path))  # noqa: B010
+setattr(AsyncArray, "config", property(_get_config, _set_config))  # noqa: B010
+setattr(AsyncArray, "codec_pipeline", property(_get_codec_pipeline, _set_codec_pipeline))  # noqa: B010
+setattr(AsyncArray, "_chunk_grid", property(_get_chunk_grid, _set_chunk_grid))  # noqa: B010
 
 
 # TODO: Array can be a frozen data class again once property setters (e.g. shape) are removed
@@ -5015,7 +5091,9 @@ async def _store_repaired_document(store_path: StorePath, metadata: ArrayMetadat
     The store's cache (see `zarr.core.metadata.stored`) says whether the document
     needs such a repair. While it has not seen the document, a consolidated copy it
     has seen stands for it, as consolidated metadata does for every reader; with
-    neither, the document is read. Only a document whose repair
+    neither, nothing is known to need a repair, and nothing is read: metadata built
+    in code, or bound to a store that never read the document, writes its chunks
+    as any array does. Only a document whose repair
     lays out chunks as `metadata` does is acted on: one that lays them out otherwise
     describes another array, and chunks written under `metadata` are its caller's
     declaration, as over any document. The document is read again, because the store
@@ -5048,10 +5126,6 @@ async def _store_repaired_document(store_path: StorePath, metadata: ArrayMetadat
         stored = cache.needing_repair(path, zarr_format)
     else:
         stored = cache.copy_needing_repair(path, zarr_format)
-        if stored is None:
-            documents = await read_documents(store_path, keys)
-            cache.observe(path, stored_array_document(documents, zarr_format), zarr_format)
-            stored = cache.needing_repair(path, zarr_format)
     if stored is None or _chunk_layout(read_repaired(stored, zarr_format)) != _chunk_layout(
         metadata
     ):
@@ -6225,7 +6299,7 @@ async def _update_attributes(
     array._io._rebind_resolved(array.metadata, array._chunk_grid)
 
     # Write new metadata
-    await array._save_metadata()
+    await array._save_metadata(array.metadata)
 
     return array
 
@@ -6256,6 +6330,10 @@ async def _info_complete(
 
 async def _delete_key(store_path: StorePath, key: str) -> None:
     await (store_path / key).delete()
+
+
+_CARRIED_KEYS: Final = ("_stored_entry", "_stored_copy")
+"""The keys a pickled binding carries its store cache's entry under."""
 
 
 def _copied_legacy(source: ArrayMetadata) -> ArrayMetadata:
@@ -6334,7 +6412,10 @@ class AsyncArrayIO:
     `setitem` resolve them into the legacy classes (`metadata_legacy`) on
     first use. The bound metadata is assumed, never checked against the
     store, and an array opened from metadata that needed a repair stores that
-    repair before its first chunk write. `AsyncArray` wraps an `AsyncArrayIO`
+    repair before its first chunk write. The codec pipeline implementation is
+    chosen from the global configuration when the binding is made; the
+    pipeline itself, with any options it reads from the configuration, is
+    built at the first data operation. `AsyncArray` wraps an `AsyncArrayIO`
     and delegates its metadata and selection IO to it.
     """
 
@@ -6587,23 +6668,38 @@ class AsyncArrayIO:
         return AsyncArray._from_io(self)
 
     def __getstate__(self) -> dict[str, object]:
-        # A store's cache does not pickle with the store: carry what it knows of this
-        # binding's document, so the unpickled binding does not read it again.
         state = dict(self.__dict__)
-        cache = stored_documents(self._store_path.store)
-        path, zarr_format = self._store_path.path, self._zarr_format
-        if cache.knows(path, zarr_format):
-            state["_stored_entry"] = cache.needing_repair(path, zarr_format)
+        state.update(self._carried_cache_entry())
         return state
 
     def __setstate__(self, state: dict[str, object]) -> None:
-        known = "_stored_entry" in state
-        entry = cast("ArrayDocument | None", state.pop("_stored_entry", None))
+        state = dict(state)
+        carried: dict[str, object] = {k: state.pop(k) for k in _CARRIED_KEYS if k in state}
         self.__dict__.update(state)
-        if known:
-            stored_documents(self._store_path.store).restore(
-                self._store_path.path, self._zarr_format, entry
-            )
+        self._restore_cache_entry(carried)
+
+    def _carried_cache_entry(self) -> dict[str, object]:
+        """What this binding's store cache knows of its document, to carry in a
+        pickle: a store's cache does not pickle with the store, and the unpickled
+        binding's first chunk write must know whether to store a repair first."""
+        cache = stored_documents(self._store_path.store)
+        path, zarr_format = self._store_path.path, self._zarr_format
+        if cache.knows(path, zarr_format):
+            return {"_stored_entry": cache.needing_repair(path, zarr_format)}
+        copy_entry = cache.copy_needing_repair(path, zarr_format)
+        if copy_entry is not None:
+            return {"_stored_copy": copy_entry}
+        return {}
+
+    def _restore_cache_entry(self, state: Mapping[str, object]) -> None:
+        """Record what `_carried_cache_entry` carried in this binding's store cache."""
+        cache = stored_documents(self._store_path.store)
+        path, zarr_format = self._store_path.path, self._zarr_format
+        if "_stored_entry" in state:
+            entry = cast("ArrayDocument | None", state["_stored_entry"])
+            cache.restore(path, zarr_format, entry)
+        elif "_stored_copy" in state:
+            cache.restore_copy(path, zarr_format, cast("ArrayDocument", state["_stored_copy"]))
 
     def _derived_source(self) -> ArrayMetadataModel | ArrayMetadata:
         """The source for a derived binding: a legacy object is copied, so in-place

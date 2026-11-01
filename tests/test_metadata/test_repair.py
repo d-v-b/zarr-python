@@ -1699,7 +1699,7 @@ def _bind_declared_other_layout(store: LocalStore) -> AnyArray:
         (_bind_opened, [1]),
         (_bind_pickled, [1]),
         (_bind_derived, [1]),
-        (_bind_declared_same_layout, [1]),
+        (_bind_declared_same_layout, [0]),
         (_bind_declared_other_layout, [0]),
     ],
     ids=["opened", "pickled", "derived", "declared-same-layout", "declared-other-layout"],
@@ -1707,10 +1707,11 @@ def _bind_declared_other_layout(store: LocalStore) -> AnyArray:
 def test_write_stores_repair_however_bound(
     tmp_path: Path, bind: Callable[[LocalStore], AnyArray], stored_after: list[int]
 ) -> None:
-    """A chunk write stores the repair of a stored document that needs one, however the
-    writing array was bound to the store: the store's cache answers, and a store
-    object that has not seen the document reads it. A declaration that lays out
-    chunks otherwise describes another array, so the document is left as stored."""
+    """A chunk write stores the repair of a stored document that needs one when the
+    store's cache knows it: an array opened, pickled or derived from one that read it.
+    A declaration over a document no binding of its store read knows nothing to repair,
+    and writes its chunks as any array does, as does one that lays out chunks
+    otherwise."""
     path = tmp_path / "legacy.zarr"
     _legacy_array(path, 2)
     array = bind(LocalStore(path))

@@ -76,6 +76,12 @@ class StoredDocuments:
         cache already knows the document: it keeps what it learned itself."""
         self._arrays.setdefault((path, zarr_format), document)
 
+    def restore_copy(self, path: str, zarr_format: ZarrFormat, document: ArrayDocument) -> None:
+        """Record a consolidated copy as `copy_needing_repair` returned it from another
+        store object's cache, unless this cache already knows the array's document."""
+        if not self.knows(path, zarr_format):
+            self._copies.setdefault((path, zarr_format), document)
+
     def observe(self, path: str, document: ArrayDocument | None, zarr_format: ZarrFormat) -> None:
         """Record that the array document of `zarr_format` at `path` is `document`
         (`None`: none)."""
