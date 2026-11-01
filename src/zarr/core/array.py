@@ -530,6 +530,10 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
             # reproduce (a NaN payload, a codec's configuration), as its bytes,
             # so a zarr without zarr-metadata loads the pickle too.
             binding_state["model_documents"] = dict(source.to_key_value())
+            # The metadata the model belongs with (one object in the pickle): a
+            # zarr that does not read the binding's state keeps it as it was while
+            # changing the metadata (a resize), and the model is then stale.
+            binding_state["metadata"] = metadata
         binding_state |= carried
         state[_BINDING_STATE] = binding_state
         # Slots as the default reduction carries them, so either version loads them.
@@ -540,6 +544,12 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         if isinstance(state, tuple):
             # A subclass with slots: the instance's dict and its slots' values.
             state = {**state[0], **(state[1] or {})}
+        if "metadata" not in state:
+            # A subclass's own state, from its own reduction, whose factory made
+            # the array: set it as the default protocol would.
+            for key, value in state.items():
+                object.__setattr__(self, key, value)
+            return
         metadata = state["metadata"]
         pipeline = state["codec_pipeline"]
         binding_state = cast("dict[str, Any]", state.get(_BINDING_STATE, {}))
@@ -548,7 +558,10 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         # another one (zarrs-python falls back for stores it cannot use).
         pipeline_class = binding_state.get("pipeline_class", type(pipeline))
         documents = binding_state.get("model_documents")
-        model = None if documents is None else _model_from_documents(documents, metadata)
+        current = binding_state.get("metadata") is metadata
+        model = (
+            None if documents is None or not current else _model_from_documents(documents, metadata)
+        )
         io._bind(
             metadata if model is None else model,
             state["store_path"],
@@ -6732,14 +6745,8 @@ def _array_metadata_model(data: dict[str, JSON]) -> ArrayMetadataModel:
     try:
         model = model_v2(data)
     except MetadataValidationError as error:
-        # The model rejects chunk sizes below 0 itself; add only what it accepts
-        # (what no problem it reports at the chunk size or above covers).
-        reported = {problem.loc for problem in error.problems}
-        unreported = [
-            problem
-            for problem in chunk_problems
-            if not any(problem.loc[:depth] in reported for depth in range(1, len(problem.loc) + 1))
-        ]
+        # The model rejects other chunk sizes itself: add those it accepts, a 0.
+        unreported = [problem for problem in chunk_problems if problem.input == 0]
         if not unreported:
             raise
         raise MetadataValidationError([*error.problems, *unreported]) from None
@@ -6991,7 +6998,10 @@ class AsyncArrayIO:
             cached = self._attributes_cache
             if cached is None or cached[0] != text:
                 same = text == _json_text(source.attributes)
-                cached = (text, source if same else source.update(attributes=json.loads(text)))
+                # Built from the attributes in their own order; the sorted text is
+                # only the key they are compared by.
+                attributes = _plain_json(resolved.attributes)
+                cached = (text, source if same else source.update(attributes=attributes))
                 self._attributes_cache = cached
             return cached[1]
         # Derived on every access, not cached: a legacy object's attributes may be

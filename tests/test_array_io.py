@@ -29,7 +29,7 @@ from zarr.errors import ArrayNotFoundError, UnknownCodecError, ZarrUserWarning
 from zarr.storage import LocalStore, MemoryStore, StorePath
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
     from pathlib import Path
 
     from zarr.core.common import JSON, ZarrFormat
@@ -1230,3 +1230,59 @@ def test_subclass_attributes_keep_names_the_binding_uses() -> None:
         object.__setattr__(named, name, f"mine {name}")
     for restored in (pickle.loads(pickle.dumps(named)), copy.deepcopy(named)):
         assert all(vars(restored)[name] == f"mine {name}" for name in names)
+
+
+class _OwnReductionAsyncArray(AsyncArray[Any]):
+    """A subclass whose reduction carries a state of its own, with no `__setstate__`."""
+
+    def __reduce__(self) -> Any:
+        return (_own_reduction_rebuilt, (self.metadata, self.store_path), {"note": "hi"})
+
+
+def _own_reduction_rebuilt(metadata: Any, store_path: StorePath) -> _OwnReductionAsyncArray:
+    return _OwnReductionAsyncArray(metadata, store_path)
+
+
+def test_a_subclass_reduction_with_its_own_state_copies_and_pickles() -> None:
+    created = zarr.create_array(MemoryStore(), shape=(4,), dtype="uint8", chunks=(2,))
+    array = _OwnReductionAsyncArray(created.metadata, created.store_path)
+    for copied in (copy.copy(array), copy.deepcopy(array), pickle.loads(pickle.dumps(array))):
+        assert vars(copied)["note"] == "hi"
+        assert copied.shape == (4,)
+
+
+async def test_attributes_changed_in_place_keep_their_order() -> None:
+    store = MemoryStore()
+    await AsyncArrayIO.build_v3(
+        store, name="a", shape=(4,), data_type="uint8", chunk_grid=(4,)
+    ).store_metadata()
+    array = (await AsyncArrayIO.open(store, name="a")).to_array()
+    array.metadata.attributes.update({"zeta": 1, "alpha": {"y": 1, "b": 2}})
+    attributes = array.io.metadata.attributes
+    assert list(attributes) == ["zeta", "alpha"]
+    assert list(cast("Mapping[str, Any]", attributes["alpha"])) == ["y", "b"]
+
+
+async def test_a_strict_v2_read_reports_a_zero_chunk_size_beside_others() -> None:
+    """A chunk size of 0, which the model accepts, is reported with the problems
+    the model reports for the other chunk sizes."""
+    store = MemoryStore()
+    await _store_v2_document(store, {**_V2_DOCUMENT, "shape": [4, 4], "chunks": [-1, 0]})
+    with pytest.raises(MetadataValidationError) as error:
+        await AsyncArrayIO.open(store, name="a")
+    assert ("chunks", 1) in [p.loc for p in error.value.problems]
+
+
+async def test_a_pickle_whose_metadata_was_replaced_binds_the_new_metadata() -> None:
+    """A pickle that another zarr loaded, resized and pickled again (keeping the
+    binding's state as it was) binds the metadata it now holds, not the stale model."""
+    store = MemoryStore()
+    await AsyncArrayIO.build_v3(
+        store, name="a", shape=(4,), data_type="uint8", chunk_grid=(4,)
+    ).store_metadata()
+    array = (await AsyncArrayIO.open(store, name="a")).to_array()
+    state = cast("dict[str, Any]", array.__getstate__())
+    resized = dataclasses.replace(state["metadata"], shape=(8,))
+    revived = object.__new__(AsyncArray)
+    revived.__setstate__({**state, "metadata": resized})
+    assert revived.io.metadata.shape == (8,)
