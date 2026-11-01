@@ -273,9 +273,10 @@ def test_binding_follows_the_global_config() -> None:
     assert legacy.order == "F"
 
 
-async def test_array_state_propagates_to_the_shared_binding() -> None:
-    """A change through the array side (resize, update_attributes) is visible
-    on the shared binding's model, and a derived binding stays independent."""
+async def test_array_state_changes_rebind_only_the_array() -> None:
+    """A change through the array side (resize, update_attributes) shows on the
+    array's current binding (`io`), not on a binding taken before it, and a
+    derived binding stays independent."""
     store = MemoryStore()
     aio = AsyncArrayIO.build_v3(store, name="foo", shape=(4,), data_type="uint8", chunk_grid=(2,))
     await aio.store_metadata()
@@ -285,10 +286,11 @@ async def test_array_state_propagates_to_the_shared_binding() -> None:
     moved = aio.with_store(MemoryStore())
 
     await arr.resize((6,))
-    assert aio.metadata.shape == (6,)
+    assert arr.io.metadata.shape == (6,)
+    assert aio.metadata.shape == (4,)
 
     await arr.update_attributes({"a": 1})
-    assert dict(aio.metadata.attributes) == {"a": 1}
+    assert dict(arr.io.metadata.attributes) == {"a": 1}
 
     # the derivatives were made before the changes and do not alias them
     assert derived.metadata_legacy.shape == (4,)
@@ -784,3 +786,91 @@ async def test_writing_valid_metadata_parses_nothing(monkeypatch: pytest.MonkeyP
     v2 = zarr.create_array(store, name="b", shape=(4,), dtype="uint8", zarr_format=2)
     v2.attrs["y"] = 2
     assert not stored_documents(store).knows("a", 3)
+
+
+async def test_an_array_copied_by_its_dict_keeps_its_own_state() -> None:
+    """An array made by copying another's `__dict__` (as subclasses do) is changed
+    apart from it: a resize, an attribute update or a field set through either
+    leaves the other, as when its fields were its only state; so does a binding
+    taken from `io` before the change."""
+    original = zarr.create_array(MemoryStore(), shape=(4,), dtype="int32", chunks=(2,))._async_array
+    taken = original.io
+    clone = object.__new__(AsyncArray)
+    clone.__dict__.update(original.__dict__)
+    await clone.resize((6,))
+    assert (original.shape, clone.shape, taken.metadata_legacy.shape) == ((4,), (6,), (4,))
+    await clone.update_attributes({"x": 1})
+    assert original.attrs == {}
+    object.__setattr__(clone, "metadata", clone.metadata.update_shape((3,)))
+    assert original.shape == (4,)
+
+
+_V2_CHUNK_ZERO: dict[str, Any] = {
+    "zarr_format": 2,
+    "shape": [0],
+    "chunks": [0],
+    "dtype": "<i4",
+    "fill_value": 0,
+    "order": "C",
+    "filters": None,
+    "compressor": None,
+}
+
+
+def _bind_by_constructor(model: ModelV2) -> AsyncArrayIO:
+    return AsyncArrayIO(model, StorePath(MemoryStore(), "a"))
+
+
+def _bind_by_with_metadata(model: ModelV2) -> AsyncArrayIO:
+    declared = AsyncArrayIO.build_v2(MemoryStore(), shape=(4,), dtype="<i4", chunks=(4,))
+    return declared.with_metadata(model)
+
+
+@pytest.mark.parametrize("bind", [_bind_by_constructor, _bind_by_with_metadata])
+def test_binding_rejects_a_v2_model_with_chunk_size_zero(
+    bind: Callable[[ModelV2], AsyncArrayIO],
+) -> None:
+    """The v2 model accepts a chunk size of 0, which zarr reads as repaired; bound
+    as a model, it is rejected as the strict read rejects it."""
+    model = ModelV2(_V2_CHUNK_ZERO)
+    with pytest.raises(MetadataValidationError, match="chunks"):
+        bind(model)
+
+
+def test_a_tuple_valued_v2_chunk_size_zero_binds_as_repaired() -> None:
+    """A metadata mapping written in Python (tuples, not lists) binds as `AsyncArray`
+    reads it: a chunk size of 0 as repaired."""
+    document = {**_V2_CHUNK_ZERO, "shape": (0,), "chunks": (0,)}
+    binding = ArrayIO(cast("Any", document), StorePath(MemoryStore(), "a"))
+    assert binding.metadata_legacy.chunks == (1,)
+    binding.store_metadata()
+    binding.verify()
+
+
+async def test_an_array_over_a_model_shows_one_document() -> None:
+    """An array over a model-backed binding hands out its metadata, which callers
+    change in place (attribute updates through a copy); the binding's model then
+    reads from it, so storing through the binding keeps the change."""
+    store = MemoryStore()
+    await AsyncArrayIO.build_v3(
+        store, name="a", shape=(4,), data_type="uint8", chunk_grid=(4,), attributes={"v": 0}
+    ).store_metadata()
+    original = (await AsyncArrayIO.open(store, name="a")).to_array()
+    _ = original.metadata
+    for copied in (copy.copy(original), original.with_config({"order": "F"})):
+        await copied.update_attributes({"v": id(copied)})
+        assert dict(original.io.metadata.attributes) == original.attrs
+        await original.io.store_metadata()
+        await original.io.verify()
+
+
+def test_bindings_of_different_classes_hash_as_they_compare() -> None:
+    class _Binding(AsyncArrayIO):
+        pass
+
+    base = AsyncArrayIO.build_v3(
+        MemoryStore(), name="a", shape=(4,), data_type="uint8", chunk_grid=(4,)
+    )
+    other = _Binding(base.metadata, base.store_path)
+    assert other == base
+    assert hash(other) == hash(base)
