@@ -10,7 +10,8 @@ from zarr.core._json import buffer_to_json_object, json_equal
 from zarr.core.buffer.core import default_buffer_prototype
 from zarr.core.buffer.cpu import buffer_prototype as cpu_buffer_prototype
 from zarr.core.common import ZARR_JSON, ZARRAY_JSON, ZATTRS_JSON
-from zarr.core.metadata.repair import mark_repaired, repair_array_document
+from zarr.core.metadata.repair import repair_array_document
+from zarr.core.metadata.stored import stored_documents
 from zarr.errors import ArrayNotFoundError, ContainsArrayError
 from zarr.storage._common import StorePath, ensure_no_existing_node
 
@@ -21,6 +22,7 @@ if TYPE_CHECKING:
     from zarr.core.common import JSON, ZarrFormat
     from zarr.core.group import GroupMetadata
     from zarr.core.metadata import ArrayMetadata
+    from zarr.core.metadata.repair import ArrayDocument
 
 
 class _Absent(Enum):
@@ -83,6 +85,11 @@ def encode_documents(
     from zarr.core.group import GroupMetadata
 
     try:
+        if isinstance(metadata, GroupMetadata):
+            return metadata.to_buffer_dict(
+                default_buffer_prototype(),
+                members_as_stored=members_as_stored(store_path, metadata),
+            )
         return metadata.to_buffer_dict(default_buffer_prototype())
     except ValueError as e:
         node = "Group" if isinstance(metadata, GroupMetadata) else "Array"
@@ -91,10 +98,74 @@ def encode_documents(
 
 
 async def store_documents(store_path: StorePath, documents: Mapping[str, Buffer]) -> None:
-    """Store metadata documents encoded by `encode_documents` under `store_path`."""
+    """Store metadata documents encoded by `encode_documents` under `store_path`, and
+    record them in the store's cache (see `stored_documents`)."""
     await asyncio.gather(
         *(set_or_delete(store_path / key, value) for key, value in documents.items())
     )
+    stored_documents(store_path.store).observe_written(store_path.path, documents)
+
+
+def members_as_stored(store_path: StorePath, metadata: GroupMetadata) -> dict[str, ArrayDocument]:
+    """The members of the consolidated metadata of the group at `store_path` to store as
+    they are stored, by their paths in it: each array whose stored document, or else
+    whose stored consolidated copy, needs a repair that moves chunks and reads as the
+    member does. A group write then leaves those copies as they were stored, so every
+    reader of the consolidated metadata reads them as repaired again. An array whose
+    own document zarr knows needs no such repair is stored as it reads."""
+    from zarr.core.group import GroupMetadata
+    from zarr.storage._utils import _join_paths
+
+    consolidated = metadata.consolidated_metadata
+    if consolidated is None:
+        return {}
+    cache = stored_documents(store_path.store)
+    as_stored: dict[str, ArrayDocument] = {}
+    for key, member in consolidated.flattened_metadata.items():
+        if isinstance(member, GroupMetadata):
+            continue
+        path = _join_paths([store_path.path, key])
+        zarr_format = member.zarr_format
+        own = cache.needing_repair(path, zarr_format)
+        if cache.knows(path, zarr_format) and own is None:
+            continue
+        for document in (own, cache.copy_needing_repair(path, zarr_format)):
+            if document is not None and reads_as(document, member):
+                as_stored[key] = document
+                break
+    return as_stored
+
+
+def reads_as(document: ArrayDocument, metadata: ArrayMetadata) -> bool:
+    """Whether the stored array document `document`, repaired, reads as `metadata`."""
+    return read_repaired(document, metadata.zarr_format).to_dict() == metadata.to_dict()
+
+
+def read_repaired(document: ArrayDocument, zarr_format: ZarrFormat) -> ArrayMetadata:
+    """The metadata the stored array document `document` reads as, without warnings."""
+    from zarr.core.metadata import ArrayV2Metadata, ArrayV3Metadata
+
+    reader = ArrayV2Metadata if zarr_format == 2 else ArrayV3Metadata
+    metadata, _ = reader._read_stored(dict(document))
+    return metadata
+
+
+def stored_array_document(
+    documents: Mapping[str, Buffer], zarr_format: ZarrFormat
+) -> ArrayDocument | None:
+    """The array document of `zarr_format` among `documents` (by store key, as
+    `read_documents` reads them), or `None` if there is none."""
+    if zarr_format == 2:
+        if ZARRAY_JSON not in documents:
+            return None
+        document: dict[str, JSON] = buffer_to_json_object(documents[ZARRAY_JSON])
+        zattrs = documents.get(ZATTRS_JSON)
+        document["attributes"] = {} if zattrs is None else buffer_to_json_object(zattrs)
+        return document
+    if ZARR_JSON not in documents:
+        return None
+    document = buffer_to_json_object(documents[ZARR_JSON])
+    return document if document.get("node_type") == "array" else None
 
 
 async def read_documents(store_path: StorePath, keys: Iterable[str]) -> dict[str, Buffer]:
@@ -139,8 +210,8 @@ def parse_stored_array(
 ) -> ArrayMetadata:
     """The metadata of an array from its documents (by store key, see `ARRAY_DOCUMENTS`),
     read with the repairs but without their warnings (whoever asks has warned, or reads
-    metadata built in code), and marked (see `mark_repaired`) if they had to be
-    repaired. Raises `ArrayNotFoundError` if there is no array document among them.
+    metadata built in code). Raises `ArrayNotFoundError` if there is no array document
+    among them.
 
     Only operations that store metadata read documents this way, so documents read as a
     rectilinear chunk grid require the rectilinear chunks flag, as storing it does; the
@@ -157,9 +228,8 @@ def parse_stored_array(
         stored = _array_metadata_dict_v3(documents[ZARR_JSON])
     else:
         raise ArrayNotFoundError(f"No Zarr format {zarr_format} array metadata document.")
-    repaired, readings = repair_array_document(stored, zarr_format)
-    metadata = parse_array_metadata(dict(repaired), path)
-    return mark_repaired(metadata, stored, readings, None, warn=False)
+    repaired, _ = repair_array_document(stored, zarr_format)
+    return parse_array_metadata(dict(repaired), path)
 
 
 def _build_parents(store_path: StorePath, zarr_format: ZarrFormat) -> dict[str, GroupMetadata]:
@@ -281,3 +351,4 @@ async def _write_metadata(
             ) from e
 
     await asyncio.gather(*set_awaitables)
+    stored_documents(store_path.store).observe_written(store_path.path, to_save)

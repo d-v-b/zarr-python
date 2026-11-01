@@ -18,6 +18,7 @@ from zarr.core.array import (
     create_array,
     from_array,
     get_array_metadata,
+    observe_read,
 )
 from zarr.core.array_spec import ArrayConfigLike, parse_array_config
 from zarr.core.buffer import NDArrayLike
@@ -423,7 +424,11 @@ async def open(
                 zarr_format = _metadata_dict["zarr_format"]
                 is_v3_array = zarr_format == 3 and _metadata_dict.get("node_type") == "array"
                 if is_v3_array or zarr_format == 2:
-                    return AsyncArray(store_path=store_path, metadata=_metadata_dict, config=config)
+                    array = AsyncArray(
+                        store_path=store_path, metadata=_metadata_dict, config=config
+                    )
+                    observe_read(store_path, metadata_dict)
+                    return array
             except (FileNotFoundError, NodeTypeValidationError):
                 pass
         _check_no_group_config(config, store_path)

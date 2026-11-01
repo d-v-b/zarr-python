@@ -129,11 +129,14 @@ from zarr.core.metadata.io import (
     encode_documents,
     parse_stored_array,
     read_documents,
+    read_repaired,
     save_metadata,
     save_new_metadata,
     store_documents,
+    stored_array_document,
     upsert_metadata,
 )
+from zarr.core.metadata.stored import moves_chunks, stored_documents
 from zarr.core.metadata.v2 import (
     CompressorLikev2,
     get_object_codec_id,
@@ -305,6 +308,13 @@ def create_codec_pipeline(
         )
         return pipeline.evolve_from_array_spec(chunk_spec)
     raise TypeError  # pragma: no cover
+
+
+def observe_read(store_path: StorePath, document: dict[str, JSON]) -> None:
+    """Record the array document `get_array_metadata` read at `store_path`, once it has
+    been read as metadata, in the store's cache (see `zarr.core.metadata.stored`)."""
+    zarr_format: ZarrFormat = 2 if document.get("zarr_format") == 2 else 3
+    stored_documents(store_path.store).observe(store_path.path, document, zarr_format)
 
 
 async def get_array_metadata(
@@ -836,7 +846,9 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         metadata_dict = await get_array_metadata(store_path, zarr_format=zarr_format)
         # TODO: remove this cast when we have better type hints
         _metadata_dict = cast("ArrayMetadataJSON_V3", metadata_dict)
-        return cls(store_path=store_path, metadata=_metadata_dict, config=config)
+        array = cls(store_path=store_path, metadata=_metadata_dict, config=config)
+        observe_read(store_path, metadata_dict)
+        return array
 
     @property
     def store(self) -> Store:
@@ -1610,19 +1622,8 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         return out_array
 
     async def _save_metadata(self, ensure_parents: bool = False) -> None:
-        """Store this array's metadata documents, delegating to the wrapped
-        `AsyncArrayIO`, which clears the `_stored_document` mark (see
-        `_stored_document_replaced`). `_resize` stores the documents it encoded before
-        deleting chunks directly, then clears the mark the same way."""
+        """Store this array's metadata documents, delegating to the wrapped `AsyncArrayIO`."""
         await self._io.store_metadata(ensure_parents=ensure_parents)
-
-    def _stored_document_replaced(self) -> None:
-        """See the module-level `_stored_document_replaced`."""
-        _stored_document_replaced(self.metadata)
-
-    async def _store_repaired_document(self) -> None:
-        """See the module-level `_store_repaired_document`."""
-        await _store_repaired_document(self.store_path, self.metadata)
 
     async def _set_selection(
         self,
@@ -5004,26 +5005,23 @@ def _sharding_codec(metadata: ArrayMetadata) -> ShardingCodec | None:
     return None
 
 
-def _stored_document_replaced(metadata: ArrayMetadata) -> None:
-    """Record that the store no longer holds a document of this array that needs a
-    repair: it holds the repair, a valid document, or none. The metadata, which a
-    consolidated group handle may share with an array handle, then stops standing for
-    the document it was read from (see `mark_repaired`), so no later write through any
-    handle stores that document again."""
-    object.__setattr__(metadata, "_stored_document", None)
-
-
 async def _store_repaired_document(store_path: StorePath, metadata: ArrayMetadata) -> None:
-    """Store the repair of the array's current stored document, if it needs one,
-    before chunks are written under `metadata`.
+    """Store the repair of the array document at `store_path`, if it needs one that
+    moves chunks, before chunks are written under `metadata`.
 
-    Only for metadata read from a document whose repair moves chunks (see
-    `zarr.core.metadata.repair`). The document is read again, because the store may
-    hold a newer one than `metadata`. If that one lays out chunks differently
-    (another writer stored a different chunk size since), the caller would write
-    chunks no reader finds, so it raises and stores nothing. If it needs no repair
-    (the array was re-saved since, possibly by another implementation), it is left as
-    written; if there is none, there is nothing to repair.
+    The store's cache (see `zarr.core.metadata.stored`) says whether the document
+    needs such a repair. While it has not seen the document, a consolidated copy it
+    has seen stands for it, as consolidated metadata does for every reader; with
+    neither, the document is read. Only a document whose repair
+    lays out chunks as `metadata` does is acted on: one that lays them out otherwise
+    describes another array, and chunks written under `metadata` are its caller's
+    declaration, as over any document. The document is read again, because the store
+    may hold a newer one. If that one lays out chunks differently (another writer
+    stored a different chunk size since), the caller would write chunks no reader
+    finds, so it raises, stores nothing, and leaves the cache as it was, so every
+    later write raises too. If it needs no repair (the array was re-saved since,
+    possibly by another implementation), it is left as written; if there is none,
+    there is nothing to repair.
 
     Storing the same repair twice is harmless, so handles that write chunks
     concurrently need no coordination. The read and the store are not one atomic
@@ -5031,23 +5029,38 @@ async def _store_repaired_document(store_path: StorePath, metadata: ArrayMetadat
     attribute update) is replaced by the repair of the document read before it, as
     with any two metadata writes that race.
     """
-    if metadata._stored_document is None:
-        return
+    cache = stored_documents(store_path.store)
+    path = store_path.path
     zarr_format = metadata.zarr_format
-    documents = await read_documents(store_path, ARRAY_DOCUMENTS[zarr_format])
-    try:
-        current = parse_stored_array(documents, zarr_format, str(store_path))
-    except ArrayNotFoundError:
-        pass
+    keys = ARRAY_DOCUMENTS[zarr_format]
+    documents: dict[str, Buffer] | None = None
+    if cache.knows(path, zarr_format):
+        stored = cache.needing_repair(path, zarr_format)
     else:
-        if _chunk_layout(current) != _chunk_layout(metadata):
-            raise ValueError(
-                f"Array {str(store_path)!r}: the metadata stored has changed since "
-                "this array was opened; reopen the array to write to it. Nothing was stored."
-            )
-        if current._stored_document is not None:
-            await upsert_metadata(store_path, current, documents)
-    _stored_document_replaced(metadata)
+        stored = cache.copy_needing_repair(path, zarr_format)
+        if stored is None:
+            documents = await read_documents(store_path, keys)
+            cache.observe(path, stored_array_document(documents, zarr_format), zarr_format)
+            stored = cache.needing_repair(path, zarr_format)
+    if stored is None or _chunk_layout(read_repaired(stored, zarr_format)) != _chunk_layout(
+        metadata
+    ):
+        return
+    if documents is None:
+        documents = await read_documents(store_path, keys)
+    document = stored_array_document(documents, zarr_format)
+    if document is None:
+        cache.observe(path, None, zarr_format)
+        return
+    current = parse_stored_array(documents, zarr_format, str(store_path))
+    if _chunk_layout(current) != _chunk_layout(metadata):
+        raise ValueError(
+            f"Array {str(store_path)!r}: the metadata stored has changed since "
+            "this array was opened; reopen the array to write to it. Nothing was stored."
+        )
+    if moves_chunks(document, zarr_format):
+        await upsert_metadata(store_path, current, documents)
+    cache.observe(path, None, zarr_format)
 
 
 def _stored_rectilinear_grid_or_none(
@@ -6101,7 +6114,6 @@ async def _resize(
 
     # Write new metadata
     await store_documents(array.store_path, documents)
-    array._stored_document_replaced()
 
     # Update the wrapped binding in place; the codec pipeline is kept, as before.
     array._io._rebind_resolved(new_metadata, new_chunk_grid)
@@ -6229,8 +6241,7 @@ async def _delete_key(store_path: StorePath, key: str) -> None:
 
 def _copied_legacy(source: ArrayMetadata) -> ArrayMetadata:
     """A copy of a legacy metadata object that shares no mutable state with it:
-    the attributes dict is copied, and the `_stored_document` repair mark is
-    kept on the copy."""
+    the attributes dict is copied."""
     copied = copy.copy(source)
     if source.attributes is not None:
         object.__setattr__(copied, "attributes", dict(source.attributes))
@@ -6394,7 +6405,9 @@ class AsyncArrayIO:
         """
         store_path = await make_store_path(store, path=name)
         data = await get_array_metadata(store_path, zarr_format=zarr_format)
-        return cls(_array_metadata_model(data), store_path, config)
+        binding = cls(_array_metadata_model(data), store_path, config)
+        observe_read(store_path, data)
+        return binding
 
     @property
     def metadata(self) -> ArrayMetadataModel:
@@ -6599,7 +6612,6 @@ class AsyncArrayIO:
         source = self._source
         if isinstance(source, ArrayV2Metadata | ArrayV3Metadata):
             await save_metadata(self._store_path, source, ensure_parents=ensure_parents)
-            _stored_document_replaced(source)
         else:
             prototype = default_buffer_prototype()
             key_value = source.to_key_value(indent=zarr_config.get("json_indent"))
@@ -6650,9 +6662,9 @@ class AsyncArrayIO:
         """Delete the stored metadata; chunks are kept. Succeeds if absent."""
         for key in ARRAY_DOCUMENTS[self._zarr_format]:
             await (self._store_path / key).delete()
-        resolved = self._resolved_if_any
-        if resolved is not None:
-            _stored_document_replaced(resolved)
+        stored_documents(self._store_path.store).observe(
+            self._store_path.path, None, self._zarr_format
+        )
 
     async def erase_chunk(self, chunk_coords: tuple[int, ...]) -> None:
         """Delete one stored chunk by grid coordinates (the shard, under sharding). Succeeds if absent."""

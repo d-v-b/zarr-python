@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import gc
 import json
+import pickle
 import re
 import warnings
 import zipfile
@@ -24,6 +26,7 @@ from zarr.core.metadata.repair import (
     RESAVE_HINT,
     repair_array_document,
 )
+from zarr.core.metadata.stored import _CACHES, StoredDocuments, moves_chunks, stored_documents
 from zarr.core.metadata.v3 import RectilinearChunkGridMetadata, RegularChunkGridMetadata
 from zarr.core.sync import sync
 from zarr.dtype import Int16
@@ -37,6 +40,13 @@ if TYPE_CHECKING:
 
     from zarr.core.common import JSON, ZarrFormat
     from zarr.types import AnyArray
+
+
+def _store_needs_repair(array: AnyArray) -> bool:
+    """Whether the cache of the array's store records that its stored document needs a
+    repair that moves chunks."""
+    cache = stored_documents(array.store_path.store)
+    return cache.needing_repair(array.store_path.path, array.metadata.zarr_format) is not None
 
 
 def _v2_doc(shape: list[int], chunks: list[Any]) -> dict[str, JSON]:
@@ -203,7 +213,7 @@ def test_repair_array_document(
         warnings.simplefilter("always")
         metadata = metadata_cls.from_dict(dict(doc), path="group/array")
     assert _chunk_shapes(metadata) == expected
-    assert metadata._stored_document == (doc if repaired == "moved" else None)
+    assert moves_chunks(doc, cast("ZarrFormat", doc["zarr_format"])) is (repaired == "moved")
     messages = [str(w.message) for w in record]
     if warning is None:
         assert messages == []
@@ -314,14 +324,14 @@ def test_read_invalid_edges_in_rectilinear_grid(
     """A stored rectilinear chunk grid whose explicit edges or run-length encoded sizes
     are integral floats or JSON `true`, as zarr-python wrote them when given float or
     `True` edges, is read with those edges as the `int`s they equal, silently: zarr read
-    these edges so before. The reading moves no chunks, so the metadata is not marked
-    for re-saving."""
+    these edges so before. The reading moves no chunks, so no repair is stored before
+    chunk writes."""
     shape = [sum(edges) for edges in expected]
     doc = _rectilinear_doc(shape, chunk_shapes)
     with zarr.config.set({"array.rectilinear_chunks": True}):
         metadata = _read_strictly(doc)
         assert metadata.chunk_grid == RectilinearChunkGridMetadata(chunk_shapes=expected)
-    assert metadata._stored_document is None
+    assert not moves_chunks(doc, 3)
 
 
 @pytest.mark.parametrize(
@@ -675,7 +685,7 @@ def test_write_stores_repaired_metadata_first(
 
         sync(write_twice())
 
-    assert arr.metadata._stored_document is None
+    assert not _store_needs_repair(arr)
     with warnings.catch_warnings():
         warnings.simplefilter("error", ZarrUserWarning)
         reopened = zarr.open_array(store=path, mode="r")
@@ -715,7 +725,7 @@ def test_stale_handle_write_keeps_newer_metadata(
 
     stale[0] = 9
 
-    assert stale.metadata._stored_document is None
+    assert not _store_needs_repair(stale)
     reopened = _open_strictly(path)
     assert reopened.shape == (9,)
     assert reopened.attrs.asdict() == {"x": 1}
@@ -843,7 +853,7 @@ def test_stale_handle_write_after_chunk_grid_change_raises(
     with pytest.raises(ValueError, match="has changed since this array was opened; reopen"):
         stale[0:3] = [7, 8, 9]
 
-    assert stale.metadata._stored_document is not None
+    assert _store_needs_repair(stale)
     assert {p.name: p.read_bytes() for p in path.iterdir()} == documents
 
 
@@ -903,7 +913,7 @@ def test_failed_metadata_save_keeps_stored_document(
     with pytest.raises(OSError, match=f"cannot store {re.escape(doc_name)}"):
         operation(arr)
 
-    assert arr.metadata._stored_document is not None
+    assert _store_needs_repair(arr)
     assert (path / doc_name).read_bytes() == stored
 
 
@@ -916,11 +926,11 @@ def test_write_without_stored_document(zarr_format: Literal[2, 3]) -> None:
     doc = _v2_doc([3], [0]) if zarr_format == 2 else _v3_doc([3], [0])
     with pytest.warns(ZarrUserWarning, match="is read as"):
         array = zarr.Array(AsyncArray.from_dict(StorePath(store), doc))
-    repaired = array.metadata._stored_document is not None
+    repaired = moves_chunks(doc, zarr_format)
 
     array[:] = [1, 2, 3]
 
-    assert (repaired, array.metadata._stored_document) == (True, None)
+    assert (repaired, _store_needs_repair(array)) == (True, False)
     np.testing.assert_array_equal(array[:], [1, 2, 3])
     assert not [key for key in store._store_dict if key.endswith((".zarray", "zarr.json"))]
 
@@ -979,7 +989,7 @@ def test_from_dict_keeps_values_that_are_not_json(codec: Any) -> None:
     doc: dict[str, Any] = _v3_doc([4], [4])
     doc["codecs"] = [codec]
     metadata = ArrayV3Metadata.from_dict(doc)
-    assert metadata._stored_document is None
+    assert not moves_chunks(doc, 3)
     assert isinstance(metadata.codecs[0], ShardingCodec)
 
 
@@ -1219,20 +1229,26 @@ def test_consolidated_repaired_member_attributes_kept_by_group_write(
 
 
 @pytest.mark.parametrize("zarr_format", [2, 3])
-def test_repaired_metadata_keeps_the_document_it_read(zarr_format: Literal[2, 3]) -> None:
-    """Metadata read from a document that had to be repaired keeps that document as it
-    was read, whatever becomes of the caller's dict (or the objects in it, which the
-    metadata's attributes may hold): consolidated metadata stores it as read."""
+def test_cache_keeps_the_document_it_read(zarr_format: Literal[2, 3]) -> None:
+    """A store's cache keeps a stored document that needs a repair as it was read,
+    whatever becomes of the caller's dict (or the objects in it), and consolidated
+    metadata stores a member given as stored exactly so."""
     doc = _v2_doc([0], [0]) if zarr_format == 2 else _v3_doc([0], [0])
     doc["attributes"] = {"k": [1]}
     read = json.loads(json.dumps(doc))
     metadata_cls = ArrayV2Metadata if zarr_format == 2 else ArrayV3Metadata
-    metadata = metadata_cls.from_dict(doc)
+    metadata = metadata_cls.from_dict(json.loads(json.dumps(doc)))
+    cache = StoredDocuments()
+    cache.observe("a", doc, zarr_format)
 
-    cast("list[int]", metadata.attributes["k"]).append(2)
+    cast("list[int]", cast("dict[str, Any]", doc["attributes"])["k"]).append(2)
     doc["shape"] = [4]
 
-    assert ConsolidatedMetadata(metadata={"a": metadata}).to_dict()["metadata"] == {"a": read}
+    stored = cache.needing_repair("a", zarr_format)
+    assert stored is not None
+    assert stored == read
+    consolidated = ConsolidatedMetadata(metadata={"a": metadata})
+    assert consolidated.to_dict(members_as_stored={"a": stored})["metadata"] == {"a": read}
 
 
 @pytest.mark.parametrize("zarr_format", [2, 3])
@@ -1246,7 +1262,7 @@ def test_empty_write_stores_no_metadata(tmp_path: Path, zarr_format: Literal[2, 
 
     array[0:0] = np.empty(0, dtype="int16")
 
-    assert array.metadata._stored_document is not None
+    assert _store_needs_repair(array)
     assert {p.name: p.read_bytes() for p in path.iterdir()} == documents
 
 
@@ -1653,3 +1669,134 @@ def test_delete_member_without_flag_keeps_group(tmp_path: Path) -> None:
     assert group.metadata.consolidated_metadata is not None
     assert sorted(group.metadata.consolidated_metadata.metadata) == ["n", "r"]
     assert {p: p.read_bytes() for p in path.rglob("*") if p.is_file()} == stored
+
+
+def _bind_opened(store: LocalStore) -> AnyArray:
+    return zarr.open_array(store=store, mode="r+")
+
+
+def _bind_pickled(store: LocalStore) -> AnyArray:
+    revived: AnyArray = pickle.loads(pickle.dumps(zarr.open_array(store=store, mode="r+")))
+    return revived
+
+
+def _bind_derived(store: LocalStore) -> AnyArray:
+    return zarr.open_array(store=store, mode="r+").io.with_config({"order": "F"}).to_array()
+
+
+def _bind_declared_same_layout(store: LocalStore) -> AnyArray:
+    return zarr.ArrayIO.build_v2(store, shape=(3,), dtype="int16", chunks=(1,)).to_array()
+
+
+def _bind_declared_other_layout(store: LocalStore) -> AnyArray:
+    return zarr.ArrayIO.build_v2(store, shape=(3,), dtype="int16", chunks=(3,)).to_array()
+
+
+@pytest.mark.filterwarnings("ignore:.*is read as:zarr.errors.ZarrUserWarning")
+@pytest.mark.parametrize(
+    ("bind", "stored_after"),
+    [
+        (_bind_opened, [1]),
+        (_bind_pickled, [1]),
+        (_bind_derived, [1]),
+        (_bind_declared_same_layout, [1]),
+        (_bind_declared_other_layout, [0]),
+    ],
+    ids=["opened", "pickled", "derived", "declared-same-layout", "declared-other-layout"],
+)
+def test_write_stores_repair_however_bound(
+    tmp_path: Path, bind: Callable[[LocalStore], AnyArray], stored_after: list[int]
+) -> None:
+    """A chunk write stores the repair of a stored document that needs one, however the
+    writing array was bound to the store: the store's cache answers, and a store
+    object that has not seen the document reads it. A declaration that lays out
+    chunks otherwise describes another array, so the document is left as stored."""
+    path = tmp_path / "legacy.zarr"
+    _legacy_array(path, 2)
+    array = bind(LocalStore(path))
+
+    array[:] = [7, 8, 9]
+
+    assert json.loads((path / ".zarray").read_text())["chunks"] == stored_after
+
+
+@pytest.mark.filterwarnings("ignore:.*is read as:zarr.errors.ZarrUserWarning")
+def test_bindings_of_one_store_share_what_is_stored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Arrays bound to one store object share its cache: once one has stored the repair,
+    another writes its chunks without reading a metadata document first."""
+    path = tmp_path / "legacy.zarr"
+    _legacy_array(path, 2)
+    store = LocalStore(path)
+    first = zarr.open_array(store=store, mode="r+")
+    second = zarr.open_array(store=store, mode="r+")
+    first[:] = [7, 8, 9]
+    accesses = _record_store_access(monkeypatch)
+
+    second[:] = [1, 2, 3]
+
+    assert not [key for _, key in accesses if key.endswith((".zarray", ".zattrs"))]
+    np.testing.assert_array_equal(_open_strictly(path)[...], [1, 2, 3])
+
+
+def test_stored_documents_belongs_to_one_store_object() -> None:
+    """Each store object has its own cache, also when it equals another store, and the
+    cache is dropped with its store."""
+    store, equal = MemoryStore(), MemoryStore()
+    assert store == equal
+    cache = stored_documents(store)
+    cache.observe("a", None, 3)
+
+    assert stored_documents(store) is cache
+    assert not stored_documents(equal).knows("a", 3)
+    key = id(store)
+    del store, cache
+    gc.collect()
+    assert key not in _CACHES
+
+
+@pytest.mark.filterwarnings("ignore:.*is read as:zarr.errors.ZarrUserWarning")
+def test_documents_of_each_format_are_recorded_apart(tmp_path: Path) -> None:
+    """A path may hold a document of each Zarr format (as `migrate_v3` leaves it before
+    `remove_metadata`): reading one does not stand for the other, so a v2 write still
+    stores the repair of its `.zarray` after the store object read the `zarr.json`."""
+    path = tmp_path / "both.zarr"
+    _legacy_array(path, 2)
+    zarr.create_array(store=tmp_path / "v3.zarr", shape=(3,), chunks=(1,), dtype="int16")
+    (path / "zarr.json").write_bytes((tmp_path / "v3.zarr" / "zarr.json").read_bytes())
+    store = LocalStore(path)
+    v2 = zarr.open_array(store=store, mode="r+", zarr_format=2)
+    zarr.open_array(store=store, mode="r+", zarr_format=3)
+
+    v2[:] = [7, 8, 9]
+
+    assert json.loads((path / ".zarray").read_text())["chunks"] == [1]
+
+
+@pytest.mark.filterwarnings("ignore:Consolidated metadata is currently not part:UserWarning")
+@pytest.mark.filterwarnings("ignore:.*is read as:zarr.errors.ZarrUserWarning")
+def test_unreadable_member_document_leaves_its_copy_as_stored(tmp_path: Path) -> None:
+    """A member document zarr fails to read (here a rectilinear grid while the flag is
+    off) is not recorded, so a group write keeps that member's consolidated copy as it
+    was stored instead of encoding the member anew."""
+    path = tmp_path / "group.zarr"
+    zarr.open_group(path, mode="w")
+    zarr.create_array(store=path / "a", shape=(3, 6), chunks=(3, 3), dtype="int8")
+    _rewrite_doc(
+        path / "a",
+        3,
+        lambda doc: doc["chunk_grid"]["configuration"].update(chunk_shape=[[1, 2], 3]),
+    )
+    zarr.consolidate_metadata(path)
+    with zarr.config.set({"array.rectilinear_chunks": True}):
+        zarr.open_array(store=path / "a", mode="r+")[0, 0] = 1
+    stored = json.dumps(_consolidated_member(path, 3, "a"))
+    store = LocalStore(path)
+    group = zarr.open_group(store, mode="r+", use_consolidated=True)
+    with pytest.raises(ValueError, match="experimental and disabled"):
+        list(zarr.open_group(store, mode="r+", use_consolidated=False).members())
+
+    group.attrs["y"] = 2
+
+    assert json.dumps(_consolidated_member(path, 3, "a")) == stored

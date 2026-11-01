@@ -4,7 +4,7 @@ import json
 import warnings
 from collections.abc import Iterable, Sequence
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, TypedDict, cast
+from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
 
 from zarr.abc.metadata import Metadata
 from zarr.abc.numcodec import Numcodec, _is_numcodec
@@ -25,7 +25,7 @@ if TYPE_CHECKING:
         TBaseScalar,
         ZDType,
     )
-    from zarr.core.metadata.repair import ArrayDocument
+    from zarr.core.metadata.repair import Reading
 
 from dataclasses import dataclass, field, fields, replace
 
@@ -45,7 +45,7 @@ from zarr.core.common import (
 from zarr.core.config import config, parse_indexing_order
 from zarr.core.json_parse import parse_field
 from zarr.core.metadata.common import parse_attributes
-from zarr.core.metadata.repair import mark_repaired, repair_array_document
+from zarr.core.metadata.repair import repair_array_document, warn_repairs
 
 
 class ArrayV2MetadataDict(TypedDict):
@@ -73,9 +73,6 @@ class ArrayV2Metadata(Metadata):
     compressor: Numcodec | None
     attributes: dict[str, JSON] = field(default_factory=dict)
     zarr_format: Literal[2] = field(init=False, default=2)
-    _stored_document: ClassVar[ArrayDocument | None] = None
-    """The stored document `from_dict` read this metadata from, if it had to repair it
-    (set on the instance by `mark_repaired`): the store may still hold it."""
 
     def __init__(
         self,
@@ -156,6 +153,13 @@ class ArrayV2Metadata(Metadata):
         """Read a stored `.zarray` document (with its attributes). An invalid document
         that `zarr.core.metadata.repair` can read is read as repaired; a reading the user
         must act on warns, naming the array at `path`."""
+        metadata, readings = cls._read_stored(data)
+        warn_repairs(readings, path)
+        return metadata
+
+    @classmethod
+    def _read_stored(cls, data: dict[str, Any]) -> tuple[ArrayV2Metadata, list[Reading]]:
+        """`from_dict` without its warnings: the metadata, and how the repairs read it."""
         repaired, readings = repair_array_document(data, 2)
         # a new dict, because we are modifying it
         _data: dict[str, Any] = dict(repaired)
@@ -209,7 +213,7 @@ class ArrayV2Metadata(Metadata):
 
         _data = {k: v for k, v in _data.items() if k in expected}
 
-        return mark_repaired(cls(**_data), data, readings, path)
+        return cls(**_data), readings
 
     def to_dict(self) -> dict[str, JSON]:
         zarray_dict = super().to_dict()
