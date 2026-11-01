@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextvars
 import sys
 import warnings
 from collections.abc import Mapping, Sequence
@@ -246,10 +247,20 @@ class HasObjectCodec:
     object_codec_id: ClassVar[str]
 
 
+_UNSTABLE_WARNING_SILENCED: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "_UNSTABLE_WARNING_SILENCED", default=False
+)
+"""Set while zarr reads a data type's JSON back without writing it, so the warning,
+which is about what is written, is not given. Per thread and task, unlike the global
+warning filters."""
+
+
 def v3_unstable_dtype_warning(dtype: object) -> None:
     """
     Emit this warning when a data type does not have a stable zarr v3 spec
     """
+    if _UNSTABLE_WARNING_SILENCED.get():
+        return
     msg = (
         f"The data type ({dtype}) does not have a Zarr V3 specification. "
         "That means that the representation of arrays saved with this data type may change without "
