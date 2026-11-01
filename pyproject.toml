@@ -50,7 +50,7 @@ dependencies = [
     # 0.16.6 and 0.17.1 refuse to unpickle untrusted data (GHSA-jqc8-qjfv-5m6r); 0.17.0 does not.
     'numcodecs>=0.16.6,!=0.17.0',
     'google-crc32c>=1.5',
-    'typing_extensions>=4.14',
+    'typing_extensions>=4.16',
     'donfig>=0.8',
     'msgspec>=0.19',
     'zarr-metadata>=0.6.0',
@@ -258,7 +258,7 @@ extra-dependencies = [
     'fsspec==2023.10.0',
     's3fs==2023.10.0',
     'universal_pathlib==0.2.0',
-    'typing_extensions==4.14.*',
+    'typing_extensions==4.16.*',
     'donfig==0.8.*',
     'obstore==0.5.*',
     'msgspec==0.19.*',
