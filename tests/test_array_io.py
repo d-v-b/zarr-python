@@ -1286,3 +1286,23 @@ async def test_a_pickle_whose_metadata_was_replaced_binds_the_new_metadata() -> 
     revived = object.__new__(AsyncArray)
     revived.__setstate__({**state, "metadata": resized})
     assert revived.io.metadata.shape == (8,)
+
+
+@pytest.mark.parametrize("chunks", [[False, 2], [0.0, 2]])
+async def test_a_strict_v2_read_reports_a_rejected_chunk_size_once(chunks: list[Any]) -> None:
+    store = MemoryStore()
+    await _store_v2_document(store, {**_V2_DOCUMENT, "shape": [4, 4], "chunks": chunks})
+    with pytest.raises(MetadataValidationError) as error:
+        await AsyncArrayIO.open(store, name="a")
+    assert [p.loc for p in error.value.problems] == [("chunks",)]
+
+
+async def test_a_model_binding_reads_attributes_with_mixed_key_types() -> None:
+    """Attributes changed in place to hold an int key read as JSON writes them."""
+    store = MemoryStore()
+    await AsyncArrayIO.build_v3(
+        store, name="a", shape=(4,), data_type="uint8", chunk_grid=(4,), attributes={"b": 1}
+    ).store_metadata()
+    array = (await AsyncArrayIO.open(store, name="a")).to_array()
+    cast("dict[Any, Any]", array.metadata.attributes)[1] = "x"
+    assert dict(array.io.metadata.attributes) == {"b": 1, "1": "x"}

@@ -6716,8 +6716,9 @@ def _model_of_legacy(metadata: ArrayMetadata) -> ArrayMetadataModel:
 
 
 def _json_text(value: object) -> str:
-    """`value`, JSON with mapping proxies at any depth, as canonical JSON text."""
-    return json.dumps(value, sort_keys=True, default=_mapping_as_dict)
+    """`value`, JSON with mapping proxies at any depth, as canonical JSON text (keys
+    made strings first, as JSON makes them, so mixed key types sort)."""
+    return json.dumps(_plain_json(value), sort_keys=True)
 
 
 def _mapping_as_dict(value: object) -> dict[str, Any]:
@@ -6746,7 +6747,11 @@ def _array_metadata_model(data: dict[str, JSON]) -> ArrayMetadataModel:
         model = model_v2(data)
     except MetadataValidationError as error:
         # The model rejects other chunk sizes itself: add those it accepts, a 0.
-        unreported = [problem for problem in chunk_problems if problem.input == 0]
+        unreported = [
+            problem
+            for problem in chunk_problems
+            if type(problem.input) is int and problem.input == 0
+        ]
         if not unreported:
             raise
         raise MetadataValidationError([*error.problems, *unreported]) from None
