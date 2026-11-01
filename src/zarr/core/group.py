@@ -89,6 +89,7 @@ if TYPE_CHECKING:
     from zarr.core.common import MemoryOrder
     from zarr.core.dtype import ZDTypeLike
     from zarr.core.metadata.repair import ArrayDocument
+    from zarr.core.metadata.stored import CarriedEntry
     from zarr.types import AnyArray, AnyAsyncArray, ArrayV2, ArrayV3, AsyncArrayV2, AsyncArrayV3
 
 logger = logging.getLogger("zarr.group")
@@ -688,6 +689,32 @@ class AsyncGroup:
                 use_consolidated=use_consolidated,
             )
 
+    def __getstate__(self) -> dict[str, object]:
+        # A store's cache does not pickle with the store: carry what it knows of the
+        # consolidated members, so a write through the unpickled group keeps the
+        # members it would have kept as stored.
+        state = dict(self.__dict__)
+        consolidated = self.metadata.consolidated_metadata
+        if consolidated is not None:
+            paths = [
+                _join_paths([self.store_path.path, key]) for key in consolidated.flattened_metadata
+            ]
+            entries = stored_documents(self.store_path.store).entries(
+                paths, self.metadata.zarr_format
+            )
+            if entries:
+                state["_stored_members"] = entries
+        return state
+
+    def __setstate__(self, state: dict[str, object]) -> None:
+        state = dict(state)
+        entries = cast("dict[str, CarriedEntry] | None", state.pop("_stored_members", None))
+        self.__dict__.update(state)
+        if entries is not None:
+            stored_documents(self.store_path.store).restore_entries(
+                entries, self.metadata.zarr_format
+            )
+
     @classmethod
     def _from_bytes_v2(
         cls,
@@ -893,7 +920,9 @@ class AsyncGroup:
         # In place, so every handle sharing this consolidated metadata (a parent's or a
         # subgroup's) sees the deletion.
         consolidated.metadata.pop(key, None)
-        await store_documents(self.store_path, encode_documents(self.store_path, self.metadata))
+        await store_documents(
+            self.store_path, encode_documents(self.store_path, self.metadata), array=False
+        )
 
     async def get[DefaultT](
         self, key: str, default: DefaultT | None = None
@@ -2278,7 +2307,9 @@ class Group(SyncMixin):
         new_metadata = replace(self.metadata, attributes=new_attributes)
 
         # Write new metadata
-        await store_documents(self.store_path, encode_documents(self.store_path, new_metadata))
+        await store_documents(
+            self.store_path, encode_documents(self.store_path, new_metadata), array=False
+        )
 
         async_group = replace(self._async_group, metadata=new_metadata)
         return replace(self, _async_group=async_group)
@@ -3469,7 +3500,8 @@ async def _store_nodes(
             node_name = created_key[: created_key.rfind("/")]
             meta_out = nodes[node_name]
         if meta_out.zarr_format == 3:
-            cache.observe_written(node_name, node_documents[node_name])
+            if not isinstance(meta_out, GroupMetadata):
+                cache.observe_written(node_name, node_documents[node_name])
             yield node_name, built[node_name]
         else:
             # For zarr v2
@@ -3485,7 +3517,8 @@ async def _store_nodes(
                 meta_done = _join_paths([node_name, ZARRAY_JSON]) in created_object_keys
 
             if meta_done and attrs_done:
-                cache.observe_written(node_name, node_documents[node_name])
+                if not isinstance(meta_out, GroupMetadata):
+                    cache.observe_written(node_name, node_documents[node_name])
                 yield node_name, built[node_name]
 
             continue

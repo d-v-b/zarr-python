@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import dataclasses
 import gc
 import json
@@ -1823,9 +1824,11 @@ def test_pickled_array_carries_what_its_store_knows(
 
 def test_restore_keeps_what_the_cache_learned_itself() -> None:
     """A carried entry fills only a document the cache does not know: what the
-    cache recorded itself, such as a repair it stored, stays."""
+    cache recorded itself, such as a repair it stored over a broken document,
+    stays."""
     cache = StoredDocuments()
     broken = _v2_doc([3], [0])
+    cache.observe("a", broken, 2)
     cache.observe("a", None, 2)
 
     cache.restore("a", 2, broken)
@@ -1853,3 +1856,57 @@ def test_pickled_consolidated_member_stores_its_repair(
     revived[:] = [7, 8, 9]
 
     assert _stored_chunks(json.loads(document.read_text())) == [1]
+
+
+def test_cache_records_only_what_stands_for_a_repair() -> None:
+    """A valid document is recorded only where it replaces one that needs a repair
+    (or a consolidated copy that does), so the cache does not grow with every
+    array it sees."""
+    cache = StoredDocuments()
+    valid, broken = _v2_doc([3], [3]), _v2_doc([3], [0])
+    for path in ("a", "b", "c"):
+        cache.observe(path, valid, 2)
+    cache.observe("b", broken, 2)
+    cache.observe("b", valid, 2)
+    cache.observe_consolidated("", {"c": broken}, 2)
+    cache.observe("c", valid, 2)
+    assert (cache.knows("a", 2), cache.knows("b", 2), cache.knows("c", 2)) == (False, True, True)
+    assert cache.needing_repair("b", 2) is None
+
+
+@pytest.mark.filterwarnings("ignore:Consolidated metadata is currently not part:UserWarning")
+@pytest.mark.filterwarnings("ignore:.*is read as:zarr.errors.ZarrUserWarning")
+@pytest.mark.parametrize("zarr_format", [2, 3])
+def test_pickled_group_keeps_consolidated_members_as_stored(
+    tmp_path: Path, zarr_format: Literal[2, 3]
+) -> None:
+    """A pickled (or deep-copied) consolidated group carries what its store's cache
+    knew of its members, so a group write through the copy keeps a member read
+    from a repaired copy as it was stored, as the original would."""
+    path = tmp_path / "group.zarr"
+    _flagged_consolidated_group(path, zarr_format, "a")
+    stored = json.dumps(_consolidated_member(path, zarr_format, "a"))
+    group = zarr.open_group(LocalStore(path), mode="r+", use_consolidated=True)
+    for revived in (pickle.loads(pickle.dumps(group)), copy.deepcopy(group)):
+        revived.attrs["x"] = 1
+        assert json.dumps(_consolidated_member(path, zarr_format, "a")) == stored
+
+
+@pytest.mark.filterwarnings("ignore:.*is read as:zarr.errors.ZarrUserWarning")
+@pytest.mark.parametrize("zarr_format", [2, 3])
+def test_array_from_a_stored_document_dict_stores_its_repair(
+    tmp_path: Path, zarr_format: Literal[2, 3]
+) -> None:
+    """An `AsyncArray` built from a stored document given as a dict stores that
+    document's repair before its first chunk write, as one opened from it does."""
+    path = tmp_path / "legacy.zarr"
+    _legacy_array(path, zarr_format)
+    doc_name = ".zarray" if zarr_format == 2 else "zarr.json"
+    doc = json.loads((path / doc_name).read_text())
+    if zarr_format == 2:
+        doc["attributes"] = {}
+    array = zarr.Array(AsyncArray(doc, StorePath(LocalStore(path))))
+
+    array[:] = [7, 8, 9]
+
+    assert _stored_chunks(json.loads((path / doc_name).read_text())) == [1]

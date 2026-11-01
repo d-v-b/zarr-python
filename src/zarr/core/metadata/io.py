@@ -97,13 +97,16 @@ def encode_documents(
         raise
 
 
-async def store_documents(store_path: StorePath, documents: Mapping[str, Buffer]) -> None:
-    """Store metadata documents encoded by `encode_documents` under `store_path`, and
-    record them in the store's cache (see `stored_documents`)."""
+async def store_documents(
+    store_path: StorePath, documents: Mapping[str, Buffer], *, array: bool
+) -> None:
+    """Store metadata documents encoded by `encode_documents` under `store_path`; an
+    array's are recorded in the store's cache (see `stored_documents`)."""
     await asyncio.gather(
         *(set_or_delete(store_path / key, value) for key, value in documents.items())
     )
-    stored_documents(store_path.store).observe_written(store_path.path, documents)
+    if array:
+        stored_documents(store_path.store).observe_written(store_path.path, documents)
 
 
 def members_as_stored(store_path: StorePath, metadata: GroupMetadata) -> dict[str, ArrayDocument]:
@@ -194,7 +197,11 @@ async def upsert_metadata(
         {key: buffer_to_json_object(buf) for key, buf in documents.items()},
     )
     changed = {change.path[0] for change in changes}
-    await store_documents(store_path, {k: v for k, v in documents.items() if k in changed})
+    await store_documents(
+        store_path,
+        {k: v for k, v in documents.items() if k in changed},
+        array=not _is_group(metadata),
+    )
     return changes
 
 
@@ -270,7 +277,13 @@ async def save_metadata(
     ValueError
     """
     to_save = encode_documents(store_path, metadata)
-    await _write_metadata(store_path, to_save, metadata.zarr_format, ensure_parents=ensure_parents)
+    await _write_metadata(
+        store_path,
+        to_save,
+        metadata.zarr_format,
+        ensure_parents=ensure_parents,
+        array=not _is_group(metadata),
+    )
 
 
 async def save_new_metadata(
@@ -303,7 +316,19 @@ async def save_new_metadata(
         await store_path.delete_dir()
     else:
         await ensure_no_existing_node(store_path, zarr_format=metadata.zarr_format)
-    await _write_metadata(store_path, to_save, metadata.zarr_format, ensure_parents=ensure_parents)
+    await _write_metadata(
+        store_path,
+        to_save,
+        metadata.zarr_format,
+        ensure_parents=ensure_parents,
+        array=not _is_group(metadata),
+    )
+
+
+def _is_group(metadata: ArrayMetadata | GroupMetadata) -> bool:
+    from zarr.core.group import GroupMetadata
+
+    return isinstance(metadata, GroupMetadata)
 
 
 async def _write_metadata(
@@ -312,6 +337,7 @@ async def _write_metadata(
     zarr_format: ZarrFormat,
     *,
     ensure_parents: bool,
+    array: bool,
 ) -> None:
     set_awaitables = [set_or_delete(store_path / key, value) for key, value in to_save.items()]
 
@@ -351,4 +377,5 @@ async def _write_metadata(
             ) from e
 
     await asyncio.gather(*set_awaitables)
-    stored_documents(store_path.store).observe_written(store_path.path, to_save)
+    if array:
+        stored_documents(store_path.store).observe_written(store_path.path, to_save)

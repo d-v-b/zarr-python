@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import functools
 import json
 import math
+import os
 import warnings
 from asyncio import gather
 from collections.abc import Iterable, Mapping, Sequence
@@ -26,8 +28,6 @@ from warnings import warn
 
 import numpy as np
 from typing_extensions import Sentinel, deprecated
-from zarr_metadata import MetadataValidationError as ModelValidationError
-from zarr_metadata import ZarrV2ArrayMetadata, ZarrV3ArrayMetadata
 
 import zarr
 from zarr.abc.codec import ArrayArrayCodec, ArrayBytesCodec, BytesBytesCodec, Codec
@@ -178,11 +178,13 @@ if TYPE_CHECKING:
     from typing import Self
 
     import numpy.typing as npt
+    from zarr_metadata import ZarrV2ArrayMetadata, ZarrV3ArrayMetadata
 
     from zarr.abc.codec import CodecPipeline
     from zarr.abc.store import Store
     from zarr.codecs.sharding import IndexLocation, ShardingCodec
     from zarr.core.buffer import Buffer
+    from zarr.core.common import AccessModeLiteral
     from zarr.core.dtype.wrapper import TBaseDType, TBaseScalar
     from zarr.core.metadata.repair import ArrayDocument
     from zarr.storage import StoreLike
@@ -461,6 +463,10 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
     ) -> None:
         # An AsyncArray reads metadata into the legacy classes, as it always has.
         metadata_parsed = parse_array_metadata(metadata, str(store_path))
+        if isinstance(metadata, dict):
+            # A document given as a dict stands for what the store holds, as the
+            # document an array is opened from does.
+            _record_given_document(store_path, metadata, metadata_parsed.zarr_format)
         object.__setattr__(self, "_io", AsyncArrayIO(metadata_parsed, store_path, config))
         # An AsyncArray is the resolving layer: build its codec pipeline now, so
         # pipeline-construction warnings fire at creation, as they always have.
@@ -6236,7 +6242,7 @@ async def _resize(
             )
 
     # Write new metadata
-    await store_documents(array.store_path, documents)
+    await store_documents(array.store_path, documents, array=True)
 
     # Update the wrapped binding in place; the codec pipeline is kept, as before.
     array._io._rebind_resolved(new_metadata, new_chunk_grid)
@@ -6372,10 +6378,23 @@ def _bound_metadata_dict(data: dict[str, Any], path: str) -> ArrayMetadataModel 
     otherwise (metadata built in code, or an invalid document zarr reads as
     repaired) read into the legacy classes now, warning as `AsyncArray` always
     has."""
+    from zarr_metadata import MetadataValidationError
+
     try:
         return _array_metadata_model(data)
-    except ModelValidationError:
+    except MetadataValidationError:
         return parse_array_metadata(data, path)
+
+
+def _record_given_document(
+    store_path: StorePath, document: Mapping[str, Any], zarr_format: ZarrFormat
+) -> None:
+    """Record `document` as the one stored at `store_path` when reading it needs a
+    repair that moves chunks, unless the store's cache already knows that document."""
+    if moves_chunks(document, zarr_format):
+        stored_documents(store_path.store).restore(
+            store_path.path, zarr_format, copy.deepcopy(dict(document))
+        )
 
 
 def _copied_legacy(source: ArrayMetadata) -> ArrayMetadata:
@@ -6403,9 +6422,19 @@ def _array_metadata_model(data: dict[str, JSON]) -> ArrayMetadataModel:
     `zarr_metadata.MetadataValidationError`. Unknown extension names read as
     unclaimed fields, not errors.
     """
+    model_v2, model_v3 = _model_classes()
     if data.get("zarr_format") == 2:
-        return ZarrV2ArrayMetadata(data)
-    return ZarrV3ArrayMetadata(data)
+        return model_v2(data)
+    return model_v3(data)
+
+
+@functools.cache
+def _model_classes() -> tuple[type[ZarrV2ArrayMetadata], type[ZarrV3ArrayMetadata]]:
+    """The `zarr_metadata` model classes, imported on first use: the import is
+    slow, and only bindings that hold a model need it."""
+    from zarr_metadata import ZarrV2ArrayMetadata, ZarrV3ArrayMetadata
+
+    return ZarrV2ArrayMetadata, ZarrV3ArrayMetadata
 
 
 class ArrayV2DeclarationKwargs(TypedDict, total=False):
@@ -6465,7 +6494,6 @@ class AsyncArrayIO:
     _config: ArrayConfig
     _pipeline_class: type[CodecPipeline]
     _source: ArrayMetadataModel | ArrayMetadata
-    _metadata_model_cache: ArrayMetadataModel | None
     _resolved_cache: ArrayMetadata | None
     _chunk_grid_cache: ChunkGrid | None
     _chunk_key_encoding_cache: ChunkKeyEncoding | None
@@ -6478,12 +6506,12 @@ class AsyncArrayIO:
         config: ArrayConfigLike | None = None,
     ) -> None:
         source: ArrayMetadataModel | ArrayMetadata
-        if isinstance(metadata, ZarrV2ArrayMetadata | ZarrV3ArrayMetadata):
-            source = metadata
-        elif isinstance(metadata, ArrayMetadata):
+        if isinstance(metadata, ArrayMetadata):
             # A resolved object passes through (v2 with a chunk size of 0 is read
             # as repaired).
             source = parse_array_metadata(metadata, str(store_path))
+        elif isinstance(metadata, _model_classes()):
+            source = metadata
         else:
             source = _bound_metadata_dict(cast("dict[str, Any]", metadata), str(store_path))
         # The pipeline implementation is chosen when the binding is made, from
@@ -6502,7 +6530,6 @@ class AsyncArrayIO:
         self._config = config
         self._pipeline_class = pipeline_class
         self._source = source
-        self._metadata_model_cache = None
         self._resolved_cache = None
         self._chunk_grid_cache = None
         self._chunk_key_encoding_cache = None
@@ -6558,7 +6585,9 @@ class AsyncArrayIO:
         repaired raises `zarr_metadata.MetadataValidationError`; use
         [`zarr.api.asynchronous.open_array`][] for the repairing read.
         """
-        store_path = await make_store_path(store, path=name)
+        # A path opens writable without creating anything when no array is there.
+        mode: AccessModeLiteral | None = "r+" if isinstance(store, str | os.PathLike) else None
+        store_path = await make_store_path(store, path=name, mode=mode)
         data = await get_array_metadata(store_path, zarr_format=zarr_format)
         binding = cls(_array_metadata_model(data), store_path, config)
         observe_read(store_path, data)
@@ -6568,16 +6597,15 @@ class AsyncArrayIO:
     def metadata(self) -> ArrayMetadataModel:
         """The bound metadata, as a `zarr_metadata` model."""
         source = self._source
-        if isinstance(source, ZarrV2ArrayMetadata | ZarrV3ArrayMetadata):
+        if not isinstance(source, ArrayV2Metadata | ArrayV3Metadata):
             return source
-        if self._metadata_model_cache is None:
-            buffers = source.to_buffer_dict(default_buffer_prototype())
-            key_value = {key: buffer.to_bytes() for key, buffer in buffers.items()}
-            if isinstance(source, ArrayV2Metadata):
-                self._metadata_model_cache = ZarrV2ArrayMetadata.from_key_value(key_value)
-            else:
-                self._metadata_model_cache = ZarrV3ArrayMetadata.from_key_value(key_value)
-        return self._metadata_model_cache
+        # Derived on every access, not cached: a legacy object may be changed in
+        # place through another handle that shares it (as `AsyncArray` copies do).
+        buffers = source.to_buffer_dict(default_buffer_prototype())
+        key_value = {key: buffer.to_bytes() for key, buffer in buffers.items()}
+        model_v2, model_v3 = _model_classes()
+        model_class = model_v2 if isinstance(source, ArrayV2Metadata) else model_v3
+        return model_class.from_key_value(key_value)
 
     @property
     def metadata_legacy(self) -> ArrayMetadata:
@@ -6587,7 +6615,7 @@ class AsyncArrayIO:
             return source
         if self._resolved_cache is None:
             data = _metadata_model_json(source)
-            if isinstance(source, ZarrV2ArrayMetadata):
+            if isinstance(source, _model_classes()[0]):
                 data.setdefault("attributes", {})
             self._resolved_cache = parse_array_metadata(data, str(self._store_path))
         return self._resolved_cache
@@ -6604,9 +6632,12 @@ class AsyncArrayIO:
 
     @property
     def _zarr_format(self) -> ZarrFormat:
-        if isinstance(self._source, ZarrV2ArrayMetadata | ArrayV2Metadata):
+        source = self._source
+        if isinstance(source, ArrayV2Metadata):
             return 2
-        return 3
+        if isinstance(source, ArrayV3Metadata):
+            return 3
+        return 2 if isinstance(source, _model_classes()[0]) else 3
 
     @property
     def _resolved_if_any(self) -> ArrayMetadata | None:
@@ -6620,7 +6651,6 @@ class AsyncArrayIO:
     ) -> None:
         """Make `resolved` this binding's state. The codec pipeline is kept: rebinding is how `resize` swaps the shape, which leaves the chunk encoding as it was."""
         self._source = resolved
-        self._metadata_model_cache = None
         self._resolved_cache = None
         self._chunk_grid_cache = chunk_grid
         self._chunk_key_encoding_cache = None
@@ -6635,7 +6665,7 @@ class AsyncArrayIO:
                 return self._chunk_grid_cache
             document = self.metadata
             doc = _metadata_model_json(document)
-            if isinstance(document, ZarrV2ArrayMetadata):
+            if isinstance(document, _model_classes()[0]):
                 self._chunk_grid_cache = ChunkGrid.from_sizes(document.shape, tuple(doc["chunks"]))
             else:
                 grid = doc["chunk_grid"]
@@ -6676,7 +6706,7 @@ class AsyncArrayIO:
         if self._chunk_key_encoding_cache is None:
             document = self.metadata
             doc = _metadata_model_json(document)
-            if isinstance(document, ZarrV2ArrayMetadata):
+            if isinstance(document, _model_classes()[0]):
                 self._chunk_key_encoding_cache = V2ChunkKeyEncoding(
                     separator=doc.get("dimension_separator", ".")
                 )
@@ -6805,7 +6835,11 @@ class AsyncArrayIO:
                 str(key): prototype.buffer.from_bytes(value) for key, value in key_value.items()
             }
             await _write_metadata(
-                self._store_path, to_save, self._zarr_format, ensure_parents=ensure_parents
+                self._store_path,
+                to_save,
+                self._zarr_format,
+                ensure_parents=ensure_parents,
+                array=True,
             )
             if self._zarr_format == 2 and ZATTRS_JSON not in to_save:
                 # An attribute-less model emits no .zattrs; a stale one must not
@@ -6824,14 +6858,14 @@ class AsyncArrayIO:
         if stored == bound:
             return
         if type(stored) is not type(bound):
-            stored_format = 2 if isinstance(stored, ZarrV2ArrayMetadata) else 3
+            stored_format = 2 if isinstance(stored, _model_classes()[0]) else 3
             raise ValueError(
                 f"Array {str(self.store_path)!r}: the stored array is Zarr format "
                 f"{stored_format}; the bound metadata is Zarr format {self._zarr_format}."
             )
         stored_json = dict(stored.to_json())
         bound_json = dict(bound.to_json())
-        if isinstance(stored, ZarrV2ArrayMetadata) and isinstance(bound, ZarrV2ArrayMetadata):
+        if isinstance(stored, _model_classes()[0]) and isinstance(bound, _model_classes()[0]):
             stored_json["attributes"] = dict(stored.attributes)
             bound_json["attributes"] = dict(bound.attributes)
         differing = sorted(

@@ -16,19 +16,26 @@ from __future__ import annotations
 import copy
 import weakref
 from functools import partial
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Literal
 
 from zarr.core._json import buffer_to_json_object
 from zarr.core.common import ZARR_JSON, ZARRAY_JSON, ZATTRS_JSON
 from zarr.core.metadata.repair import repair_array_document
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterable, Mapping
 
     from zarr.abc.store import Store
     from zarr.core.buffer import Buffer
     from zarr.core.common import JSON, ZarrFormat
     from zarr.core.metadata.repair import ArrayDocument
+
+
+type CarriedEntry = (
+    tuple[Literal["document"], ArrayDocument | None] | tuple[Literal["copy"], ArrayDocument]
+)
+"""What a cache records of one array document, carried in a pickle: the document's
+entry, or else a consolidated copy's."""
 
 
 def moves_chunks(document: ArrayDocument, zarr_format: ZarrFormat) -> bool:
@@ -42,8 +49,10 @@ class StoredDocuments:
 
     Each array document zarr has seen, by its path and Zarr format (a path may hold a
     document of each), maps to the document as it was stored when reading it needs a
-    repair that moves chunks, and to `None` when it needs none or there is no
-    document; a document zarr has not seen is unknown. Copies of array documents in
+    repair that moves chunks. A document that needs none (or its absence) is recorded,
+    as `None`, only where it replaces such a document or a consolidated copy that
+    needs one; otherwise it is unknown, which means the same, so the cache holds only
+    what stands for a repair. Copies of array documents in
     consolidated metadata are recorded apart, by the array's path and format, only
     when reading them needs such a repair, so a group write can store them as they
     were stored. A document zarr reads to open an array is recorded only once it has
@@ -85,14 +94,34 @@ class StoredDocuments:
     def observe(self, path: str, document: ArrayDocument | None, zarr_format: ZarrFormat) -> None:
         """Record that the array document of `zarr_format` at `path` is `document`
         (`None`: none)."""
+        key = (path, zarr_format)
         if document is not None and moves_chunks(document, zarr_format):
-            self._arrays[path, zarr_format] = copy.deepcopy(document)
-        else:
-            self._arrays[path, zarr_format] = None
+            self._arrays[key] = copy.deepcopy(document)
+        elif key in self._arrays or key in self._copies:
+            self._arrays[key] = None
+
+    def entries(self, paths: Iterable[str], zarr_format: ZarrFormat) -> dict[str, CarriedEntry]:
+        """What this cache records of the array documents at `paths`, to carry to
+        another store object's cache (see `restore_entries`)."""
+        carried: dict[str, CarriedEntry] = {}
+        for path in paths:
+            if self.knows(path, zarr_format):
+                carried[path] = ("document", self.needing_repair(path, zarr_format))
+            elif (copy_entry := self.copy_needing_repair(path, zarr_format)) is not None:
+                carried[path] = ("copy", copy_entry)
+        return carried
+
+    def restore_entries(self, entries: Mapping[str, CarriedEntry], zarr_format: ZarrFormat) -> None:
+        """Record what `entries` carried, keeping what this cache already knows."""
+        for path, entry in entries.items():
+            if entry[0] == "document":
+                self.restore(path, zarr_format, entry[1])
+            else:
+                self.restore_copy(path, zarr_format, entry[1])
 
     def observe_written(self, path: str, documents: Mapping[str, Buffer | None]) -> None:
-        """Record the metadata documents just stored under `path`, by key (`None`:
-        deleted), as `store_documents` takes them."""
+        """Record the array metadata documents just stored under `path`, by key
+        (`None`: deleted), as `store_documents` takes them."""
         if ZARR_JSON in documents:
             zarr_json = documents[ZARR_JSON]
             document = None if zarr_json is None else buffer_to_json_object(zarr_json)

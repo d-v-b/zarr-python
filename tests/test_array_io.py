@@ -21,6 +21,7 @@ from zarr.storage import MemoryStore, StorePath
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path
 
     from zarr.core.common import JSON, ZarrFormat
 
@@ -439,3 +440,10 @@ async def test_v2_model_binding_without_attributes() -> None:
     assert arr.metadata.attributes == {}
     await arr.update_attributes({"x": 1})
     assert (await open_array(store=store, path="foo")).metadata.attributes == {"x": 1}
+
+
+def test_open_a_missing_path_creates_nothing(tmp_path: Path) -> None:
+    missing = tmp_path / "missing.zarr"
+    with pytest.raises(FileNotFoundError):
+        ArrayIO.open(str(missing))
+    assert not missing.exists()
