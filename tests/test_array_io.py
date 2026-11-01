@@ -995,3 +995,85 @@ def test_a_dataclass_subclass_may_annotate_fields_again() -> None:
     typed = _Typed(created.metadata, created.store_path)
     assert typed.shape == (4,)
     assert dataclasses.replace(typed, label="y").label == "y"
+
+
+class _NativeBinding(AsyncArrayIO):
+    """A binding that derives state of its own (a native handle's shape) in `_bind`."""
+
+    native_shape: tuple[int, ...]
+
+    def _bind(self, source: Any, *args: Any) -> None:
+        super()._bind(source, *args)
+        self.native_shape = tuple(source.shape)
+
+
+async def test_every_route_rebinds_through_bind() -> None:
+    """Every way a binding is made or changed goes through `_bind`, so state a
+    subclass derives there follows the metadata, also after a resize."""
+    store = MemoryStore()
+    built = _NativeBinding.build_v3(store, name="a", shape=(4,), data_type="uint8", chunk_grid=(2,))
+    await built.store_metadata()
+    array = built.to_array()
+    await array.resize((6,))
+    bindings = [
+        built,
+        await _NativeBinding.open(store, name="a"),
+        built.with_metadata(built.metadata),
+        built.with_store(MemoryStore()),
+        built.with_config({"order": "F"}),
+        pickle.loads(pickle.dumps(built)),
+        array.io,
+        array.with_config({"order": "F"}).io,
+        pickle.loads(pickle.dumps(array)).io,
+        copy.copy(array).io,
+    ]
+    for binding in bindings:
+        assert isinstance(binding, _NativeBinding)
+        assert binding.native_shape == binding.metadata.shape
+
+
+@pytest.mark.parametrize("derive", ["with_config", "pickle", "deepcopy"])
+async def test_an_array_over_a_model_keeps_the_document_as_stored(derive: str) -> None:
+    """An array rebuilt from one over a model binding (`with_config`, pickling, a
+    deep copy) keeps the model, so its binding still verifies against the store
+    and stores the document unchanged (a NaN payload is kept)."""
+    store = MemoryStore()
+    document = {
+        "zarr_format": 3,
+        "node_type": "array",
+        "shape": [4],
+        "data_type": "float32",
+        "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [4]}},
+        "chunk_key_encoding": {"name": "default"},
+        "fill_value": "0x7fc00001",
+        "codecs": [{"name": "bytes", "configuration": {"endian": "little"}}],
+        "attributes": {},
+    }
+    await store.set(
+        "a/zarr.json", default_buffer_prototype().buffer.from_bytes(json.dumps(document).encode())
+    )
+    array = (await AsyncArrayIO.open(store, name="a")).to_array()
+    if derive == "with_config":
+        rebuilt = array.with_config({"order": "F"})
+    elif derive == "pickle":
+        rebuilt = pickle.loads(pickle.dumps(array))
+    else:
+        rebuilt = copy.deepcopy(array)
+    await rebuilt.io.verify()
+    await rebuilt.io.store_metadata()
+    stored = await store.get("a/zarr.json", prototype=default_buffer_prototype())
+    assert stored is not None
+    assert json.loads(stored.to_bytes()) == document
+
+
+async def test_bindings_compare_with_attributes_json_cannot_hold() -> None:
+    """Equality falls back to the resolved metadata when attributes were changed in
+    place to values JSON cannot hold; reading the model names the value."""
+    array = AsyncArrayIO.build_v3(
+        MemoryStore(), name="a", shape=(4,), data_type="uint8", chunk_grid=(4,)
+    ).to_array()
+    binding = array.io
+    array.metadata.attributes["n"] = np.int64(3)
+    assert binding == copy.copy(binding)
+    with pytest.raises(TypeError, match="int64 is not JSON serializable"):
+        _ = binding.metadata

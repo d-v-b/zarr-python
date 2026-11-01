@@ -522,6 +522,11 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
             # Carried only when it is a subclass, so the pickle stays loadable where
             # that class is not importable only if it is used.
             state["_binding_class"] = type(self._io)
+        source = self._io._source
+        if not isinstance(source, ArrayV2Metadata | ArrayV3Metadata):
+            # The document as stored, which the legacy metadata cannot always
+            # reproduce (a NaN payload, a codec's configuration).
+            state["_model"] = source
         state.update(carried)
         return state
 
@@ -532,7 +537,15 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         # The class the binding chose: a pipeline may build an instance of
         # another one (zarrs-python falls back for stores it cannot use).
         pipeline_class = state.get("_pipeline_class", type(pipeline))
-        io._bind(metadata, state["store_path"], state["config"], pipeline_class)
+        model = state.get("_model")
+        io._bind(
+            metadata if model is None else model,
+            state["store_path"],
+            state["config"],
+            pipeline_class,
+        )
+        if model is not None:
+            io._resolved_cache = metadata
         io._codec_pipeline_cache = pipeline
         io._chunk_grid_cache = state["_chunk_grid"]
         if not any(key in state for key in _CARRIED_KEYS):
@@ -1327,7 +1340,12 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
             # Merge new config with existing config, so missing keys are inherited
             # from the current array rather than from global defaults
             new_config = ArrayConfig(**{**self.config.to_dict(), **config})  # type: ignore[arg-type]
-        return type(self)(metadata=self.metadata, store_path=self.store_path, config=new_config)
+        # Built through the constructor, as it always was, so a subclass's own
+        # __init__ runs; then over this array's kind of binding (its class, and
+        # its model, so the document stays as stored).
+        rebuilt = type(self)(metadata=self.metadata, store_path=self.store_path, config=new_config)
+        object.__setattr__(rebuilt, "_io", self._io._rebound_like(rebuilt._io))
+        return rebuilt
 
     async def nchunks_initialized(self) -> int:
         """
@@ -6467,6 +6485,7 @@ _ASYNC_ARRAY_STATE_KEYS: Final = frozenset(
         "config",
         "_pipeline_class",
         "_binding_class",
+        "_model",
     }
     | set(_CARRIED_KEYS)
 )
@@ -6610,7 +6629,15 @@ def _metadata_model_json(document: ArrayMetadataModel) -> dict[str, Any]:
 
 def _plain_json(value: object) -> Any:
     """`value`, a model's read-only JSON (mapping proxies at any depth), as plain JSON."""
-    return json.loads(json.dumps(value, default=dict))
+    return json.loads(json.dumps(value, default=_mapping_as_dict))
+
+
+def _mapping_as_dict(value: object) -> dict[str, Any]:
+    """`json.dumps`' fallback for `_plain_json`: a mapping as a dict; anything else is
+    not JSON."""
+    if isinstance(value, Mapping):
+        return dict(value)
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
 def _array_metadata_model(data: dict[str, JSON]) -> ArrayMetadataModel:
@@ -6726,6 +6753,11 @@ class AsyncArrayIO:
     pipeline itself, with any options it reads from the configuration, is
     built at the first data operation. `AsyncArray` wraps an `AsyncArrayIO`
     and delegates its metadata and selection IO to it.
+
+    Every way a binding is made or changed (construction, the builders,
+    `open`, the `with_*` methods, pickling, and the resize or attribute update
+    of an array over it) goes through `_bind`, so a subclass that derives
+    state of its own from the binding (a native handle) derives it there.
     """
 
     _store_path: StorePath
@@ -6901,6 +6933,26 @@ class AsyncArrayIO:
             copied._resolved_cache = _copied_legacy(self._resolved_cache)
         return copied
 
+    def _rebound_like(self, built: AsyncArrayIO) -> Self:
+        """A binding of this binding's class, over this binding's model when it holds
+        one (sharing `built`'s resolved metadata), at `built`'s location, with its
+        configuration, pipeline class and caches: how an array rebuilt through its
+        constructor keeps the binding it had."""
+        rebound = object.__new__(type(self))
+        source = self._source
+        model_backed = not isinstance(source, ArrayV2Metadata | ArrayV3Metadata)
+        rebound._bind(
+            source if model_backed else built._source,
+            built._store_path,
+            built._config,
+            built._pipeline_class,
+        )
+        if model_backed:
+            rebound._resolved_cache = built.metadata_legacy
+        rebound._codec_pipeline_cache = built._codec_pipeline_cache
+        rebound._chunk_grid_cache = built._chunk_grid_cache
+        return rebound
+
     @property
     def store_path(self) -> StorePath:
         """The bound location in a store."""
@@ -6930,11 +6982,13 @@ class AsyncArrayIO:
     def _rebind_resolved(
         self, resolved: ArrayMetadata, chunk_grid: ChunkGrid | None = None
     ) -> None:
-        """Make `resolved` this binding's state. The codec pipeline is kept: rebinding is how `resize` swaps the shape, which leaves the chunk encoding as it was."""
-        self._source = resolved
-        self._resolved_cache = None
+        """Make `resolved` this binding's state, through `_bind`. The codec pipeline is
+        kept: rebinding is how `resize` swaps the shape, which leaves the chunk
+        encoding as it was."""
+        pipeline = self._codec_pipeline_cache
+        self._bind(resolved, self._store_path, self._config, self._pipeline_class)
+        self._codec_pipeline_cache = pipeline
         self._chunk_grid_cache = chunk_grid
-        self._chunk_key_encoding_cache = None
 
     @property
     def _chunk_grid(self) -> ChunkGrid:
@@ -7305,7 +7359,12 @@ class AsyncArrayIO:
             return NotImplemented
         if self._store_path != other._store_path or self._config != other._config:
             return False
-        return self.metadata == other.metadata
+        try:
+            return self.metadata == other.metadata
+        except TypeError:
+            # Attributes changed in place to values JSON cannot hold: compare the
+            # resolved forms, which hold them.
+            return self.metadata_legacy == other.metadata_legacy
 
     def __hash__(self) -> int:
         # A subset of the equality fields, available without deriving either
