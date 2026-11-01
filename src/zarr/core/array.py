@@ -10,7 +10,7 @@ import os
 import warnings
 from asyncio import gather
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import MISSING, dataclass, field, replace
 from itertools import starmap
 from logging import getLogger
 from typing import (
@@ -510,6 +510,7 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         # Attributes of the instance's own (a subclass's) pickle with it, as
         # they did when the fields were its only state.
         state: dict[str, object] = {key: v for key, v in vars(self).items() if key != "_io"}
+        state |= _slot_values(self)
         state |= {
             "metadata": metadata,
             "store_path": self.store_path,
@@ -563,10 +564,15 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
                 object.__setattr__(self, key, value)
 
     def __copy__(self) -> Self:
+        if _overrides_reduction(type(self)):
+            # A subclass that decides how it is copied is copied its way.
+            return cast("Self", copy._reconstruct(self, None, *self.__reduce_ex__(4)))  # type: ignore[attr-defined]
         # A shallow copy shares the field values, as a dataclass copy does (a
         # change to either takes a binding of its own; see `_own_binding`).
         copied = object.__new__(type(self))
         copied.__dict__.update(vars(self))
+        for name, value in _slot_values(self).items():
+            object.__setattr__(copied, name, value)
         return copied
 
     @classmethod
@@ -1963,9 +1969,9 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
 
 
 class _BindingField:
-    """A dataclass field of `AsyncArray`, read from and written to its binding. Like a
-    field without a default, it is not an attribute of the class, so a `@dataclass`
-    subclass that annotates the field again finds no default."""
+    """A dataclass field of `AsyncArray`, read from and written to its binding. On the
+    class it reads as `dataclasses.MISSING`, so a `@dataclass` subclass that annotates
+    the field again finds no default, as for a field without one."""
 
     def __init__(
         self,
@@ -1978,7 +1984,7 @@ class _BindingField:
 
     def __get__(self, instance: AsyncArray[Any] | None, owner: type | None = None) -> Any:
         if instance is None:
-            raise AttributeError(f"{self._get.__name__.removeprefix('_get_')} is an instance field")
+            return MISSING
         return self._get(instance)
 
     def __set__(self, instance: AsyncArray[Any], value: object) -> None:
@@ -1988,6 +1994,26 @@ class _BindingField:
 def _get_metadata(self: AsyncArray[Any]) -> ArrayMetadata:
     """The in-memory metadata of this array."""
     return self._io.metadata_legacy
+
+
+def _slot_values(array: AsyncArray[Any]) -> dict[str, object]:
+    """The values in the `__slots__` a subclass of `AsyncArray` declares, which
+    `vars` leaves out, by name; unset slots are left out."""
+    values: dict[str, object] = {}
+    for klass in type(array).__mro__:
+        slots = vars(klass).get("__slots__", ())
+        for name in (slots,) if isinstance(slots, str) else slots:
+            if name not in ("__dict__", "__weakref__") and hasattr(array, name):
+                values[name] = getattr(array, name)
+    return values
+
+
+_REDUCTION_HOOKS: Final = ("__reduce_ex__", "__reduce__", "__getstate__", "__setstate__")
+
+
+def _overrides_reduction(cls: type) -> bool:
+    """Whether a subclass of `AsyncArray` defines how it is pickled or copied."""
+    return any(getattr(cls, hook) is not getattr(AsyncArray, hook) for hook in _REDUCTION_HOOKS)
 
 
 def _own_binding(self: AsyncArray[Any]) -> AsyncArrayIO:

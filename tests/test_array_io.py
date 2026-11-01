@@ -6,8 +6,8 @@ import copy
 import dataclasses
 import json
 import pickle
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from dataclasses import MISSING, dataclass
+from typing import TYPE_CHECKING, Any, SupportsIndex, cast
 
 import numpy as np
 import pytest
@@ -1077,3 +1077,40 @@ async def test_bindings_compare_with_attributes_json_cannot_hold() -> None:
     assert binding == copy.copy(binding)
     with pytest.raises(TypeError, match="int64 is not JSON serializable"):
         _ = binding.metadata
+
+
+class _SlottedAsyncArray(AsyncArray[Any]):
+    """An `AsyncArray` subclass with a slot of its own."""
+
+    __slots__ = ("extra",)
+    extra: int
+
+
+class _ReducingAsyncArray(AsyncArray[Any]):
+    """An `AsyncArray` subclass that decides how it is copied."""
+
+    def __reduce_ex__(self, protocol: SupportsIndex) -> Any:
+        return (_rebuilt_marked, (self.metadata, self.store_path))
+
+
+def _rebuilt_marked(metadata: Any, store_path: StorePath) -> _ReducingAsyncArray:
+    rebuilt = _ReducingAsyncArray(metadata, store_path)
+    object.__setattr__(rebuilt, "marked", True)
+    return rebuilt
+
+
+def test_subclass_slots_and_reductions_are_honored() -> None:
+    """A subclass's slots pickle and copy with it, and a subclass that defines its
+    own reduction is copied its way, as when the fields were an array's only state."""
+    created = zarr.create_array(MemoryStore(), shape=(4,), dtype="uint8", chunks=(2,))
+    slotted = _SlottedAsyncArray(created.metadata, created.store_path)
+    object.__setattr__(slotted, "extra", 5)
+    for copied in (pickle.loads(pickle.dumps(slotted)), copy.copy(slotted), copy.deepcopy(slotted)):
+        assert copied.extra == 5
+    reducing = _ReducingAsyncArray(created.metadata, created.store_path)
+    assert vars(copy.copy(reducing))["marked"] is True
+
+
+def test_fields_read_as_missing_on_the_class() -> None:
+    """The fields have no class value, as fields without defaults have none."""
+    assert all(getattr(AsyncArray, name) is MISSING for name in ("metadata", "config"))
