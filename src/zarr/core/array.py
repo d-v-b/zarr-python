@@ -5024,6 +5024,13 @@ async def _store_repaired_document(store_path: StorePath, metadata: ArrayMetadat
     possibly by another implementation), it is left as written; if there is none,
     there is nothing to repair.
 
+    The check is only as fresh as the cache. Once a binding of the same store object
+    has read or stored a newer document (for example, `create_array(...,
+    overwrite=True)` on that store), the cache no longer records the repair, so an
+    array opened before that writes its chunks under its own metadata unchecked, as
+    any array whose document another writer replaced does: zarr does not detect a
+    stale array handle.
+
     Storing the same repair twice is harmless, so handles that write chunks
     concurrently need no coordination. The read and the store are not one atomic
     step, though: a metadata write by another handle between them (a resize, an
