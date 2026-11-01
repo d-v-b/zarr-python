@@ -1833,3 +1833,23 @@ def test_restore_keeps_what_the_cache_learned_itself() -> None:
 
     assert cache.needing_repair("a", 2) is None
     assert cache.needing_repair("b", 2) == broken
+
+
+@pytest.mark.filterwarnings("ignore:Consolidated metadata is currently not part:UserWarning")
+@pytest.mark.filterwarnings("ignore:.*is read as:zarr.errors.ZarrUserWarning")
+@pytest.mark.parametrize("zarr_format", [2, 3])
+def test_pickled_consolidated_member_stores_its_repair(
+    tmp_path: Path, zarr_format: Literal[2, 3]
+) -> None:
+    """A member read from consolidated metadata carries its copy's entry when
+    pickled, so the unpickled member's first chunk write stores the repair."""
+    path = tmp_path / "group.zarr"
+    document = _consolidated_legacy_member(path, zarr_format)
+    group = zarr.open_group(LocalStore(path), mode="r+", use_consolidated=True)
+    member = group["a"]
+    assert isinstance(member, zarr.Array)
+    revived: AnyArray = pickle.loads(pickle.dumps(member))
+
+    revived[:] = [7, 8, 9]
+
+    assert _stored_chunks(json.loads(document.read_text())) == [1]

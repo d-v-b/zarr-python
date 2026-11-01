@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import pytest
@@ -20,6 +20,8 @@ from zarr.errors import ArrayNotFoundError, UnknownCodecError
 from zarr.storage import MemoryStore, StorePath
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from zarr.core.common import JSON, ZarrFormat
 
 METADATA_DOCUMENTS = ("zarr.json", ".zarray", ".zattrs", ".zgroup")
@@ -330,7 +332,14 @@ def _bind_zero_chunk_by_constructor(metadata: ArrayV2Metadata) -> AsyncArrayIO:
 
 
 def _bind_zero_chunk_by_build(metadata: ArrayV2Metadata) -> AsyncArrayIO:
-    return AsyncArrayIO.build_v2(MemoryStore(), shape=metadata.shape, dtype="int16", chunks=(0,))
+    return AsyncArrayIO.build_v2(
+        MemoryStore(),
+        shape=metadata.shape,
+        dtype=metadata.dtype,
+        chunks=metadata.chunks,
+        fill_value=metadata.fill_value,
+        order=metadata.order,
+    )
 
 
 def _bind_zero_chunk_by_with_metadata(metadata: ArrayV2Metadata) -> AsyncArrayIO:
@@ -343,7 +352,9 @@ def _bind_zero_chunk_by_with_metadata(metadata: ArrayV2Metadata) -> AsyncArrayIO
     [_bind_zero_chunk_by_constructor, _bind_zero_chunk_by_build, _bind_zero_chunk_by_with_metadata],
     ids=["constructor", "build_v2", "with_metadata"],
 )
-def test_zero_chunk_v2_metadata_binds_repaired(bind: Any) -> None:
+def test_zero_chunk_v2_metadata_binds_repaired(
+    bind: Callable[[ArrayV2Metadata], AsyncArrayIO],
+) -> None:
     """`ArrayV2Metadata` with a chunk size of 0 is read as repaired however it
     reaches a binding, as `parse_array_metadata` reads it."""
     metadata = ArrayV2Metadata(shape=(3,), chunks=(0,), dtype=Int16(), fill_value=0, order="C")
@@ -373,3 +384,58 @@ async def test_v2_model_binding_keeps_attributes_writable() -> None:
 def test_build_v2_vlen_without_object_codec_raises() -> None:
     with pytest.raises(ValueError, match="requires the numcodecs.VLenUTF8 codec"):
         AsyncArrayIO.build_v2(MemoryStore(), shape=(4,), dtype=str, chunks=(2,))
+
+
+async def test_metadata_dict_binds_as_a_model_until_chunks_move() -> None:
+    """A valid metadata dict binds as a model, so an extension zarr-python
+    lacks fails only when chunks are read or written; metadata zarr can only
+    read as repaired is read, repaired, when bound."""
+    store = MemoryStore()
+    doc: dict[str, JSON] = {
+        "zarr_format": 3,
+        "node_type": "array",
+        "shape": [4],
+        "data_type": "bfloat16",
+        "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [4]}},
+        "chunk_key_encoding": {"name": "default"},
+        "fill_value": 0,
+        "codecs": [{"name": "zarrs.zfp", "configuration": {"mode": "reversible"}}],
+    }
+    aio = AsyncArrayIO(cast("Any", doc), StorePath(store, "foo"))
+    assert isinstance(aio.metadata, ZarrV3ArrayMetadata)
+    await aio.store_metadata()
+    await aio.verify()
+    await aio.erase_chunks()
+    with pytest.raises(ValueError, match="bfloat16"):
+        await aio.getitem(Ellipsis)
+
+    zero_chunk = {**doc, "data_type": "uint8", "codecs": [{"name": "bytes"}]}
+    zero_chunk["chunk_grid"] = {"name": "regular", "configuration": {"chunk_shape": [0]}}
+    with pytest.warns(zarr.errors.ZarrUserWarning, match="is read as"):
+        repaired = AsyncArrayIO(cast("Any", zero_chunk), StorePath(store, "bar"))
+    assert repaired.metadata_legacy.chunks == (1,)
+
+
+async def test_chunk_and_selection_io_signatures() -> None:
+    """erase_chunk takes grid coordinates positionally, as any sequence;
+    setitem takes its prototype by keyword."""
+    store = MemoryStore()
+    aio = AsyncArrayIO.build_v3(store, name="foo", shape=(4,), data_type="uint8", chunk_grid=(2,))
+    await aio.setitem(Ellipsis, np.arange(4, dtype="uint8"))
+    await aio.erase_chunk([0])
+    assert "foo/c/0" not in await _store_keys(store)
+    with pytest.raises(TypeError):
+        await aio.erase_chunk(chunk_coords=(1,))  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        await aio.setitem(Ellipsis, np.arange(4, dtype="uint8"), default_buffer_prototype())  # type: ignore[call-arg]
+
+
+async def test_v2_model_binding_without_attributes() -> None:
+    store = MemoryStore()
+    aio = AsyncArrayIO.build_v2(store, name="foo", shape=(4,), dtype="uint8", chunks=(2,))
+    await aio.store_metadata()
+    await store.delete("foo/.zattrs")
+    arr = (await AsyncArrayIO.open(store, name="foo")).to_array()
+    assert arr.metadata.attributes == {}
+    await arr.update_attributes({"x": 1})
+    assert (await open_array(store=store, path="foo")).metadata.attributes == {"x": 1}

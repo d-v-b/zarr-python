@@ -26,6 +26,7 @@ from warnings import warn
 
 import numpy as np
 from typing_extensions import Sentinel, deprecated
+from zarr_metadata import MetadataValidationError as ModelValidationError
 from zarr_metadata import ZarrV2ArrayMetadata, ZarrV3ArrayMetadata
 
 import zarr
@@ -458,7 +459,9 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         store_path: StorePath,
         config: ArrayConfigLike | None = None,
     ) -> None:
-        object.__setattr__(self, "_io", AsyncArrayIO(metadata, store_path, config))
+        # An AsyncArray reads metadata into the legacy classes, as it always has.
+        metadata_parsed = parse_array_metadata(metadata, str(store_path))
+        object.__setattr__(self, "_io", AsyncArrayIO(metadata_parsed, store_path, config))
         # An AsyncArray is the resolving layer: build its codec pipeline now, so
         # pipeline-construction warnings fire at creation, as they always have.
         _ = self._io._resolved_codec_pipeline
@@ -484,6 +487,7 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
             "codec_pipeline": self.codec_pipeline,
             "_chunk_grid": self._chunk_grid,
             "config": self.config,
+            "_pipeline_class": self._io._pipeline_class,
         }
         state.update(self._io._carried_cache_entry())
         return state
@@ -492,13 +496,12 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         metadata = state["metadata"]
         pipeline = state["codec_pipeline"]
         io = object.__new__(AsyncArrayIO)
-        io._bind(metadata, state["store_path"], state["config"], type(pipeline))
+        # The class the binding chose: a pipeline may build an instance of
+        # another one (zarrs-python falls back for stores it cannot use).
+        pipeline_class = state.get("_pipeline_class", type(pipeline))
+        io._bind(metadata, state["store_path"], state["config"], pipeline_class)
         io._codec_pipeline_cache = pipeline
         io._chunk_grid_cache = state["_chunk_grid"]
-        # A pickle from before the store's cache held this carries it on the metadata.
-        legacy_mark = metadata.__dict__.pop("_stored_document", None)
-        if legacy_mark is not None:
-            state = {**state, "_stored_entry": legacy_mark}
         io._restore_cache_entry(state)
         object.__setattr__(self, "_io", io)
 
@@ -720,7 +723,7 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         attributes: dict[str, JSON] | None = None,
     ) -> ArrayV2Metadata:
         """See the module-level `build_array_metadata_v2`."""
-        return build_array_metadata_v2(
+        return _array_metadata_v2(
             shape=shape,
             dtype=dtype,
             chunks=chunks,
@@ -4687,7 +4690,7 @@ async def init_array(
             order_parsed = order
         chunk_key_encoding_parsed = cast("V2ChunkKeyEncoding", chunk_key_encoding_parsed)
 
-        meta = build_array_metadata_v2(
+        meta = _array_metadata_v2(
             shape=shape_parsed,
             dtype=zdtype,
             chunks=outer_chunks.chunk_shape,
@@ -4753,6 +4756,43 @@ async def init_array(
     return arr
 
 
+def _array_metadata_v2(
+    *,
+    shape: ShapeLike,
+    dtype: ZDTypeLike | ZDType[TBaseDType, TBaseScalar],
+    chunks: ShapeLike,
+    fill_value: Any = DEFAULT_FILL_VALUE,
+    order: MemoryOrder | None = None,
+    dimension_separator: Literal[".", "/"] = ".",
+    filters: Iterable[dict[str, JSON] | Numcodec] | None = None,
+    compressor: CompressorLikev2 = None,
+    attributes: dict[str, JSON] | None = None,
+) -> ArrayV2Metadata:
+    """`build_array_metadata_v2` without its object codec check, which the
+    callers that create arrays from user arguments make (or, for the legacy
+    `create` path, have never made) themselves."""
+    zdtype = parse_dtype(dtype, zarr_format=2)
+    if order is None:
+        order = zarr_config.get("array.order")
+    if fill_value is DEFAULT_FILL_VALUE:
+        fill_value_parsed: Any = zdtype.default_scalar()
+    else:
+        # An explicit None is kept: the field is nullable in Zarr format 2.
+        fill_value_parsed = fill_value
+
+    return ArrayV2Metadata(
+        shape=parse_shapelike(shape),
+        dtype=zdtype,
+        chunks=parse_shapelike(chunks),
+        order=order,
+        dimension_separator=dimension_separator,
+        fill_value=fill_value_parsed,
+        compressor=compressor,
+        filters=filters,
+        attributes=attributes,
+    )
+
+
 def build_array_metadata_v2(
     *,
     shape: ShapeLike,
@@ -4773,27 +4813,18 @@ def build_array_metadata_v2(
     `array.order`. `filters` and `compressor` are numcodecs objects or their
     JSON, as stored. Nothing is guessed.
     """
-    zdtype = parse_dtype(dtype, zarr_format=2)
-    if order is None:
-        order = zarr_config.get("array.order")
-    if fill_value is DEFAULT_FILL_VALUE:
-        fill_value_parsed: Any = zdtype.default_scalar()
-    else:
-        # An explicit None is kept: the field is nullable in Zarr format 2.
-        fill_value_parsed = fill_value
-
-    metadata = ArrayV2Metadata(
-        shape=parse_shapelike(shape),
-        dtype=zdtype,
-        chunks=parse_shapelike(chunks),
+    metadata = _array_metadata_v2(
+        shape=shape,
+        dtype=dtype,
+        chunks=chunks,
+        fill_value=fill_value,
         order=order,
         dimension_separator=dimension_separator,
-        fill_value=fill_value_parsed,
-        compressor=compressor,
         filters=filters,
+        compressor=compressor,
         attributes=attributes,
     )
-    _check_object_codec_v2(zdtype, metadata.filters, metadata.compressor)
+    _check_object_codec_v2(metadata.dtype, metadata.filters, metadata.compressor)
     return metadata
 
 
@@ -5099,8 +5130,9 @@ async def _store_repaired_document(store_path: StorePath, metadata: ArrayMetadat
     declaration, as over any document. The document is read again, because the store
     may hold a newer one. If that one lays out chunks differently (another writer
     stored a different chunk size since), the caller would write chunks no reader
-    finds, so it raises, stores nothing, and leaves the cache as it was, so every
-    later write raises too. If it needs no repair (the array was re-saved since,
+    finds, so it raises, stores nothing, and leaves the cache as it was, so later
+    writes raise too, until a binding of this store object reads or stores a newer
+    document. If it needs no repair (the array was re-saved since,
     possibly by another implementation), it is left as written; if there is none,
     there is nothing to repair.
 
@@ -5108,8 +5140,8 @@ async def _store_repaired_document(store_path: StorePath, metadata: ArrayMetadat
     has read or stored a newer document (for example, `create_array(...,
     overwrite=True)` on that store), the cache no longer records the repair, so an
     array opened before that writes its chunks under its own metadata unchecked, as
-    any array whose document another writer replaced does: zarr does not detect a
-    stale array handle.
+    any array whose document another writer replaced does: outside the check above,
+    zarr does not detect a stale array handle.
 
     Storing the same repair twice is harmless, so handles that write chunks
     concurrently need no coordination. The read and the store are not one atomic
@@ -5121,7 +5153,6 @@ async def _store_repaired_document(store_path: StorePath, metadata: ArrayMetadat
     path = store_path.path
     zarr_format = metadata.zarr_format
     keys = ARRAY_DOCUMENTS[zarr_format]
-    documents: dict[str, Buffer] | None = None
     if cache.knows(path, zarr_format):
         stored = cache.needing_repair(path, zarr_format)
     else:
@@ -5130,8 +5161,7 @@ async def _store_repaired_document(store_path: StorePath, metadata: ArrayMetadat
         metadata
     ):
         return
-    if documents is None:
-        documents = await read_documents(store_path, keys)
+    documents = await read_documents(store_path, keys)
     document = stored_array_document(documents, zarr_format)
     if document is None:
         cache.observe(path, None, zarr_format)
@@ -6336,6 +6366,18 @@ _CARRIED_KEYS: Final = ("_stored_entry", "_stored_copy")
 """The keys a pickled binding carries its store cache's entry under."""
 
 
+def _bound_metadata_dict(data: dict[str, Any], path: str) -> ArrayMetadataModel | ArrayMetadata:
+    """A metadata dict given to a binding: read as a model when it is valid
+    JSON metadata, so names resolve only when chunks are read or written;
+    otherwise (metadata built in code, or an invalid document zarr reads as
+    repaired) read into the legacy classes now, warning as `AsyncArray` always
+    has."""
+    try:
+        return _array_metadata_model(data)
+    except ModelValidationError:
+        return parse_array_metadata(data, path)
+
+
 def _copied_legacy(source: ArrayMetadata) -> ArrayMetadata:
     """A copy of a legacy metadata object with its own attributes dict, so an
     attribute update through one binding (which replaces top-level keys in
@@ -6438,10 +6480,12 @@ class AsyncArrayIO:
         source: ArrayMetadataModel | ArrayMetadata
         if isinstance(metadata, ZarrV2ArrayMetadata | ZarrV3ArrayMetadata):
             source = metadata
-        else:
-            # A legacy resolved object passes through; raw JSON is read eagerly,
-            # as repaired when it needs that, warning as `AsyncArray` always has.
+        elif isinstance(metadata, ArrayMetadata):
+            # A resolved object passes through (v2 with a chunk size of 0 is read
+            # as repaired).
             source = parse_array_metadata(metadata, str(store_path))
+        else:
+            source = _bound_metadata_dict(cast("dict[str, Any]", metadata), str(store_path))
         # The pipeline implementation is chosen when the binding is made, from
         # the global configuration, exactly as `AsyncArray` has always chosen
         # it; the pipeline itself is built on first use.
@@ -6544,11 +6588,7 @@ class AsyncArrayIO:
         if self._resolved_cache is None:
             data = _metadata_model_json(source)
             if isinstance(source, ZarrV2ArrayMetadata):
-                # The model's attributes are read-only JSON; its `.zattrs` is plain.
-                zattrs = {str(key): value for key, value in source.to_key_value().items()}
-                data["attributes"] = (
-                    json.loads(zattrs[ZATTRS_JSON]) if ZATTRS_JSON in zattrs else {}
-                )
+                data.setdefault("attributes", {})
             self._resolved_cache = parse_array_metadata(data, str(self._store_path))
         return self._resolved_cache
 
@@ -6812,8 +6852,9 @@ class AsyncArrayIO:
             self._store_path.path, None, self._zarr_format
         )
 
-    async def erase_chunk(self, chunk_coords: tuple[int, ...]) -> None:
+    async def erase_chunk(self, chunk_coords: Sequence[int], /) -> None:
         """Delete one stored chunk by grid coordinates (the shard, under sharding). Succeeds if absent."""
+        chunk_coords = tuple(chunk_coords)
         grid_shape = self._shard_grid_shape
         if len(chunk_coords) != len(grid_shape) or any(
             coord < 0 or coord >= size for coord, size in zip(chunk_coords, grid_shape, strict=True)
@@ -6904,6 +6945,7 @@ class AsyncArrayIO:
         self,
         selection: BasicSelection,
         value: npt.ArrayLike,
+        *,
         prototype: BufferPrototype | None = None,
     ) -> None:
         """Encode `value` and store the chunks covering `selection`."""
@@ -7040,7 +7082,7 @@ class ArrayIO:
         """Delete the stored metadata; chunks are kept. See `AsyncArrayIO.erase_metadata`."""
         sync(self._async_io.erase_metadata())
 
-    def erase_chunk(self, chunk_coords: tuple[int, ...]) -> None:
+    def erase_chunk(self, chunk_coords: Sequence[int], /) -> None:
         """Delete one stored chunk by grid coordinates. See `AsyncArrayIO.erase_chunk`."""
         sync(self._async_io.erase_chunk(chunk_coords))
 
@@ -7061,6 +7103,7 @@ class ArrayIO:
         self,
         selection: BasicSelection,
         value: npt.ArrayLike,
+        *,
         prototype: BufferPrototype | None = None,
     ) -> None:
         """Encode `value` and store the chunks. See `AsyncArrayIO.setitem`."""
