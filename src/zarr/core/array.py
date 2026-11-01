@@ -496,15 +496,23 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
     def __getstate__(self) -> dict[str, object]:
         # The pickled state is the fields', as it has always been, so a pickle
         # loads in either version; what the store's cache knows rides along.
+        carried = self._io._carried_cache_entry()
+        metadata = self.metadata
+        mark = carried.get("_stored_entry", carried.get("_stored_copy"))
+        if mark is not None:
+            # zarr 3.4.1 and 3.4.2 read the repair a stored document needs from
+            # this mark on the metadata itself; this version reads the carried entry.
+            metadata = copy.copy(metadata)
+            object.__setattr__(metadata, "_stored_document", copy.deepcopy(mark))
         state: dict[str, object] = {
-            "metadata": self.metadata,
+            "metadata": metadata,
             "store_path": self.store_path,
             "codec_pipeline": self.codec_pipeline,
             "_chunk_grid": self._chunk_grid,
             "config": self.config,
             "_pipeline_class": self._io._pipeline_class,
         }
-        state.update(self._io._carried_cache_entry())
+        state.update(carried)
         return state
 
     def __setstate__(self, state: dict[str, Any]) -> None:
@@ -517,6 +525,11 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         io._bind(metadata, state["store_path"], state["config"], pipeline_class)
         io._codec_pipeline_cache = pipeline
         io._chunk_grid_cache = state["_chunk_grid"]
+        if not any(key in state for key in _CARRIED_KEYS):
+            # A pickle from zarr 3.4.1 or 3.4.2 marks the metadata itself.
+            legacy_mark = vars(metadata).get("_stored_document")
+            if legacy_mark is not None:
+                state = {**state, "_stored_entry": legacy_mark}
         io._restore_cache_entry(state)
         object.__setattr__(self, "_io", io)
 
@@ -6575,8 +6588,11 @@ class AsyncArrayIO:
                 source = _copied_legacy(source)
         elif isinstance(metadata, _model_classes()):
             source = metadata
-        else:
+        elif isinstance(metadata, Mapping):
             source = _bound_metadata_dict(cast("dict[str, Any]", metadata), store_path)
+        else:
+            # Raises the TypeError AsyncArray always raised for such input.
+            source = parse_array_metadata(metadata, str(store_path))
         # The pipeline implementation is chosen when the binding is made, from
         # the global configuration, exactly as `AsyncArray` has always chosen
         # it; the pipeline itself is built on first use.

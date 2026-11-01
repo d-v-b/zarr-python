@@ -7,7 +7,7 @@ import pickle
 import re
 import sys
 from itertools import accumulate, starmap
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 from unittest import mock
 
 import numcodecs
@@ -2754,3 +2754,10 @@ def test_import_zarr_leaves_zarr_metadata_unimported() -> None:
 
     code = "import sys, zarr; assert 'zarr_metadata' not in sys.modules"
     subprocess.run([sys.executable, "-c", code], check=True)
+
+
+def test_async_array_rejects_metadata_that_is_not_a_mapping() -> None:
+    with pytest.raises(TypeError):
+        AsyncArray(cast("Any", 42), StorePath(MemoryStore()))
+    with pytest.raises(TypeError):
+        zarr.AsyncArrayIO(cast("Any", 42), StorePath(MemoryStore()))

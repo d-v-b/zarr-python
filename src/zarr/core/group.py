@@ -410,7 +410,8 @@ class GroupMetadata(Metadata):
         indent = config.get("json_indent")
         if self.zarr_format == 3:
             document = self.to_dict()
-            if self.consolidated_metadata is not None:
+            if self.consolidated_metadata is not None and as_stored:
+                # Encoded again only where a member is kept as stored.
                 document["consolidated_metadata"] = self.consolidated_metadata.to_dict(
                     members_as_stored=as_stored
                 )
@@ -710,10 +711,25 @@ class AsyncGroup:
         state = dict(state)
         entries = cast("dict[str, CarriedEntry] | None", state.pop("_stored_members", None))
         self.__dict__.update(state)
-        if entries is not None:
+        if entries is None:
+            entries = self._legacy_member_marks()
+        if entries:
             stored_documents(self.store_path.store).restore_entries(
                 entries, self.metadata.zarr_format
             )
+
+    def _legacy_member_marks(self) -> dict[str, CarriedEntry]:
+        """The consolidated members a pickle from zarr 3.4.1 or 3.4.2 marks as read
+        from a document that needs a repair, as the entries this version carries."""
+        consolidated = self.metadata.consolidated_metadata
+        if consolidated is None:
+            return {}
+        marks: dict[str, CarriedEntry] = {}
+        for key, member in consolidated.flattened_metadata.items():
+            mark = vars(member).get("_stored_document")
+            if mark is not None:
+                marks[_join_paths([self.store_path.path, key])] = ("copy", mark)
+        return marks
 
     @classmethod
     def _from_bytes_v2(

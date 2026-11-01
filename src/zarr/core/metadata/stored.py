@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Final, Literal
 
 from zarr.core._json import buffer_to_json_object
 from zarr.core.common import ZARR_JSON, ZARRAY_JSON, ZATTRS_JSON
-from zarr.core.metadata.repair import repair_array_document
+from zarr.core.metadata.repair import may_move_chunks, repair_array_document
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -40,6 +40,8 @@ entry, or else a consolidated copy's."""
 
 def moves_chunks(document: ArrayDocument, zarr_format: ZarrFormat) -> bool:
     """Whether reading `document` needs a repair that moves chunks."""
+    if not may_move_chunks(document, zarr_format):
+        return False
     _, readings = repair_array_document(document, zarr_format)
     return any(reading.moves_chunks for reading in readings)
 

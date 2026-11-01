@@ -1959,3 +1959,33 @@ def test_pickled_subgroup_keeps_nested_members_as_stored(
     assert write_through(lambda sub: pickle.loads(pickle.dumps(sub)), "pickled") == write_through(
         lambda sub: sub, "original"
     )
+
+
+@pytest.mark.filterwarnings("ignore:.*is read as:zarr.errors.ZarrUserWarning")
+@pytest.mark.parametrize("zarr_format", [2, 3])
+def test_pickles_cross_versions_with_the_repair(tmp_path: Path, zarr_format: Literal[2, 3]) -> None:
+    """An array pickled by zarr 3.4.1 or 3.4.2 marks its metadata with the stored
+    document it was read from; this version reads that mark, and marks the metadata
+    it pickles the same way, so a write after unpickling stores the repair in
+    either direction."""
+    path = tmp_path / "legacy.zarr"
+    _legacy_array(path, zarr_format)
+    doc_name = ".zarray" if zarr_format == 2 else "zarr.json"
+    stored = json.loads((path / doc_name).read_text())
+    array = zarr.open_array(store=LocalStore(path), mode="r+")
+
+    state = array.async_array.__getstate__()
+    assert vars(state["metadata"])["_stored_document"] is not None
+
+    old_state = {
+        key: state[key] for key in ("store_path", "codec_pipeline", "_chunk_grid", "config")
+    }
+    old_metadata = copy.copy(array.metadata)
+    object.__setattr__(old_metadata, "_stored_document", stored)
+    old_state["metadata"] = old_metadata
+    revived = object.__new__(type(array.async_array))
+    revived.__setstate__(
+        pickle.loads(pickle.dumps({**old_state, "store_path": StorePath(LocalStore(path))}))
+    )
+    sync(revived.setitem(slice(None), np.array([7, 8, 9], dtype="int16")))
+    assert _stored_chunks(json.loads((path / doc_name).read_text())) == [1]
