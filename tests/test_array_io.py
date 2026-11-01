@@ -5,7 +5,9 @@ from __future__ import annotations
 import copy
 import dataclasses
 import json
+import math
 import pickle
+import threading
 from dataclasses import MISSING, dataclass
 from typing import TYPE_CHECKING, Any, SupportsIndex, cast
 
@@ -488,8 +490,17 @@ async def test_a_strict_v2_read_reports_every_problem_with_its_chunk_sizes() -> 
     with pytest.raises(MetadataValidationError) as error:
         await AsyncArrayIO.open(store, name="a")
     locations = [p.loc for p in error.value.problems]
-    assert ("chunks", 0) in locations
-    assert len(locations) > 1
+    assert locations.count(("chunks", 0)) == 1
+    assert any(loc[0] == "dtype" for loc in locations)
+
+
+async def test_a_strict_v2_read_reports_a_chunk_size_once() -> None:
+    """A chunk size the model rejects itself is reported once."""
+    store = MemoryStore()
+    await _store_v2_document(store, {**_V2_DOCUMENT, "chunks": [-1]})
+    with pytest.raises(MetadataValidationError) as error:
+        await AsyncArrayIO.open(store, name="a")
+    assert [p.loc for p in error.value.problems] == [("chunks",)]
 
 
 def test_with_metadata_rejects_what_is_not_metadata() -> None:
@@ -1073,16 +1084,35 @@ async def test_an_array_over_a_model_keeps_the_document_as_stored(derive: str) -
 
 
 async def test_bindings_compare_with_attributes_json_cannot_hold() -> None:
-    """Equality falls back to the resolved metadata when attributes were changed in
-    place to values JSON cannot hold; reading the model names the value."""
-    array = AsyncArrayIO.build_v3(
-        MemoryStore(), name="a", shape=(4,), data_type="uint8", chunk_grid=(4,)
-    ).to_array()
-    binding = array.io
-    array.metadata.attributes["n"] = np.int64(3)
-    assert binding == copy.copy(binding)
+    """Equality of model bindings whose attributes were changed in place to values
+    JSON cannot hold compares their documents without the attributes, then the
+    attributes; reading the model names the value."""
+    store = MemoryStore()
+    await AsyncArrayIO.build_v3(
+        store, name="a", shape=(4,), data_type="float32", chunk_grid=(4,), fill_value=0.0
+    ).store_metadata()
+    first, second = [(await AsyncArrayIO.open(store, name="a")).to_array() for _ in range(2)]
+    for array in (first, second):
+        array.metadata.attributes["n"] = np.int64(3)
+    assert first.io == second.io
+    second.metadata.attributes["n"] = np.int64(4)
+    assert first.io != second.io
     with pytest.raises(TypeError, match="int64 is not JSON serializable"):
-        _ = binding.metadata
+        _ = first.io.metadata
+
+
+async def test_a_model_binding_reads_changed_attributes_once() -> None:
+    """A model binding whose attributes were changed in place gives one model for
+    them until they change again, also for attributes holding NaN."""
+    store = MemoryStore()
+    await AsyncArrayIO.build_v3(
+        store, name="a", shape=(4,), data_type="uint8", chunk_grid=(4,)
+    ).store_metadata()
+    array = (await AsyncArrayIO.open(store, name="a")).to_array()
+    array.metadata.attributes["x"] = float("nan")
+    binding = array.io
+    assert binding.metadata is binding.metadata
+    assert math.isnan(cast("float", binding.metadata.attributes["x"]))
 
 
 class _SlottedAsyncArray(AsyncArray[Any]):
@@ -1159,4 +1189,44 @@ async def test_a_pickled_array_carries_its_model_as_bytes() -> None:
     array = (await AsyncArrayIO.open(store, name="a")).to_array()
     pickled = pickle.dumps(array)
     assert b"zarr_metadata" not in pickled
-    assert pickle.loads(pickled).io == array.io
+    restored = pickle.loads(pickled).io
+    assert restored == array.io
+    assert not isinstance(restored._source, ArrayV2Metadata | ArrayV3Metadata)
+
+
+class _UnpicklableBinding(AsyncArrayIO):
+    """A binding deriving state that does not pickle, which it leaves out of its own."""
+
+    lock: Any
+
+    def _bind(self, *args: Any) -> None:
+        super()._bind(*args)
+        self.lock = threading.Lock()
+
+    def __getstate__(self) -> dict[str, object]:
+        state = super().__getstate__()
+        state.pop("lock")
+        return state
+
+
+def test_a_binding_derives_its_state_again_when_unpickled() -> None:
+    binding = _UnpicklableBinding.build_v3(
+        MemoryStore(), shape=(4,), data_type="uint8", chunk_grid=(4,)
+    )
+    for restored in (pickle.loads(pickle.dumps(binding)), copy.deepcopy(binding)):
+        assert restored == binding
+        assert restored.lock is not binding.lock
+
+
+class _NamedAsyncArray(AsyncArray[Any]):
+    """A subclass with attributes named as a binding's own state might be."""
+
+
+def test_subclass_attributes_keep_names_the_binding_uses() -> None:
+    created = zarr.create_array(MemoryStore(), shape=(4,), dtype="uint8", chunks=(2,))
+    named = _NamedAsyncArray(created.metadata, created.store_path)
+    names = ("_context", "_pipeline_class", "_binding_class", "_model_documents", "_stored_entry")
+    for name in names:
+        object.__setattr__(named, name, f"mine {name}")
+    for restored in (pickle.loads(pickle.dumps(named)), copy.deepcopy(named)):
+        assert all(vars(restored)[name] == f"mine {name}" for name in names)

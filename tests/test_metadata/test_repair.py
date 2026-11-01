@@ -1972,7 +1972,7 @@ def test_pickles_cross_versions_with_the_repair(tmp_path: Path, zarr_format: Lit
     stored = json.loads((path / doc_name).read_text())
     array = zarr.open_array(store=LocalStore(path), mode="r+")
 
-    state = array.async_array.__getstate__()
+    state = cast("dict[str, Any]", array.async_array.__getstate__())
     assert vars(state["metadata"])["_stored_document"] is not None
 
     old_state = {

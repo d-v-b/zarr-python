@@ -498,9 +498,10 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         of the array that share its metadata."""
         return self._io
 
-    def __getstate__(self) -> dict[str, object]:
+    def __getstate__(self) -> dict[str, object] | tuple[dict[str, object], dict[str, object]]:
         # The pickled state is the fields', as it has always been, so a pickle
-        # loads in either version; what the store's cache knows rides along.
+        # loads in either version; the binding's own state rides along under one
+        # key of its own, so no name an instance may hold is taken.
         carried = self._io._carried_cache_entry()
         metadata: ArrayMetadata = self.metadata
         mark = carried.get("_stored_entry", carried.get("_stored_copy"))
@@ -517,22 +518,23 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
             "codec_pipeline": self.codec_pipeline,
             "_chunk_grid": self._chunk_grid,
             "config": self.config,
-            "_pipeline_class": self._io._pipeline_class,
         }
+        binding_state: dict[str, object] = {"pipeline_class": self._io._pipeline_class}
         if type(self._io) is not AsyncArrayIO:
             # Carried only when it is a subclass, so the pickle stays loadable where
             # that class is not importable only if it is used.
-            state["_binding_class"] = type(self._io)
+            binding_state["binding_class"] = type(self._io)
         source = self._io._source
         if not isinstance(source, ArrayV2Metadata | ArrayV3Metadata):
             # The document as stored, which the legacy metadata cannot always
             # reproduce (a NaN payload, a codec's configuration), as its bytes,
             # so a zarr without zarr-metadata loads the pickle too.
-            state["_model_documents"] = dict(source.to_key_value())
-        state.update(carried)
+            binding_state["model_documents"] = dict(source.to_key_value())
+        binding_state |= carried
+        state[_BINDING_STATE] = binding_state
         # Slots as the default reduction carries them, so either version loads them.
         slots = _slot_values(self)
-        return (state, slots) if slots else state  # type: ignore[return-value]
+        return (state, slots) if slots else state
 
     def __setstate__(self, state: dict[str, Any] | tuple[dict[str, Any], dict[str, Any]]) -> None:
         if isinstance(state, tuple):
@@ -540,11 +542,12 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
             state = {**state[0], **(state[1] or {})}
         metadata = state["metadata"]
         pipeline = state["codec_pipeline"]
-        io = object.__new__(state.get("_binding_class", AsyncArrayIO))
+        binding_state = cast("dict[str, Any]", state.get(_BINDING_STATE, {}))
+        io = object.__new__(binding_state.get("binding_class", AsyncArrayIO))
         # The class the binding chose: a pipeline may build an instance of
         # another one (zarrs-python falls back for stores it cannot use).
-        pipeline_class = state.get("_pipeline_class", type(pipeline))
-        documents = state.get("_model_documents")
+        pipeline_class = binding_state.get("pipeline_class", type(pipeline))
+        documents = binding_state.get("model_documents")
         model = None if documents is None else _model_from_documents(documents, metadata)
         io._bind(
             metadata if model is None else model,
@@ -556,15 +559,16 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
             io._resolved_cache = metadata
         io._codec_pipeline_cache = pipeline
         io._chunk_grid_cache = state["_chunk_grid"]
-        if not any(key in state for key in _CARRIED_KEYS):
+        carried: dict[str, Any] = {k: binding_state[k] for k in _CARRIED_KEYS if k in binding_state}
+        if _BINDING_STATE not in state:
             # A pickle from zarr 3.4.1 or 3.4.2 marks the metadata itself.
             legacy_mark = vars(metadata).get("_stored_document")
             if legacy_mark is not None:
-                state = {**state, "_stored_entry": legacy_mark}
+                carried = {"_stored_entry": legacy_mark}
         if "_stored_document" in vars(metadata):
             # Read once; the cache holds it from here on.
             object.__delattr__(metadata, "_stored_document")
-        io._restore_cache_entry(state)
+        io._restore_cache_entry(carried)
         object.__setattr__(self, "_io", io)
         for key, value in state.items():
             if key not in _ASYNC_ARRAY_STATE_KEYS:
@@ -573,7 +577,7 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
     def __copy__(self) -> Self:
         if _overrides_reduction(type(self)):
             # A subclass that decides how it is copied is copied its way.
-            return cast("Self", copy._reconstruct(self, None, *self.__reduce_ex__(4)))  # type: ignore[attr-defined]
+            return cast("Self", _copied_by_reduction(self))
         # A shallow copy shares the field values, as a dataclass copy does (a
         # change to either takes a binding of its own; see `_own_binding`).
         copied = object.__new__(type(self))
@@ -2001,6 +2005,19 @@ class _BindingField:
 def _get_metadata(self: AsyncArray[Any]) -> ArrayMetadata:
     """The in-memory metadata of this array."""
     return self._io.metadata_legacy
+
+
+def _copied_by_reduction(array: AsyncArray[Any]) -> object:
+    """A shallow copy of `array` made from its reduction, as `copy.copy` makes one."""
+    reduced = array.__reduce_ex__(4)
+    if isinstance(reduced, str):
+        return array
+    rebuild, args, *rest = reduced
+    copied = rebuild(*args)
+    state = rest[0] if rest else None
+    if state is not None:
+        copied.__setstate__(state)
+    return copied
 
 
 def _model_from_documents(
@@ -6518,18 +6535,12 @@ async def _delete_key(store_path: StorePath, key: str) -> None:
 _CARRIED_KEYS: Final = ("_stored_entry", "_stored_copy")
 """The keys a pickled binding carries its store cache's entry under."""
 
+_BINDING_STATE: Final = "_zarr_binding_state"
+"""The key a pickled `AsyncArray` carries its binding's own state under: its pipeline
+class, its class when a subclass, a model's documents, its store cache's entry."""
+
 _ASYNC_ARRAY_STATE_KEYS: Final = frozenset(
-    {
-        "metadata",
-        "store_path",
-        "codec_pipeline",
-        "_chunk_grid",
-        "config",
-        "_pipeline_class",
-        "_binding_class",
-        "_model_documents",
-    }
-    | set(_CARRIED_KEYS)
+    {"metadata", "store_path", "codec_pipeline", "_chunk_grid", "config", _BINDING_STATE}
 )
 """The keys of a pickled `AsyncArray`'s state that rebuild its binding; any other key is
 an attribute of the instance's own."""
@@ -6674,6 +6685,28 @@ def _plain_json(value: object) -> Any:
     return json.loads(json.dumps(value, default=_mapping_as_dict))
 
 
+def _document_without_attributes(binding: AsyncArrayIO) -> ArrayMetadataModel:
+    """The document `binding` holds, as a model, with no attributes."""
+    source = binding._source
+    if isinstance(source, ArrayV2Metadata | ArrayV3Metadata):
+        return _model_of_legacy(replace(source, attributes={}))
+    return source.update(attributes={})
+
+
+def _model_of_legacy(metadata: ArrayMetadata) -> ArrayMetadataModel:
+    """The document `metadata` encodes, as a model."""
+    buffers = metadata.to_buffer_dict(default_buffer_prototype())
+    key_value = {key: buffer.to_bytes() for key, buffer in buffers.items()}
+    model_v2, model_v3 = _model_classes()
+    model_class = model_v2 if isinstance(metadata, ArrayV2Metadata) else model_v3
+    return model_class.from_key_value(key_value)
+
+
+def _json_text(value: object) -> str:
+    """`value`, JSON with mapping proxies at any depth, as canonical JSON text."""
+    return json.dumps(value, sort_keys=True, default=_mapping_as_dict)
+
+
 def _mapping_as_dict(value: object) -> dict[str, Any]:
     """`json.dumps`' fallback for `_plain_json`: a mapping as a dict; anything else is
     not JSON."""
@@ -6699,9 +6732,17 @@ def _array_metadata_model(data: dict[str, JSON]) -> ArrayMetadataModel:
     try:
         model = model_v2(data)
     except MetadataValidationError as error:
-        if not chunk_problems:
+        # The model rejects chunk sizes below 0 itself; add only what it accepts
+        # (what no problem it reports at the chunk size or above covers).
+        reported = {problem.loc for problem in error.problems}
+        unreported = [
+            problem
+            for problem in chunk_problems
+            if not any(problem.loc[:depth] in reported for depth in range(1, len(problem.loc) + 1))
+        ]
+        if not unreported:
             raise
-        raise MetadataValidationError([*error.problems, *chunk_problems]) from None
+        raise MetadataValidationError([*error.problems, *unreported]) from None
     if chunk_problems:
         raise MetadataValidationError(chunk_problems)
     return model
@@ -6802,7 +6843,9 @@ class AsyncArrayIO:
     state of its own from the binding (a native handle) derives it there.
     Attributes alone may change in place, without a `_bind` (an `AsyncArray`
     over the binding updates them so, as it always has): derived state must not
-    capture them, and writing metadata reads `metadata`.
+    capture them, and writing metadata reads `metadata`. Pickling a binding
+    pickles its attributes and unpickling binds it again; a subclass whose
+    derived state does not pickle leaves it out in `__getstate__`.
     """
 
     _store_path: StorePath
@@ -6813,6 +6856,7 @@ class AsyncArrayIO:
     _chunk_grid_cache: ChunkGrid | None
     _chunk_key_encoding_cache: ChunkKeyEncoding | None
     _codec_pipeline_cache: CodecPipeline | None
+    _attributes_cache: tuple[str, ArrayMetadataModel] | None
 
     def __init__(
         self,
@@ -6856,6 +6900,7 @@ class AsyncArrayIO:
         self._chunk_grid_cache = None
         self._chunk_key_encoding_cache = None
         self._codec_pipeline_cache = None
+        self._attributes_cache = None
 
     @classmethod
     def _from_resolved(
@@ -6937,21 +6982,22 @@ class AsyncArrayIO:
         source = self._source
         if not isinstance(source, ArrayV2Metadata | ArrayV3Metadata):
             resolved = self._resolved_cache
-            if resolved is not None:
-                # An `AsyncArray` over this binding hands out the resolved object,
-                # whose attributes callers change in place: the model reads them.
-                attributes = _plain_json(resolved.attributes)
-                if attributes != _plain_json(source.attributes):
-                    return source.update(attributes=attributes)
-            return source
+            if resolved is None:
+                return source
+            # An `AsyncArray` over this binding hands out the resolved object, whose
+            # attributes callers change in place: the model reads them. Compared as
+            # JSON text, in which NaN equals itself, and kept until they change.
+            text = _json_text(resolved.attributes)
+            cached = self._attributes_cache
+            if cached is None or cached[0] != text:
+                same = text == _json_text(source.attributes)
+                cached = (text, source if same else source.update(attributes=json.loads(text)))
+                self._attributes_cache = cached
+            return cached[1]
         # Derived on every access, not cached: a legacy object's attributes may be
         # changed in place through another handle that shares it (as `AsyncArray`
         # copies do); the chunk grid and key encoding such changes cannot touch.
-        buffers = source.to_buffer_dict(default_buffer_prototype())
-        key_value = {key: buffer.to_bytes() for key, buffer in buffers.items()}
-        model_v2, model_v3 = _model_classes()
-        model_class = model_v2 if isinstance(source, ArrayV2Metadata) else model_v3
-        return model_class.from_key_value(key_value)
+        return _model_of_legacy(source)
 
     @property
     def metadata_legacy(self) -> ArrayMetadata:
@@ -7432,8 +7478,11 @@ class AsyncArrayIO:
             return self.metadata == other.metadata
         except TypeError:
             # Attributes changed in place to values JSON cannot hold: compare the
-            # resolved forms, which hold them.
-            return self.metadata_legacy == other.metadata_legacy
+            # documents without them, then the resolved attributes, which hold them.
+            return (
+                _document_without_attributes(self) == _document_without_attributes(other)
+                and self.metadata_legacy.attributes == other.metadata_legacy.attributes
+            )
 
     def __hash__(self) -> int:
         # A subset of the equality fields, available without deriving either
