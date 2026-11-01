@@ -1001,10 +1001,12 @@ class _NativeBinding(AsyncArrayIO):
     """A binding that derives state of its own (a native handle's shape) in `_bind`."""
 
     native_shape: tuple[int, ...]
+    native_where: str
 
-    def _bind(self, source: Any, *args: Any) -> None:
-        super()._bind(source, *args)
+    def _bind(self, source: Any, store_path: StorePath, *args: Any) -> None:
+        super()._bind(source, store_path, *args)
         self.native_shape = tuple(source.shape)
+        self.native_where = str(store_path)
 
 
 async def test_every_route_rebinds_through_bind() -> None:
@@ -1027,9 +1029,13 @@ async def test_every_route_rebinds_through_bind() -> None:
         pickle.loads(pickle.dumps(array)).io,
         copy.copy(array).io,
     ]
+    moved = copy.copy(array)
+    object.__setattr__(moved, "store_path", StorePath(MemoryStore(), "b"))
+    bindings.append(moved.io)
     for binding in bindings:
         assert isinstance(binding, _NativeBinding)
         assert binding.native_shape == binding.metadata.shape
+        assert binding.native_where == str(binding.store_path)
 
 
 @pytest.mark.parametrize("derive", ["with_config", "pickle", "deepcopy"])
@@ -1082,7 +1088,7 @@ async def test_bindings_compare_with_attributes_json_cannot_hold() -> None:
 class _SlottedAsyncArray(AsyncArray[Any]):
     """An `AsyncArray` subclass with a slot of its own."""
 
-    __slots__ = ("extra",)
+    __slots__ = ("__private", "extra")
     extra: int
 
 
@@ -1105,8 +1111,10 @@ def test_subclass_slots_and_reductions_are_honored() -> None:
     created = zarr.create_array(MemoryStore(), shape=(4,), dtype="uint8", chunks=(2,))
     slotted = _SlottedAsyncArray(created.metadata, created.store_path)
     object.__setattr__(slotted, "extra", 5)
+    object.__setattr__(slotted, "_SlottedAsyncArray__private", 6)
     for copied in (pickle.loads(pickle.dumps(slotted)), copy.copy(slotted), copy.deepcopy(slotted)):
         assert copied.extra == 5
+        assert vars(type(copied))["_SlottedAsyncArray__private"].__get__(copied) == 6
     reducing = _ReducingAsyncArray(created.metadata, created.store_path)
     assert vars(copy.copy(reducing))["marked"] is True
 
@@ -1114,3 +1122,41 @@ def test_subclass_slots_and_reductions_are_honored() -> None:
 def test_fields_read_as_missing_on_the_class() -> None:
     """The fields have no class value, as fields without defaults have none."""
     assert all(getattr(AsyncArray, name) is MISSING for name in ("metadata", "config"))
+
+
+class _StampingAsyncArray(AsyncArray[Any]):
+    """A subclass whose `__init__` changes the metadata it is given."""
+
+    def __init__(self, metadata: Any, store_path: StorePath, config: Any = None) -> None:
+        stamped = dataclasses.replace(
+            metadata, attributes={**metadata.attributes, "n": metadata.attributes.get("n", 0) + 1}
+        )
+        super().__init__(stamped, store_path, config)
+
+
+async def test_with_config_keeps_what_a_subclass_init_built() -> None:
+    """`with_config` rebuilds through the constructor and keeps the metadata a
+    subclass `__init__` built, as it always has, also over a model binding."""
+    store = MemoryStore()
+    await AsyncArrayIO.build_v3(
+        store, name="a", shape=(4,), data_type="uint8", chunk_grid=(4,)
+    ).store_metadata()
+    for array in (
+        _StampingAsyncArray(zarr.open_array(store, path="a").metadata, StorePath(store, "a")),
+        _StampingAsyncArray._from_io(await AsyncArrayIO.open(store, name="a")),
+    ):
+        before = cast("int", array.attrs.get("n", 0))
+        assert array.with_config({"order": "F"}).attrs["n"] == before + 1
+
+
+async def test_a_pickled_array_carries_its_model_as_bytes() -> None:
+    """The model a pickled array carries is its documents' bytes, so a zarr without
+    zarr-metadata loads the pickle too."""
+    store = MemoryStore()
+    await AsyncArrayIO.build_v3(
+        store, name="a", shape=(4,), data_type="uint8", chunk_grid=(4,)
+    ).store_metadata()
+    array = (await AsyncArrayIO.open(store, name="a")).to_array()
+    pickled = pickle.dumps(array)
+    assert b"zarr_metadata" not in pickled
+    assert pickle.loads(pickled).io == array.io

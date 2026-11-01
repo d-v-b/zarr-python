@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import copyreg
 import functools
 import json
 import math
@@ -510,7 +511,6 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         # Attributes of the instance's own (a subclass's) pickle with it, as
         # they did when the fields were its only state.
         state: dict[str, object] = {key: v for key, v in vars(self).items() if key != "_io"}
-        state |= _slot_values(self)
         state |= {
             "metadata": metadata,
             "store_path": self.store_path,
@@ -526,19 +526,26 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         source = self._io._source
         if not isinstance(source, ArrayV2Metadata | ArrayV3Metadata):
             # The document as stored, which the legacy metadata cannot always
-            # reproduce (a NaN payload, a codec's configuration).
-            state["_model"] = source
+            # reproduce (a NaN payload, a codec's configuration), as its bytes,
+            # so a zarr without zarr-metadata loads the pickle too.
+            state["_model_documents"] = dict(source.to_key_value())
         state.update(carried)
-        return state
+        # Slots as the default reduction carries them, so either version loads them.
+        slots = _slot_values(self)
+        return (state, slots) if slots else state  # type: ignore[return-value]
 
-    def __setstate__(self, state: dict[str, Any]) -> None:
+    def __setstate__(self, state: dict[str, Any] | tuple[dict[str, Any], dict[str, Any]]) -> None:
+        if isinstance(state, tuple):
+            # A subclass with slots: the instance's dict and its slots' values.
+            state = {**state[0], **(state[1] or {})}
         metadata = state["metadata"]
         pipeline = state["codec_pipeline"]
         io = object.__new__(state.get("_binding_class", AsyncArrayIO))
         # The class the binding chose: a pipeline may build an instance of
         # another one (zarrs-python falls back for stores it cannot use).
         pipeline_class = state.get("_pipeline_class", type(pipeline))
-        model = state.get("_model")
+        documents = state.get("_model_documents")
+        model = None if documents is None else _model_from_documents(documents, metadata)
         io._bind(
             metadata if model is None else model,
             state["store_path"],
@@ -1350,7 +1357,7 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         # __init__ runs; then over this array's kind of binding (its class, and
         # its model, so the document stays as stored).
         rebuilt = type(self)(metadata=self.metadata, store_path=self.store_path, config=new_config)
-        object.__setattr__(rebuilt, "_io", self._io._rebound_like(rebuilt._io))
+        object.__setattr__(rebuilt, "_io", self._io._rebound_like(rebuilt._io, rebuilt.metadata))
         return rebuilt
 
     async def nchunks_initialized(self) -> int:
@@ -1996,16 +2003,23 @@ def _get_metadata(self: AsyncArray[Any]) -> ArrayMetadata:
     return self._io.metadata_legacy
 
 
+def _model_from_documents(
+    documents: Mapping[str, bytes], metadata: ArrayMetadata
+) -> ArrayMetadataModel:
+    """The model a pickled `AsyncArray` carried as its documents' bytes."""
+    model_v2, model_v3 = _model_classes()
+    model_class = model_v2 if metadata.zarr_format == 2 else model_v3
+    return model_class.from_key_value(cast("Any", documents))
+
+
 def _slot_values(array: AsyncArray[Any]) -> dict[str, object]:
     """The values in the `__slots__` a subclass of `AsyncArray` declares, which
     `vars` leaves out, by name; unset slots are left out."""
-    values: dict[str, object] = {}
-    for klass in type(array).__mro__:
-        slots = vars(klass).get("__slots__", ())
-        for name in (slots,) if isinstance(slots, str) else slots:
-            if name not in ("__dict__", "__weakref__") and hasattr(array, name):
-                values[name] = getattr(array, name)
-    return values
+    return {
+        name: getattr(array, name)
+        for name in copyreg._slotnames(type(array))  # type: ignore[attr-defined]
+        if hasattr(array, name)
+    }
 
 
 _REDUCTION_HOOKS: Final = ("__reduce_ex__", "__reduce__", "__getstate__", "__setstate__")
@@ -2039,7 +2053,8 @@ def _get_store_path(self: AsyncArray[Any]) -> StorePath:
 
 
 def _set_store_path(self: AsyncArray[Any], value: StorePath) -> None:
-    _own_binding(self)._store_path = value
+    binding = _own_binding(self)
+    binding._rebind_at(value, binding._config)
 
 
 def _get_config(self: AsyncArray[Any]) -> ArrayConfig:
@@ -2048,7 +2063,8 @@ def _get_config(self: AsyncArray[Any]) -> ArrayConfig:
 
 
 def _set_config(self: AsyncArray[Any], value: ArrayConfig) -> None:
-    _own_binding(self)._config = value
+    binding = _own_binding(self)
+    binding._rebind_at(binding._store_path, value)
 
 
 def _get_codec_pipeline(self: AsyncArray[Any]) -> CodecPipeline:
@@ -6511,7 +6527,7 @@ _ASYNC_ARRAY_STATE_KEYS: Final = frozenset(
         "config",
         "_pipeline_class",
         "_binding_class",
-        "_model",
+        "_model_documents",
     }
     | set(_CARRIED_KEYS)
 )
@@ -6784,6 +6800,9 @@ class AsyncArrayIO:
     `open`, the `with_*` methods, pickling, and the resize or attribute update
     of an array over it) goes through `_bind`, so a subclass that derives
     state of its own from the binding (a native handle) derives it there.
+    Attributes alone may change in place, without a `_bind` (an `AsyncArray`
+    over the binding updates them so, as it always has): derived state must not
+    capture them, and writing metadata reads `metadata`.
     """
 
     _store_path: StorePath
@@ -6959,22 +6978,26 @@ class AsyncArrayIO:
             copied._resolved_cache = _copied_legacy(self._resolved_cache)
         return copied
 
-    def _rebound_like(self, built: AsyncArrayIO) -> Self:
-        """A binding of this binding's class, over this binding's model when it holds
-        one (sharing `built`'s resolved metadata), at `built`'s location, with its
-        configuration, pipeline class and caches: how an array rebuilt through its
-        constructor keeps the binding it had."""
+    def _rebound_like(self, built: AsyncArrayIO, metadata: ArrayMetadata) -> Self:
+        """How an array rebuilt through its constructor (`built`, which bound
+        `metadata`) keeps the binding it had: a binding of this binding's class, at
+        `built`'s location, with its configuration, pipeline class and caches, over
+        this binding's model when `metadata` is still this binding's resolved form
+        (shared), else over `metadata` itself (a subclass `__init__` substituted it)."""
         rebound = object.__new__(type(self))
         source = self._source
-        model_backed = not isinstance(source, ArrayV2Metadata | ArrayV3Metadata)
+        keeps_model = (
+            not isinstance(source, ArrayV2Metadata | ArrayV3Metadata)
+            and metadata is self._resolved_if_any
+        )
         rebound._bind(
-            source if model_backed else built._source,
+            source if keeps_model else metadata,
             built._store_path,
             built._config,
             built._pipeline_class,
         )
-        if model_backed:
-            rebound._resolved_cache = built.metadata_legacy
+        if keeps_model:
+            rebound._resolved_cache = metadata
         rebound._codec_pipeline_cache = built._codec_pipeline_cache
         rebound._chunk_grid_cache = built._chunk_grid_cache
         return rebound
@@ -7004,6 +7027,24 @@ class AsyncArrayIO:
         if isinstance(source, ArrayV2Metadata | ArrayV3Metadata):
             return source
         return self._resolved_cache
+
+    def _rebind_at(self, store_path: StorePath, config: ArrayConfig) -> None:
+        """Bind this binding again, through `_bind`, at `store_path` with `config`,
+        keeping its caches: setting an array's location or configuration never
+        rebuilt its pipeline."""
+        caches = (
+            self._resolved_cache,
+            self._chunk_grid_cache,
+            self._chunk_key_encoding_cache,
+            self._codec_pipeline_cache,
+        )
+        self._bind(self._source, store_path, config, self._pipeline_class)
+        (
+            self._resolved_cache,
+            self._chunk_grid_cache,
+            self._chunk_key_encoding_cache,
+            self._codec_pipeline_cache,
+        ) = caches
 
     def _rebind_resolved(
         self, resolved: ArrayMetadata, chunk_grid: ChunkGrid | None = None
@@ -7111,6 +7152,8 @@ class AsyncArrayIO:
         state = dict(state)
         carried: dict[str, object] = {k: state.pop(k) for k in _CARRIED_KEYS if k in state}
         self.__dict__.update(state)
+        # Through `_bind`, so state a subclass derives there is derived again.
+        self._rebind_at(self._store_path, self._config)
         self._restore_cache_entry(carried)
 
     def _carried_cache_entry(self) -> dict[str, object]:
