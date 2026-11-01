@@ -4706,7 +4706,7 @@ def build_array_metadata_v2(
         # An explicit None is kept: the field is nullable in Zarr format 2.
         fill_value_parsed = fill_value
 
-    return ArrayV2Metadata(
+    metadata = ArrayV2Metadata(
         shape=parse_shapelike(shape),
         dtype=zdtype,
         chunks=parse_shapelike(chunks),
@@ -4717,6 +4717,8 @@ def build_array_metadata_v2(
         filters=filters,
         attributes=attributes,
     )
+    _check_object_codec_v2(zdtype, metadata.filters, metadata.compressor)
+    return metadata
 
 
 def build_array_metadata_v3(
@@ -5343,18 +5345,28 @@ def _parse_chunk_encoding_v2(
                     )
                     raise TypeError(msg)
         _filters = parse_filters(filters)
+    _check_object_codec_v2(dtype, _filters, _compressor)
+    return _filters, _compressor
+
+
+def _check_object_codec_v2(
+    dtype: ZDType[TBaseDType, TBaseScalar],
+    filters: tuple[Numcodec, ...] | None,
+    compressor: Numcodec | None,
+) -> None:
+    """Raise if `dtype` needs an object codec that neither `filters` nor `compressor` holds."""
     if isinstance(dtype, HasObjectCodec):
         # check the filters and the compressor for the object codec required for this data type
-        if _filters is None:
-            if _compressor is None:
+        if filters is None:
+            if compressor is None:
                 object_codec_id = None
             else:
-                object_codec_id = get_object_codec_id((_compressor.get_config(),))
+                object_codec_id = get_object_codec_id((compressor.get_config(),))
         else:
             object_codec_id = get_object_codec_id(
                 (
-                    *[f.get_config() for f in _filters],
-                    _compressor.get_config() if _compressor is not None else None,
+                    *[f.get_config() for f in filters],
+                    compressor.get_config() if compressor is not None else None,
                 )
             )
         if object_codec_id is None:
@@ -5370,7 +5382,6 @@ def _parse_chunk_encoding_v2(
                 "this array. "
             )
             raise ValueError(msg)
-    return _filters, _compressor
 
 
 def _parse_chunk_encoding_v3(
@@ -6452,7 +6463,11 @@ class AsyncArrayIO:
         if self._resolved_cache is None:
             data = _metadata_model_json(source)
             if isinstance(source, ZarrV2ArrayMetadata):
-                data["attributes"] = dict(source.attributes)
+                # The model's attributes are read-only JSON; its `.zattrs` is plain.
+                zattrs = {str(key): value for key, value in source.to_key_value().items()}
+                data["attributes"] = (
+                    json.loads(zattrs[ZATTRS_JSON]) if ZATTRS_JSON in zattrs else {}
+                )
             self._resolved_cache = parse_array_metadata(data, str(self._store_path))
         return self._resolved_cache
 
@@ -6634,11 +6649,15 @@ class AsyncArrayIO:
         return self._derive(self._derived_source(), self._store_path, new_config)
 
     async def store_metadata(self, *, ensure_parents: bool = False) -> None:
-        """Store the metadata, unconditionally replacing any stored metadata here.
+        """Store the metadata documents of this array's Zarr format, unconditionally
+        replacing those stored here.
 
-        Chunks of a previous array at this location are kept; `erase_chunks`
-        removes them. With `ensure_parents`, missing parent groups are stored
-        first.
+        Documents of the other format, or of a group, at this location are left
+        as they are, as `erase_metadata` leaves them; `verify` reports when a
+        format 3 document would be opened instead. Chunks of a previous array at
+        this location are kept; `erase_chunks` removes them. With
+        `ensure_parents`, missing parent groups are stored first; they are nodes
+        of their own, which `erase_metadata` leaves in place.
         """
         source = self._source
         if isinstance(source, ArrayV2Metadata | ArrayV3Metadata):

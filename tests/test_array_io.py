@@ -20,7 +20,7 @@ from zarr.errors import ArrayNotFoundError, UnknownCodecError
 from zarr.storage import MemoryStore, StorePath
 
 if TYPE_CHECKING:
-    from zarr.core.common import ZarrFormat
+    from zarr.core.common import JSON, ZarrFormat
 
 METADATA_DOCUMENTS = ("zarr.json", ".zarray", ".zattrs", ".zgroup")
 
@@ -348,3 +348,28 @@ def test_zero_chunk_v2_metadata_binds_repaired(bind: Any) -> None:
     reaches a binding, as `parse_array_metadata` reads it."""
     metadata = ArrayV2Metadata(shape=(3,), chunks=(0,), dtype=Int16(), fill_value=0, order="C")
     assert bind(metadata).metadata_legacy.chunks == (1,)
+
+
+async def test_v2_model_binding_keeps_attributes_writable() -> None:
+    """A v2 binding read as a model resolves its attributes as plain, mutable
+    JSON, so writes through it that re-encode the attributes succeed."""
+    store = MemoryStore()
+    attributes: dict[str, JSON] = {"k": [1, 2], "d": {"n": None}}
+    aio = AsyncArrayIO.build_v2(
+        store, name="foo", shape=(4,), dtype="uint8", chunks=(2,), attributes=attributes
+    )
+    await aio.store_metadata()
+    arr = (await AsyncArrayIO.open(store, name="foo")).to_array()
+
+    assert arr.metadata.attributes == attributes
+    await arr.update_attributes({"new": 1})
+    await arr.resize((6,))
+
+    reread = await open_array(store=store, path="foo")
+    assert reread.metadata.attributes == {**attributes, "new": 1}
+    assert reread.shape == (6,)
+
+
+def test_build_v2_vlen_without_object_codec_raises() -> None:
+    with pytest.raises(ValueError, match="requires the numcodecs.VLenUTF8 codec"):
+        AsyncArrayIO.build_v2(MemoryStore(), shape=(4,), dtype=str, chunks=(2,))
