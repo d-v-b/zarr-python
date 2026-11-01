@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import pickle
 from typing import TYPE_CHECKING, Any, cast
 
@@ -488,3 +489,103 @@ async def test_pickled_binding_rebuilds_its_pipeline() -> None:
     revived = pickle.loads(pickle.dumps(aio))
     assert revived._codec_pipeline_cache is None
     assert revived == aio
+
+
+@pytest.mark.parametrize("zarr_format", [2, 3])
+async def test_erase_and_store_metadata_leave_a_group_in_place(zarr_format: ZarrFormat) -> None:
+    """erase_metadata deletes only an array's documents, and storing a v2 model
+    without attributes keeps a group's `.zattrs`."""
+    store = MemoryStore()
+    group = await zarr.api.asynchronous.open_group(
+        store, path="g", zarr_format=zarr_format, mode="w"
+    )
+    await group.update_attributes({"owner": "group"})
+    before = await _store_keys(store)
+    declared = (
+        AsyncArrayIO.build_v2(store, name="g", shape=(4,), dtype="uint8", chunks=(4,))
+        if zarr_format == 2
+        else AsyncArrayIO.build_v3(store, name="g", shape=(4,), data_type="uint8", chunk_grid=(4,))
+    )
+    await declared.erase_metadata()
+    assert await _store_keys(store) == before
+    if zarr_format == 2:
+        model = declared.metadata
+        assert isinstance(model, ModelV2)
+        await declared.with_metadata(model.update(attributes=UNSET)).store_metadata()
+        reopened = await zarr.api.asynchronous.open_group(store, path="g", mode="r", zarr_format=2)
+        assert dict(reopened.attrs) == {"owner": "group"}
+
+
+def test_constructor_never_shares_the_callers_metadata() -> None:
+    mine = zarr.create_array(MemoryStore(), shape=(4,), dtype="uint8", chunks=(4,)).metadata
+    aio = AsyncArrayIO(mine, StorePath(MemoryStore()))
+    assert aio.metadata_legacy is not mine
+    assert aio.metadata_legacy.attributes is not mine.attributes
+
+
+async def test_metadata_dict_of_a_repaired_document_stores_its_repair() -> None:
+    """An invalid stored document given to AsyncArrayIO as a dict is recorded as
+    what the store holds, as AsyncArray records it, so the first chunk write
+    stores the repair."""
+    store = MemoryStore()
+    doc: dict[str, Any] = {
+        "zarr_format": 2,
+        "shape": [3],
+        "chunks": [0],
+        "dtype": "<u2",
+        "fill_value": 0,
+        "order": "C",
+        "filters": None,
+        "compressor": None,
+    }
+    prototype = default_buffer_prototype()
+    await store.set("foo/.zarray", prototype.buffer.from_bytes(json.dumps(doc).encode()))
+    with pytest.warns(zarr.errors.ZarrUserWarning, match="is read as"):
+        aio = AsyncArrayIO(cast("Any", {**doc, "attributes": {}}), StorePath(store, "foo"))
+    await aio.setitem(Ellipsis, np.array([7, 8, 9], dtype="uint16"))
+    buffer = await store.get("foo/.zarray", prototype=prototype)
+    assert buffer is not None
+    assert json.loads(buffer.to_bytes())["chunks"] == [1]
+
+
+async def test_verify_names_the_fields_that_differ() -> None:
+    store = MemoryStore()
+    aio = AsyncArrayIO.build_v3(
+        store, name="foo", shape=(4,), data_type="float32", chunk_grid=(4,), fill_value=0.0
+    )
+    await aio.store_metadata()
+    other = aio.with_metadata(aio.metadata.update(fill_value=-0.0))
+    with pytest.raises(ValueError, match=r"differing fields: fill_value\.$"):
+        await other.verify()
+
+
+def test_build_v3_keeps_empty_dimension_names_on_a_0d_array() -> None:
+    """The builder keeps an empty name list for a 0-d array; the creation paths
+    read it as no names, as they always have."""
+    built = ArrayIO.build_v3(
+        MemoryStore(), shape=(), data_type="int8", chunk_grid=(), dimension_names=[]
+    )
+    assert built.metadata_legacy.dimension_names == ()  # type: ignore[union-attr]
+    created = zarr.create_array(MemoryStore(), shape=(), dtype="int8", dimension_names=[])
+    assert created.metadata.dimension_names is None  # type: ignore[union-attr]
+
+
+async def test_erase_chunk_takes_integer_coordinates() -> None:
+    store = MemoryStore()
+    aio = AsyncArrayIO.build_v3(store, name="foo", shape=(4,), data_type="uint8", chunk_grid=(2,))
+    await aio.setitem(Ellipsis, np.arange(4, dtype="uint8"))
+    with pytest.raises(TypeError):
+        await aio.erase_chunk([cast("int", np.float64(1))])
+    await aio.erase_chunk([cast("int", np.int64(1))])
+    assert "foo/c/1" not in await _store_keys(store)
+
+
+def test_equality_does_not_depend_on_resolution() -> None:
+    doc = AsyncArrayIO.build_v3(
+        MemoryStore(), name="foo", shape=(4,), data_type="uint8", chunk_grid=(4,)
+    ).metadata.to_json()
+    a, b = (AsyncArrayIO(doc, StorePath(MemoryStore(), "foo")) for _ in "ab")
+    a = b.with_store(a.store_path)
+    before = a == b
+    _ = a.metadata_legacy
+    assert (a == b) is before

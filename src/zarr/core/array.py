@@ -5,6 +5,7 @@ import copy
 import functools
 import json
 import math
+import operator
 import os
 import warnings
 from asyncio import gather
@@ -69,6 +70,7 @@ from zarr.core.common import (
     ZARR_JSON,
     ZARRAY_JSON,
     ZATTRS_JSON,
+    ZGROUP_JSON,
     ChunksLike,
     DimensionNamesLike,
     MemoryOrder,
@@ -472,7 +474,9 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
             # A document given as a dict stands for what the store holds, as the
             # document an array is opened from does.
             _record_given_document(store_path, metadata, metadata_parsed.zarr_format)
-        object.__setattr__(self, "_io", AsyncArrayIO(metadata_parsed, store_path, config))
+        object.__setattr__(
+            self, "_io", AsyncArrayIO._from_resolved(metadata_parsed, store_path, config)
+        )
         # An AsyncArray is the resolving layer: build its codec pipeline now, so
         # pipeline-construction warnings fire at creation, as they always have.
         _ = self._io._resolved_codec_pipeline
@@ -675,7 +679,8 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
             fill_value=fill_value,
             chunk_key_encoding=chunk_key_encoding,
             codecs=codecs,
-            dimension_names=dimension_names,
+            # As these paths always have, an empty list declares no names.
+            dimension_names=dimension_names or None,
             attributes=attributes,
         )
 
@@ -4759,7 +4764,8 @@ async def init_array(
             chunk_grid=grid,
             chunk_key_encoding=chunk_key_encoding_parsed,
             codecs=codecs_out,
-            dimension_names=dimension_names,
+            # As these paths always have, an empty list declares no names.
+            dimension_names=dimension_names or None,
             attributes=attributes,
         )
 
@@ -4900,7 +4906,7 @@ def build_array_metadata_v3(
         chunk_key_encoding=chunk_key_encoding_parsed,
         fill_value=fill_value_parsed,
         codecs=codecs_parsed,  # type: ignore[arg-type]
-        dimension_names=tuple(dimension_names) if dimension_names else None,
+        dimension_names=tuple(dimension_names) if dimension_names is not None else None,
         attributes=attributes if attributes is not None else {},
     )
 
@@ -6379,7 +6385,9 @@ _CARRIED_KEYS: Final = ("_stored_entry", "_stored_copy")
 """The keys a pickled binding carries its store cache's entry under."""
 
 
-def _bound_metadata_dict(data: dict[str, Any], path: str) -> ArrayMetadataModel | ArrayMetadata:
+def _bound_metadata_dict(
+    data: dict[str, Any], store_path: StorePath
+) -> ArrayMetadataModel | ArrayMetadata:
     """A metadata dict given to a binding: read as a model when it is valid
     JSON metadata, so names resolve only when chunks are read or written;
     otherwise (metadata built in code, or an invalid document zarr reads as
@@ -6387,13 +6395,23 @@ def _bound_metadata_dict(data: dict[str, Any], path: str) -> ArrayMetadataModel 
     has."""
     from zarr_metadata import MetadataValidationError
 
+    path = str(store_path)
+    zarr_format: ZarrFormat = 2 if data.get("zarr_format") == 2 else 3
     if data.get("storage_transformers"):
         # Bound as legacy metadata, which rejects them, as AsyncArray always has.
         return parse_array_metadata(data, path)
-    try:
-        return _array_metadata_model(data)
-    except MetadataValidationError:
-        return parse_array_metadata(data, path)
+    if not moves_chunks(data, zarr_format):
+        # A document zarr reads as repaired, moving chunks, is never bound as a
+        # model, also where the model accepts it (a v2 chunk size of 0).
+        try:
+            return _array_metadata_model(data)
+        except MetadataValidationError:
+            pass
+    legacy = parse_array_metadata(data, path)
+    # An invalid document given as a dict stands for what the store holds, as
+    # one given to AsyncArray does.
+    _record_given_document(store_path, data, legacy.zarr_format)
+    return legacy
 
 
 def _record_given_document(
@@ -6405,6 +6423,37 @@ def _record_given_document(
         stored_documents(store_path.store).restore(
             store_path.path, zarr_format, copy.deepcopy(dict(document))
         )
+
+
+def _differing_fields(
+    model_class: type[ArrayMetadataModel],
+    stored: ArrayMetadataModel,
+    stored_json: dict[str, Any],
+    bound_json: dict[str, Any],
+) -> list[str]:
+    """The fields of `stored` that differ from `bound_json`'s as the model compares
+    them: a field whose JSON differs (so `-0.0` from `0.0`) counts unless putting
+    the bound value in `stored` leaves it equal (an absent field against its
+    default)."""
+    from zarr_metadata import MetadataValidationError
+
+    differing = []
+    for key in sorted(stored_json.keys() | bound_json.keys()):
+        stored_value, bound_value = stored_json.get(key), bound_json.get(key)
+        if json.dumps(stored_value, sort_keys=True) == json.dumps(bound_value, sort_keys=True):
+            continue
+        patched = dict(stored_json)
+        if key in bound_json:
+            patched[key] = bound_value
+        else:
+            patched.pop(key)
+        try:
+            unchanged = model_class(patched) == stored
+        except MetadataValidationError:
+            unchanged = False
+        if not unchanged:
+            differing.append(key)
+    return differing
 
 
 def _copied_legacy(source: ArrayMetadata) -> ArrayMetadata:
@@ -6519,13 +6568,15 @@ class AsyncArrayIO:
     ) -> None:
         source: ArrayMetadataModel | ArrayMetadata
         if isinstance(metadata, ArrayMetadata):
-            # A resolved object passes through (v2 with a chunk size of 0 is read
-            # as repaired).
+            # A resolved object is read (v2 with a chunk size of 0 as repaired)
+            # and never shared with the caller.
             source = parse_array_metadata(metadata, str(store_path))
+            if source is metadata:
+                source = _copied_legacy(source)
         elif isinstance(metadata, _model_classes()):
             source = metadata
         else:
-            source = _bound_metadata_dict(cast("dict[str, Any]", metadata), str(store_path))
+            source = _bound_metadata_dict(cast("dict[str, Any]", metadata), store_path)
         # The pipeline implementation is chosen when the binding is made, from
         # the global configuration, exactly as `AsyncArray` has always chosen
         # it; the pipeline itself is built on first use.
@@ -6546,6 +6597,22 @@ class AsyncArrayIO:
         self._chunk_grid_cache = None
         self._chunk_key_encoding_cache = None
         self._codec_pipeline_cache = None
+
+    @classmethod
+    def _from_resolved(
+        cls, source: ArrayMetadata, store_path: StorePath, config: ArrayConfigLike | None
+    ) -> Self:
+        """A binding over `source` itself, already resolved (as `AsyncArray` binds the
+        metadata it is given): read as `parse_array_metadata` reads a metadata
+        object, but not copied."""
+        binding = object.__new__(cls)
+        binding._bind(
+            parse_array_metadata(source, str(store_path)),
+            store_path,
+            parse_array_config(config),
+            get_pipeline_class(),
+        )
+        return binding
 
     @classmethod
     def build_v2(
@@ -6817,7 +6884,7 @@ class AsyncArrayIO:
         if isinstance(metadata, ArrayV2Metadata | ArrayV3Metadata):
             source = _copied_legacy(parse_array_metadata(metadata, str(self._store_path)))
         elif isinstance(metadata, dict):
-            source = _bound_metadata_dict(cast("dict[str, Any]", metadata), str(self._store_path))
+            source = _bound_metadata_dict(cast("dict[str, Any]", metadata), self._store_path)
         else:
             source = metadata
         return self._derive(source, self._store_path, self._config)
@@ -6864,9 +6931,13 @@ class AsyncArrayIO:
                 ensure_parents=ensure_parents,
                 array=True,
             )
-            if self._zarr_format == 2 and ZATTRS_JSON not in to_save:
+            if (
+                self._zarr_format == 2
+                and ZATTRS_JSON not in to_save
+                and not await (self._store_path / ZGROUP_JSON).exists()
+            ):
                 # An attribute-less model emits no .zattrs; a stale one must not
-                # survive an unconditional metadata write.
+                # survive an unconditional metadata write. A group's is its own.
                 await (self._store_path / ZATTRS_JSON).delete()
 
     async def verify(self) -> None:
@@ -6891,27 +6962,25 @@ class AsyncArrayIO:
         if isinstance(stored, _model_classes()[0]) and isinstance(bound, _model_classes()[0]):
             stored_json["attributes"] = dict(stored.attributes)
             bound_json["attributes"] = dict(bound.attributes)
-        differing = sorted(
-            key
-            for key in stored_json.keys() | bound_json.keys()
-            if stored_json.get(key) != bound_json.get(key)
-        )
+        differing = _differing_fields(type(stored), stored, stored_json, bound_json)
         raise ValueError(
             f"Array {str(self.store_path)!r}: the stored metadata does not match the "
             f"bound metadata; differing fields: {', '.join(differing)}."
         )
 
     async def erase_metadata(self) -> None:
-        """Delete the stored metadata; chunks are kept. Succeeds if absent."""
-        for key in ARRAY_DOCUMENTS[self._zarr_format]:
-            await (self._store_path / key).delete()
-        stored_documents(self._store_path.store).observe(
-            self._store_path.path, None, self._zarr_format
-        )
+        """Delete the stored array metadata of this array's format; chunks are
+        kept. Succeeds if absent; a group's documents here are left in place."""
+        zarr_format = self._zarr_format
+        keys = ARRAY_DOCUMENTS[zarr_format]
+        if stored_array_document(await read_documents(self._store_path, keys), zarr_format):
+            for key in keys:
+                await (self._store_path / key).delete()
+        stored_documents(self._store_path.store).observe(self._store_path.path, None, zarr_format)
 
     async def erase_chunk(self, chunk_coords: Sequence[int], /) -> None:
         """Delete one stored chunk by grid coordinates (the shard, under sharding). Succeeds if absent."""
-        chunk_coords = tuple(chunk_coords)
+        chunk_coords = tuple(operator.index(coord) for coord in chunk_coords)
         grid_shape = self._shard_grid_shape
         if len(chunk_coords) != len(grid_shape) or any(
             coord < 0 or coord >= size for coord, size in zip(chunk_coords, grid_shape, strict=True)
@@ -7023,9 +7092,9 @@ class AsyncArrayIO:
             return NotImplemented
         if self._store_path != other._store_path or self._config != other._config:
             return False
-        resolved, other_resolved = self._resolved_if_any, other._resolved_if_any
-        if resolved is not None and other_resolved is not None:
-            return resolved == other_resolved
+        legacy = (ArrayV2Metadata, ArrayV3Metadata)
+        if isinstance(self._source, legacy) and isinstance(other._source, legacy):
+            return self._source == other._source
         return self.metadata == other.metadata
 
     def __hash__(self) -> int:
