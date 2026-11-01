@@ -178,7 +178,12 @@ if TYPE_CHECKING:
     from typing import Self
 
     import numpy.typing as npt
-    from zarr_metadata import ZarrV2ArrayMetadata, ZarrV3ArrayMetadata
+    from zarr_metadata import (
+        ZarrV2ArrayMetadata,
+        ZarrV2ArrayMetadataJSON,
+        ZarrV3ArrayMetadata,
+        ZarrV3ArrayMetadataJSON,
+    )
 
     from zarr.abc.codec import CodecPipeline
     from zarr.abc.store import Store
@@ -6412,6 +6417,8 @@ def _copied_legacy(source: ArrayMetadata) -> ArrayMetadata:
 
 
 type ArrayMetadataModel = ZarrV2ArrayMetadata | ZarrV3ArrayMetadata
+type ArrayMetadataModelJSON = ZarrV2ArrayMetadataJSON | ZarrV3ArrayMetadataJSON
+"""Array metadata as `zarr_metadata` types it in JSON (zarrista's metadata type)."""
 """Array metadata as a `zarr_metadata` model: validated JSON, extension names unresolved."""
 
 
@@ -6484,9 +6491,9 @@ class AsyncArrayIO:
     in a store. Construction performs no IO; every read or write of the store
     is an explicit method call, and every write has an erasing inverse. The
     metadata operations (`store_metadata`, `erase_metadata`, `erase_chunk`,
-    `erase_chunks`, `verify`) never resolve extension names; `getitem` and
-    `setitem` resolve them into the legacy classes (`metadata_legacy`) on
-    first use. The bound metadata is assumed, never checked against the
+    `erase_chunks`, `verify`) never resolve extension names; with the codec
+    pipelines zarr-python has today, `getitem` and `setitem` resolve them into
+    the legacy classes (`metadata_legacy`) on first use. The bound metadata is assumed, never checked against the
     store, and an array opened from metadata that needed a repair stores that
     repair before its first chunk write. The codec pipeline implementation is
     chosen from the global configuration when the binding is made; the
@@ -6506,7 +6513,7 @@ class AsyncArrayIO:
 
     def __init__(
         self,
-        metadata: ArrayMetadataModel | ArrayMetadata | ArrayMetadataDict,
+        metadata: ArrayMetadataModel | ArrayMetadata | ArrayMetadataDict | ArrayMetadataModelJSON,
         store_path: StorePath,
         config: ArrayConfigLike | None = None,
     ) -> None:
@@ -6745,6 +6752,9 @@ class AsyncArrayIO:
 
     def __getstate__(self) -> dict[str, object]:
         state = dict(self.__dict__)
+        # The pipeline is rebuilt on first use: a built one is bound to this
+        # process's store object, and may not pickle.
+        state["_codec_pipeline_cache"] = None
         state.update(self._carried_cache_entry())
         return state
 
@@ -6797,13 +6807,20 @@ class AsyncArrayIO:
         derived._bind(source, store_path, config, self._pipeline_class)
         return derived
 
-    def with_metadata(self, metadata: ArrayMetadataModel | ArrayMetadata) -> Self:
+    def with_metadata(
+        self, metadata: ArrayMetadataModel | ArrayMetadata | ArrayMetadataModelJSON
+    ) -> Self:
         """This binding with `metadata` in place of its own. Nothing is stored;
-        a legacy `metadata` object is read as the constructor reads it, then
-        copied."""
+        a legacy `metadata` object or a metadata dict is read as the
+        constructor reads it, and a legacy object is copied."""
+        source: ArrayMetadataModel | ArrayMetadata
         if isinstance(metadata, ArrayV2Metadata | ArrayV3Metadata):
-            metadata = _copied_legacy(parse_array_metadata(metadata, str(self._store_path)))
-        return self._derive(metadata, self._store_path, self._config)
+            source = _copied_legacy(parse_array_metadata(metadata, str(self._store_path)))
+        elif isinstance(metadata, dict):
+            source = _bound_metadata_dict(cast("dict[str, Any]", metadata), str(self._store_path))
+        else:
+            source = metadata
+        return self._derive(source, self._store_path, self._config)
 
     def with_store(self, store: Store | StorePath) -> Self:
         """This binding at its path within `store`, or at a `StorePath` as given. Nothing is stored."""
@@ -7024,7 +7041,7 @@ class ArrayIO:
 
     def __init__(
         self,
-        metadata: ArrayMetadataModel | ArrayMetadata | ArrayMetadataDict,
+        metadata: ArrayMetadataModel | ArrayMetadata | ArrayMetadataDict | ArrayMetadataModelJSON,
         store_path: StorePath,
         config: ArrayConfigLike | None = None,
     ) -> None:
@@ -7098,7 +7115,9 @@ class ArrayIO:
         """An `Array` over this binding; both share one state."""
         return Array(self._async_io.to_array())
 
-    def with_metadata(self, metadata: ArrayMetadataModel | ArrayMetadata) -> Self:
+    def with_metadata(
+        self, metadata: ArrayMetadataModel | ArrayMetadata | ArrayMetadataModelJSON
+    ) -> Self:
         """This binding with `metadata` in place of its own. See `AsyncArrayIO.with_metadata`."""
         return self._wrap(self._async_io.with_metadata(metadata))
 

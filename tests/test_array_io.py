@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pickle
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
@@ -463,3 +464,27 @@ def test_metadata_dict_with_storage_transformers_raises() -> None:
     }
     with pytest.raises(ValueError, match="storage transformers"):
         AsyncArrayIO(cast("Any", doc), StorePath(MemoryStore()))
+
+
+async def test_bindings_take_metadata_json() -> None:
+    """A binding takes array metadata as `zarr_metadata` types it in JSON (what
+    zarrista's arrays hold), through the constructor and with_metadata."""
+    store = MemoryStore()
+    aio = AsyncArrayIO.build_v3(store, name="foo", shape=(4,), data_type="uint8", chunk_grid=(2,))
+    json_metadata = aio.metadata.to_json()
+    rebound = aio.with_metadata(json_metadata)
+    assert AsyncArrayIO(json_metadata, aio.store_path) == aio
+    assert rebound == aio
+    await rebound.store_metadata()
+    await rebound.setitem(Ellipsis, np.arange(4, dtype="uint8"))
+    np.testing.assert_array_equal(await aio.getitem(Ellipsis), np.arange(4))
+
+
+async def test_pickled_binding_rebuilds_its_pipeline() -> None:
+    aio = AsyncArrayIO.build_v3(
+        MemoryStore(), name="foo", shape=(4,), data_type="uint8", chunk_grid=(2,)
+    )
+    _ = await aio.getitem(Ellipsis)
+    revived = pickle.loads(pickle.dumps(aio))
+    assert revived._codec_pipeline_cache is None
+    assert revived == aio
