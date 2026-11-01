@@ -1800,3 +1800,21 @@ def test_unreadable_member_document_leaves_its_copy_as_stored(tmp_path: Path) ->
     group.attrs["y"] = 2
 
     assert json.dumps(_consolidated_member(path, 3, "a")) == stored
+
+
+def test_pickled_array_carries_what_its_store_knows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pickled array carries what its store's cache knows of its document, so the
+    unpickled array writes its chunks without reading a metadata document first, as
+    each task of a distributed write unpickles a store of its own."""
+    path = tmp_path / "valid.zarr"
+    store = LocalStore(path)
+    zarr.create_array(store=store, shape=(3,), chunks=(1,), dtype="int16")
+    revived: AnyArray = pickle.loads(pickle.dumps(zarr.open_array(store=store, mode="r+")))
+    accesses = _record_store_access(monkeypatch)
+
+    revived[:] = [1, 2, 3]
+
+    assert not [key for _, key in accesses if key.endswith("zarr.json")]
+    np.testing.assert_array_equal(_open_strictly(path)[...], [1, 2, 3])

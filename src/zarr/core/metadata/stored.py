@@ -46,8 +46,9 @@ class StoredDocuments:
     document; a document zarr has not seen is unknown. Copies of array documents in
     consolidated metadata are recorded apart, by the array's path and format, only
     when reading them needs such a repair, so a group write can store them as they
-    were stored. zarr records a document it read only once it has read it as
-    metadata, so a document it could not read is unknown.
+    were stored. A document zarr reads to open an array is recorded only once it has
+    been read as metadata, so one it could not open is unknown; one a chunk write reads
+    is recorded as read.
     """
 
     def __init__(self) -> None:
@@ -68,6 +69,12 @@ class StoredDocuments:
         """The consolidated copy of the array document of `zarr_format` at `path` as it
         was stored, if reading it needs a repair that moves chunks."""
         return self._copies.get((path, zarr_format))
+
+    def restore(self, path: str, zarr_format: ZarrFormat, document: ArrayDocument | None) -> None:
+        """Record `document` as `needing_repair(path, zarr_format)` returned it from
+        another store object's cache (a binding carries it when pickled), unless this
+        cache already knows the document: what it learned itself is newer."""
+        self._arrays.setdefault((path, zarr_format), document)
 
     def observe(self, path: str, document: ArrayDocument | None, zarr_format: ZarrFormat) -> None:
         """Record that the array document of `zarr_format` at `path` is `document`

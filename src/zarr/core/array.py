@@ -181,6 +181,7 @@ if TYPE_CHECKING:
     from zarr.codecs.sharding import IndexLocation, ShardingCodec
     from zarr.core.buffer import Buffer
     from zarr.core.dtype.wrapper import TBaseDType, TBaseScalar
+    from zarr.core.metadata.repair import ArrayDocument
     from zarr.storage import StoreLike
     from zarr.types import AnyArray, AnyAsyncArray, ArrayV2, ArrayV3, AsyncArrayV2, AsyncArrayV3
 
@@ -6552,10 +6553,29 @@ class AsyncArrayIO:
         """An `AsyncArray` over this binding; both share one state."""
         return AsyncArray._from_io(self)
 
+    def __getstate__(self) -> dict[str, object]:
+        # A store's cache does not pickle with the store: carry what it knows of this
+        # binding's document, so the unpickled binding does not read it again.
+        state = dict(self.__dict__)
+        cache = stored_documents(self._store_path.store)
+        path, zarr_format = self._store_path.path, self._zarr_format
+        if cache.knows(path, zarr_format):
+            state["_stored_entry"] = cache.needing_repair(path, zarr_format)
+        return state
+
+    def __setstate__(self, state: dict[str, object]) -> None:
+        known = "_stored_entry" in state
+        entry = cast("ArrayDocument | None", state.pop("_stored_entry", None))
+        self.__dict__.update(state)
+        if known:
+            stored_documents(self._store_path.store).restore(
+                self._store_path.path, self._zarr_format, entry
+            )
+
     def _derived_source(self) -> ArrayMetadataModel | ArrayMetadata:
-        """The source for a derived binding: a legacy object is copied, so the
-        repair mark and in-place attribute updates never alias across bindings;
-        a model is immutable and shared."""
+        """The source for a derived binding: a legacy object is copied, so in-place
+        attribute updates never alias across bindings; a model is immutable and
+        shared."""
         source = self._source
         if isinstance(source, ArrayV2Metadata | ArrayV3Metadata):
             return _copied_legacy(source)
