@@ -359,8 +359,9 @@ def may_move_chunks(doc: ArrayDocument, zarr_format: ZarrFormat) -> bool:
     """Whether some repair might move chunks in `doc`: `False` for a rectilinear
     grid, and when every stored regular chunk size is a JSON int >= 1 or `true`,
     for only a stored 0 (or `false`) or an edge list in a regular grid is read so
-    that it moves chunks (see `_read_chunk_size` and `_invalid_chunk_sizes_v3`). A cheap check that answers
-    for most documents before `repair_array_document` runs."""
+    that it moves chunks (see `_read_chunk_size` and `_invalid_chunk_sizes_v3`).
+    A cheap check that answers for most documents before `repair_array_document`
+    runs."""
     if zarr_format == 2:
         sizes = doc.get("chunks")
     else:

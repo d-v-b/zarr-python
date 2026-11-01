@@ -176,11 +176,12 @@ from zarr.storage._memory import MemoryStore
 from zarr.storage._utils import _relativize_path
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
     from typing import Self
 
     import numpy.typing as npt
     from zarr_metadata import (
+        ValidationProblem,
         ZarrV2ArrayMetadata,
         ZarrV2ArrayMetadataJSON,
         ZarrV3ArrayMetadata,
@@ -255,18 +256,16 @@ def parse_array_metadata(data: Any, path: str | None = None) -> ArrayMetadata:
         zarr_format = data.get("zarr_format")
         if zarr_format == 3:
             meta_out = ArrayV3Metadata.from_dict(data, path=path)
-            if len(meta_out.storage_transformers) > 0:
-                msg = (
-                    f"Array metadata contains storage transformers: {meta_out.storage_transformers}."
-                    "Arrays with storage transformers are not supported in zarr-python at this time."
-                )
-                raise ValueError(msg)
+            _reject_storage_transformers(meta_out)
             return meta_out
         elif zarr_format == 2:
             return ArrayV2Metadata.from_dict(data, path=path)
         else:
             raise ValueError(f"Invalid zarr_format: {zarr_format}. Expected 2 or 3")
-    raise TypeError
+    raise TypeError(
+        "Expected array metadata (ArrayV2Metadata or ArrayV3Metadata) or a metadata "
+        f"mapping, got {type(data).__name__}."
+    )
 
 
 def create_codec_pipeline(
@@ -483,17 +482,19 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
 
     @classmethod
     def _from_io(cls, io: AsyncArrayIO) -> AnyAsyncArray:
-        """An array over an existing binding, until a change to the array's state
-        gives it a binding of its own (see `_own_binding`)."""
+        """An array over a copy of `io` (see `AsyncArrayIO._detached`): nothing done
+        through the array changes `io`."""
         self = object.__new__(cls)
-        object.__setattr__(self, "_io", io)
+        object.__setattr__(self, "_io", io._detached())
         return self
 
     @property
     def io(self) -> AsyncArrayIO:
-        """The explicit-IO binding this array delegates to, as of now: a change to
-        the array's state (resize, append, an attribute update) gives the array a
-        binding of its own, and a binding taken before keeps the state it had."""
+        """The explicit-IO binding this array delegates to, as of now. A resize or an
+        append gives the array a binding of its own, so a binding taken before keeps
+        the shape it had; an attribute update changes the metadata in place, as it
+        always has, so it shows through a binding taken before, and through copies
+        of the array that share its metadata."""
         return self._io
 
     def __getstate__(self) -> dict[str, object]:
@@ -517,13 +518,17 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
             "config": self.config,
             "_pipeline_class": self._io._pipeline_class,
         }
+        if type(self._io) is not AsyncArrayIO:
+            # Carried only when it is a subclass, so the pickle stays loadable where
+            # that class is not importable only if it is used.
+            state["_binding_class"] = type(self._io)
         state.update(carried)
         return state
 
     def __setstate__(self, state: dict[str, Any]) -> None:
         metadata = state["metadata"]
         pipeline = state["codec_pipeline"]
-        io = object.__new__(AsyncArrayIO)
+        io = object.__new__(state.get("_binding_class", AsyncArrayIO))
         # The class the binding chose: a pipeline may build an instance of
         # another one (zarrs-python falls back for stores it cannot use).
         pipeline_class = state.get("_pipeline_class", type(pipeline))
@@ -1939,9 +1944,32 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         )
 
 
+class _BindingField:
+    """A dataclass field of `AsyncArray`, read from and written to its binding. Like a
+    field without a default, it is not an attribute of the class, so a `@dataclass`
+    subclass that annotates the field again finds no default."""
+
+    def __init__(
+        self,
+        get: Callable[[AsyncArray[Any]], Any],
+        set_: Callable[[AsyncArray[Any], Any], None],
+    ) -> None:
+        self._get = get
+        self._set = set_
+        self.__doc__ = get.__doc__
+
+    def __get__(self, instance: AsyncArray[Any] | None, owner: type | None = None) -> Any:
+        if instance is None:
+            raise AttributeError(f"{self._get.__name__.removeprefix('_get_')} is an instance field")
+        return self._get(instance)
+
+    def __set__(self, instance: AsyncArray[Any], value: object) -> None:
+        self._set(instance, value)
+
+
 def _get_metadata(self: AsyncArray[Any]) -> ArrayMetadata:
     """The in-memory metadata of this array."""
-    return self._io._legacy_as_source()
+    return self._io.metadata_legacy
 
 
 def _own_binding(self: AsyncArray[Any]) -> AsyncArrayIO:
@@ -1951,7 +1979,7 @@ def _own_binding(self: AsyncArray[Any]) -> AsyncArrayIO:
     made by copying this one (its `__dict__`), or a binding taken from `io`, keeps the
     state it had.
     """
-    io = object.__new__(AsyncArrayIO)
+    io = object.__new__(type(self._io))
     io.__dict__.update(vars(self._io))
     object.__setattr__(self, "_io", io)
     return io
@@ -1999,11 +2027,13 @@ def _set_chunk_grid(self: AsyncArray[Any], value: ChunkGrid) -> None:
 # The dataclass fields of `AsyncArray` read the wrapped binding. They are
 # attached once the dataclass is made, so `@dataclass` sees fields, not
 # defaults; the setters keep `object.__setattr__(array, name, value)` working.
-setattr(AsyncArray, "metadata", property(_get_metadata, _set_metadata))  # noqa: B010
-setattr(AsyncArray, "store_path", property(_get_store_path, _set_store_path))  # noqa: B010
-setattr(AsyncArray, "config", property(_get_config, _set_config))  # noqa: B010
-setattr(AsyncArray, "codec_pipeline", property(_get_codec_pipeline, _set_codec_pipeline))  # noqa: B010
-setattr(AsyncArray, "_chunk_grid", property(_get_chunk_grid, _set_chunk_grid))  # noqa: B010
+setattr(AsyncArray, "metadata", _BindingField(_get_metadata, _set_metadata))  # noqa: B010
+setattr(AsyncArray, "store_path", _BindingField(_get_store_path, _set_store_path))  # noqa: B010
+setattr(AsyncArray, "config", _BindingField(_get_config, _set_config))  # noqa: B010
+setattr(  # noqa: B010
+    AsyncArray, "codec_pipeline", _BindingField(_get_codec_pipeline, _set_codec_pipeline)
+)
+setattr(AsyncArray, "_chunk_grid", _BindingField(_get_chunk_grid, _set_chunk_grid))  # noqa: B010
 
 
 # TODO: Array can be a frozen data class again once property setters (e.g. shape) are removed
@@ -6429,7 +6459,15 @@ _CARRIED_KEYS: Final = ("_stored_entry", "_stored_copy")
 """The keys a pickled binding carries its store cache's entry under."""
 
 _ASYNC_ARRAY_STATE_KEYS: Final = frozenset(
-    {"metadata", "store_path", "codec_pipeline", "_chunk_grid", "config", "_pipeline_class"}
+    {
+        "metadata",
+        "store_path",
+        "codec_pipeline",
+        "_chunk_grid",
+        "config",
+        "_pipeline_class",
+        "_binding_class",
+    }
     | set(_CARRIED_KEYS)
 )
 """The keys of a pickled `AsyncArray`'s state that rebuild its binding; any other key is
@@ -6447,24 +6485,34 @@ def _bound_metadata_dict(
     from zarr_metadata import MetadataValidationError
 
     path = str(store_path)
+    # Metadata written in Python may hold tuples where its JSON holds lists; the
+    # repairs read JSON.
+    data = cast("dict[str, Any]", _lists_for_tuples(data))
     zarr_format: ZarrFormat = 2 if data.get("zarr_format") == 2 else 3
     if data.get("storage_transformers"):
         # Bound as legacy metadata, which rejects them, as AsyncArray always has.
         return parse_array_metadata(data, path)
     if not moves_chunks(data, zarr_format):
         # A document zarr reads as repaired, moving chunks, is never bound as a
-        # model, also where the model accepts it (a v2 chunk size of 0).
+        # model, also where the model accepts it.
         try:
             return _array_metadata_model(data)
         except MetadataValidationError:
             pass
-    # Read again as an object, as `AsyncArray` binds it: that read repairs a v2 chunk
-    # size of 0 the document repairs leave (a tuple-valued shape).
-    legacy = parse_array_metadata(parse_array_metadata(data, path), path)
+    legacy = parse_array_metadata(data, path)
     # An invalid document given as a dict stands for what the store holds, as
     # one given to AsyncArray does.
     _record_given_document(store_path, data, legacy.zarr_format)
     return legacy
+
+
+def _lists_for_tuples(value: object) -> object:
+    """`value` with every tuple, at any depth in its dicts and lists, made a list."""
+    if isinstance(value, dict):
+        return {key: _lists_for_tuples(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_lists_for_tuples(item) for item in value]
+    return value
 
 
 def _record_given_document(
@@ -6508,13 +6556,13 @@ def _differing_fields(
     return differing
 
 
-def _reject_storage_transformers(model: ArrayMetadataModel) -> None:
-    """Raise, as `parse_array_metadata` does, for a model that declares storage
+def _reject_storage_transformers(metadata: ArrayMetadataModel | ArrayMetadata) -> None:
+    """Raise for metadata (a model or a legacy object) that declares storage
     transformers: zarr-python cannot read or write chunks through them."""
-    transformers = getattr(model, "storage_transformers", ())
+    transformers = getattr(metadata, "storage_transformers", ())
     if transformers:
         raise ValueError(
-            f"Array metadata contains storage transformers: {transformers}."
+            f"Array metadata contains storage transformers: {transformers}. "
             "Arrays with storage transformers are not supported in zarr-python at this time."
         )
 
@@ -6572,30 +6620,41 @@ def _array_metadata_model(data: dict[str, JSON]) -> ArrayMetadataModel:
     `zarr_metadata.MetadataValidationError`. Unknown extension names read as
     unclaimed fields, not errors.
     """
+    from zarr_metadata import MetadataValidationError
+
     model_v2, model_v3 = _model_classes()
     if data.get("zarr_format") != 2:
         return model_v3(data)
     chunks = data.get("chunks")
-    if isinstance(chunks, list | tuple):
-        _reject_v2_chunk_sizes(chunks)
-    return _checked_model(model_v2(data))
+    chunk_problems = _v2_chunk_problems(chunks) if isinstance(chunks, list | tuple) else []
+    try:
+        model = model_v2(data)
+    except MetadataValidationError as error:
+        if not chunk_problems:
+            raise
+        raise MetadataValidationError([*error.problems, *chunk_problems]) from None
+    if chunk_problems:
+        raise MetadataValidationError(chunk_problems)
+    return model
 
 
 def _checked_model(model: ArrayMetadataModel) -> ArrayMetadataModel:
     """`model`, once checked as zarr checks a model it binds: it declares no storage
     transformers, and a Zarr format 2 model no chunk size zarr reads as repaired."""
+    from zarr_metadata import MetadataValidationError
+
     _reject_storage_transformers(model)
-    if isinstance(model, _model_classes()[0]):
-        _reject_v2_chunk_sizes(model.chunks)
+    if isinstance(model, _model_classes()[0]) and (problems := _v2_chunk_problems(model.chunks)):
+        raise MetadataValidationError(problems)
     return model
 
 
-def _reject_v2_chunk_sizes(chunks: Sequence[object]) -> None:
-    """Raise `zarr_metadata.MetadataValidationError` for each Zarr format 2 chunk size
-    that is not an integer >= 1: the v2 model accepts a 0, which zarr reads as repaired."""
-    from zarr_metadata import MetadataValidationError, ValidationProblem
+def _v2_chunk_problems(chunks: Sequence[object]) -> list[ValidationProblem]:
+    """A problem for each Zarr format 2 chunk size that is not an integer >= 1: the v2
+    model accepts a 0, which zarr reads as repaired."""
+    from zarr_metadata import ValidationProblem
 
-    problems = [
+    return [
         ValidationProblem(
             ("chunks", index),
             f"expected an integer >= 1, got {size!r}",
@@ -6605,8 +6664,6 @@ def _reject_v2_chunk_sizes(chunks: Sequence[object]) -> None:
         for index, size in enumerate(chunks)
         if not (type(size) is int and size >= 1)
     ]
-    if problems:
-        raise MetadataValidationError(problems)
 
 
 @functools.cache
@@ -6802,6 +6859,13 @@ class AsyncArrayIO:
         """The bound metadata, as a `zarr_metadata` model."""
         source = self._source
         if not isinstance(source, ArrayV2Metadata | ArrayV3Metadata):
+            resolved = self._resolved_cache
+            if resolved is not None:
+                # An `AsyncArray` over this binding hands out the resolved object,
+                # whose attributes callers change in place: the model reads them.
+                attributes = _plain_json(resolved.attributes)
+                if attributes != _plain_json(source.attributes):
+                    return source.update(attributes=attributes)
             return source
         # Derived on every access, not cached: a legacy object's attributes may be
         # changed in place through another handle that shares it (as `AsyncArray`
@@ -6825,14 +6889,17 @@ class AsyncArrayIO:
             self._resolved_cache = parse_array_metadata(data, str(self._store_path))
         return self._resolved_cache
 
-    def _legacy_as_source(self) -> ArrayMetadata:
-        """`metadata_legacy`, made this binding's source. An `AsyncArray` hands it out as
-        its `metadata`, which callers change in place (its attributes) and share with
-        other arrays, so this binding's model must be read from it from then on."""
-        resolved = self.metadata_legacy
-        if self._source is not resolved:
-            self._source = resolved
-        return resolved
+    def _detached(self) -> Self:
+        """A copy of this binding that shares nothing that is changed in place: its
+        legacy metadata (whose attributes an `AsyncArray` updates in place) is copied,
+        and its caches of immutable values are shared."""
+        copied = object.__new__(type(self))
+        copied.__dict__.update(self.__dict__)
+        if isinstance(self._source, ArrayV2Metadata | ArrayV3Metadata):
+            copied._source = _copied_legacy(self._source)
+        elif self._resolved_cache is not None:
+            copied._resolved_cache = _copied_legacy(self._resolved_cache)
+        return copied
 
     @property
     def store_path(self) -> StorePath:
@@ -6948,9 +7015,8 @@ class AsyncArrayIO:
         return self._codec_pipeline_cache
 
     def to_array(self) -> AnyAsyncArray:
-        """An `AsyncArray` over this binding. A change to the array's state (resize,
-        append, an attribute update) gives the array a binding of its own, and
-        this binding keeps the state it had."""
+        """An `AsyncArray` over a copy of this binding: nothing done through the array
+        (a resize, an attribute update) changes this binding."""
         return AsyncArray._from_io(self)
 
     def __getstate__(self) -> dict[str, object]:
@@ -6997,7 +7063,7 @@ class AsyncArrayIO:
         source = self._source
         if isinstance(source, ArrayV2Metadata | ArrayV3Metadata):
             return _copied_legacy(source)
-        return source
+        return self.metadata
 
     def _derive(
         self,
@@ -7061,6 +7127,7 @@ class AsyncArrayIO:
         if isinstance(source, ArrayV2Metadata | ArrayV3Metadata):
             await save_metadata(self._store_path, source, ensure_parents=ensure_parents)
         else:
+            source = self.metadata
             prototype = default_buffer_prototype()
             key_value = source.to_key_value(indent=zarr_config.get("json_indent"))
             to_save = {
@@ -7324,7 +7391,8 @@ class ArrayIO:
         return self._async_io.config
 
     def to_array(self) -> AnyArray:
-        """An `Array` over this binding; both share one state."""
+        """An `Array` over a copy of this binding: nothing done through the array (a
+        resize, an attribute update) changes this binding."""
         return Array(self._async_io.to_array())
 
     def with_metadata(

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
 import json
 import pickle
-import tempfile
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
@@ -18,8 +19,9 @@ from zarr import ArrayIO, AsyncArray, AsyncArrayIO
 from zarr.api.asynchronous import open_array
 from zarr.core.buffer import default_buffer_prototype
 from zarr.core.codec_pipeline import FusedCodecPipeline
-from zarr.core.metadata import ArrayV2Metadata
+from zarr.core.metadata import ArrayV2Metadata, ArrayV3Metadata
 from zarr.core.metadata.stored import stored_documents
+from zarr.core.sync import sync
 from zarr.dtype import Int16
 from zarr.errors import ArrayNotFoundError, UnknownCodecError, ZarrUserWarning
 from zarr.storage import LocalStore, MemoryStore, StorePath
@@ -449,24 +451,45 @@ async def test_v2_model_binding_without_attributes() -> None:
     assert (await open_array(store=store, path="foo")).metadata.attributes == {"x": 1}
 
 
-async def test_open_rejects_a_v2_chunk_size_zarr_reads_as_repaired() -> None:
-    """The strict read rejects a v2 chunk size of 0, as it does a v3 one, though
-    the v2 model accepts it."""
-    store = MemoryStore()
-    document = {
-        "zarr_format": 2,
-        "shape": [4],
-        "chunks": [0],
-        "dtype": "<i4",
-        "fill_value": 0,
-        "order": "C",
-        "filters": None,
-        "compressor": None,
-    }
+async def _store_v2_document(store: MemoryStore, document: dict[str, Any]) -> None:
     prototype = default_buffer_prototype()
     await store.set("a/.zarray", prototype.buffer.from_bytes(json.dumps(document).encode()))
-    with pytest.raises(MetadataValidationError, match="chunks"):
+
+
+_V2_DOCUMENT: dict[str, Any] = {
+    "zarr_format": 2,
+    "shape": [4],
+    "chunks": [4],
+    "dtype": "<i4",
+    "fill_value": 0,
+    "order": "C",
+    "filters": None,
+    "compressor": None,
+}
+
+
+async def test_open_rejects_a_v2_chunk_size_zarr_reads_as_repaired() -> None:
+    """The strict reads (`open`, `verify`) reject a v2 chunk size of 0, as they do a
+    v3 one, though the v2 model accepts it, naming where and what kind."""
+    store = MemoryStore()
+    await _store_v2_document(store, {**_V2_DOCUMENT, "chunks": [0]})
+    with pytest.raises(MetadataValidationError) as opened:
         await AsyncArrayIO.open(store, name="a")
+    binding = AsyncArrayIO.build_v2(store, name="a", shape=(4,), dtype="<i4", chunks=(4,))
+    with pytest.raises(MetadataValidationError) as verified:
+        await binding.verify()
+    for error in (opened.value, verified.value):
+        assert [(p.loc, p.kind) for p in error.problems] == [(("chunks", 0), "invalid_value")]
+
+
+async def test_a_strict_v2_read_reports_every_problem_with_its_chunk_sizes() -> None:
+    store = MemoryStore()
+    await _store_v2_document(store, {**_V2_DOCUMENT, "chunks": [0], "dtype": "nope"})
+    with pytest.raises(MetadataValidationError) as error:
+        await AsyncArrayIO.open(store, name="a")
+    locations = [p.loc for p in error.value.problems]
+    assert ("chunks", 0) in locations
+    assert len(locations) > 1
 
 
 def test_with_metadata_rejects_what_is_not_metadata() -> None:
@@ -512,11 +535,11 @@ async def test_bindings_take_metadata_json() -> None:
     np.testing.assert_array_equal(await aio.getitem(Ellipsis), np.arange(4))
 
 
-async def test_pickled_binding_rebuilds_its_pipeline() -> None:
+async def test_pickled_binding_rebuilds_its_pipeline(tmp_path: Path) -> None:
     """A pickled binding drops its built pipeline (a pipeline assigned to it is not
     carried either) and builds its class's pipeline on first use."""
     aio = AsyncArrayIO.build_v3(
-        LocalStore(tempfile.mkdtemp()), name="foo", shape=(4,), data_type="uint8", chunk_grid=(2,)
+        LocalStore(tmp_path), name="foo", shape=(4,), data_type="uint8", chunk_grid=(2,)
     )
     await aio.setitem(Ellipsis, np.arange(4, dtype="uint8"))
     revived = pickle.loads(pickle.dumps(aio))
@@ -742,6 +765,7 @@ def test_async_array_subclass_state_survives_pickle_and_copy() -> None:
         assert type(restored) is _TaggedAsyncArray
         assert restored.tag == "mine"
         assert restored == tagged
+        assert set(vars(restored)) == {"_io", "tag"}
 
 
 async def test_copying_an_array_shares_its_metadata() -> None:
@@ -874,3 +898,100 @@ def test_bindings_of_different_classes_hash_as_they_compare() -> None:
     other = _Binding(base.metadata, base.store_path)
     assert other == base
     assert hash(other) == hash(base)
+
+
+async def test_attribute_updates_through_an_array() -> None:
+    """An attribute update through an array never reaches the binding the array was
+    made from (`to_array`), shows through a binding taken from the array (`io`)
+    consistently in both forms, and through an array copied by its `__dict__`, as
+    it did when the fields were an array's only state."""
+    store = MemoryStore()
+    origin = AsyncArrayIO.build_v3(
+        store, name="a", shape=(4,), data_type="uint8", chunk_grid=(4,), attributes={"v": 0}
+    )
+    await origin.store_metadata()
+    array = origin.to_array()
+    taken = array.io
+    clone = object.__new__(AsyncArray)
+    clone.__dict__.update(array.__dict__)
+    await array.update_attributes({"v": 1})
+    assert dict(origin.metadata.attributes) == {"v": 0}
+    assert dict(origin.metadata_legacy.attributes) == {"v": 0}
+    assert dict(taken.metadata.attributes) == taken.metadata_legacy.attributes == {"v": 1}
+    assert clone.attrs == {"v": 1}
+    await taken.store_metadata()
+    await taken.verify()
+
+
+@pytest.mark.parametrize(
+    ("data_type", "fill_value"), [("float32", "0x7fc00001"), ("float64", "0x7ff8000000000001")]
+)
+async def test_reading_an_array_leaves_its_binding_as_stored(
+    data_type: str, fill_value: str
+) -> None:
+    """Reading an array made from a binding (its shape, its data) leaves the binding
+    holding the document as stored: it still verifies, compares equal to a fresh
+    open, and stores that document unchanged (a NaN payload is kept)."""
+    store = MemoryStore()
+    document = {
+        "zarr_format": 3,
+        "node_type": "array",
+        "shape": [4],
+        "data_type": data_type,
+        "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [4]}},
+        "chunk_key_encoding": {"name": "default"},
+        "fill_value": fill_value,
+        "codecs": [{"name": "bytes", "configuration": {"endian": "little"}}],
+        "attributes": {},
+    }
+    stored = default_buffer_prototype().buffer.from_bytes(json.dumps(document).encode())
+    await store.set("a/zarr.json", stored)
+    binding = await AsyncArrayIO.open(store, name="a")
+    array = binding.to_array()
+    _ = array.shape
+    await array.getitem(slice(None))
+    assert binding == await AsyncArrayIO.open(store, name="a")
+    await binding.verify()
+    await binding.store_metadata()
+    rewritten = await store.get("a/zarr.json", prototype=default_buffer_prototype())
+    assert rewritten is not None
+    assert json.loads(rewritten.to_bytes()) == document
+
+
+class _LoggingBinding(AsyncArrayIO):
+    """A binding subclass, as a backend would define one."""
+
+
+def test_an_array_keeps_its_binding_class() -> None:
+    """A change to an array's state, and pickling, keep the class of the binding
+    it was made from."""
+    binding = _LoggingBinding.build_v3(
+        MemoryStore(), name="a", shape=(4,), data_type="uint8", chunk_grid=(4,)
+    )
+    array = binding.to_array()
+    for kept in (array, pickle.loads(pickle.dumps(array))):
+        sync(kept.resize((6,)))
+        assert type(kept.io) is _LoggingBinding
+
+
+@dataclass(frozen=True)
+class _Typed(AsyncArray[Any]):
+    """A `@dataclass` subclass that annotates a field again and adds one with no default."""
+
+    metadata: ArrayV3Metadata
+    label: str
+
+    def __init__(
+        self, metadata: Any, store_path: StorePath, config: Any = None, label: str = "x"
+    ) -> None:
+        super().__init__(metadata, store_path, config)
+        object.__setattr__(self, "label", label)
+
+
+def test_a_dataclass_subclass_may_annotate_fields_again() -> None:
+    """A `@dataclass` subclass that annotates a field again, or adds one without a
+    default, defines and works, as when the fields had no class attribute."""
+    created = zarr.create_array(MemoryStore(), shape=(4,), dtype="uint8", chunks=(2,))
+    typed = _Typed(created.metadata, created.store_path)
+    assert typed.shape == (4,)
+    assert dataclasses.replace(typed, label="y").label == "y"

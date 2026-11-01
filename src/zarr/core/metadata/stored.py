@@ -177,17 +177,16 @@ class StoredDocuments:
 
 def _may_move(written: WrittenArrayMetadata) -> bool:
     """`may_move_chunks` for the document `written` encodes, read from its chunk sizes."""
-    from zarr.core.metadata import ArrayV2Metadata, ArrayV3Metadata
+    from zarr.core.metadata import ArrayV3Metadata
 
-    if isinstance(written, ArrayV2Metadata):
-        return may_move_chunks({"chunks": list(written.chunks)}, 2)
-    if isinstance(written, ArrayV3Metadata):
-        return may_move_chunks(
-            cast("ArrayDocument", {"chunk_grid": written.chunk_grid.to_dict()}), 3
-        )
     if written.zarr_format == 2:
         return may_move_chunks({"chunks": list(written.chunks)}, 2)
-    return may_move_chunks(cast("ArrayDocument", {"chunk_grid": written.chunk_grid.json}), 3)
+    grid: object = (
+        written.chunk_grid.to_dict()
+        if isinstance(written, ArrayV3Metadata)
+        else written.chunk_grid.json
+    )
+    return may_move_chunks(cast("ArrayDocument", {"chunk_grid": grid}), 3)
 
 
 def _forget(key: int, ref: weakref.ref[Store]) -> None:
