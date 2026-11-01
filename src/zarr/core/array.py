@@ -7059,7 +7059,10 @@ class AsyncArrayIO:
         )
         if keeps_model:
             rebound._resolved_cache = metadata
-        rebound._codec_pipeline_cache = built._codec_pipeline_cache
+        if built._pipeline_class is rebound._pipeline_class:
+            # The pipeline the constructor built is the one this binding runs; a
+            # `_bind` that chose another pipeline class builds its own.
+            rebound._codec_pipeline_cache = built._codec_pipeline_cache
         rebound._chunk_grid_cache = built._chunk_grid_cache
         return rebound
 

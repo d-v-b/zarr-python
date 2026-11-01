@@ -20,7 +20,7 @@ import zarr
 from zarr import ArrayIO, AsyncArray, AsyncArrayIO
 from zarr.api.asynchronous import open_array
 from zarr.core.buffer import default_buffer_prototype
-from zarr.core.codec_pipeline import FusedCodecPipeline
+from zarr.core.codec_pipeline import BatchedCodecPipeline, FusedCodecPipeline
 from zarr.core.metadata import ArrayV2Metadata, ArrayV3Metadata
 from zarr.core.metadata.stored import stored_documents
 from zarr.core.sync import sync
@@ -1306,3 +1306,25 @@ async def test_a_model_binding_reads_attributes_with_mixed_key_types() -> None:
     array = (await AsyncArrayIO.open(store, name="a")).to_array()
     cast("dict[Any, Any]", array.metadata.attributes)[1] = "x"
     assert dict(array.io.metadata.attributes) == {"b": 1, "1": "x"}
+
+
+class _OwnPipeline(BatchedCodecPipeline):
+    """A pipeline class a backend binding chooses for itself."""
+
+
+class _OwnPipelineBinding(AsyncArrayIO):
+    """A binding whose `_bind` runs a pipeline class of its own, as a backend might."""
+
+    def _bind(self, *args: Any) -> None:
+        *rest, _ = args
+        bind: Any = super()._bind
+        bind(*rest, _OwnPipeline)
+
+
+def test_with_config_runs_the_pipeline_a_binding_chose() -> None:
+    array = _OwnPipelineBinding.build_v3(
+        MemoryStore(), shape=(4,), data_type="uint8", chunk_grid=(4,)
+    ).to_array()
+    configured = array.with_config({"order": "F"})
+    assert configured.io._pipeline_class is _OwnPipeline
+    assert isinstance(configured.codec_pipeline, _OwnPipeline)
