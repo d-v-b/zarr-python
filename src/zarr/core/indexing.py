@@ -791,12 +791,6 @@ class IntArrayDimIndexer:
         dim_sel = np.asanyarray(dim_sel)
         if not is_integer_array(dim_sel, 1):
             raise IndexError("integer arrays in an orthogonal selection must be 1-dimensional only")
-        # Check unsigned values before narrowing: uint64 can wrap to a valid negative index.
-        if boundscheck and dim_sel.dtype.kind == "u":
-            boundscheck_indices(dim_sel, dim_len)
-        # uint64 promotes to float against the signed chunk offset
-        dim_sel = dim_sel.astype(np.intp, copy=False)
-
         nitems = len(dim_sel)
         g = dim_grid
         nchunks = g.nchunks
@@ -808,6 +802,11 @@ class IntArrayDimIndexer:
         # handle out of bounds
         if boundscheck:
             boundscheck_indices(dim_sel, dim_len)
+
+        # Narrow only after the checks, which ran in the caller's dtype: a uint64
+        # value past intp would otherwise wrap to a valid negative index. From
+        # here on, arithmetic against the signed chunk offsets stays integral.
+        dim_sel = dim_sel.astype(np.intp, copy=False)
 
         # determine which chunk is needed for each selection item
         # note: for dense integer selections, the division operation here is the
@@ -1246,16 +1245,6 @@ class CoordinateIndexer(Indexer):
                 "(coordinate) array per dimension of the target array, "
                 f"got {selection!r}"
             )
-        # Check unsigned values before narrowing can turn an out-of-bounds value negative.
-        for dim_sel, dim_len in zip(selection_normalized, shape, strict=True):
-            if dim_sel.dtype.kind == "u":
-                boundscheck_indices(dim_sel, dim_len)
-        # keep indices integral: uint64 against a signed offset promotes to float
-        selection_normalized = cast(
-            "CoordinateSelectionNormalized",
-            tuple(np.asarray(s, dtype=np.intp) for s in selection_normalized),
-        )
-
         # Optimization for a single sorted, in-bounds, 1-D integer coordinate array over a
         # regular (fixed-size) chunk grid. The general path below makes several full passes over
         # the flat selection. For sufficiently dense selections, locating the internal chunk
@@ -1275,6 +1264,8 @@ class CoordinateIndexer(Indexer):
                 and coords[-1] < shape[0]
                 and coords[0] <= coords[-1]
             ):
+                # The guard above checked the bounds in the caller's dtype; narrow now.
+                coords = coords.astype(np.intp, copy=False)
                 size = g0.size
                 first = int(coords[0]) // size
                 last = int(coords[-1]) // size
@@ -1290,7 +1281,7 @@ class CoordinateIndexer(Indexer):
                     if first == last:
                         counts = np.array([coords.size], dtype=np.intp)
                     else:
-                        edges = np.arange(first + 1, last + 1, dtype=coords.dtype) * size
+                        edges = np.arange(first + 1, last + 1, dtype=np.intp) * size
                         cuts = np.searchsorted(coords, edges)
                         counts = np.diff(cuts, prepend=0, append=coords.size)
                     occupied = np.nonzero(counts)[0]
@@ -1316,6 +1307,13 @@ class CoordinateIndexer(Indexer):
         )
         for dim_sel, dim_len in zip(selection_normalized, shape, strict=True):
             boundscheck_indices(dim_sel, dim_len)
+        # Narrow only after the checks, which ran in the caller's dtype: a uint64
+        # value past intp would otherwise wrap to a valid negative index. From
+        # here on, arithmetic against the signed chunk offsets stays integral.
+        selection_normalized = cast(
+            "CoordinateSelectionNormalized",
+            tuple(np.asarray(s, dtype=np.intp) for s in selection_normalized),
+        )
 
         # compute chunk index for each point in the selection
         chunks_multi_index = tuple(

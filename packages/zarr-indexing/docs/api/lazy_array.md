@@ -38,10 +38,11 @@ materialize values. `view.write(values)` synchronously writes to the original
 source through the composed transform and returns `None`; `view[key] = values`
 writes a selected sub-view. Writes require a writable source.
 
-For consumers requiring eager indexing, import `EagerArrayAdapter` from
-`zarr_indexing` and wrap the view. The adapter delegates shape, rank, dtype,
-NumPy conversion, and tokenization to the view, but materializes each
-`adapter[key]`. Use it with `dask.array.from_array`; direct lazy indexing
-is not a reliable Dask block-read interface.
+For `dask.array.from_array`, wrap the view in `EagerArrayAdapter` (importable
+from `zarr_indexing`). Block reads work on a bare view, but Dask infers its
+block prototype by indexing the input with empty slices, and a view's empty
+slice is another view. The adapter materializes each `adapter[key]`, so the
+prototype is an `ndarray`, and delegates shape, rank, dtype, NumPy conversion,
+and tokenization to the view.
 
 ::: zarr_indexing.lazy_array

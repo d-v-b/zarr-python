@@ -32,7 +32,7 @@ __all__ = [
 
 @dataclass(frozen=True, slots=True)
 class ReadContext:
-    """A source-global transform and optional projection for a partitioned read.
+    """A source-global read transform and the chunk projection that planned it.
 
     Examples
     --------
@@ -421,17 +421,13 @@ def _lower_general(array: Any, transform: IndexTransform) -> Any:
     broadcast_axes = [d for d in range(transform.input_rank) if d not in slice_input_dims]
     broadcast_shape = tuple(transform.domain.shape[d] for d in broadcast_axes)
 
-    for _, arr_map in correlated:
-        # The axes the array varies over (its non-singleton axes; see
-        # transform._array_map_dependency_axes) must all live in the block.
-        dependency = (axis for axis, size in enumerate(arr_map.index_array.shape) if size > 1)
-        if any(a not in broadcast_axes for a in dependency):
-            # Reachable only by hand-building a transform: no selection binds
-            # the same input axis to both a slice map and an index array.
-            raise NotImplementedError(
-                "resolving a transform whose index array varies over an input "
-                "dimension also bound by a slice map is not supported"
-            )
+    if transform.index_array_shares_affine_axis:
+        # Reachable only by hand-building a transform: no selection binds
+        # the same input axis to both a slice map and an index array.
+        raise NotImplementedError(
+            "resolving a transform whose index array varies over an input "
+            "dimension also bound by a slice map is not supported"
+        )
 
     # Gather any reversing or repeating slice axis first, then take the basic-slice
     # cut. The correlated axes keep their full extent: their coordinates are absolute.

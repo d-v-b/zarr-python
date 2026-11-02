@@ -39,11 +39,16 @@ def test_from_array(source: zarr.Array) -> None:
     """Adapt lazy selections for `dask.array.from_array`."""
     lazy = LazyArray(source)
 
-    # `from_array` expects eager block indexing, which `EagerArrayAdapter`
-    # provides. Each Dask block reads its own region through the adapter.
+    # `from_array` infers its block prototype by indexing the input with empty
+    # slices, and a view's empty slice is another view. `EagerArrayAdapter`
+    # returns arrays from indexing, so the prototype is an ndarray and
+    # reductions such as `mean` work. Each Dask block reads its own region
+    # through the adapter.
     array = da.from_array(EagerArrayAdapter(lazy), chunks=(10, 10))
     print(array)
+    assert isinstance(array._meta, np.ndarray)
     assert np.array_equal(array.compute(scheduler="threads"), source[:])
+    assert array.mean().compute() == source[:].mean()
 
     # A view works the same way, and its shape is the shape of the selection.
     view = LazyArray(source)[5:35, 3:27]
