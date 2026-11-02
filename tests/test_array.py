@@ -145,7 +145,7 @@ def test_array_creation_existing_node(
 @pytest.mark.parametrize("store", ["local", "memory", "zip"], indirect=["store"])
 @pytest.mark.parametrize("zarr_format", [2, 3])
 async def test_create_creates_parents(
-    store: LocalStore | MemoryStore, zarr_format: ZarrFormat
+    store: LocalStore | MemoryStore, zarr_format: ZarrFormat, subtests: pytest.Subtests
 ) -> None:
     # prepare a root node, with some data set
     await zarr.api.asynchronous.open_group(
@@ -178,8 +178,10 @@ async def test_create_creates_parents(
 
     paths = ["a", "a/b", "a/b/c"]
     for path in paths:
-        g = await zarr.api.asynchronous.open_group(store=store, path=path)
-        assert isinstance(g, AsyncGroup)
+        # each parent is an independent claim; a missing intermediate must not mask the rest
+        with subtests.test(path=path):
+            g = await zarr.api.asynchronous.open_group(store=store, path=path)
+            assert isinstance(g, AsyncGroup)
 
 
 @pytest.mark.parametrize("store", ["local", "memory", "zip"], indirect=["store"])
