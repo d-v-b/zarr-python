@@ -298,7 +298,9 @@ A v3 model consists of its document and the scope it was read in.
 scope (`CORE_AND_EXTENSIONS_CONTEXT` when none is given) and raises
 `MetadataValidationError` with every problem, so an invalid model is never
 built. `to_json` returns the document as it was written, and
-`to_key_value` writes that same document to store bytes.
+`to_key_value` writes that same document to store bytes, spelled as its
+`JSONWriterConfig` argument directs (indentation, key order, ASCII
+escaping, trailing newline); the default is that of `json.dumps`.
 
 Every typed attribute is a view of that read: each declaration as the scope read
 it (an `AcceptedDeclaration` or an `UnclaimedDeclaration`), and `shape`, `attributes`
