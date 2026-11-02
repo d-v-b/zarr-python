@@ -645,7 +645,8 @@ def _indexed_set(out_dim: int, m: ArrayMap, dg: DimensionGridLike) -> IndexedSet
             f"{m.index_array.shape} that varies over no input axis; it cannot be "
             "partitioned as an orthogonal map"
         )
-    flat = m.index_array.reshape(-1)
+    # Every value is binned into a chunk, so every value is read.
+    flat = m.checked_index_array(out_dim).reshape(-1)
     n = int(flat.size)
     storage = checked_affine(m.offset, m.stride, flat)
     # Probe the extreme coordinates with the scalar lookup first: a grid's
