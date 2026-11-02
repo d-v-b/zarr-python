@@ -1,4 +1,4 @@
-"""Strategies for each codec this package defines that holds no other field.
+"""Strategies for each codec this package defines that holds no other declaration.
 
 A codec handed an array draws what fits the chunk: a `bytes` codec an
 `endian` for a type whose values take several bytes, a `transpose` an
@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 from hypothesis import strategies as st
 
-from zarr_metadata.definition._definition import AcceptedField
+from zarr_metadata.definition._definition import AcceptedDeclaration, EmptyConfiguration
 from zarr_metadata.testing._data_type import (
     COMPLEX_WIDTHS,
     FLOAT_WIDTHS,
@@ -30,6 +30,8 @@ from zarr_metadata.v3.codec.crc32c import CRC32C_CODEC
 from zarr_metadata.v3.codec.gzip import GZIP_CODEC
 from zarr_metadata.v3.codec.scale_offset import SCALE_OFFSET_CODEC
 from zarr_metadata.v3.codec.transpose import TRANSPOSE_CODEC
+from zarr_metadata.v3.codec.vlen_bytes import VLEN_BYTES_CODEC
+from zarr_metadata.v3.codec.vlen_utf8 import VLEN_UTF8_CODEC
 from zarr_metadata.v3.codec.zstd import ZSTD_CODEC, ZSTD_MAX_LEVEL, ZSTD_MIN_LEVEL
 from zarr_metadata.v3.data_type.numpy_datetime64 import NUMPY_DATETIME64_DATA_TYPE
 from zarr_metadata.v3.data_type.numpy_timedelta64 import NUMPY_TIMEDELTA64_DATA_TYPE
@@ -129,7 +131,7 @@ def _scale_offset(chunk: Chunk) -> st.SearchStrategy[Mapping[str, JSONValue]] | 
     non-negative integers, which every integer and float type holds.
     """
     data_type = chunk.data_type
-    definition = data_type.definition if isinstance(data_type, AcceptedField) else None
+    definition = data_type.definition if isinstance(data_type, AcceptedDeclaration) else None
     if definition is None:
         offset: st.SearchStrategy[JSONValue] = st.integers(0, 127)
         scale: st.SearchStrategy[JSONValue] = st.integers(1, 127)
@@ -155,6 +157,17 @@ def _scale_offset(chunk: Chunk) -> st.SearchStrategy[Mapping[str, JSONValue]] | 
     return st.fixed_dictionaries({}, optional={"offset": offset, "scale": scale})
 
 
+def _vlen(definition: CodecDefinition[Any]) -> CodecStrategy:
+    """A codec with nothing to configure that takes only some data types: none for a chunk of another, which its own chunk rules say."""
+    return CodecStrategy(
+        configurations=lambda chunk: (
+            None
+            if any(definition.chunk_rules(EmptyConfiguration(), {}, chunk))
+            else EMPTY_CONFIGURATIONS
+        )
+    )
+
+
 def _unchunked(configurations: st.SearchStrategy[Mapping[str, JSONValue]]) -> CodecStrategy:
     """A codec whose configurations do not depend on the chunk it is handed."""
     return CodecStrategy(configurations=lambda _chunk: configurations)
@@ -167,6 +180,8 @@ CODEC_STRATEGIES: Final[Mapping[CodecDefinition[Any], CodecStrategy]] = {
     GZIP_CODEC: _unchunked(st.fixed_dictionaries({"level": st.integers(0, 9)})),
     SCALE_OFFSET_CODEC: CodecStrategy(configurations=_scale_offset),
     TRANSPOSE_CODEC: CodecStrategy(configurations=_transpose),
+    VLEN_BYTES_CODEC: _vlen(VLEN_BYTES_CODEC),
+    VLEN_UTF8_CODEC: _vlen(VLEN_UTF8_CODEC),
     ZSTD_CODEC: _unchunked(
         st.fixed_dictionaries(
             {"level": st.integers(ZSTD_MIN_LEVEL, ZSTD_MAX_LEVEL)},
@@ -174,6 +189,6 @@ CODEC_STRATEGIES: Final[Mapping[CodecDefinition[Any], CodecStrategy]] = {
         )
     ),
 }
-"""A strategy for each codec that holds no other field."""
+"""A strategy for each codec that holds no other declaration."""
 
 __all__ = ["CODEC_STRATEGIES"]
