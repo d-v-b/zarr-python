@@ -10,6 +10,7 @@ import pickle
 import threading
 from dataclasses import MISSING, dataclass
 from typing import TYPE_CHECKING, Any, SupportsIndex, cast
+from unittest import mock
 
 import numpy as np
 import pytest
@@ -810,10 +811,11 @@ async def test_writing_valid_metadata_parses_nothing(monkeypatch: pytest.MonkeyP
     nothing about, records nothing and parses no document."""
     import zarr.core.metadata.stored as stored_module
 
-    def refuse(_: object) -> None:
-        raise AssertionError("a written document was parsed")
-
-    monkeypatch.setattr(stored_module, "buffer_to_json_object", refuse)
+    monkeypatch.setattr(
+        stored_module,
+        "buffer_to_json_object",
+        mock.Mock(side_effect=AssertionError("a written document was parsed")),
+    )
     store = MemoryStore()
     arr = zarr.create_array(store, name="a", shape=(4,), dtype="uint8", attributes={"x": 1})
     arr.attrs["y"] = 2
