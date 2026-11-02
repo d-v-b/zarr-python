@@ -20,9 +20,10 @@ from zarr_metadata import ZarrV2ArrayMetadata as ModelV2
 import zarr
 from zarr import ArrayIO, AsyncArray, AsyncArrayIO
 from zarr.api.asynchronous import open_array
+from zarr.core.array import parse_array_metadata
 from zarr.core.buffer import default_buffer_prototype
 from zarr.core.codec_pipeline import BatchedCodecPipeline, FusedCodecPipeline
-from zarr.core.metadata import ArrayV2Metadata, ArrayV3Metadata
+from zarr.core.metadata import ArrayMetadata, ArrayV2Metadata, ArrayV3Metadata
 from zarr.core.metadata.stored import stored_documents
 from zarr.core.sync import sync
 from zarr.dtype import Int16
@@ -1330,3 +1331,32 @@ def test_with_config_runs_the_pipeline_a_binding_chose() -> None:
     configured = array.with_config({"order": "F"})
     assert configured.io._pipeline_class is _OwnPipeline
     assert isinstance(configured.codec_pipeline, _OwnPipeline)
+
+
+class _ResolvedFirstElsewhere:
+    """Stands in for `parse_array_metadata` while another thread stores its own
+    resolution of `binding` first."""
+
+    def __init__(self, binding: AsyncArrayIO, elsewhere: ArrayMetadata) -> None:
+        self.binding = binding
+        self.elsewhere = elsewhere
+
+    def __call__(self, *args: Any, **kwargs: Any) -> ArrayMetadata:
+        resolved = parse_array_metadata(*args, **kwargs)
+        self.binding._resolved_cache = self.elsewhere
+        return resolved
+
+
+async def test_bindings_resolving_at_once_share_the_first_resolution() -> None:
+    """A binding over a model keeps the legacy metadata resolved first, so threads
+    resolving it at once share one object, whose attributes an array changes in place."""
+    store = MemoryStore()
+    built = AsyncArrayIO.build_v3(store, name="a", shape=(4,), data_type="uint8", chunk_grid=(4,))
+    await built.store_metadata()
+    binding = await AsyncArrayIO.open(store, name="a")
+    elsewhere = parse_array_metadata(built.metadata_legacy.to_dict(), "a")
+    with mock.patch(
+        "zarr.core.array.parse_array_metadata", _ResolvedFirstElsewhere(binding, elsewhere)
+    ):
+        assert binding.metadata_legacy is elsewhere
+    assert binding.metadata_legacy is elsewhere

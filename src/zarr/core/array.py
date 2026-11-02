@@ -8,6 +8,7 @@ import json
 import math
 import operator
 import os
+import threading
 import warnings
 from asyncio import gather
 from collections.abc import Iterable, Mapping, Sequence
@@ -6832,6 +6833,10 @@ def _bound_store_path(store: Store | StorePath, name: str | None) -> StorePath:
     return store_path
 
 
+_FIRST_RESOLUTION_LOCK: Final = threading.Lock()
+"""Held while a binding stores the legacy metadata it resolved first."""
+
+
 class AsyncArrayIO:
     """Explicit asynchronous IO for one Zarr array.
 
@@ -7024,7 +7029,14 @@ class AsyncArrayIO:
             data = _metadata_model_json(source)
             if isinstance(source, _model_classes()[0]):
                 data.setdefault("attributes", {})
-            self._resolved_cache = parse_array_metadata(data, str(self._store_path))
+            resolved = parse_array_metadata(data, str(self._store_path))
+            # Threads resolving at once all keep the first object stored: an
+            # `AsyncArray` changes its attributes in place, so they must share it.
+            # (A rebind of this binding racing the read is a write racing a read,
+            # which no binding orders.)
+            with _FIRST_RESOLUTION_LOCK:
+                if self._resolved_cache is None:
+                    self._resolved_cache = resolved
         return self._resolved_cache
 
     def _detached(self) -> Self:
