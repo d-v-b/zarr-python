@@ -545,7 +545,7 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         if isinstance(state, tuple):
             # A subclass with slots: the instance's dict, if any, and its slots' values.
             state = {**(state[0] or {}), **(state[1] or {})}
-        if "metadata" not in state or "codec_pipeline" not in state:
+        if not state.keys() >= _ASYNC_ARRAY_FIELDS:
             # A subclass's own state, from its own reduction, whose factory made
             # the array: set it as the default protocol would.
             for key, value in state.items():
@@ -6553,9 +6553,13 @@ _BINDING_STATE: Final = "_zarr_binding_state"
 """The key a pickled `AsyncArray` carries its binding's own state under: its pipeline
 class, its class when a subclass, a model's documents, its store cache's entry."""
 
-_ASYNC_ARRAY_STATE_KEYS: Final = frozenset(
-    {"metadata", "store_path", "codec_pipeline", "_chunk_grid", "config", _BINDING_STATE}
+_ASYNC_ARRAY_FIELDS: Final = frozenset(
+    {"metadata", "store_path", "codec_pipeline", "_chunk_grid", "config"}
 )
+"""The fields a pickled `AsyncArray`'s state holds; a state without them all is a
+subclass's own."""
+
+_ASYNC_ARRAY_STATE_KEYS: Final = _ASYNC_ARRAY_FIELDS | {_BINDING_STATE}
 """The keys of a pickled `AsyncArray`'s state that rebuild its binding; any other key is
 an attribute of the instance's own."""
 

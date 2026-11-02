@@ -1267,14 +1267,14 @@ def _slot_state_rebuilt(metadata: Any, store_path: StorePath) -> _SlotStateReduc
 
 
 class _MetadataStateReductionAsyncArray(AsyncArray[Any]):
-    """A subclass whose own state holds a `metadata` entry, which is not an array's
-    field state: it has no `codec_pipeline`."""
+    """A subclass whose own state holds some of an array's fields, which is not an
+    array's field state: it does not hold them all."""
 
     def __reduce__(self) -> Any:
         return (
             _metadata_state_rebuilt,
             (self.metadata, self.store_path),
-            {"metadata": self.metadata},
+            {"metadata": self.metadata, "codec_pipeline": self.codec_pipeline},
         )
 
 
