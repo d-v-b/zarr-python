@@ -20,7 +20,7 @@ from zarr_metadata import ZarrV2ArrayMetadata as ModelV2
 import zarr
 from zarr import ArrayIO, AsyncArray, AsyncArrayIO
 from zarr.api.asynchronous import open_array
-from zarr.core.array import parse_array_metadata
+from zarr.core.array import create_codec_pipeline, parse_array_metadata
 from zarr.core.buffer import default_buffer_prototype
 from zarr.core.codec_pipeline import BatchedCodecPipeline, FusedCodecPipeline
 from zarr.core.metadata import ArrayMetadata, ArrayV2Metadata, ArrayV3Metadata
@@ -1254,6 +1254,72 @@ def test_a_subclass_reduction_with_its_own_state_copies_and_pickles() -> None:
         assert copied.shape == (4,)
 
 
+class _SlotStateReductionAsyncArray(AsyncArray[Any]):
+    """A subclass whose reduction carries a state in the default protocol's
+    `(None, slots)` form."""
+
+    def __reduce__(self) -> Any:
+        return (_slot_state_rebuilt, (self.metadata, self.store_path), (None, {"note": "hi"}))
+
+
+def _slot_state_rebuilt(metadata: Any, store_path: StorePath) -> _SlotStateReductionAsyncArray:
+    return _SlotStateReductionAsyncArray(metadata, store_path)
+
+
+class _MetadataStateReductionAsyncArray(AsyncArray[Any]):
+    """A subclass whose own state holds a `metadata` entry, which is not an array's
+    field state: it has no `codec_pipeline`."""
+
+    def __reduce__(self) -> Any:
+        return (
+            _metadata_state_rebuilt,
+            (self.metadata, self.store_path),
+            {"metadata": self.metadata},
+        )
+
+
+def _metadata_state_rebuilt(
+    metadata: Any, store_path: StorePath
+) -> _MetadataStateReductionAsyncArray:
+    return _MetadataStateReductionAsyncArray(metadata, store_path)
+
+
+def test_a_subclass_reduction_state_is_read_in_every_form() -> None:
+    created = zarr.create_array(MemoryStore(), shape=(4,), dtype="uint8", chunks=(2,))
+    slotted = _SlotStateReductionAsyncArray(created.metadata, created.store_path)
+    for copied in (copy.copy(slotted), copy.deepcopy(slotted), pickle.loads(pickle.dumps(slotted))):
+        assert vars(copied)["note"] == "hi"
+    holding = _MetadataStateReductionAsyncArray(created.metadata, created.store_path)
+    for copied in (copy.copy(holding), copy.deepcopy(holding), pickle.loads(pickle.dumps(holding))):
+        assert copied.shape == (4,)
+
+
+class _AttributeNamedLikeTheCacheEntry(AsyncArrayIO):
+    """A binding subclass with an attribute of the name a carried cache entry had."""
+
+    _stored_entry: str
+
+
+async def test_a_pickled_binding_keeps_its_attributes_apart_from_what_it_carries() -> None:
+    """What a binding carries in a pickle takes no name of a subclass's, and the
+    model derived from attributes changed in place is not pickled."""
+    store = MemoryStore()
+    await AsyncArrayIO.build_v3(
+        store, name="a", shape=(4,), data_type="uint8", chunk_grid=(4,)
+    ).store_metadata()
+    binding = _AttributeNamedLikeTheCacheEntry.build_v3(
+        store, name="a", shape=(4,), data_type="uint8", chunk_grid=(4,)
+    )
+    binding._stored_entry = "mine"
+    assert pickle.loads(pickle.dumps(binding))._stored_entry == "mine"
+
+    array = (await AsyncArrayIO.open(store, name="a")).to_array()
+    array.metadata.attributes["changed"] = 1
+    assert dict(array.io.metadata.attributes) == {"changed": 1}
+    assert array.io.__getstate__()["_attributes_cache"] is None
+    assert dict(pickle.loads(pickle.dumps(array.io)).metadata.attributes) == {"changed": 1}
+
+
 async def test_attributes_changed_in_place_keep_their_order() -> None:
     store = MemoryStore()
     await AsyncArrayIO.build_v3(
@@ -1264,6 +1330,12 @@ async def test_attributes_changed_in_place_keep_their_order() -> None:
     attributes = array.io.metadata.attributes
     assert list(attributes) == ["zeta", "alpha"]
     assert list(cast("Mapping[str, Any]", attributes["alpha"])) == ["y", "b"]
+
+    # a change of order alone is a change
+    stored = array.metadata.attributes
+    alpha = stored.pop("zeta")
+    stored["zeta"] = alpha
+    assert list(array.io.metadata.attributes) == ["alpha", "zeta"]
 
 
 async def test_a_strict_v2_read_reports_a_zero_chunk_size_beside_others() -> None:
@@ -1331,6 +1403,33 @@ def test_with_config_runs_the_pipeline_a_binding_chose() -> None:
     configured = array.with_config({"order": "F"})
     assert configured.io._pipeline_class is _OwnPipeline
     assert isinstance(configured.codec_pipeline, _OwnPipeline)
+
+
+class _AssignedPipeline(BatchedCodecPipeline):
+    """A pipeline class a subclass `__init__` assigns."""
+
+
+class _PipelineAssigningAsyncArray(AsyncArray[Any]):
+    """A subclass whose `__init__` assigns a pipeline of its own."""
+
+    def __init__(self, metadata: Any, store_path: StorePath, config: Any = None) -> None:
+        super().__init__(metadata, store_path, config)
+        pipeline = create_codec_pipeline(self.metadata, pipeline_class=_AssignedPipeline)
+        object.__setattr__(self, "codec_pipeline", pipeline)
+
+
+def test_with_config_prefers_a_binding_pipeline_over_an_assigned_one() -> None:
+    """A binding that chose a pipeline class runs it, over a pipeline a subclass
+    `__init__` assigned; without such a binding, the assigned pipeline runs."""
+    binding = _OwnPipelineBinding.build_v3(
+        MemoryStore(), shape=(4,), data_type="uint8", chunk_grid=(4,)
+    )
+    chosen = _PipelineAssigningAsyncArray._from_io(binding).with_config({"order": "F"})
+    assert isinstance(chosen.codec_pipeline, _OwnPipeline)
+
+    created = zarr.create_array(MemoryStore(), shape=(4,), dtype="uint8", chunks=(2,))
+    assigned = _PipelineAssigningAsyncArray(created.metadata, created.store_path)
+    assert isinstance(assigned.with_config({"order": "F"}).codec_pipeline, _AssignedPipeline)
 
 
 class _ResolvedFirstElsewhere:

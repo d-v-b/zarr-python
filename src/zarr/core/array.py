@@ -543,9 +543,9 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
 
     def __setstate__(self, state: dict[str, Any] | tuple[dict[str, Any], dict[str, Any]]) -> None:
         if isinstance(state, tuple):
-            # A subclass with slots: the instance's dict and its slots' values.
-            state = {**state[0], **(state[1] or {})}
-        if "metadata" not in state:
+            # A subclass with slots: the instance's dict, if any, and its slots' values.
+            state = {**(state[0] or {}), **(state[1] or {})}
+        if "metadata" not in state or "codec_pipeline" not in state:
             # A subclass's own state, from its own reduction, whose factory made
             # the array: set it as the default protocol would.
             for key, value in state.items():
@@ -6717,9 +6717,9 @@ def _model_of_legacy(metadata: ArrayMetadata) -> ArrayMetadataModel:
 
 
 def _json_text(value: object) -> str:
-    """`value`, JSON with mapping proxies at any depth, as canonical JSON text (keys
-    made strings first, as JSON makes them, so mixed key types sort)."""
-    return json.dumps(_plain_json(value), sort_keys=True)
+    """`value`, JSON with mapping proxies at any depth, as JSON text in its own order
+    (keys made strings, as JSON makes them), so a change of order is a change."""
+    return json.dumps(_plain_json(value))
 
 
 def _mapping_as_dict(value: object) -> dict[str, Any]:
@@ -7008,8 +7008,6 @@ class AsyncArrayIO:
             cached = self._attributes_cache
             if cached is None or cached[0] != text:
                 same = text == _json_text(source.attributes)
-                # Built from the attributes in their own order; the sorted text is
-                # only the key they are compared by.
                 attributes = _plain_json(resolved.attributes)
                 cached = (text, source if same else source.update(attributes=attributes))
                 self._attributes_cache = cached
@@ -7056,7 +7054,9 @@ class AsyncArrayIO:
         `metadata`) keeps the binding it had: a binding of this binding's class, at
         `built`'s location, with its configuration, pipeline class and caches, over
         this binding's model when `metadata` is still this binding's resolved form
-        (shared), else over `metadata` itself (a subclass `__init__` substituted it)."""
+        (shared), else over `metadata` itself (a subclass `__init__` substituted it).
+        A `_bind` that runs another pipeline class wins over any pipeline `built`
+        holds, also one a subclass `__init__` assigned."""
         rebound = object.__new__(type(self))
         source = self._source
         keeps_model = (
@@ -7219,14 +7219,17 @@ class AsyncArrayIO:
     def __getstate__(self) -> dict[str, object]:
         state = dict(self.__dict__)
         # The pipeline is rebuilt on first use: a built one is bound to this
-        # process's store object, and may not pickle.
+        # process's store object, and may not pickle. The attributes' model is
+        # derived again.
         state["_codec_pipeline_cache"] = None
-        state.update(self._carried_cache_entry())
+        state["_attributes_cache"] = None
+        # Under one key of its own, so no name a subclass's attribute may hold is taken.
+        state[_BINDING_STATE] = self._carried_cache_entry()
         return state
 
     def __setstate__(self, state: dict[str, object]) -> None:
         state = dict(state)
-        carried: dict[str, object] = {k: state.pop(k) for k in _CARRIED_KEYS if k in state}
+        carried = cast("dict[str, object]", state.pop(_BINDING_STATE, {}))
         self.__dict__.update(state)
         # Through `_bind`, so state a subclass derives there is derived again.
         self._rebind_at(self._store_path, self._config)
