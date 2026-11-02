@@ -11,6 +11,7 @@ from zarr.core.dtype.common import (
     HasItemSize,
     check_dtype_spec_no_object_codec_v2,
 )
+from zarr.core.dtype.npy.common import check_json_bool
 from zarr.core.dtype.wrapper import TBaseDType, ZDType
 from zarr.errors import DataTypeValidationError
 
@@ -296,11 +297,15 @@ class Bool(ZDType[np.dtypes.BoolDType, np.bool_], HasItemSize):
         Raises
         ------
         TypeError
-            If the input is not a valid boolean type.
+            If the input is not a JSON boolean, or, for Zarr format 2, the integer 0 or 1.
         """
-        if self._check_scalar(data):
+        if check_json_bool(data):
             return np.bool_(data)
-        raise TypeError(f"Invalid type: {data}. Expected a boolean.")  # pragma: no cover
+        # zarr 2.0 and 2.1 stored the fill value of a bool array as given, 0 by default.
+        if zarr_format == 2 and type(data) is int and data in (0, 1):
+            return np.bool_(data)
+        expected = "a boolean, or the integer 0 or 1" if zarr_format == 2 else "a boolean"
+        raise TypeError(f"Invalid type: {data!r}. Expected {expected}.")
 
     @property
     def item_size(self) -> int:
