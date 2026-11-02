@@ -71,3 +71,31 @@ def test_every_python_block_says_whether_it_runs() -> None:
         )
     ]
     assert unmarked == []
+
+
+def test_the_extensions_page_example_is_the_definition_module_docstring_example() -> None:
+    """The acme.lz4 example on the extensions page is, line for line, the example in the `zarr_metadata.definition` module docstring. Only the page's copy runs under these tests, so this is what keeps the docstring's copy from drifting."""
+    import textwrap
+
+    import zarr_metadata.definition
+
+    page_blocks = [
+        example
+        for example in _examples()
+        if example.path == PACKAGE_ROOT / "docs" / "extensions.md"
+        and example.prefix_settings().get("session") == "extensions"
+    ]
+    assert len(page_blocks) == 1, (
+        "expected exactly one extensions-session block on docs/extensions.md"
+    )
+    docstring = zarr_metadata.definition.__doc__
+    assert docstring is not None, "zarr_metadata.definition has no module docstring"
+    lines = docstring.splitlines()
+    marker = "from collections.abc import Iterator"
+    starts = [i for i, line in enumerate(lines) if line.strip() == marker]
+    assert len(starts) == 1, f"expected one line {marker!r} in the docstring, found {len(starts)}"
+    end = starts[0]
+    while end < len(lines) and (lines[end].startswith("    ") or lines[end].strip() == ""):
+        end += 1
+    docstring_example = textwrap.dedent("\n".join(lines[starts[0] : end])).strip()
+    assert page_blocks[0].source.strip().splitlines() == docstring_example.splitlines()
