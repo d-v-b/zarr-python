@@ -1,6 +1,6 @@
 from typing import Any
 
-from zarr.core.array import Array, AsyncArray
+from zarr.core.array import Array, AsyncArray, ChunkProblem
 from zarr.core.common import JSON, ZarrFormat
 from zarr.core.dtype.common import DTypeConfig_V2, DTypeJSON
 from zarr.core.metadata.v2 import ArrayV2Metadata
@@ -32,6 +32,7 @@ __all__ = (
     "ArrayV3",
     "AsyncArrayV2",
     "AsyncArrayV3",
+    "ChunkProblem",
     "DTypeConfig_V2",
     "DTypeJSON",
     "ZarrFormat",

@@ -31,6 +31,7 @@ from zarr.abc.codec import ArrayArrayCodec, Codec
 from zarr.codecs import BytesCodec, ShardingCodec, TransposeCodec
 from zarr.codecs.numcodecs import Delta
 from zarr.codecs.scale_offset import ScaleOffset
+from zarr.core.array import ChunkProblem
 from zarr.core.array_spec import ArrayConfig, ArraySpec
 from zarr.core.buffer import default_buffer_prototype
 from zarr.core.dtype import Int32
@@ -40,9 +41,12 @@ from zarr.core.metadata.v3 import (
     RectilinearChunkGridMetadata,
     RegularChunkGridMetadata,
     _declared_chunk_grid,
+    find_rejecting_codec,
     validate_chunk_specs,
 )
+from zarr.errors import VindexInvalidSelectionError
 from zarr.registry import _codec_registries, register_codec
+from zarr.storage import MemoryStore, StorePath
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -391,6 +395,212 @@ def test_only_chunk_local_arrays_check_chunks_on_write(
     assert isinstance(metadata, ArrayV3Metadata)
     assert replace(metadata, attributes={"a": 1})._chunk_local is chunk_local
     assert pickle.loads(pickle.dumps(metadata))._chunk_local is chunk_local
+
+
+_SHARD_REJECTED = ChunkProblem(
+    kind="codec_rejected",
+    chunk_shape=(4,),
+    chunk_coords=(0,),
+    codec="sharding_indexed",
+    message="Chunk edge length 4 in dimension 0 is not divisible by the shard's inner chunk size 3.",
+)
+
+
+@pytest.mark.filterwarnings(
+    "ignore:Combining a `sharding_indexed` codec:zarr.errors.ZarrUserWarning"
+)
+@pytest.mark.parametrize(
+    ("selection", "expected"),
+    [
+        (Ellipsis, (_SHARD_REJECTED,)),
+        (slice(0, 4), (_SHARD_REJECTED,)),
+        (slice(2, 8), (_SHARD_REJECTED,)),
+        (3, (_SHARD_REJECTED,)),
+        ([1, 5], (_SHARD_REJECTED,)),
+        (np.array([1, 5]), (_SHARD_REJECTED,)),
+        (np.arange(10) % 2 == 0, (_SHARD_REJECTED,)),
+        ((slice(None),), (_SHARD_REJECTED,)),
+        (np.int64(3), (_SHARD_REJECTED,)),
+        ((np.array([1, 5]),), (_SHARD_REJECTED,)),
+        ((Ellipsis, slice(0, 4)), (_SHARD_REJECTED,)),
+        (slice(4, 10), ()),
+        (5, ()),
+        (np.array([5, 7]), ()),
+        (np.arange(10) > 5, ()),
+        (slice(0, 0), ()),
+        (np.zeros(10, dtype=bool), ()),
+    ],
+    ids=[
+        "ellipsis",
+        "bad-slice",
+        "spanning-slice",
+        "bad-int",
+        "bad-list",
+        "bad-coordinates",
+        "bad-mask",
+        "bad-tuple",
+        "bad-numpy-int",
+        "bad-array-in-tuple",
+        "bad-ellipsis-mix",
+        "good-slice",
+        "good-int",
+        "good-coordinates",
+        "good-mask",
+        "empty-slice",
+        "empty-mask",
+    ],
+)
+def test_validate_write_chunk_local(selection: Any, expected: tuple[ChunkProblem, ...]) -> None:
+    """Each selection form reports what `__setitem__` with it would hit, on `Array` and
+    `AsyncArray`, and writes nothing. The write then raises exactly when a problem was
+    reported."""
+    with zarr.config.set({"array.rectilinear_chunks": True}):
+        array = _chunk_local_array()
+        problems = array.validate_write(selection)
+        assert problems == expected
+        assert array.async_array.validate_write(selection) == expected
+    assert all(type(ix) is int for problem in problems for ix in problem.chunk_coords)
+    assert array.nchunks_initialized == 0
+    with zarr.config.set({"array.rectilinear_chunks": True}):
+        if expected:
+            with pytest.raises(ValueError, match="not divisible"):
+                array[selection] = 1
+        else:
+            array[selection] = 1
+
+
+@pytest.mark.filterwarnings(
+    "ignore:Combining a `sharding_indexed` codec:zarr.errors.ZarrUserWarning"
+)
+def test_validate_write_reports_each_rejected_shape() -> None:
+    """Every rejected shape is reported once, with the first chunk that has it; a good
+    shape is not, and the codec named is the one that rejected."""
+    with zarr.config.set({"array.rectilinear_chunks": True}):
+        array = zarr.create_array(
+            {},
+            shape=(24, 5),
+            chunks=[[4, 6, 4, 5, 5], [2, 3]],
+            dtype="i4",
+            filters=[OpaqueCodec()],
+            serializer=ShardingCodec(chunk_shape=(3, 1)),
+            compressors=None,
+        )
+        by_slices = array.validate_write()
+        by_mask = array.validate_write(np.ones(array.shape, dtype=bool))
+    assert {(p.chunk_shape, p.chunk_coords) for p in by_slices} == {
+        ((4, 2), (0, 0)),
+        ((4, 3), (0, 1)),
+        ((5, 2), (3, 0)),
+        ((5, 3), (3, 1)),
+    }
+    assert {p.codec for p in by_slices} == {"sharding_indexed"}
+    assert set(by_mask) == set(by_slices)
+
+
+@pytest.mark.parametrize(
+    ("filters", "chunks", "zarr_format"),
+    [
+        ([OpaqueCodec()], (6,), 3),
+        ([TransposeCodec(order=(0,))], [[6, 6]], 3),
+        (None, [[6, 6]], 3),
+        ([OpaqueCodec()], [[4, 8]], 3),
+        (None, (6,), 2),
+    ],
+    ids=[
+        "undeclared-regular",
+        "declared-rectilinear",
+        "no-filter-rectilinear",
+        "undeclared-rectilinear-accepts-every-shape",
+        "v2",
+    ],
+)
+def test_validate_write_no_problems(filters: Any, chunks: Any, zarr_format: Any) -> None:
+    """Chains validated exactly when the array is created have no problems to report, and
+    neither does a chunk-local chain whose codecs accept every shape."""
+    with zarr.config.set({"array.rectilinear_chunks": True}):
+        array = zarr.create_array(
+            {},
+            shape=(12,),
+            chunks=chunks,
+            dtype="i4",
+            zarr_format=zarr_format,
+            filters=filters,
+            compressors=None,
+        )
+        assert array.validate_write() == ()
+        assert array.validate_write(slice(0, 1)) == ()
+
+
+@pytest.mark.filterwarnings(
+    "ignore:Combining a `sharding_indexed` codec:zarr.errors.ZarrUserWarning"
+)
+@pytest.mark.parametrize(
+    "selection",
+    [Ellipsis, slice(None), (slice(None), slice(None))],
+    ids=["ellipsis", "slice", "tuple-of-slices"],
+)
+def test_validate_write_whole_array_cost_ignores_chunk_count(selection: Any) -> None:
+    """A whole-array check on a grid of 10^10 chunks finishes, because it visits only the
+    distinct edges per axis, and reports the one bad shape among them."""
+    nchunks = 10**5
+    with zarr.config.set({"array.rectilinear_chunks": True}):
+        metadata = ArrayV3Metadata(
+            shape=(4 + 6 * (nchunks - 1), 6 * nchunks),
+            data_type=Int32(),
+            chunk_grid=RectilinearChunkGridMetadata(
+                chunk_shapes=((4, *(6,) * (nchunks - 1)), (6,) * nchunks)
+            ),
+            chunk_key_encoding={"name": "default"},
+            fill_value=0,
+            codecs=(OpaqueCodec(), ShardingCodec(chunk_shape=(3, 3))),
+            attributes={},
+            dimension_names=None,
+        )
+        array = zarr.AsyncArray(metadata=metadata, store_path=StorePath(MemoryStore()))
+        problems = array.validate_write(selection)
+    assert [(p.chunk_shape, p.chunk_coords) for p in problems] == [((4, 6), (0, 0))]
+
+
+def test_validate_write_out_of_bounds_raises() -> None:
+    """A selection the write would refuse raises the same error, on every array."""
+    array = zarr.create_array({}, shape=(10,), chunks=(5,), dtype="i4")
+    with pytest.raises(IndexError):
+        array.validate_write(10)
+
+
+def test_validate_write_unsupported_vectorized_selection_raises() -> None:
+    """A vectorized selection the write would refuse raises the same error."""
+    array = zarr.create_array({}, shape=(4, 4), chunks=(2, 2), dtype="i4")
+    with pytest.raises(VindexInvalidSelectionError):
+        array.validate_write(np.zeros(3, dtype=bool))
+
+
+def _int32_chunk_spec(shape: tuple[int, ...]) -> ArraySpec:
+    return ArraySpec(
+        shape=shape,
+        dtype=Int32(),
+        fill_value=0,
+        config=ArrayConfig.from_dict({}),
+        prototype=default_buffer_prototype(),
+    )
+
+
+class _ValidateRaisesCodec(OpaqueCodec):
+    """Rejects a chunk shape with an error that is not a `ValueError`."""
+
+    def validate(self, *, shape: tuple[int, ...], **_kwargs: Any) -> None:
+        if shape == (4,):
+            raise RuntimeError("rejected")
+
+
+def test_find_rejecting_codec_names_the_first_rejecting_codec() -> None:
+    """The codec that rejects is named, whatever it raises, and a passing chain gives `None`."""
+    codecs = (OpaqueCodec(), _ValidateRaisesCodec(), BytesCodec())
+    assert find_rejecting_codec(codecs, _int32_chunk_spec((6,))) is None
+    rejection = find_rejecting_codec(codecs, _int32_chunk_spec((4,)))
+    assert rejection is not None
+    assert rejection[0] is codecs[1]
+    assert str(rejection[1]) == "rejected"
 
 
 def test_chunk_local_does_not_enumerate_to_find_codec_errors() -> None:

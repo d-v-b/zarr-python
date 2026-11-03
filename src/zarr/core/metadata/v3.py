@@ -214,6 +214,25 @@ def validate_chunk_specs(codecs: Iterable[Codec], chunk_specs: Iterable[ArraySpe
         )
 
 
+def find_rejecting_codec(
+    codecs: Iterable[Codec], chunk_spec: ArraySpec
+) -> tuple[Codec, Exception] | None:
+    """The first codec that rejects `chunk_spec`, with the error it raised, or `None`.
+
+    A codec is validated against the spec produced by the codecs before it, so each
+    prefix of the chain is checked in turn, and the codec that ends the first failing
+    prefix is the one that rejected the chunk. Any exception counts as a rejection,
+    since a write would fail on it too.
+    """
+    chain = tuple(codecs)
+    for end in range(1, len(chain) + 1):
+        try:
+            validate_chunk_specs(chain[:end], (chunk_spec,))
+        except Exception as error:  # noqa: BLE001
+            return chain[end - 1], error
+    return None
+
+
 def _thread_codec_chain(
     codecs: Iterable[Codec],
     *,
