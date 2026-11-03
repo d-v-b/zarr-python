@@ -367,7 +367,7 @@ def test_read_write_with_thread_pool() -> None:
 
 def test_thread_pool_write_worker_exception_propagates() -> None:
     """A store error raised inside a pool worker during write_sync surfaces to
-    the caller (write_sync consumes pool.map, so worker exceptions re-raise)."""
+    the caller (write_sync re-raises it once the other workers have stopped)."""
     with zarr_config.set(_FUSED_POOL_CONFIG):
         store = MemoryStore()
         arr = zarr.create_array(

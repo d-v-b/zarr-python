@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from itertools import batched, chain, pairwise
 from typing import TYPE_CHECKING, Any
@@ -29,7 +29,12 @@ from zarr.core.chunk_utils import (
     merge_and_encode_chunk,
     scatter_chunk,
 )
-from zarr.core.common import concurrent_iter, concurrent_map
+from zarr.core.common import (
+    cancel_and_drain,
+    concurrent_iter,
+    concurrent_map,
+    to_thread_to_completion,
+)
 from zarr.core.config import config
 from zarr.errors import ZarrUserWarning
 from zarr.registry import register_pipeline
@@ -201,23 +206,6 @@ def pipeline_supports_partial_encode(
     return isinstance(array_bytes_codec, ArrayBytesCodecPartialEncodeMixin)
 
 
-async def _cancel_and_drain(futures: Iterable[asyncio.Future[Any]]) -> None:
-    """Cancel every not-yet-done future/task and await its outcome.
-
-    Used to clean up work spawned by a drain loop (`asyncio.as_completed` +
-    `await`) when the loop exits early via exception. Without this, tasks
-    already spawned keep running unattended after the caller has moved on,
-    and an eventual failure surfaces as an unraisable "exception was never
-    retrieved" warning instead of being observed here.
-    """
-    pending = [f for f in futures if not f.done()]
-    if len(pending) == 0:
-        return
-    for f in pending:
-        f.cancel()
-    await asyncio.gather(*pending, return_exceptions=True)
-
-
 async def _fetch_and_decode_as_completed(
     batch: Sequence[tuple[ByteGetter | None, ArraySpec]],
     transform: ChunkTransform,
@@ -272,7 +260,7 @@ async def _fetch_and_decode_as_completed(
         # single call over both iterables (not two sequential calls) so that
         # outer-task cancellation during the first drain can't skip the
         # second, leaving its futures/tasks unobserved.
-        await _cancel_and_drain(chain(fetch_tasks, decode_futures))
+        await cancel_and_drain(chain(fetch_tasks, decode_futures))
 
 
 async def _encode_and_write_as_completed(
@@ -334,7 +322,7 @@ async def _encode_and_write_as_completed(
         # two sequential calls) so that outer-task cancellation during the
         # first drain can't skip the second, leaving its futures/tasks
         # unobserved.
-        await _cancel_and_drain(chain(write_tasks, encode_futures))
+        await cancel_and_drain(chain(write_tasks, encode_futures))
 
 
 async def _async_read_fallback(
@@ -1277,7 +1265,16 @@ class FusedCodecPipeline(CodecPipeline):
 
         if max_workers > 1 and len(batch) > 1:
             pool = _get_pool(max_workers)
-            list(pool.map(_write_one, batch))
+            # Not `pool.map`: that raises as soon as the failed chunk's result is
+            # reached, leaving the other writes running or queued behind the caller.
+            futures = [pool.submit(_write_one, item) for item in batch]
+            wait(futures, return_when=FIRST_EXCEPTION)
+            for future in futures:
+                future.cancel()
+            wait(futures)
+            for future in futures:
+                if not future.cancelled():
+                    future.result()
         else:
             for item in batch:
                 _write_one(item)
@@ -1374,7 +1371,7 @@ class FusedCodecPipeline(CodecPipeline):
         ):
             # One thread hop for the whole batch; see the matching comment in
             # `read` for why write_sync must not run inline on the event loop.
-            await asyncio.to_thread(
+            await to_thread_to_completion(
                 self.write_sync, batch, value, drop_axes, max_workers=_resolve_max_workers()
             )
             return
