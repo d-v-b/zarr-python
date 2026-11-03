@@ -9,7 +9,7 @@ Required dependencies include:
 - [numpy](https://numpy.org) (2.0 or later)
 - [numcodecs](https://numcodecs.readthedocs.io/en/stable/) (0.14 or later)
 - [google-crc32c](https://github.com/googleapis/python-crc32c) (1.5 or later)
-- [typing_extensions](https://typing-extensions.readthedocs.io/en/latest/) (4.14 or later)
+- [typing_extensions](https://typing-extensions.readthedocs.io/en/latest/) (4.16 or later)
 - [donfig](https://donfig.readthedocs.io/en/latest/) (0.8 or later)
 
 ## pip

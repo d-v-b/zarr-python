@@ -34,7 +34,7 @@ from zarr.api.synchronous import (
     zeros,
     zeros_like,
 )
-from zarr.core.array import Array, AsyncArray
+from zarr.core.array import Array, ArrayIO, AsyncArray, AsyncArrayIO
 from zarr.core.config import config
 from zarr.core.group import AsyncGroup, Group
 
@@ -147,7 +147,9 @@ def set_format(log_format: str) -> None:
 
 __all__ = [
     "Array",
+    "ArrayIO",
     "AsyncArray",
+    "AsyncArrayIO",
     "AsyncGroup",
     "Group",
     "__version__",

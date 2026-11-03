@@ -4,7 +4,7 @@ import json
 from collections.abc import Iterable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, ClassVar, Final, Literal, NotRequired, TypeGuard, cast
+from typing import TYPE_CHECKING, Any, Final, Literal, NotRequired, TypeGuard, cast
 
 from typing_extensions import TypedDict
 
@@ -41,8 +41,8 @@ from zarr.core.dtype.common import check_dtype_spec_v3
 from zarr.core.json_parse import parse_field
 from zarr.core.metadata.common import parse_attributes
 from zarr.core.metadata.repair import (
-    mark_repaired,
     repair_array_document,
+    warn_repairs,
 )
 from zarr.errors import MetadataValidationError, NodeTypeValidationError
 from zarr.registry import get_codec_class
@@ -54,7 +54,7 @@ if TYPE_CHECKING:
     from zarr.core.buffer import Buffer, BufferPrototype
     from zarr.core.chunk_grids import ChunkGrid
     from zarr.core.dtype.wrapper import TBaseDType, TBaseScalar
-    from zarr.core.metadata.repair import ArrayDocument
+    from zarr.core.metadata.repair import Reading
 
 
 def parse_zarr_format(data: object) -> Literal[3]:
@@ -519,9 +519,6 @@ class ArrayV3Metadata(Metadata):
     node_type: Literal["array"] = field(default="array", init=False)
     storage_transformers: tuple[dict[str, JSON], ...]
     extra_fields: dict[str, AllowedExtraField]
-    _stored_document: ClassVar[ArrayDocument | None] = None
-    """The stored document `from_dict` read this metadata from, if it had to repair it
-    (set on the instance by `mark_repaired`): the store may still hold it."""
 
     def __init__(
         self,
@@ -679,6 +676,14 @@ class ArrayV3Metadata(Metadata):
                 if path is not None:
                     e.add_note(f"Array {path!r}: nothing was read.")
                 raise
+        metadata, readings = cls._read_stored(data)
+        warn_repairs(readings, path)
+        return metadata
+
+    @classmethod
+    def _read_stored(cls, data: dict[str, JSON]) -> tuple[Self, list[Reading]]:
+        """`from_dict` without its warnings or the rectilinear chunks flag: the
+        metadata, and how the repairs read it."""
         repaired, readings = repair_array_document(data, 3)
         # a new dict, because we are modifying it
         _data = dict(repaired)
@@ -723,7 +728,7 @@ class ArrayV3Metadata(Metadata):
             extra_fields=allowed_extra_fields,
             storage_transformers=_data_typed.get("storage_transformers", ()),  # type: ignore[arg-type]
         )
-        return mark_repaired(metadata, data, readings, path)
+        return metadata, readings
 
     def to_dict(self) -> dict[str, JSON]:
         out_dict = super().to_dict()
