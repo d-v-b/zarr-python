@@ -270,7 +270,7 @@ class DataTypeRegistry:
             If no matching Zarr data type is found for the given JSON data.
         """
 
-        resolver = Resolver(context=Context(data_types=self), zarr_format=zarr_format)
+        resolver = Resolver(context=Context._over(self), zarr_format=zarr_format)
         return self._match_json(data, resolver=resolver)
 
     def _match_json(
