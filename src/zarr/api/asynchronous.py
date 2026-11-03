@@ -49,7 +49,7 @@ from zarr.errors import (
     ZarrUserWarning,
 )
 from zarr.storage import StorePath
-from zarr.storage._common import make_store_path
+from zarr.storage._common import make_store_path, resolve_zarr_format
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -235,6 +235,7 @@ async def consolidate_metadata(
         consolidated metadata, this function raises a `TypeError`.
         See `Store.supports_consolidated_metadata`.
     """
+    zarr_format = resolve_zarr_format(store, zarr_format)
     store_path = await make_store_path(store, path=path)
 
     if not store_path.store.supports_consolidated_metadata:
@@ -410,6 +411,7 @@ async def open(
             mode = "r"
         else:
             mode = "a"
+    zarr_format = resolve_zarr_format(store, zarr_format)
     store_path = await make_store_path(store, mode=mode, path=path, storage_options=storage_options)
 
     # TODO: the mode check below seems wrong!
@@ -546,6 +548,7 @@ async def save_array(
     **kwargs
         Passed through to [`create`][zarr.api.asynchronous.create], e.g., compressor.
     """
+    zarr_format = resolve_zarr_format(store, zarr_format)
     if zarr_format is None:
         zarr_format = _default_zarr_format()
     if not isinstance(arr, NDArrayLike):
@@ -553,8 +556,6 @@ async def save_array(
 
     mode = kwargs.pop("mode", "a")
     store_path = await make_store_path(store, path=path, mode=mode, storage_options=storage_options)
-    if np.isscalar(arr):
-        arr = np.array(arr)
     shape = arr.shape
     chunks = getattr(arr, "chunks", None)  # for array-likes with chunks attribute
     overwrite = kwargs.pop("overwrite", None) or _infer_overwrite(mode)
@@ -601,6 +602,7 @@ async def save_group(
         NumPy arrays with data to save.
     """
 
+    zarr_format = resolve_zarr_format(store, zarr_format)
     if zarr_format is None:
         zarr_format = _default_zarr_format()
 
@@ -816,6 +818,7 @@ async def create_group(
         The new group.
     """
 
+    zarr_format = resolve_zarr_format(store, zarr_format)
     if zarr_format is None:
         zarr_format = _default_zarr_format()
 
@@ -911,6 +914,7 @@ async def open_group(
         }
     )
 
+    zarr_format = resolve_zarr_format(store, zarr_format)
     store_path = await make_store_path(store, mode=mode, storage_options=storage_options, path=path)
     if attributes is None:
         attributes = {}
@@ -1125,6 +1129,7 @@ async def create(
     z : array
         The array.
     """
+    zarr_format = resolve_zarr_format(store, zarr_format)
     if zarr_format is None:
         zarr_format = _default_zarr_format()
 
@@ -1364,6 +1369,7 @@ async def open_array(
     """
 
     mode = kwargs.pop("mode", None)
+    zarr_format = resolve_zarr_format(store, zarr_format)
     store_path = await make_store_path(store, path=path, mode=mode, storage_options=storage_options)
 
     if "write_empty_chunks" in kwargs:
