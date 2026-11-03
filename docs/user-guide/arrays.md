@@ -824,6 +824,39 @@ print(z.info)
     a write touches it, before anything is stored, or when its stored bytes are read. See
     [Chunk geometry and validation](extending.md#chunk-geometry-and-validation).
 
+### Checking a write before making it
+
+For such an array, some regions may be writable and others not. To find out which
+without writing anything, pass a selection to `Array.validate_write`. It takes any
+selection `__setitem__` takes and returns one `ChunkProblem` per rejected chunk shape.
+Here, `PackBits` does not describe its grid, and it encodes a chunk of 24 bits as 4 bytes
+and a chunk of 8 bits as 2, so an inner chunk size of 4 fits only the larger chunk:
+
+```python exec="true" session="arrays" source="above" result="ansi"
+from zarr.codecs import ShardingCodec
+from zarr.codecs.numcodecs import PackBits
+
+z = zarr.create_array(
+    store=zarr.storage.MemoryStore(),
+    shape=(32,),
+    chunks=[[8, 24]],
+    dtype='bool',
+    filters=[PackBits()],
+    serializer=ShardingCodec(chunk_shape=(4,)),
+    compressors=None,
+)
+print(z.validate_write(slice(8, 32)))
+for problem in z.validate_write():
+    print(problem.kind, problem.chunk_shape, problem.chunk_coords, problem.codec)
+    print(problem.message)
+```
+
+An empty result means that the codecs accept every chunk the selection touches. Arrays
+whose codecs were validated against every chunk when they were created, which includes
+every array with a regular chunk grid, always return an empty result. The check does not
+cover everything a write can run into: a codec that checks a shape only while encoding
+passes it, and the store may be read-only.
+
 ### Metadata format
 
 Rectilinear chunk grid metadata uses run-length encoding (RLE) for compact

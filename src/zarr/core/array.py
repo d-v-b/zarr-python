@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import itertools
 import math
 import warnings
 from asyncio import gather
@@ -14,6 +15,7 @@ from typing import (
     Any,
     Literal,
     TypedDict,
+    TypeGuard,
     cast,
     overload,
 )
@@ -106,10 +108,14 @@ from zarr.core.indexing import (
     _iter_grid,
     check_fields,
     check_no_multi_fields,
+    ensure_tuple,
+    is_coordinate_selection,
+    is_mask_selection,
     is_pure_fancy_indexing,
     is_pure_orthogonal_indexing,
     is_scalar,
     pop_fields,
+    replace_lists,
 )
 from zarr.core.metadata import (
     ArrayMetadata,
@@ -140,6 +146,7 @@ from zarr.core.metadata.v3 import (
     RectilinearChunkGridMetadata,
     RegularChunkGridMetadata,
     create_chunk_grid_metadata,
+    find_rejecting_codec,
     parse_node_type_array,
     representative_chunk_shape,
     validate_chunk_specs,
@@ -149,6 +156,7 @@ from zarr.errors import (
     ArrayNotFoundError,
     ChunkNotFoundError,
     MetadataValidationError,
+    VindexInvalidSelectionError,
     ZarrDeprecationWarning,
     ZarrUserWarning,
 )
@@ -366,6 +374,27 @@ def _v2_chunks_given(chunks: object) -> bool:
     if isinstance(chunks, np.ndarray):
         return chunks.size > 1 or bool(chunks.any())
     return bool(chunks)
+
+
+@dataclass(frozen=True)
+class ChunkProblem:
+    """A chunk shape that a write would be refused for, as `Array.validate_write` reports it.
+
+    `kind` classifies the problem for programmatic dispatch. `codec_rejected` is
+    currently the only kind: a codec raised an error when validated against this chunk
+    shape. `message` is that error's text.
+    """
+
+    kind: Literal["codec_rejected"]
+    """What is wrong."""
+    chunk_shape: tuple[int, ...]
+    """The rejected chunk shape."""
+    chunk_coords: tuple[int, ...]
+    """The grid coordinates of the first selected chunk with this shape."""
+    codec: str
+    """The name of the codec that rejected the chunk shape."""
+    message: str
+    """The human-readable description of the problem."""
 
 
 @dataclass(frozen=True)
@@ -1750,6 +1779,43 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         indexer = BasicIndexer(selection, shape=self.metadata.shape, chunk_grid=self._chunk_grid)
         return await self._set_selection(indexer, value, prototype=prototype)
 
+    def validate_write(self, selection: Selection = Ellipsis) -> tuple[ChunkProblem, ...]:
+        """Report the chunk shapes in `selection` that the array's codecs reject, writing nothing.
+
+        This performs no I/O. See [zarr.Array.validate_write][] for the details.
+
+        Parameters
+        ----------
+        selection : Selection, optional
+            The region to check, in any form `Array.__setitem__` takes. Defaults to the
+            whole array.
+
+        Returns
+        -------
+        tuple[ChunkProblem, ...]
+            One problem per rejected chunk shape; empty if the selection passes the check.
+        """
+        indexer = _setitem_indexer(selection, self.metadata.shape, self._chunk_grid)
+        if product(indexer.shape) == 0 or not _needs_chunk_check(self.metadata):
+            return ()
+        prototype = default_buffer_prototype()
+        problems = []
+        for shape, coords in _first_chunk_of_each_shape(self._chunk_grid, indexer).items():
+            spec = _get_chunk_spec(self.metadata, self._chunk_grid, coords, self.config, prototype)
+            rejection = find_rejecting_codec(self.metadata.codecs, spec)
+            if rejection is not None:
+                codec, error = rejection
+                problems.append(
+                    ChunkProblem(
+                        kind="codec_rejected",
+                        chunk_shape=shape,
+                        chunk_coords=coords,
+                        codec=str(codec.to_dict()["name"]),
+                        message=str(error),
+                    )
+                )
+        return tuple(problems)
+
     @property
     def oindex(self) -> AsyncOIndex[T_ArrayMetadata]:
         """Shortcut for orthogonal (outer) indexing, see [get_orthogonal_selection][zarr.Array.get_orthogonal_selection] and
@@ -2883,6 +2949,49 @@ class Array[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
             self.set_orthogonal_selection(pure_selection, value, fields=fields)
         else:
             self.set_basic_selection(cast("BasicSelection", pure_selection), value, fields=fields)
+
+    def validate_write(self, selection: Selection = Ellipsis) -> tuple[ChunkProblem, ...]:
+        """Report the chunk shapes in `selection` that the array's codecs reject, writing nothing.
+
+        `array[selection] = value` validates the codec chain against the chunks it touches
+        before it stores anything, and raises if a codec rejects one. This method performs
+        the same check without writing and without any I/O, and reports every rejected
+        chunk shape instead of raising on the first.
+
+        Only an array with a rectilinear chunk grid and a codec that does not declare how it
+        changes the grid can have problems here, because its codecs are validated against a
+        single representative chunk when the array is created. Every other array was
+        validated for all of its chunks then, so the result is always empty.
+
+        The check covers codec validation only. An empty result does not promise that
+        the write succeeds: a codec that checks a shape only while encoding passes it, the
+        store may be read-only, and an unknown field name is not looked up here.
+
+        Parameters
+        ----------
+        selection : Selection, optional
+            The region to check, in any form `__setitem__` takes. Defaults to the whole
+            array. A selection whose indexing the write would refuse raises the same error
+            here.
+
+        Returns
+        -------
+        tuple[ChunkProblem, ...]
+            One problem per rejected chunk shape, each naming the first selected chunk with
+            that shape; empty if the selection passes the check. A selection of no
+            elements touches no chunks, so it always passes.
+
+        Examples
+        --------
+        >>> array = zarr.create_array({}, shape=(10,), chunks=(5,), dtype="i4")
+        >>> array.validate_write(slice(0, 4))
+        ()
+
+        Related
+        -------
+        [__setitem__][zarr.Array.__setitem__]
+        """
+        return self.async_array.validate_write(selection)
 
     def get_basic_selection(
         self,
@@ -5657,6 +5766,65 @@ def _get_chunk_spec(
     )
 
 
+def _setitem_indexer(
+    selection: Selection, shape: tuple[int, ...], chunk_grid: ChunkGrid
+) -> Indexer:
+    """The indexer `Array.__setitem__` writes `selection` through."""
+    _, pure_selection = pop_fields(selection)
+    if is_pure_fancy_indexing(pure_selection, len(shape)):
+        normalized = replace_lists(ensure_tuple(pure_selection))
+        if is_coordinate_selection(normalized, shape):
+            return CoordinateIndexer(normalized, shape, chunk_grid)
+        if is_mask_selection(normalized, shape):
+            return MaskIndexer(normalized, shape, chunk_grid)
+        raise VindexInvalidSelectionError(
+            "unsupported selection type for vectorized indexing; only "
+            "coordinate selection (tuple of integer arrays) and mask selection "
+            f"(single Boolean array) are supported; got {normalized!r}"
+        )
+    if is_pure_orthogonal_indexing(pure_selection, len(shape)):
+        return OrthogonalIndexer(pure_selection, shape, chunk_grid)
+    return BasicIndexer(cast("BasicSelection", pure_selection), shape, chunk_grid)
+
+
+def _needs_chunk_check(metadata: ArrayMetadata) -> TypeGuard[ArrayV3Metadata]:
+    """Whether the codecs have not yet been validated against every chunk of the array."""
+    return isinstance(metadata, ArrayV3Metadata) and metadata._chunk_local
+
+
+def _first_chunk_of_each_shape(
+    chunk_grid: ChunkGrid, indexer: Indexer
+) -> dict[tuple[int, ...], tuple[int, ...]]:
+    """Map each distinct chunk shape `indexer` touches to the first chunk that has it.
+
+    A basic or orthogonal selection touches the cross product of the chunks it touches
+    per axis, so its shapes come from the distinct sizes per axis, at a cost that does
+    not depend on how many chunks it touches. Other indexers are enumerated.
+    """
+    dimensions = chunk_grid.dimensions
+    if isinstance(indexer, BasicIndexer | OrthogonalIndexer):
+        first_per_axis: list[dict[int, int]] = []
+        for dimension, dim_indexer in zip(dimensions, indexer.dim_indexers, strict=True):
+            first_of_size: dict[int, int] = {}
+            for projection in dim_indexer:
+                ix = int(projection.dim_chunk_ix)
+                first_of_size.setdefault(dimension.chunk_size(ix), ix)
+            first_per_axis.append(first_of_size)
+        return dict(
+            zip(
+                itertools.product(*first_per_axis),
+                itertools.product(*(axis.values() for axis in first_per_axis)),
+                strict=True,
+            )
+        )
+    first_of_shape: dict[tuple[int, ...], tuple[int, ...]] = {}
+    for chunk_projection in indexer:
+        coords = tuple(int(ix) for ix in chunk_projection.chunk_coords)
+        shape = tuple(d.chunk_size(ix) for d, ix in zip(dimensions, coords, strict=True))
+        first_of_shape.setdefault(shape, coords)
+    return first_of_shape
+
+
 def _check_chunks_before_write(
     metadata: ArrayMetadata,
     chunk_grid: ChunkGrid,
@@ -5670,15 +5838,13 @@ def _check_chunks_before_write(
     for every chunk when the metadata was created. Without it, a write spanning good and
     bad chunks raises on the bad one while the good ones are stored.
     """
-    if not (isinstance(metadata, ArrayV3Metadata) and metadata._chunk_local):
+    if not _needs_chunk_check(metadata):
         return
-    specs_by_shape: dict[tuple[int, ...], ArraySpec] = {}
-    for projection in indexer:
-        spec = _get_chunk_spec(
-            metadata, chunk_grid, projection.chunk_coords, array_config, prototype
-        )
-        specs_by_shape.setdefault(spec.shape, spec)
-    validate_chunk_specs(metadata.codecs, specs_by_shape.values())
+    specs = [
+        _get_chunk_spec(metadata, chunk_grid, coords, array_config, prototype)
+        for coords in _first_chunk_of_each_shape(chunk_grid, indexer).values()
+    ]
+    validate_chunk_specs(metadata.codecs, specs)
 
 
 async def _get_selection(

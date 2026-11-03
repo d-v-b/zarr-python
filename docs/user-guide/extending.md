@@ -88,7 +88,8 @@ following consequences:
   shape is accepted when the array is created, and the error surfaces when a write
   touches a chunk of that shape, or when such a chunk is read from the store. An array
   write calls `validate` for each distinct chunk shape it touches before storing anything,
-  so a write that includes a bad chunk stores nothing. Suppose a sharding codec follows an undeclared
+  so a write that includes a bad chunk stores nothing, and `Array.validate_write` reports
+  which chunk shapes in a region a write would be refused for. Suppose a sharding codec follows an undeclared
   filter on a grid with chunk edges `[4, 6]`. An inner chunk size of `3` divides the
   representative edge `6`, so the array is created, but writing to a chunk with edge `4`
   raises an error.
