@@ -1,6 +1,6 @@
 """Zarr v3 metadata types, and the front door to the v3 definitions.
 
-This module holds the JSON of any metadata field (a bare name or a
+This module holds the JSON of any declaration (a bare name or a
 `ZarrV3NamedConfigJSON` envelope) and the node name and path
 types. Each document type is in the submodule for its node: `array`,
 `group` and `consolidated`. The extensions are in `codec`, `data_type`,
@@ -14,8 +14,12 @@ import builds or updates a scope. Each is the same object as in its own
 submodule, where a definition's configuration types and constants are.
 """
 
+from typing import TYPE_CHECKING
+
 from zarr_metadata._common import ZarrV3NamedConfigJSON
-from zarr_metadata.v3._common import ZarrV3ExtensionField, ZarrV3MetadataFieldJSON
+from zarr_metadata._renamed import renamed_scope
+from zarr_metadata.v3._common import ZarrV3DeclarationJSON, ZarrV3ExtensionField
+from zarr_metadata.v3._core import RENAMED_SCOPES
 from zarr_metadata.v3._hierarchy import NodeName, NodePath
 from zarr_metadata.v3.chunk_grid.rectilinear import RECTILINEAR_CHUNK_GRID
 from zarr_metadata.v3.chunk_grid.regular import REGULAR_CHUNK_GRID
@@ -56,6 +60,7 @@ from zarr_metadata.v3.data_type.uint16 import UINT16_DATA_TYPE
 from zarr_metadata.v3.data_type.uint32 import UINT32_DATA_TYPE
 from zarr_metadata.v3.data_type.uint64 import UINT64_DATA_TYPE
 from zarr_metadata.v3.data_type.variable_length_bytes import VARIABLE_LENGTH_BYTES_DATA_TYPE
+from zarr_metadata.v3.data_type.zarr_python_raw_bytes import ZARR_PYTHON_RAW_BYTES_DATA_TYPE
 from zarr_metadata.v3.definition import (
     CORE_AND_EXTENSIONS_CONTEXT,
     CORE_CONTEXT,
@@ -105,11 +110,20 @@ __all__ = [
     "VLEN_BYTES_CODEC",
     "VLEN_UTF8_CODEC",
     "ZARR_PYTHON_CONTEXT",
+    "ZARR_PYTHON_RAW_BYTES_DATA_TYPE",
     "ZSTD_CODEC",
     "NodeName",
     "NodePath",
     "ZarrV3Context",
+    "ZarrV3DeclarationJSON",
     "ZarrV3ExtensionField",
-    "ZarrV3MetadataFieldJSON",
     "ZarrV3NamedConfigJSON",
 ]
+
+
+if not TYPE_CHECKING:
+    # Hidden from type checkers, which would otherwise read every missing
+    # name of this module as a scope.
+    def __getattr__(name: str) -> object:
+        """`CORE` and `CORE_AND_EXTENSIONS`, the scopes' names before they ended in `_CONTEXT`, with a `DeprecationWarning`."""
+        return renamed_scope(__name__, name, RENAMED_SCOPES)

@@ -6,8 +6,8 @@ import base64
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
-from zarr_metadata._json import ValidationProblem
-from zarr_metadata._numpy import NUMPY_TIME_UNITS, base64_fill_value_rules
+from zarr_metadata._json import ValidationProblem, shown
+from zarr_metadata._numpy import NUMPY_TIME_UNITS, base64_bytes
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -139,9 +139,12 @@ def sized_base64_rules(
     """Check that a fill value that is not null is standard-alphabet base64 of exactly `size` bytes, or of at most `size` bytes when `exact` is False. Any size passes when `size` is None, which happens only when the item size is unknown."""
     if value is None:
         return
-    problems = list(base64_fill_value_rules(None, (), value))
-    if problems:
-        yield from problems
+    try:
+        base64_bytes(value)
+    except ValueError:
+        yield ValidationProblem(
+            (), f"expected standard-alphabet base64, got {shown(value)}", "invalid_value"
+        )
         return
     if size is None:
         return

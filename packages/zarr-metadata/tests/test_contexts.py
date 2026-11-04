@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 from typing_extensions import TypedDict
 
-from zarr_metadata.definition import Context, ScopeConflictError, UnclaimedField, resolve
+from zarr_metadata.definition import Context, ScopeConflictError, UnclaimedDeclaration, resolve
 from zarr_metadata.definition._context import slot_kinds
 from zarr_metadata.model import (
     ZarrV2ArrayMetadata,
@@ -19,7 +19,7 @@ from zarr_metadata.model import (
     read_array_metadata_v2,
     read_array_metadata_v3,
 )
-from zarr_metadata.v2 import CORE_V2, GZIP_CODEC_V2, ZarrV2Context
+from zarr_metadata.v2 import CORE_V2_CONTEXT, GZIP_CODEC_V2, ZarrV2Context
 from zarr_metadata.v2._context import _KINDS as V2_KINDS
 from zarr_metadata.v2.definition import (
     ZarrV2CodecDefinition,
@@ -42,7 +42,7 @@ V2_ARRAY = ZarrV2ArrayMetadata.create_default().to_json()
 
 FORMATS = [
     pytest.param(ZarrV3Context, CORE_CONTEXT, CodecDefinition, GZIP_CODEC, 3, id="v3"),
-    pytest.param(ZarrV2Context, CORE_V2, ZarrV2CodecDefinition, GZIP_CODEC_V2, 2, id="v2"),
+    pytest.param(ZarrV2Context, CORE_V2_CONTEXT, ZarrV2CodecDefinition, GZIP_CODEC_V2, 2, id="v2"),
 ]
 
 
@@ -54,7 +54,7 @@ def test_the_scope_of_each_format_behaves_alike(
     gzip: Any,  # noqa: ANN401 - either gzip definition
     zarr_format: int,
 ) -> None:
-    """Both scope classes implement `Context` in the same way: the format they read, `claimant`, `definitions_of`, a view per slot, `update` replacing a slot, `union`, equality and hashing by what each slot files, a short repr, and pickling and copying. A field is read in either one with `resolve`."""
+    """Both scope classes implement `Context` in the same way: the format they read, `claimant`, `definitions_of`, a view per slot, `update` replacing a slot, `union`, equality and hashing by what each slot files, a short repr, and pickling and copying. A declaration is read in either one with `resolve`."""
     built = cls(codecs=[gzip])
     assert built.zarr_format == zarr_format
     assert built.claimant(kind, "gzip") is gzip
@@ -71,8 +71,8 @@ def test_the_scope_of_each_format_behaves_alike(
     assert pickle.loads(pickle.dumps(core)) == core
     assert copy.copy(core) is core
     assert copy.deepcopy(core) is core
-    field, _ = resolve({"id": "acme"} if zarr_format == 2 else "acme", kind, cls())
-    assert isinstance(field, UnclaimedField)
+    declaration, _ = resolve({"id": "acme"} if zarr_format == 2 else "acme", kind, cls())
+    assert isinstance(declaration, UnclaimedDeclaration)
 
 
 @pytest.mark.parametrize(("cls", "core", "kind", "gzip", "zarr_format"), FORMATS)
@@ -236,9 +236,9 @@ def test_error_a_reader_refuses_what_is_not_a_scope_of_its_format(
     ("core", "given", "zarr_format"),
     [
         (CORE_CONTEXT, "nope", 3),
-        (CORE_CONTEXT, CORE_V2, 3),
-        (CORE_V2, "nope", 2),
-        (CORE_V2, CORE_CONTEXT, 2),
+        (CORE_CONTEXT, CORE_V2_CONTEXT, 3),
+        (CORE_V2_CONTEXT, "nope", 2),
+        (CORE_V2_CONTEXT, CORE_CONTEXT, 2),
     ],
     ids=["v3-not-a-scope", "v3-a-v2-scope", "v2-not-a-scope", "v2-a-v3-scope"],
 )
@@ -261,7 +261,7 @@ def test_each_declared_slot_has_a_view(cls: Any) -> None:  # noqa: ANN401 - eith
     slots_type = ZarrV3ContextSlots if cls is ZarrV3Context else ZarrV2ContextSlots
     assert list(cls.kinds) == list(slots_type.__annotations__)
     assert set(cls.kinds.values()) == (V3_KINDS if cls is ZarrV3Context else V2_KINDS)
-    scope: Any = CORE_CONTEXT if cls is ZarrV3Context else CORE_V2
+    scope: Any = CORE_CONTEXT if cls is ZarrV3Context else CORE_V2_CONTEXT
     for slot, kind in cls.kinds.items():
         assert getattr(scope, slot) == scope.definitions_of(kind)
 

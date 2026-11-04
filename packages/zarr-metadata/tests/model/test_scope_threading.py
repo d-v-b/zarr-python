@@ -116,7 +116,7 @@ def test_every_entry_point_reads_in_the_scope_it_is_given(read: Callable[..., ob
 
 @pytest.mark.parametrize("read", GROUP_ENTRY_POINTS.values(), ids=GROUP_ENTRY_POINTS.keys())
 def test_a_group_reads_the_same_in_every_scope(read: Callable[..., object]) -> None:
-    """A group document has no fields, and a group does not read the documents its consolidated metadata lists. So each group entry point accepts a group that lists `BAD`, in every scope."""
+    """A group document has no declarations, and a group does not read the documents its consolidated metadata lists. So each group entry point accepts a group that lists `BAD`, in every scope."""
     accepted = _accepts(read)
     assert accepted(EMPTY) is True
     assert accepted(CORE_AND_EXTENSIONS_CONTEXT) is True
@@ -138,10 +138,10 @@ def test_error_every_entry_point_refuses_a_scope_of_another_format(
     read: Callable[..., object],
 ) -> None:
     """A v3 entry point given a v2 scope raises `TypeError`. A scope reads documents of one format, and a v2 scope claims nothing that a v3 document contains."""
-    from zarr_metadata.v2.definition import CORE_V2
+    from zarr_metadata.v2.definition import CORE_V2_CONTEXT
 
     with pytest.raises(TypeError, match="format"):
-        read(context=CORE_V2)
+        read(context=CORE_V2_CONTEXT)
 
 
 NOT_JSON = b"{not json"
@@ -164,9 +164,9 @@ def test_error_a_v3_store_reader_refuses_a_scope_of_another_format_before_decodi
     name: str,
 ) -> None:
     """A v3 entry point that reads a store's bytes raises `TypeError` for a v2 scope before it decodes the bytes, so the wrong scope is reported even when the bytes are not JSON. With a v3 scope, the same bytes raise `MetadataValidationError`."""
-    from zarr_metadata.v2.definition import CORE_V2
+    from zarr_metadata.v2.definition import CORE_V2_CONTEXT
 
     with pytest.raises(TypeError, match="format"):
-        STORE_READERS[name](context=CORE_V2)
+        STORE_READERS[name](context=CORE_V2_CONTEXT)
     with pytest.raises(MetadataValidationError):
         STORE_READERS[name](context=CORE_AND_EXTENSIONS_CONTEXT)

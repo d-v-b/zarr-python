@@ -7,7 +7,7 @@ registers and this package defines. `ZARR_PYTHON_CONTEXT` adds the data types th
 zarr-python writes but no specification registers, whose spelling
 zarr-python may still change. A name in none of these scopes is not
 rejected, because that is what keeps the format open. Instead it is read
-as an `UnclaimedField` and not checked.
+as an `UnclaimedDeclaration` and not checked.
 """
 
 from __future__ import annotations
@@ -54,6 +54,7 @@ from zarr_metadata.v3.data_type.uint16 import UINT16_DATA_TYPE
 from zarr_metadata.v3.data_type.uint32 import UINT32_DATA_TYPE
 from zarr_metadata.v3.data_type.uint64 import UINT64_DATA_TYPE
 from zarr_metadata.v3.data_type.variable_length_bytes import VARIABLE_LENGTH_BYTES_DATA_TYPE
+from zarr_metadata.v3.data_type.zarr_python_raw_bytes import ZARR_PYTHON_RAW_BYTES_DATA_TYPE
 
 CORE_CONTEXT: Final = ZarrV3Context(
     data_types=(
@@ -114,17 +115,26 @@ ZARR_PYTHON_CONTEXT: Final = CORE_AND_EXTENSIONS_CONTEXT.update(
         *CORE_AND_EXTENSIONS_CONTEXT.data_types.values(),
         NULL_TERMINATED_BYTES_DATA_TYPE,
         VARIABLE_LENGTH_BYTES_DATA_TYPE,
+        ZARR_PYTHON_RAW_BYTES_DATA_TYPE,
     ],
 )
-"""A scope with `CORE_AND_EXTENSIONS_CONTEXT`, plus the data types that zarr-python writes but no specification registers: `null_terminated_bytes` and `variable_length_bytes`.
+"""A scope with `CORE_AND_EXTENSIONS_CONTEXT`, plus the data types that zarr-python writes but no specification registers: `null_terminated_bytes`, `variable_length_bytes` and `raw_bytes`.
 
 zarr-python warns when it writes these that their spelling may change, so
 they are kept out of `CORE_AND_EXTENSIONS_CONTEXT`. Read in this scope to check
 strictly what zarr-python writes.
 """
 
+RENAMED_SCOPES: Final = {
+    "CORE": ("CORE_CONTEXT", CORE_CONTEXT),
+    "CORE_AND_EXTENSIONS": ("CORE_AND_EXTENSIONS_CONTEXT", CORE_AND_EXTENSIONS_CONTEXT),
+}
+"""The v3 scopes' names before they ended in `_CONTEXT`, with each scope's name now and the scope."""
+
+
 __all__ = [
     "CORE_AND_EXTENSIONS_CONTEXT",
     "CORE_CONTEXT",
+    "RENAMED_SCOPES",
     "ZARR_PYTHON_CONTEXT",
 ]

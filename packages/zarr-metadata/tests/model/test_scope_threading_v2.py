@@ -1,4 +1,4 @@
-"""Tests that every v2 entry point reads in the scope it is given, uses `CORE_V2` when given none, and refuses a scope of another format."""
+"""Tests that every v2 entry point reads in the scope it is given, uses `CORE_V2_CONTEXT` when given none, and refuses a scope of another format."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import zarr_metadata.model as zm
 from zarr_metadata.model import ZarrV2ArrayMetadata
 from zarr_metadata.problems import MetadataValidationError
 from zarr_metadata.v2.definition import (
-    CORE_V2,
+    CORE_V2_CONTEXT,
     ZarrV2Context,
 )
 from zarr_metadata.v3.definition import CORE_AND_EXTENSIONS_CONTEXT
@@ -36,7 +36,7 @@ STORE_C = {".zmetadata": json.dumps(CONSOLIDATED).encode()}
 
 
 def _accepts(read: Callable[..., object]) -> Callable[[Context | None], bool]:
-    """Return whether `read`, given `context`, finds nothing wrong. Success is a model, a reading with a model, or a field that was read or left unclaimed."""
+    """Return whether `read`, given `context`, finds nothing wrong. Success is a model, a reading with a model, or a declaration that was read or left unclaimed."""
 
     def accepted(context: Context | None) -> bool:
         try:
@@ -44,7 +44,7 @@ def _accepts(read: Callable[..., object]) -> Callable[[Context | None], bool]:
         except MetadataValidationError:
             return False
         if isinstance(found, tuple) and len(found) == 2 and isinstance(found[1], tuple):
-            return len(found[1]) == 0  # a resolved field and its problems
+            return len(found[1]) == 0  # a resolved declaration and its problems
         reading = getattr(found, "reading", found)
         metadata = getattr(reading, "metadata", found)
         return metadata is not None
@@ -116,10 +116,10 @@ REFUSES_BAD = frozenset(
 
 @pytest.mark.parametrize("name", ENTRY_POINTS.keys())
 def test_every_v2_entry_point_reads_in_the_scope_it_is_given(name: str) -> None:
-    """Each v2 entry point accepts its document in an empty scope. In `CORE_V2` (also selected by `None`), it refuses the non-integer gzip level when the document contains it. This shows that each entry point reads in the scope it is given."""
+    """Each v2 entry point accepts its document in an empty scope. In `CORE_V2_CONTEXT` (also selected by `None`), it refuses the non-integer gzip level when the document contains it. This shows that each entry point reads in the scope it is given."""
     accepted = _accepts(ENTRY_POINTS[name])
     assert accepted(EMPTY) is True
-    assert accepted(CORE_V2) is (name not in REFUSES_BAD)
+    assert accepted(CORE_V2_CONTEXT) is (name not in REFUSES_BAD)
     assert accepted(None) is (name not in REFUSES_BAD)
 
 
@@ -158,4 +158,4 @@ def test_error_a_v2_store_reader_refuses_a_scope_of_another_format_before_decodi
     with pytest.raises(TypeError, match="format"):
         STORE_READERS[name](context=CORE_AND_EXTENSIONS_CONTEXT)
     with pytest.raises(MetadataValidationError):
-        STORE_READERS[name](context=CORE_V2)
+        STORE_READERS[name](context=CORE_V2_CONTEXT)

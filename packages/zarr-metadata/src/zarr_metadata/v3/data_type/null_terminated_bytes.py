@@ -15,9 +15,10 @@ from typing import Final, Literal, NotRequired
 from typing_extensions import ReadOnly, TypedDict
 
 from zarr_metadata._json import ValidationProblem
-from zarr_metadata._numpy import Base64Bytes, base64_fill_value_rules
+from zarr_metadata._numpy import Base64Bytes
 from zarr_metadata.definition._definition import Nested
 from zarr_metadata.v3._definition import DataTypeDefinition, single_byte
+from zarr_metadata.v3.data_type._byte import base64_decoded, base64_problems, base64_spelling
 
 NULL_TERMINATED_BYTES_DATA_TYPE_NAME: Final = "null_terminated_bytes"
 """The `name` field value of the `null_terminated_bytes` data type."""
@@ -27,24 +28,25 @@ NullTerminatedBytesDataTypeName = Literal["null_terminated_bytes"]
 
 
 class NullTerminatedBytesConfiguration(TypedDict, closed=True):
-    """
-    Configuration for the `null_terminated_bytes` data type.
-
-    Attributes
-    ----------
-    length_bytes
-        The size in bytes of every value, at least 1.
-    """
+    """Configuration for the `null_terminated_bytes` data type."""
 
     length_bytes: ReadOnly[int]
+    """The size in bytes of every value, at least 1."""
 
 
 class NullTerminatedBytes(TypedDict, closed=True):
     """`null_terminated_bytes` data type metadata."""
 
     name: NullTerminatedBytesDataTypeName
+    """The data type's name, `"null_terminated_bytes"`."""
     configuration: NullTerminatedBytesConfiguration
+    """The data type's parameters."""
     must_understand: NotRequired[bool]
+    """Whether a reader that does not recognize this data type must refuse the document.
+
+    Absent means `true`. The spec does not permit `false` for a data type
+    (https://github.com/zarr-developers/zarr-specs/blob/fc7dd9c9beb5a50b87f9b08b00bf50fc0048482f/docs/v3/core/index.rst#L1580-L1581).
+    """
 
 
 NullTerminatedBytesFillValue = Base64Bytes
@@ -67,12 +69,16 @@ def _fill_value_rules(
     nested: Nested,
     value: NullTerminatedBytesFillValue,
 ) -> Iterator[ValidationProblem]:
-    """Check that the fill value is base64, and that the bytes it encodes fit in `length_bytes`."""
-    problems = list(base64_fill_value_rules(configuration, nested, value))
-    if problems:
-        yield from problems
+    """Check that the fill value is base64, and that the bytes it encodes fit in `length_bytes`.
+
+    Trailing null bytes are padding, as in `_fill_value_canonical`, so they
+    do not count: `"QQAA"` fits in one byte, as `"QQ=="` does.
+    """
+    yield from base64_problems(value)
+    data = base64_decoded(value)
+    if data is None:
         return
-    size = len(base64.b64decode(value))
+    size = len(data.rstrip(b"\x00"))
     if size > configuration["length_bytes"]:
         yield ValidationProblem(
             (),
@@ -91,7 +97,7 @@ def _fill_value_canonical(
     A value is padded with null bytes to `length_bytes`, so `"QQ=="` and
     `"QQAA"` are the same value, as are `"QR=="` and `"QQ=="`.
     """
-    return base64.b64encode(base64.b64decode(value).rstrip(b"\x00")).decode("ascii")
+    return base64_spelling(base64.b64decode(value).rstrip(b"\x00"))
 
 
 NULL_TERMINATED_BYTES_DATA_TYPE: Final = DataTypeDefinition(

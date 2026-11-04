@@ -12,9 +12,10 @@ in `CORE_AND_EXTENSIONS_CONTEXT`.
 import base64
 from typing import Final, Literal
 
-from zarr_metadata._numpy import Base64Bytes, base64_fill_value_rules
+from zarr_metadata._numpy import Base64Bytes
 from zarr_metadata.definition._definition import EmptyConfiguration, Nested
 from zarr_metadata.v3._definition import DataTypeDefinition, variable_length
+from zarr_metadata.v3.data_type._byte import base64_fill_value_rules, base64_spelling
 
 VARIABLE_LENGTH_BYTES_DATA_TYPE_NAME: Final = "variable_length_bytes"
 """The `data_type` value for the `variable_length_bytes` type."""
@@ -30,7 +31,7 @@ def _fill_value_canonical(
     configuration: EmptyConfiguration, nested: Nested, value: VariableLengthBytesFillValue
 ) -> str:
     """Return the bytes encoded in base64 again, so `"QR=="` becomes `"QQ=="`."""
-    return base64.b64encode(base64.b64decode(value)).decode("ascii")
+    return base64_spelling(base64.b64decode(value))
 
 
 VARIABLE_LENGTH_BYTES_DATA_TYPE: Final = DataTypeDefinition(
