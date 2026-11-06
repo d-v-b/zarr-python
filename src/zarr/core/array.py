@@ -106,6 +106,7 @@ from zarr.core.indexing import (
     _iter_grid,
     check_fields,
     check_no_multi_fields,
+    expand_bool_index,
     is_pure_fancy_indexing,
     is_pure_orthogonal_indexing,
     is_scalar,
@@ -2758,9 +2759,10 @@ class Array[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         [vindex][zarr.Array.vindex], [oindex][zarr.Array.oindex], [blocks][zarr.Array.blocks], [__setitem__][zarr.Array.__setitem__]
         """
 
-        fields, pure_selection = pop_fields(selection)
+        expanded = expand_bool_index(selection, self.shape)
+        fields, pure_selection = pop_fields(expanded)
         if is_pure_fancy_indexing(pure_selection, self.ndim):
-            return self.vindex[cast("CoordinateSelection | MaskSelection", selection)]
+            return self.vindex[cast("CoordinateSelection | MaskSelection", expanded)]
         elif is_pure_orthogonal_indexing(pure_selection, self.ndim):
             return self.get_orthogonal_selection(pure_selection, fields=fields)
         else:
@@ -2871,9 +2873,10 @@ class Array[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         # which reads the data synchronously before we enter the async context.
         if isinstance(value, Array):
             value = np.asarray(value)
-        fields, pure_selection = pop_fields(selection)
+        expanded = expand_bool_index(selection, self.shape)
+        fields, pure_selection = pop_fields(expanded)
         if is_pure_fancy_indexing(pure_selection, self.ndim):
-            self.vindex[cast("CoordinateSelection | MaskSelection", selection)] = value
+            self.vindex[cast("CoordinateSelection | MaskSelection", expanded)] = value
         elif is_pure_orthogonal_indexing(pure_selection, self.ndim):
             self.set_orthogonal_selection(pure_selection, value, fields=fields)
         else:
