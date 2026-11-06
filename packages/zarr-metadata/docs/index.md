@@ -305,7 +305,14 @@ Every typed attribute is a view of that read: each declaration as the scope read
 it (an `AcceptedDeclaration` or an `UnclaimedDeclaration`), and `shape`, `attributes`
 and the members that hold no declaration as the read refined them. These views are read-only
 at every level: a list in the document is shown as a tuple, and an object
-as a read-only mapping. `to_json` returns plain containers.
+as a read-only mapping. `to_json` returns a copy the caller may change:
+each object a new `dict`, and each array a new tuple, since the package's
+JSON types spell a JSON array as a tuple. `json.dumps` writes it, but it
+does not compare equal to what `json.loads` returns for the same document,
+where arrays are lists. To ask whether a model holds a document, compare
+models, `ZarrV3ArrayMetadata.from_json(document) == model`, which also
+treats a default the document leaves out as equal to the default written
+out.
 
 To change a model, call `update`. It replaces members of the document with
 the given JSON members and reads the result in the model's own scope, so
