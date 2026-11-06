@@ -642,8 +642,8 @@ class BoolArrayDimIndexer:
         if not is_bool_array(dim_sel, 1):
             raise IndexError("Boolean arrays in an orthogonal selection must be 1-dimensional only")
 
-        # check shape
-        if dim_sel.shape[0] != dim_len:
+        # check shape; an empty Boolean array selects nothing, as in NumPy
+        if dim_sel.shape[0] not in (dim_len, 0):
             raise IndexError(
                 f"Boolean array has the wrong length for dimension; expected {dim_len}, got {dim_sel.shape[0]}"
             )
@@ -660,7 +660,8 @@ class BoolArrayDimIndexer:
                 dim_sel[dim_offset : dim_offset + chunk_len]
             )
         chunk_nitems_cumsum = np.cumsum(chunk_nitems)
-        nitems = chunk_nitems_cumsum[-1]
+        # a zero-length dimension has no chunks, so the cumulative sum may be empty
+        nitems = int(chunk_nitems.sum())
         dim_chunk_ixs = np.nonzero(chunk_nitems)[0]
 
         # store attributes
@@ -1566,6 +1567,65 @@ def pop_fields(selection: SelectionWithFields) -> tuple[Fields | None, Selection
         return fields, selection
 
 
+def expand_bool_index(
+    selection: SelectionWithFields, shape: tuple[int, ...]
+) -> SelectionWithFields:
+    """Rewrite a Boolean array used as the whole index into an equivalent selection.
+
+    NumPy reads such an array `m` as `m.nonzero()`: coordinates along the leading
+    `m.ndim` axes, with the remaining axes taken whole. A mask with the full shape of
+    the array stays a mask selection. A 1-dimensional mask over the first of several
+    axes becomes an orthogonal selection. Any other mask, including an empty one
+    whose shape does not match (which NumPy accepts as selecting nothing), becomes a
+    coordinate selection that broadcasts against the trailing axes. All other
+    selections are returned unchanged.
+
+    Raises
+    ------
+    IndexError
+        If a non-empty mask does not match the shape of the leading axes it covers.
+    """
+    fields, pure_selection = pop_fields(selection)
+    if (
+        not is_bool_array(pure_selection)
+        or not 0 < pure_selection.ndim <= len(shape)
+        or pure_selection.shape == shape
+    ):
+        return selection
+
+    mask = np.asarray(pure_selection)
+    # as in NumPy, an empty mask may have length 0 along any axis it covers
+    lengths_allowed = {0} if mask.size == 0 else set()
+    for axis, (mask_len, dim_len) in enumerate(zip(mask.shape, shape, strict=False)):
+        if mask_len not in lengths_allowed | {dim_len}:
+            raise IndexError(
+                f"Boolean index did not match indexed array along axis {axis}; size of "
+                f"axis is {dim_len} but size of corresponding Boolean axis is {mask_len}"
+            )
+
+    expanded: tuple[Any, ...]
+    if mask.ndim == 1 and mask.size > 0:
+        # spell out the trailing slices so the selection reads as orthogonal
+        expanded = (mask,) + (slice(None),) * (len(shape) - 1)
+    else:
+        # The trailing axes are read in full, so this materializes one coordinate
+        # per selected element.
+        n_trailing = len(shape) - mask.ndim
+        leading = tuple(c.reshape(c.shape + (1,) * n_trailing) for c in np.nonzero(mask))
+        trailing = tuple(
+            np.arange(dim_len, dtype=np.intp).reshape(
+                (1,) * (axis + 1) + (dim_len,) + (1,) * (n_trailing - axis - 1)
+            )
+            for axis, dim_len in enumerate(shape[mask.ndim :])
+        )
+        expanded = leading + trailing
+
+    if fields is not None:
+        expanded += (fields,) if isinstance(fields, str) else tuple(fields)
+    # fields mixed into a selection tuple are what `pop_fields` takes apart
+    return cast("SelectionWithFields", expanded)
+
+
 def make_slice_selection(selection: Any) -> list[slice]:
     ls: list[slice] = []
     for dim_selection in selection:
@@ -1746,6 +1806,7 @@ def colexicographic_order_coords(shape: tuple[int, ...]) -> tuple[tuple[int, ...
 def get_indexer(
     selection: SelectionWithFields, shape: tuple[int, ...], chunk_grid: ChunkGrid
 ) -> Indexer:
+    selection = expand_bool_index(selection, shape)
     _, pure_selection = pop_fields(selection)
     if is_pure_fancy_indexing(pure_selection, len(shape)):
         new_selection = ensure_tuple(selection)

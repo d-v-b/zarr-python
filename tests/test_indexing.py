@@ -428,6 +428,71 @@ def test_get_basic_selection_2d_rejects_list_in_tuple(store: StorePath) -> None:
         z.get_basic_selection((slice(None), [0, 1]))
 
 
+_EVEN_ROWS = np.array([True, False, True, False])
+_EMPTY_MASK = np.array([], dtype=bool)
+
+
+@pytest.mark.parametrize(
+    ("shape", "selection"),
+    [
+        # full-shape masks, including ones with a zero-length axis
+        ((4,), _EVEN_ROWS),
+        ((4, 3), np.eye(4, 3, dtype=bool)),
+        ((0,), _EMPTY_MASK),
+        ((0, 3), np.zeros((0, 3), dtype=bool)),
+        ((4, 0), np.zeros((4, 0), dtype=bool)),
+        # a 1-D mask over the first of several axes
+        ((4, 3), _EVEN_ROWS),
+        ((4, 3), np.ones(4, dtype=bool)),
+        ((4, 3), np.zeros(4, dtype=bool)),
+        ((4, 0), _EVEN_ROWS),
+        # an N-D mask over the leading axes of a higher-dimensional array
+        ((2, 3, 4), np.array([[True, False, True], [False, True, True]])),
+        ((2, 3, 4, 5), np.array([[True, False, True], [False, True, True]])),
+        # an empty mask selects nothing, whatever axes it covers
+        ((4,), _EMPTY_MASK),
+        ((4, 3), _EMPTY_MASK),
+        ((0, 3), _EMPTY_MASK),
+        ((2, 3, 4), np.zeros((0, 3), dtype=bool)),
+        # empty masks inside a selection tuple
+        ((4, 3), (_EMPTY_MASK, slice(None))),
+        ((4, 3), (slice(None), _EMPTY_MASK)),
+        ((0, 3), (_EMPTY_MASK, slice(None))),
+    ],
+)
+def test_bool_index_matches_numpy(store: StorePath, shape: tuple[int, ...], selection: Any) -> None:
+    """A Boolean array index selects, and writes, the same elements as in NumPy."""
+    a = np.arange(np.prod(shape), dtype="i4").reshape(shape)
+    z = zarr_array_from_numpy_array(store, a, chunk_shape=tuple(max(1, s // 2) for s in shape))
+    assert_array_equal(z[selection], a[selection])
+
+    z[selection] = -1
+    a[selection] = -1
+    assert_array_equal(z[...], a)
+
+
+@pytest.mark.parametrize(
+    ("shape", "selection"),
+    [
+        ((4,), np.array([True, False, True])),
+        ((4, 3), np.array([True, False, True])),
+        ((2, 3, 4), np.ones((2, 2), dtype=bool)),
+        # an empty mask still has to match along every axis it does not leave empty
+        ((5, 2), np.zeros((2, 0), dtype=bool)),
+        ((2, 3, 4), np.zeros((7, 0), dtype=bool)),
+    ],
+)
+def test_bool_index_wrong_shape_raises(
+    store: StorePath, shape: tuple[int, ...], selection: npt.NDArray[np.bool_]
+) -> None:
+    """A non-empty Boolean array index must match the leading axes it covers."""
+    z = zarr_array_from_numpy_array(store, np.zeros(shape, dtype="i4"))
+    with pytest.raises(IndexError, match="Boolean index did not match"):
+        z[selection]
+    with pytest.raises(IndexError, match="Boolean index did not match"):
+        z[selection] = 1
+
+
 def test_fancy_indexing_fallback_on_get_setitem(store: StorePath) -> None:
     """Paired integer-list indexing falls back to vectorized (fancy) get and set via `__getitem__`/`__setitem__`."""
     z = zarr_array_from_numpy_array(store, np.zeros((20, 20)))
