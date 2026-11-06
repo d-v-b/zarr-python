@@ -493,6 +493,24 @@ def test_bool_index_wrong_shape_raises(
         z[selection] = 1
 
 
+@pytest.mark.parametrize(
+    "selection",
+    [
+        (np.ones((2, 3), dtype=bool), slice(None)),
+        (np.ones((2, 3), dtype=bool), 1),
+        (Ellipsis, np.ones((3, 4), dtype=bool)),
+        (slice(None), np.ones((3, 4), dtype=bool)),
+    ],
+)
+def test_bool_index_nd_in_tuple_raises(store: StorePath, selection: tuple[Any, ...]) -> None:
+    """A Boolean array with more than one dimension is only supported as the whole index."""
+    z = zarr_array_from_numpy_array(store, np.zeros((2, 3, 4), dtype="i4"))
+    with pytest.raises(IndexError, match="only supported as the whole index"):
+        z[selection]
+    with pytest.raises(IndexError, match="only supported as the whole index"):
+        z[selection] = 1
+
+
 def test_fancy_indexing_fallback_on_get_setitem(store: StorePath) -> None:
     """Paired integer-list indexing falls back to vectorized (fancy) get and set via `__getitem__`/`__setitem__`."""
     z = zarr_array_from_numpy_array(store, np.zeros((20, 20)))

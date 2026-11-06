@@ -1583,9 +1583,20 @@ def expand_bool_index(
     Raises
     ------
     IndexError
-        If a non-empty mask does not match the shape of the leading axes it covers.
+        If a non-empty mask does not match the shape of the leading axes it covers,
+        or if a Boolean array with more than one dimension appears inside a tuple.
     """
     fields, pure_selection = pop_fields(selection)
+    if isinstance(pure_selection, tuple):
+        for position, item in enumerate(pure_selection):
+            if is_bool_array(item) and len(item.shape) > 1:
+                raise IndexError(
+                    f"got a {len(item.shape)}-dimensional Boolean array at position {position} "
+                    "of the selection; a Boolean array with more than one dimension is only "
+                    "supported as the whole index, as in `array[mask]`. Index with the mask "
+                    "alone, or read the region first and index the result with NumPy."
+                )
+        return selection
     if (
         not is_bool_array(pure_selection)
         or not 0 < pure_selection.ndim <= len(shape)
