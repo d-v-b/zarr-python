@@ -8,6 +8,7 @@ import json
 import math
 import pickle
 import threading
+import warnings
 from dataclasses import MISSING, dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, SupportsIndex, cast
@@ -19,23 +20,47 @@ from zarr_metadata import UNSET, MetadataValidationError, ZarrV3ArrayMetadata
 from zarr_metadata import ZarrV2ArrayMetadata as ModelV2
 
 import zarr
+import zarr.core.context as context_module
 import zarr.core.metadata.stored as stored_module
 from zarr import ArrayIO, AsyncArray, AsyncArrayIO
 from zarr.api.asynchronous import open_array
-from zarr.core.array import create_codec_pipeline, parse_array_metadata
+from zarr.codecs import BloscCodec, BytesCodec, GzipCodec, ShardingCodec, ZstdCodec
+from zarr.codecs.numcodecs import Shuffle
+from zarr.core.array import build_array_metadata_v3, create_codec_pipeline, parse_array_metadata
+from zarr.core.array_spec import parse_array_config
 from zarr.core.buffer import default_buffer_prototype
 from zarr.core.codec_pipeline import BatchedCodecPipeline, FusedCodecPipeline
+from zarr.core.dtype import (
+    Float32,
+    Int8,
+    NullTerminatedBytes,
+    Struct,
+    UInt16,
+    VariableLengthUTF8,
+    data_type_registry,
+    parse_dtype,
+)
+from zarr.core.dtype.registry import DataTypeRegistry
 from zarr.core.metadata import ArrayMetadata, ArrayV2Metadata, ArrayV3Metadata
 from zarr.core.metadata.stored import stored_documents
 from zarr.core.sync import sync
 from zarr.dtype import Int16
-from zarr.errors import ArrayNotFoundError, UnknownCodecError, ZarrUserWarning
+from zarr.errors import (
+    ArrayNotFoundError,
+    UnknownCodecError,
+    UnstableSpecificationWarning,
+    ZarrUserWarning,
+)
+from zarr.errors import MetadataValidationError as ZarrMetadataValidationError
+from zarr.experimental import Context
 from zarr.storage import LocalStore, MemoryStore, StorePath
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
     from pathlib import Path
+    from typing import Self
 
+    from zarr.core.array_spec import ArrayConfigLike
     from zarr.core.common import JSON, ZarrFormat
 
 METADATA_DOCUMENTS = ("zarr.json", ".zarray", ".zattrs", ".zgroup")
@@ -759,13 +784,659 @@ async def test_with_metadata_takes_any_mapping() -> None:
     await rebound.store_metadata()
 
 
+BYTES_JSON: dict[str, JSON] = {"name": "bytes", "configuration": {"endian": "little"}}
+
+
+ZSTD_JSON: dict[str, JSON] = {"name": "zstd", "configuration": {"level": 0, "checksum": False}}
+
+
+class _MarkedPipeline(BatchedCodecPipeline):
+    """A pipeline class distinguishable from the default, for context tests."""
+
+
+async def test_context_scopes_resolution() -> None:
+    """Names resolve through the context when the data path is built, the
+    context's pipeline wins over the global choice, and with_context rebinds."""
+    store = MemoryStore()
+    data = np.arange(16, dtype="uint16").reshape(4, 4)
+    registry = DataTypeRegistry()
+    registry.register(UInt16._zarr_v3_name, UInt16)
+    context = Context(
+        data_types=registry,
+        codecs={"bytes": BytesCodec, "zstd": ZstdCodec},
+        codec_pipeline=_MarkedPipeline,
+    )
+    aio = AsyncArrayIO.build_v3(
+        store,
+        name="foo",
+        shape=data.shape,
+        data_type="uint16",
+        chunk_grid=(2, 2),
+        codecs=[BYTES_JSON, ZSTD_JSON],
+        context=context,
+    )
+    assert isinstance(aio.to_array().codec_pipeline, _MarkedPipeline)
+    await aio.setitem(Ellipsis, data)
+    await aio.store_metadata()
+
+    opened = await AsyncArrayIO.open(store, name="foo", context=context)
+    np.testing.assert_array_equal(await opened.getitem(Ellipsis), data)
+
+    # the context survives derivation on both layers
+    assert isinstance(opened.with_config({"order": "F"}).to_array().codec_pipeline, _MarkedPipeline)
+    assert isinstance(opened.to_array().with_config({"order": "F"}).codec_pipeline, _MarkedPipeline)
+
+    rebound = opened.with_context(None)
+    assert not isinstance(rebound.to_array().codec_pipeline, _MarkedPipeline)
+    np.testing.assert_array_equal(await rebound.getitem(Ellipsis), data)
+
+
+async def test_context_unknown_codec_resolution_raises() -> None:
+    """A stored codec name outside the context opens for metadata work and
+    fails to resolve when the data path is built, naming the scope."""
+    store = MemoryStore()
+    aio = AsyncArrayIO.build_v3(store, name="foo", shape=(4,), data_type="uint8", chunk_grid=(4,))
+    await aio.store_metadata()
+    context = Context(data_types=data_type_registry, codecs={"bytes": BytesCodec})
+    opened = await AsyncArrayIO.open(store, name="foo", context=context)
+    await opened.verify()  # metadata work needs no resolution
+    with pytest.raises(UnknownCodecError, match="Codecs in scope: \\['bytes'\\]"):
+        await opened.getitem(Ellipsis)
+
+
+def test_context_unknown_codec_on_build_raises() -> None:
+    context = Context(data_types=data_type_registry, codecs={"bytes": BytesCodec})
+    with pytest.raises(UnknownCodecError, match="'zstd' is not in this context"):
+        AsyncArrayIO.build_v3(
+            MemoryStore(),
+            shape=(4,),
+            data_type="uint8",
+            chunk_grid=(4,),
+            codecs=[BYTES_JSON, ZSTD_JSON],
+            context=context,
+        )
+
+
+def test_context_unknown_dtype_raises() -> None:
+    context = Context(data_types=DataTypeRegistry())
+    with pytest.raises(ValueError, match="No Zarr data type found"):
+        AsyncArrayIO.build_v3(
+            MemoryStore(), shape=(4,), data_type="uint16", chunk_grid=(4,), context=context
+        )
+    # the str shortcut goes through the registry too
+    with pytest.raises(ValueError, match="No Zarr data type found"):
+        AsyncArrayIO.build_v3(
+            MemoryStore(), shape=(4,), data_type=str, chunk_grid=(4,), context=context
+        )
+
+
+def test_context_pickles_with_codecs() -> None:
+    """An array bound to a context with a codec scope pickles and unpickles
+    with the scope intact."""
+    context = Context(
+        data_types=data_type_registry,
+        codecs={"bytes": BytesCodec, "zstd": ZstdCodec},
+        codec_pipeline=_MarkedPipeline,
+    )
+    arr = zarr.create_array(MemoryStore(), shape=(4,), dtype="uint8", chunks=(4,))
+    rebound = arr.io.with_context(context).to_array()
+    revived = pickle.loads(pickle.dumps(rebound))
+    revived_context = revived._async_array._io._context
+    assert revived_context is not None
+    assert revived_context.codecs is not None
+    assert set(revived_context.codecs) == {"bytes", "zstd"}
+    assert revived_context.codec_pipeline is _MarkedPipeline
+    np.testing.assert_array_equal(revived[:], np.zeros(4, dtype="uint8"))
+
+
+async def test_with_context_reresolves_a_legacy_source() -> None:
+    """A binding built from resolved metadata is re-resolved by with_context,
+    so its stored names are checked against the scope."""
+    arr = await zarr.api.asynchronous.create_array(
+        MemoryStore(), shape=(4,), dtype="uint16", chunks=(4,)
+    )
+    full = Context(
+        data_types=data_type_registry,
+        codecs={"bytes": BytesCodec, "zstd": ZstdCodec},
+        codec_pipeline=_MarkedPipeline,
+    )
+    rebound = arr.io.with_context(full)
+    assert isinstance(rebound.to_array().codec_pipeline, _MarkedPipeline)
+    data = np.arange(4, dtype="uint16")
+    await rebound.setitem(Ellipsis, data)
+    np.testing.assert_array_equal(await rebound.getitem(Ellipsis), data)
+
+
+async def test_with_context_rejects_a_legacy_codec_outside_the_scope() -> None:
+    arr = await zarr.api.asynchronous.create_array(
+        MemoryStore(), shape=(4,), dtype="uint16", chunks=(4,)
+    )
+    narrow = Context(data_types=data_type_registry, codecs={"bytes": BytesCodec})
+    with pytest.raises(UnknownCodecError, match="is not in this context"):
+        arr.io.with_context(narrow)
+
+
+async def test_with_context_rejects_a_legacy_dtype_outside_the_scope() -> None:
+    arr = await zarr.api.asynchronous.create_array(
+        MemoryStore(), shape=(4,), dtype="uint16", chunks=(4,)
+    )
+    with pytest.raises(ValueError, match="No Zarr data type found"):
+        arr.io.with_context(Context(data_types=DataTypeRegistry()))
+
+
+async def test_context_v2_scopes_dtype_resolution() -> None:
+    """A v2 document resolves its dtype through the context on build and open."""
+    store = MemoryStore()
+    registry = DataTypeRegistry()
+    registry.register(UInt16._zarr_v3_name, UInt16)
+    context = Context(data_types=registry)
+    data = np.arange(4, dtype="uint16")
+    aio = AsyncArrayIO.build_v2(
+        store, name="foo", shape=(4,), dtype="uint16", chunks=(4,), context=context
+    )
+    await aio.store_metadata()
+    await aio.setitem(Ellipsis, data)
+    opened = await AsyncArrayIO.open(store, name="foo", context=context)
+    np.testing.assert_array_equal(await opened.getitem(Ellipsis), data)
+
+
+def test_context_v2_unknown_dtype_raises() -> None:
+    context = Context(data_types=DataTypeRegistry())
+    with pytest.raises(ValueError, match="No Zarr data type found"):
+        AsyncArrayIO.build_v2(
+            MemoryStore(), name="foo", shape=(4,), dtype="uint16", chunks=(4,), context=context
+        )
+
+
+def test_context_default_codecs_outside_the_scope_raise() -> None:
+    """The default codec chain resolves under the context too, so a closed
+    scope never stores a chain it could not read back."""
+    narrow = Context(data_types=data_type_registry, codecs={"bytes": BytesCodec})
+    with pytest.raises(UnknownCodecError, match="is not in this context"):
+        AsyncArrayIO.build_v3(
+            MemoryStore(), shape=(4,), data_type="uint16", chunk_grid=(4,), context=narrow
+        )
+
+
+async def test_with_context_rebinding_stores_the_repair() -> None:
+    """Rebinding a repaired legacy array carries nothing about the store: its
+    store's cache still records the broken document, so the first write
+    through the rebound binding stores the repair."""
+    store = MemoryStore()
+    doc: dict[str, Any] = {
+        "zarr_format": 2,
+        "shape": [3],
+        "chunks": [0],
+        "dtype": "<u2",
+        "fill_value": 0,
+        "order": "C",
+        "filters": None,
+        "compressor": None,
+    }
+    prototype = default_buffer_prototype()
+    await store.set("foo/.zarray", prototype.buffer.from_bytes(json.dumps(doc).encode()))
+    with pytest.warns(ZarrUserWarning, match="is read as"):
+        arr = await open_array(store=store, path="foo", mode="r+")
+    context = Context(data_types=data_type_registry)
+    rebound = arr.io.with_context(context)
+    assert stored_documents(store).needing_repair("foo", 2) is not None
+
+    await rebound.setitem(slice(None), np.array([7, 8, 9], dtype="uint16"))
+
+    buffer = await store.get("foo/.zarray", prototype=prototype)
+    assert buffer is not None
+    assert json.loads(buffer.to_bytes())["chunks"] == [1]
+    np.testing.assert_array_equal(await rebound.getitem(Ellipsis), [7, 8, 9])
+
+
+class _ScopedUTF8(VariableLengthUTF8):
+    """A variable-length UTF-8 data type distinguishable from the default."""
+
+
+def test_parse_dtype_vlen_shortcut_in_context() -> None:
+    """The variable-length-UTF8 shortcut returns what the context's registry
+    matches, not the default class."""
+    registry = DataTypeRegistry()
+    registry.register(VariableLengthUTF8._zarr_v3_name, _ScopedUTF8)  # type: ignore[arg-type]
+    context = Context(data_types=registry)
+    assert isinstance(parse_dtype(str, zarr_format=2, context=context), _ScopedUTF8)
+    assert isinstance(parse_dtype(str, zarr_format=3, context=context), _ScopedUTF8)
+
+
+def test_with_metadata_under_a_context_rejects_a_codec_outside_it() -> None:
+    narrow = Context(data_types=data_type_registry, codecs={"bytes": BytesCodec})
+    aio = AsyncArrayIO.build_v3(
+        MemoryStore(),
+        shape=(4,),
+        data_type="uint8",
+        chunk_grid=(4,),
+        codecs=[BYTES_JSON],
+        context=narrow,
+    )
+    outside = zarr.create_array(
+        MemoryStore(), shape=(4,), dtype="uint8", chunks=(4,)
+    ).io.metadata_legacy
+    with pytest.raises(UnknownCodecError, match="is not in this context"):
+        aio.with_metadata(outside)
+
+
+def test_builders_under_a_context_reject_instances_outside_it() -> None:
+    """Data type and codec instances are checked against a closed context
+    too, so a builder never binds what its own context cannot read back."""
+    registry = DataTypeRegistry()
+    registry.register(UInt16._zarr_v3_name, UInt16)
+    context = Context(data_types=registry, codecs={"bytes": BytesCodec, "zstd": ZstdCodec})
+    with pytest.raises(ValueError, match="No Zarr data type found"):
+        AsyncArrayIO.build_v3(
+            MemoryStore(), shape=(4,), data_type=Int16(), chunk_grid=(4,), context=context
+        )
+    with pytest.raises(UnknownCodecError, match="'gzip' is not in this context"):
+        AsyncArrayIO.build_v3(
+            MemoryStore(),
+            shape=(4,),
+            data_type="uint16",
+            chunk_grid=(4,),
+            codecs=[BytesCodec(), GzipCodec()],
+            context=context,
+        )
+
+
+class _ScopedUInt16(UInt16):
+    """A uint16 data type distinguishable from the default."""
+
+
+def _scoped_uint16_registry() -> DataTypeRegistry:
+    registry = DataTypeRegistry()
+    registry.register(UInt16._zarr_v3_name, _ScopedUInt16)
+    return registry
+
+
+def test_v2_bindings_resolve_through_a_data_type_scope() -> None:
+    """A Zarr format 2 legacy object entering a data type scope (constructor,
+    with_metadata) binds the scope's class, and leaving it rebinds the default;
+    a codec scope does not govern a Zarr format 2 array's numcodecs."""
+    context = Context(data_types=_scoped_uint16_registry())
+    legacy = zarr.create_array(
+        MemoryStore(), shape=(4,), dtype="uint16", chunks=(4,), zarr_format=2
+    ).io.metadata_legacy
+    declared = AsyncArrayIO.build_v2(
+        MemoryStore(), shape=(4,), dtype="uint16", chunks=(4,), context=context
+    )
+    for binding in (
+        AsyncArrayIO(legacy, StorePath(MemoryStore()), context=context),
+        declared.with_metadata(legacy),
+    ):
+        assert type(binding.metadata_legacy.dtype) is _ScopedUInt16
+        assert type(binding.with_context(None).metadata_legacy.dtype) is UInt16
+
+    codecs_only = Context(codecs={"bytes": BytesCodec})
+    unscoped = AsyncArrayIO(legacy, StorePath(MemoryStore()), context=codecs_only)
+    assert unscoped.metadata_legacy.to_dict() == legacy.to_dict()
+
+
+def test_switching_between_scopes_of_different_kinds() -> None:
+    """Moving from a codec scope to a data type scope reads the codecs again
+    under the defaults and resolves the data type through the new scope."""
+    codec_scoped = AsyncArrayIO.build_v3(
+        MemoryStore(),
+        shape=(4,),
+        data_type="uint16",
+        chunk_grid=(4,),
+        codecs=[BYTES_JSON],
+        context=Context(codecs={"bytes": _UnregisteredBytes}),
+    )
+    assert type(codec_scoped.metadata_legacy.codecs[0]) is _UnregisteredBytes  # type: ignore[union-attr]
+    switched = codec_scoped.with_context(Context(data_types=_scoped_uint16_registry()))
+    assert type(switched.metadata_legacy.codecs[0]) is BytesCodec  # type: ignore[union-attr]
+    assert type(switched.metadata_legacy.dtype) is _ScopedUInt16
+
+
+def test_bindings_resolve_through_the_context_they_are_under() -> None:
+    """Whatever reaches a binding under a context, its data type is the
+    context's class: a builder's declaration, a chunk-size-0 v2 declaration
+    (read as repaired), and a legacy object given to with_metadata; leaving
+    the context rebinds the default class."""
+    context = Context(data_types=_scoped_uint16_registry())
+
+    built = AsyncArrayIO.build_v3(
+        MemoryStore(), shape=(4,), data_type="uint16", chunk_grid=(4,), context=context
+    )
+    zero_chunk = AsyncArrayIO.build_v2(
+        MemoryStore(), shape=(3,), dtype="uint16", chunks=(0,), context=context
+    )
+    outside = zarr.create_array(MemoryStore(), shape=(4,), dtype="uint16", chunks=(4,))
+    rebound = built.with_metadata(outside.io.metadata_legacy)
+
+    for binding in (built, zero_chunk, rebound):
+        assert isinstance(binding.metadata_legacy.dtype, _ScopedUInt16)
+    assert zero_chunk.metadata_legacy.chunks == (1,)
+    assert type(built.with_context(None).metadata_legacy.dtype) is UInt16
+
+
+def test_context_selects_a_pipeline_alone() -> None:
+    """A context that only selects the codec pipeline resolves names from the
+    default registries."""
+    context = Context(codec_pipeline=_MarkedPipeline)
+    aio = AsyncArrayIO.build_v3(
+        MemoryStore(), shape=(4,), data_type="uint16", chunk_grid=(4,), context=context
+    )
+    assert isinstance(aio.to_array().codec_pipeline, _MarkedPipeline)
+    assert type(aio.metadata_legacy.dtype) is UInt16
+
+
+def test_bindings_under_different_contexts_differ() -> None:
+    store = MemoryStore()
+    aio = AsyncArrayIO.build_v3(store, name="foo", shape=(4,), data_type="uint8", chunk_grid=(4,))
+    scoped = aio.with_context(Context(codec_pipeline=_MarkedPipeline))
+    assert scoped != aio
+    assert scoped.with_context(None) == aio
+
+
+class _UnregisteredUInt16(UInt16):
+    """A data type no registry holds."""
+
+
+class _UnregisteredBytes(BytesCodec):
+    """A codec no registry holds by its own name; it encodes as `bytes`."""
+
+
+def test_pipeline_only_context_resolves_as_no_context() -> None:
+    """A context that only selects the codec pipeline accepts exactly what no
+    context accepts: unregistered data type and codec instances bind as given,
+    for both formats, and survive with_config and with_context."""
+    context = Context(codec_pipeline=_MarkedPipeline)
+    v3 = AsyncArrayIO.build_v3(
+        MemoryStore(),
+        shape=(4,),
+        data_type=_UnregisteredUInt16(),
+        chunk_grid=(4,),
+        codecs=[_UnregisteredBytes()],
+        context=context,
+    )
+    v2 = AsyncArrayIO.build_v2(
+        MemoryStore(), shape=(4,), dtype=_UnregisteredUInt16(), chunks=(4,), context=context
+    )
+    v3_bindings = [
+        v3,
+        v3.with_config({"order": "F"}),
+        v3.with_context(None),
+        AsyncArrayIO(v3.metadata_legacy, StorePath(MemoryStore()), context=context),
+        v3.with_metadata(v3.metadata_legacy),
+    ]
+    for binding in [*v3_bindings, v2]:
+        assert type(binding.metadata_legacy.dtype) is _UnregisteredUInt16
+    for binding in v3_bindings:
+        assert type(binding.metadata_legacy.codecs[0]) is _UnregisteredBytes  # type: ignore[union-attr]
+    assert isinstance(v3.to_array().codec_pipeline, _MarkedPipeline)
+
+
+async def test_scoped_array_keeps_its_context() -> None:
+    """An array under a closed context keeps it across with_config and
+    pickling, reads chunk-size-0 v2 metadata as repaired without a warning,
+    and binds the context's classes."""
+    registry = DataTypeRegistry()
+    registry.register(UInt16._zarr_v3_name, _ScopedUInt16)
+    context = Context(data_types=registry, codec_pipeline=_MarkedPipeline)
+    zero_chunk = ArrayV2Metadata(shape=(3,), chunks=(0,), dtype=UInt16(), fill_value=0, order="C")
+    store = MemoryStore()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        arr = AsyncArray(zero_chunk, StorePath(store), context=context)
+        declared = AsyncArrayIO.build_v2(store, shape=(3,), dtype="uint16", chunks=(3,))
+        rebound = declared.with_context(context).with_metadata(zero_chunk)
+        configured = arr.with_config({"order": "F"})
+    revived = pickle.loads(pickle.dumps(arr))
+    for array in (arr, configured, revived, rebound.to_array()):
+        assert array.metadata.chunks == (1,)
+        assert isinstance(array.metadata.dtype, _ScopedUInt16)
+        assert array.io._context == context
+        assert isinstance(array.codec_pipeline, _MarkedPipeline)
+
+
+def test_default_context_is_the_empty_context() -> None:
+    assert Context.default() == Context()
+    assert not Context().limits_names
+    assert Context(codecs={"bytes": BytesCodec}).limits_names
+
+
+def test_closed_data_type_scope_checks_structured_fields() -> None:
+    """A NumPy structured dtype is checked whole: a field type outside a closed
+    data type scope is rejected at build, as a Struct instance is."""
+    registry = DataTypeRegistry()
+    registry.register(Int8._zarr_v3_name, Int8)
+    registry.register(Struct._zarr_v3_name, Struct)
+    context = Context(data_types=registry)
+    with pytest.raises(ValueError, match="No Zarr data type found"):
+        AsyncArrayIO.build_v3(
+            MemoryStore(),
+            shape=(4,),
+            data_type=np.dtype([("a", "i1"), ("b", "f8")]),
+            chunk_grid=(4,),
+            context=context,
+        )
+
+
+def test_closed_codec_scope_keeps_admitted_instances() -> None:
+    """An admitted codec instance binds as given, so it evolves against the data
+    type as it does with no context."""
+    closed = Context(codecs={"bytes": BytesCodec, "blosc": BloscCodec})
+    stored = [
+        AsyncArrayIO.build_v3(
+            MemoryStore(),
+            shape=(4,),
+            data_type="int32",
+            chunk_grid=(4,),
+            codecs=[BytesCodec(), BloscCodec()],
+            context=context,
+        ).metadata_legacy.to_dict()["codecs"]
+        for context in (closed, None)
+    ]
+    assert stored[0] == stored[1]
+
+
+def test_leaving_a_closed_scope_rebinds_the_defaults() -> None:
+    """Rebinding under any context that limits no names (or none) reads the
+    names a closed scope resolved again under the defaults, and a context that
+    sets nothing is no context."""
+    scoped = AsyncArrayIO.build_v3(
+        MemoryStore(),
+        shape=(4,),
+        data_type="uint8",
+        chunk_grid=(4,),
+        codecs=[BYTES_JSON],
+        context=Context(codecs={"bytes": _UnregisteredBytes}),
+    )
+    for context in (None, Context(), Context(codec_pipeline=_MarkedPipeline)):
+        rebound = scoped.with_context(context)
+        assert type(rebound.metadata_legacy.codecs[0]) is BytesCodec  # type: ignore[union-attr]
+    plain = scoped.with_context(None)
+    assert plain.with_context(Context.default()) == plain
+
+
+def test_with_metadata_under_a_pipeline_only_context_copies() -> None:
+    declared = AsyncArrayIO.build_v3(
+        MemoryStore(),
+        shape=(4,),
+        data_type="uint8",
+        chunk_grid=(4,),
+        context=Context(codec_pipeline=_MarkedPipeline),
+    )
+    mine = zarr.create_array(
+        MemoryStore(), shape=(4,), dtype="uint8", chunks=(4,)
+    ).io.metadata_legacy
+    rebound = declared.with_metadata(mine)
+    assert rebound.metadata_legacy is not mine
+    assert rebound.metadata_legacy.attributes is not mine.attributes
+
+
+def test_the_context_is_not_a_dataclass_field() -> None:
+    """The dataclass fields are as they always were; `dataclasses.replace` builds
+    from them, so its result has no context, and `with_config` keeps it."""
+    context = Context(codec_pipeline=_MarkedPipeline)
+    arr = AsyncArray(
+        zarr.create_array(MemoryStore(), shape=(4,), dtype="uint8", chunks=(4,)).metadata,
+        StorePath(MemoryStore()),
+        context=context,
+    )
+    order_f = parse_array_config({"order": "F"})
+    assert dataclasses.replace(arr, config=order_f).io.context is None
+    configured = arr.with_config(order_f)
+    assert configured.io.context == context
+    assert isinstance(configured.codec_pipeline, _MarkedPipeline)
+    assert [f.name for f in dataclasses.fields(arr)] == [
+        "metadata",
+        "store_path",
+        "codec_pipeline",
+        "_chunk_grid",
+        "config",
+    ]
+
+
+@pytest.mark.parametrize(
+    "context",
+    [
+        None,
+        Context(codec_pipeline=BatchedCodecPipeline),
+        Context(data_types=data_type_registry),
+    ],
+)
+def test_v3_from_dict_reports_errors_in_field_order(context: Context | None) -> None:
+    """Unless a context limits codecs, codecs are parsed after the other fields,
+    so a document with several bad fields reports the chunk grid first, as it
+    always has."""
+    doc: dict[str, Any] = {
+        "zarr_format": 3,
+        "node_type": "array",
+        "shape": [4],
+        "data_type": "uint8",
+        "chunk_grid": {"name": "nope", "configuration": {}},
+        "chunk_key_encoding": {"name": "default"},
+        "fill_value": 0,
+        "codecs": [{"name": "nope"}],
+    }
+    with pytest.raises(ValueError, match="chunk grid"):
+        ArrayV3Metadata.from_dict(doc, context=context)
+
+
+def test_a_context_rechecks_only_the_kinds_it_limits() -> None:
+    """A context that limits one kind leaves the other as given, entering it
+    (constructor, with_metadata) and leaving it (with_context), for an instance
+    no registry holds."""
+    codecs_only = Context(codecs={"bytes": BytesCodec})
+    declared = AsyncArrayIO.build_v3(
+        MemoryStore(),
+        shape=(4,),
+        data_type=_UnregisteredUInt16(),
+        chunk_grid=(4,),
+        codecs=[BytesCodec()],
+    )
+    legacy = declared.metadata_legacy
+    bindings = [
+        AsyncArrayIO(legacy, StorePath(MemoryStore()), context=codecs_only),
+        declared.with_context(codecs_only).with_metadata(legacy),
+        declared.with_context(codecs_only).with_context(None),
+    ]
+    for binding in bindings:
+        assert type(binding.metadata_legacy.dtype) is _UnregisteredUInt16
+
+    registry = DataTypeRegistry()
+    registry.register(UInt16._zarr_v3_name, UInt16)
+    data_types_only = Context(data_types=registry)
+    unregistered_codec = AsyncArrayIO.build_v3(
+        MemoryStore(),
+        shape=(4,),
+        data_type="uint16",
+        chunk_grid=(4,),
+        codecs=[_UnregisteredBytes()],
+    )
+    for binding in (
+        unregistered_codec.with_context(data_types_only),
+        unregistered_codec.with_context(data_types_only).with_context(None),
+    ):
+        assert type(binding.metadata_legacy.codecs[0]) is _UnregisteredBytes  # type: ignore[union-attr]
+
+
+@dataclass(frozen=True)
+class _LocalBytes(BytesCodec):
+    """A serializer only a context holds, under a name of its own."""
+
+    def to_dict(self) -> dict[str, JSON]:
+        return {"name": "local_bytes", "configuration": {"endian": "little"}}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, JSON]) -> Self:
+        return cls(endian="little")
+
+
+async def test_repair_before_a_write_reads_under_the_context() -> None:
+    """The repair check before a chunk write reads the stored document under the
+    binding's context, so a codec only the context holds does not stop a write
+    to an array whose stored chunk size needs a repair."""
+    store = MemoryStore()
+    doc: dict[str, Any] = {
+        "zarr_format": 3,
+        "node_type": "array",
+        "shape": [3],
+        "data_type": "uint16",
+        "fill_value": 0,
+        "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [0]}},
+        "chunk_key_encoding": {"name": "default"},
+        "codecs": [{"name": "local_bytes", "configuration": {"endian": "little"}}],
+        "attributes": {},
+    }
+    prototype = default_buffer_prototype()
+    await store.set("a/zarr.json", prototype.buffer.from_bytes(json.dumps(doc).encode()))
+    context = Context(codecs={"local_bytes": _LocalBytes})
+    with pytest.warns(ZarrUserWarning, match="is read as"):
+        arr = AsyncArray(cast("Any", doc), StorePath(store, "a"), context=context)
+    await arr.setitem(slice(None), np.array([7, 8, 9], dtype="uint16"))
+    np.testing.assert_array_equal(await arr.getitem(slice(None)), [7, 8, 9])
+
+
+def test_closed_codec_scope_rejects_an_instance_of_another_class() -> None:
+    """An instance of another class than the scope maps its name to is refused, not
+    rebuilt (that would drop state its JSON does not hold)."""
+    with pytest.raises(UnknownCodecError, match="maps 'bytes' to BytesCodec"):
+        AsyncArrayIO.build_v3(
+            MemoryStore(),
+            shape=(4,),
+            data_type="uint8",
+            chunk_grid=(4,),
+            codecs=[_UnregisteredBytes()],
+            context=Context(codecs={"bytes": BytesCodec}),
+        )
+
+
+def test_a_context_copies_a_registry_it_is_given() -> None:
+    registry = _scoped_uint16_registry()
+    context = Context(data_types=registry)
+    registry.register(Int16._zarr_v3_name, Int16)
+    assert context.data_types is not None
+    assert Int16._zarr_v3_name not in context.data_types.contents
+    assert Context(data_types=data_type_registry).data_types is data_type_registry
+
+
+def test_a_pickled_context_keeps_the_default_registry() -> None:
+    """A context over the default data type registry unpickles over the
+    receiving process's registry, not a snapshot; another registry is copied."""
+    restored = pickle.loads(pickle.dumps(Context(data_types=data_type_registry)))
+    assert restored.data_types is data_type_registry
+    own = _scoped_uint16_registry()
+    copied = pickle.loads(pickle.dumps(Context(data_types=own)))
+    assert copied.data_types is not own
+    assert copied.data_types is not None
+    assert copied.data_types.get(UInt16._zarr_v3_name) is _ScopedUInt16
+
+
 class _TaggedAsyncArray(AsyncArray[Any]):
     """An `AsyncArray` subclass with an instance attribute of its own."""
 
     tag: str
 
-    def __init__(self, metadata: Any, store_path: StorePath, tag: str = "default") -> None:
-        super().__init__(metadata, store_path)
+    def __init__(
+        self, metadata: Any, store_path: StorePath, config: Any = None, tag: str = "default"
+    ) -> None:
+        super().__init__(metadata, store_path, config)
         object.__setattr__(self, "tag", tag)
 
 
@@ -779,6 +1450,13 @@ def test_async_array_subclass_state_survives_pickle_and_copy() -> None:
         assert restored.tag == "mine"
         assert restored == tagged
         assert set(vars(restored)) == {"_io", "tag"}
+
+    # Rebuilt through the subclass's __init__ (which takes no context), as before.
+    order_f = parse_array_config({"order": "F"})
+    for rebuilt in (tagged.with_config(order_f), dataclasses.replace(tagged, config=order_f)):
+        assert type(rebuilt) is _TaggedAsyncArray
+        assert rebuilt.tag == "default"
+        assert rebuilt.config.order == "F"
 
 
 async def test_copying_an_array_shares_its_metadata() -> None:
@@ -984,6 +1662,7 @@ def test_an_array_keeps_its_binding_class() -> None:
     for kept in (array, pickle.loads(pickle.dumps(array))):
         sync(kept.resize((6,)))
         assert type(kept.io) is _LoggingBinding
+    assert type(array.with_config({"order": "F"}).io) is _LoggingBinding
 
 
 @dataclass(frozen=True)
@@ -1057,6 +1736,7 @@ async def test_every_route_rebinds_through_bind() -> None:
         built.with_metadata(built.metadata),
         built.with_store(MemoryStore()),
         built.with_config({"order": "F"}),
+        built.with_context(Context(codec_pipeline=_MarkedPipeline)),
         pickle.loads(pickle.dumps(built)),
         array.io,
         array.with_config({"order": "F"}).io,
@@ -1452,6 +2132,824 @@ def test_with_config_prefers_a_binding_pipeline_over_an_assigned_one() -> None:
     assert isinstance(assigned.with_config({"order": "F"}).codec_pipeline, _AssignedPipeline)
 
 
+def test_bindings_expose_their_context() -> None:
+    context = Context(codec_pipeline=_MarkedPipeline)
+    aio = AsyncArrayIO.build_v3(
+        MemoryStore(), shape=(4,), data_type="uint8", chunk_grid=(4,), context=context
+    )
+    sync_io = ArrayIO.build_v3(
+        MemoryStore(), shape=(4,), data_type="uint8", chunk_grid=(4,), context=context
+    )
+    assert aio.context == sync_io.context == context
+    assert aio.with_context(None).context is None
+    assert aio.with_context(Context()).context is None
+
+
+@dataclass(frozen=True, init=False)
+class _DecoratedAsyncArray(AsyncArray[Any]):
+    """A `@dataclass` subclass with a field and an `__init__` that takes no context."""
+
+    tag: str = "default"
+
+    def __init__(
+        self, metadata: Any, store_path: StorePath, config: Any = None, tag: str = "default"
+    ) -> None:
+        super().__init__(metadata, store_path, config)
+        object.__setattr__(self, "tag", tag)
+
+
+def test_a_subclass_init_without_context_is_rebuilt() -> None:
+    """`dataclasses.replace` and `with_config` call a subclass `__init__` that takes
+    no context, decorated or not, as they always did; a decorated subclass's own
+    field is passed by `replace`, and `with_config` keeps a context."""
+    created = zarr.create_array(MemoryStore(), shape=(4,), dtype="uint8", chunks=(2,))
+    order_f = parse_array_config({"order": "F"})
+    context = Context(codec_pipeline=_MarkedPipeline)
+    for cls, replaced_tag in ((_TaggedAsyncArray, "default"), (_DecoratedAsyncArray, "mine")):
+        array = cls(created.metadata, created.store_path, tag="mine")
+        for rebuilt, tag in (
+            (dataclasses.replace(array, config=order_f), replaced_tag),
+            (array.with_config(order_f), "default"),
+        ):
+            assert type(rebuilt) is cls
+            assert rebuilt.tag == tag
+            assert rebuilt.config.order == "F"
+        scoped = cls._from_io(AsyncArrayIO(created.metadata, created.store_path, context=context))
+        object.__setattr__(scoped, "tag", "mine")
+        configured = scoped.with_config(order_f)
+        assert type(configured) is cls
+        assert configured.tag == "default"
+        assert configured.io.context == context
+        assert isinstance(configured.codec_pipeline, _MarkedPipeline)
+
+
+def test_async_array_takes_context_by_keyword_only() -> None:
+    created = zarr.create_array(MemoryStore(), shape=(4,), dtype="uint8", chunks=(2,))
+    with pytest.raises(TypeError, match="positional"):
+        AsyncArray(created.metadata, created.store_path, None, Context())  # type: ignore[call-overload]
+
+
+def test_async_array_rejects_a_model_under_any_context() -> None:
+    """`AsyncArray` takes legacy metadata or a mapping; a model is refused under a
+    context that limits names as without one."""
+    model = AsyncArrayIO.build_v3(
+        MemoryStore(), shape=(4,), data_type="uint8", chunk_grid=(4,)
+    ).metadata
+    closed = Context(codecs={"bytes": BytesCodec})
+    for context in (None, closed):
+        with pytest.raises(TypeError, match="got ZarrV3ArrayMetadata"):
+            AsyncArray(cast("Any", model), StorePath(MemoryStore()), context=context)
+
+
+def test_a_context_with_only_unset_kinds_binds_as_none() -> None:
+    aio = AsyncArrayIO.build_v3(
+        MemoryStore(), shape=(4,), data_type="uint8", chunk_grid=(4,), context=Context()
+    )
+    assert aio.context is None
+
+
+class _BuiltBinding(AsyncArrayIO):
+    """A binding subclass whose own `__init__` sets up state, as a backend's might."""
+
+    ready: bool
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.ready = True
+
+
+def test_builders_run_a_binding_subclass_init() -> None:
+    context = Context(codec_pipeline=_MarkedPipeline)
+    built = (
+        _BuiltBinding.build_v3(MemoryStore(), shape=(4,), data_type="uint8", chunk_grid=(4,)),
+        _BuiltBinding.build_v2(
+            MemoryStore(), shape=(4,), dtype="uint8", chunks=(4,), context=context
+        ),
+    )
+    for binding in built:
+        assert binding.ready
+
+
+async def test_with_config_under_a_context_shares_metadata_and_builds_one_pipeline() -> None:
+    """Under a context, `with_config` keeps the context and its pipeline, builds no
+    other pipeline, and shares the metadata object, as it does with no context."""
+    closed = Context(codecs={"bytes": BytesCodec}, codec_pipeline=_MarkedPipeline)
+    for context in (None, closed):
+        array = AsyncArrayIO.build_v3(
+            MemoryStore(),
+            shape=(4,),
+            data_type="uint8",
+            chunk_grid=(4,),
+            codecs=[BYTES_JSON],
+            context=context,
+        ).to_array()
+        configured = array.with_config({"order": "F"})
+        assert configured.metadata is array.metadata
+        assert configured.io.context == context
+    array = AsyncArrayIO.build_v3(
+        MemoryStore(),
+        shape=(4,),
+        data_type="uint8",
+        chunk_grid=(4,),
+        codecs=[BYTES_JSON],
+        context=closed,
+    ).to_array()
+    with zarr.config.set({"codec_pipeline.path": "no.such.Pipeline"}):
+        configured = array.with_config({"order": "F"})
+    assert isinstance(configured.codec_pipeline, _MarkedPipeline)
+
+
+def test_sync_bindings_take_a_context(tmp_path: Path) -> None:
+    context = Context(codec_pipeline=_MarkedPipeline)
+    built = ArrayIO.build_v2(
+        LocalStore(tmp_path), name="a", shape=(4,), dtype="uint8", chunks=(4,), context=context
+    )
+    built.store_metadata()
+    opened = ArrayIO.open(LocalStore(tmp_path), name="a", context=context)
+    assert built.context == opened.context == context
+    assert opened.with_context(None).context is None
+    assert isinstance(opened.to_array().async_array.codec_pipeline, _MarkedPipeline)
+
+
+@pytest.mark.parametrize("context", [None, Context(data_types=data_type_registry)])
+@pytest.mark.parametrize(
+    "native", [np.dtype(">u2"), np.dtype([("a", ">i4"), ("n", [("c", ">u2")])])]
+)
+def test_a_data_type_scope_keeps_the_byte_order(
+    context: Context | None, native: np.dtype[Any]
+) -> None:
+    """Zarr format 3 data type JSON has no byte order; entering a data type scope, or
+    leaving it, keeps a big-endian data type (or field) big-endian, as no context does."""
+    built = AsyncArrayIO.build_v3(
+        MemoryStore(), shape=(4,), data_type=native, chunk_grid=(4,), context=context
+    )
+    created = zarr.create_array(MemoryStore(), shape=(4,), dtype=native)
+    bound = AsyncArrayIO(created.metadata, created.store_path, context=context)
+    for binding in (built, bound, bound.with_context(None)):
+        assert binding.metadata_legacy.dtype.to_native_dtype() == native
+
+
+@dataclass(frozen=True)
+class _TunedZstd(ZstdCodec):
+    """A zstd codec with state its JSON does not hold."""
+
+    threads: int = 1
+
+
+def test_a_closed_codec_scope_keeps_admitted_instances_whole() -> None:
+    """An instance of the class the scope maps its name to is bound as given on
+    every route, state its JSON does not hold included, also nested in sharding."""
+    context = Context(codecs={"bytes": BytesCodec, "zstd": _TunedZstd})
+    tuned = _TunedZstd(level=3, threads=8)
+    built = AsyncArrayIO.build_v3(
+        MemoryStore(),
+        shape=(4,),
+        data_type="uint8",
+        chunk_grid=(4,),
+        codecs=[BytesCodec(), tuned],
+        context=context,
+    )
+    plain = AsyncArrayIO.build_v3(
+        MemoryStore(), shape=(4,), data_type="uint8", chunk_grid=(4,), codecs=[BytesCodec(), tuned]
+    )
+    legacy = plain.metadata_legacy
+    for binding in (
+        built,
+        plain.with_context(context),
+        AsyncArrayIO(legacy, plain.store_path, context=context),
+        AsyncArray(legacy, plain.store_path, context=context).io,
+    ):
+        assert binding.metadata_legacy.codecs[1] == tuned  # type: ignore[union-attr]
+        assert binding.metadata_legacy.codecs[1].threads == 8  # type: ignore[union-attr]
+    sharded = AsyncArrayIO.build_v3(
+        MemoryStore(),
+        shape=(4,),
+        data_type="uint8",
+        chunk_grid=(4,),
+        codecs=[ShardingCodec(chunk_shape=(2,), codecs=[BytesCodec(), tuned])],
+    )
+    scoped = sharded.with_context(Context(codecs={"sharding_indexed": ShardingCodec}))
+    assert scoped.metadata_legacy.codecs[0].codecs[1].threads == 8  # type: ignore[union-attr]
+
+
+@dataclass(frozen=True, kw_only=True)
+class _AliasRegistry(DataTypeRegistry):
+    """A registry that matches a name of its own."""
+
+    def match_json(self, data: Any, *, zarr_format: ZarrFormat) -> Any:
+        return super().match_json("float32" if data == "real32" else data, zarr_format=zarr_format)
+
+
+def test_a_context_keeps_the_class_of_a_registry_it_copies() -> None:
+    registry = _AliasRegistry()
+    registry.register(Float32._zarr_v3_name, Float32)
+    context = Context(data_types=registry)
+    assert type(context.data_types) is _AliasRegistry
+    assert type(parse_dtype("real32", zarr_format=3, context=context)) is Float32
+
+
+def test_a_closed_data_type_scope_rejects_an_instance_of_another_class() -> None:
+    """A data type instance is admitted only if the scope reads its JSON as its own
+    class, as a codec instance is."""
+    context = Context(data_types=_scoped_uint16_registry())
+    with pytest.raises(ValueError, match="reads its JSON as, _ScopedUInt16"):
+        parse_dtype(UInt16(), zarr_format=3, context=context)
+    assert type(parse_dtype(_ScopedUInt16(), zarr_format=3, context=context)) is _ScopedUInt16
+
+
+def test_matching_in_a_registry_does_not_copy_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    registry = _scoped_uint16_registry()
+    monkeypatch.setattr(
+        context_module,
+        "_registry_snapshot",
+        mock.Mock(side_effect=AssertionError("the registry was copied")),
+    )
+    assert type(registry.match_json("uint16", zarr_format=3)) is _ScopedUInt16
+
+
+def test_with_config_chooses_the_pipeline_anew_unless_the_context_chose_it() -> None:
+    """Under a context that sets no pipeline, `with_config` follows the global
+    configuration, as with no context; a context's own pipeline is kept."""
+    fused = "zarr.core.codec_pipeline.FusedCodecPipeline"
+    for context, expected in (
+        (Context(data_types=_scoped_uint16_registry()), FusedCodecPipeline),
+        (Context(codec_pipeline=_MarkedPipeline), _MarkedPipeline),
+    ):
+        array = AsyncArrayIO.build_v3(
+            MemoryStore(), shape=(4,), data_type="uint16", chunk_grid=(4,), context=context
+        ).to_array()
+        with zarr.config.set({"codec_pipeline.path": fused}):
+            configured = array.with_config({"order": "F"})
+        assert type(configured.codec_pipeline) is expected
+
+
+@dataclass(frozen=True)
+class _LazyEntryPoint:
+    """An entry point that loads a data type class."""
+
+    loaded: type[Any]
+
+    def load(self) -> type[Any]:
+        return self.loaded
+
+
+def test_a_context_compares_the_same_before_and_after_its_registry_loads() -> None:
+    registry = DataTypeRegistry()
+    registry._lazy_load_list.append(cast("Any", _LazyEntryPoint(_ScopedUInt16)))
+    context = Context(data_types=registry)
+    binding = AsyncArrayIO.build_v3(
+        MemoryStore(), shape=(4,), data_type="uint16", chunk_grid=(4,), context=context
+    )
+    _ = binding.metadata_legacy
+    assert context == Context(data_types=registry)
+
+
+def test_a_closed_data_type_scope_checks_struct_field_classes() -> None:
+    """A structured data type instance is admitted only if the scope reads each of
+    its fields as that field's own class."""
+    context = Context(data_types=_scoped_uint16_registry_with_struct())
+    with pytest.raises(ValueError, match="reads its JSON as"):
+        parse_dtype(Struct(fields=(("a", UInt16()),)), zarr_format=3, context=context)
+    admitted = Struct(fields=(("a", _ScopedUInt16()),))
+    assert parse_dtype(admitted, zarr_format=3, context=context) is admitted
+
+
+def _scoped_uint16_registry_with_struct() -> DataTypeRegistry:
+    registry = _scoped_uint16_registry()
+    registry.register(Struct._zarr_v3_name, Struct)
+    return registry
+
+
+def test_leaving_a_codec_scope_keeps_default_codecs_whole() -> None:
+    """Leaving a scope rebinds only codecs the scope bound to other classes: a
+    default-class codec is kept whole, with the codecs nested in it."""
+    tuned = _TunedZstd(level=3, threads=8)
+    sharded = AsyncArrayIO.build_v3(
+        MemoryStore(),
+        shape=(4,),
+        data_type="uint8",
+        chunk_grid=(4,),
+        codecs=[ShardingCodec(chunk_shape=(2,), codecs=[BytesCodec(), tuned])],
+    )
+    left = sharded.with_context(Context(codecs={"sharding_indexed": ShardingCodec})).with_context(
+        None
+    )
+    assert left.metadata_legacy.codecs[0].codecs[1].threads == 8  # type: ignore[union-attr]
+
+
+def test_rebinding_resolved_metadata_reads_other_classes_by_name() -> None:
+    """Metadata already resolved, entering a scope that maps a name to another class
+    than its codec's, is read again as the scope's class (a builder refuses such an
+    instance)."""
+    plain = AsyncArrayIO.build_v3(
+        MemoryStore(),
+        shape=(4,),
+        data_type="uint8",
+        chunk_grid=(4,),
+        codecs=[BytesCodec(), _TunedZstd(level=3, threads=8)],
+    )
+    scoped = plain.with_context(Context(codecs={"bytes": BytesCodec, "zstd": ZstdCodec}))
+    assert type(scoped.metadata_legacy.codecs[1]) is ZstdCodec  # type: ignore[union-attr]
+
+
+class _ScopedShuffle(Shuffle):
+    """A shuffle codec class of a scope's own."""
+
+
+async def test_a_scoped_numcodecs_class_survives_fitting_to_the_array() -> None:
+    """A numcodecs codec fitted to the array's data type stays the scope's class."""
+    store = MemoryStore()
+    document = {
+        "zarr_format": 3,
+        "node_type": "array",
+        "shape": [4],
+        "data_type": "int32",
+        "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [4]}},
+        "chunk_key_encoding": {"name": "default"},
+        "fill_value": 0,
+        "codecs": [
+            {"name": "bytes", "configuration": {"endian": "little"}},
+            {"name": "numcodecs.shuffle", "configuration": {}},
+        ],
+        "attributes": {},
+    }
+    await store.set(
+        "a/zarr.json", default_buffer_prototype().buffer.from_bytes(json.dumps(document).encode())
+    )
+    context = Context(codecs={"bytes": BytesCodec, "numcodecs.shuffle": _ScopedShuffle})
+    binding = await AsyncArrayIO.open(store, name="a", context=context)
+    assert type(binding.metadata_legacy.codecs[1]) is _ScopedShuffle  # type: ignore[union-attr]
+
+
+async def test_a_scoped_write_passes_a_recorded_document_its_scope_cannot_read() -> None:
+    """A document the store's cache records as needing a repair, which the writing
+    binding's scope cannot read, describes another array: the write goes ahead."""
+    store = MemoryStore()
+    document = {
+        "zarr_format": 3,
+        "node_type": "array",
+        "shape": [3],
+        "data_type": "int32",
+        "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [0]}},
+        "chunk_key_encoding": {"name": "default"},
+        "fill_value": 0,
+        "codecs": [{"name": "bytes", "configuration": {"endian": "little"}}],
+    }
+    await store.set(
+        "a/zarr.json", default_buffer_prototype().buffer.from_bytes(json.dumps(document).encode())
+    )
+    with pytest.warns(ZarrUserWarning):
+        await open_array(store=store, path="a")
+    context = Context(data_types=_scoped_uint16_registry())
+    binding = AsyncArrayIO.build_v3(
+        store, name="a", shape=(3,), data_type="uint16", chunk_grid=(3,), context=context
+    )
+    await binding.setitem(slice(None), np.array([1, 2, 3], dtype="uint16"))
+    # Another array's layout: its document is left as it was.
+    stored = await store.get("a/zarr.json", prototype=default_buffer_prototype())
+    assert stored is not None
+    assert json.loads(stored.to_bytes())["chunk_grid"]["configuration"]["chunk_shape"] == [0]
+
+
+class _ResubmittingAsyncArray(AsyncArray[Any]):
+    """A subclass whose `__init__` gives its metadata as a dict."""
+
+    def __init__(self, metadata: Any, store_path: StorePath, config: Any = None) -> None:
+        super().__init__(metadata.to_dict(), store_path, config)
+
+
+def test_with_config_resolves_substituted_metadata_under_the_context() -> None:
+    context = Context(data_types=_scoped_uint16_registry())
+    binding = AsyncArrayIO.build_v3(
+        MemoryStore(), shape=(4,), data_type="uint16", chunk_grid=(4,), context=context
+    )
+    array = _ResubmittingAsyncArray._from_io(binding)
+    configured = array.with_config({"order": "F"})
+    assert type(configured.metadata.dtype) is _ScopedUInt16
+    assert configured.io.context == context
+
+
+def test_bindings_take_context_by_keyword_only() -> None:
+    created = zarr.create_array(MemoryStore(), shape=(4,), dtype="uint8", chunks=(2,))
+    for binding_class in (AsyncArrayIO, ArrayIO):
+        with pytest.raises(TypeError, match="positional"):
+            binding_class(created.metadata, created.store_path, None, Context())  # type: ignore[call-arg]
+
+
+def test_with_config_without_a_context_runs_the_constructor() -> None:
+    """Without a context, `with_config` builds the array through its constructor, as
+    it always has."""
+    created = zarr.create_array(MemoryStore(), shape=(4,), dtype="uint8", chunks=(2,))
+    array = AsyncArray(created.metadata, created.store_path)
+    with mock.patch.object(
+        AsyncArray, "__init__", autospec=True, side_effect=AsyncArray.__init__
+    ) as init:
+        array.with_config({"order": "F"})
+    assert init.call_count == 1
+
+
+def test_the_builder_keeps_a_scoped_numcodecs_class_through_fitting() -> None:
+    """`build_array_metadata_v3` under a codec scope returns the scope's class for a
+    codec that fitting to the array rebuilt, as reading a document does."""
+    context = Context(codecs={"bytes": BytesCodec, "numcodecs.shuffle": _ScopedShuffle})
+    metadata = build_array_metadata_v3(
+        shape=(4,),
+        data_type="int32",
+        chunk_grid=(4,),
+        codecs=[BYTES_JSON, {"name": "numcodecs.shuffle", "configuration": {}}],
+        context=context,
+    )
+    assert type(metadata.codecs[1]) is _ScopedShuffle
+
+
+def test_a_name_limiting_scope_shares_metadata_it_does_not_change() -> None:
+    """Under a scope that reads every name as the metadata already holds it, an
+    `AsyncArray` binds the object it is given, as with no context."""
+    created = zarr.create_array(MemoryStore(), shape=(4,), dtype="uint8", chunks=(4,))
+    context = Context(data_types=data_type_registry)
+    array = AsyncArray(created.metadata, created.store_path, context=context)
+    assert array.metadata is created.metadata
+
+
+def test_with_config_builds_its_pipeline_over_metadata_resolved_under_the_scope() -> None:
+    """A subclass `__init__` that substitutes metadata read under the defaults: the
+    array is resolved again under its context, and its pipeline is built over that."""
+    context = Context(codecs={"bytes": _UnregisteredBytes})
+    binding = AsyncArrayIO.build_v3(
+        MemoryStore(),
+        shape=(4,),
+        data_type="uint8",
+        chunk_grid=(4,),
+        codecs=[BYTES_JSON],
+        context=context,
+    )
+    configured = _ResubmittingAsyncArray._from_io(binding).with_config({"order": "F"})
+    pipeline = cast("BatchedCodecPipeline", configured.codec_pipeline)
+    assert type(pipeline.array_bytes_codec) is _UnregisteredBytes
+
+
+class _LocalPipelineBinding(AsyncArrayIO):
+    """A binding whose `_bind` chooses its own pipeline for a local store only."""
+
+    def _bind(self, *args: Any) -> None:
+        *rest, pipeline_class = args
+        local = isinstance(rest[1].store, LocalStore)
+        bind: Any = super()._bind
+        bind(*rest, _OwnPipeline if local else pipeline_class)
+
+
+def test_a_binding_made_from_another_gets_its_contexts_pipeline(tmp_path: Path) -> None:
+    """Under a context that chose a pipeline, a binding made from one whose `_bind`
+    chose another class for its store gets the context's class again."""
+    context = Context(codec_pipeline=_MarkedPipeline)
+    local = _LocalPipelineBinding.build_v3(
+        LocalStore(tmp_path), shape=(4,), data_type="uint8", chunk_grid=(4,), context=context
+    )
+    assert local._pipeline_class is _OwnPipeline
+    assert local.with_store(MemoryStore())._pipeline_class is _MarkedPipeline
+
+
+class _ShapePipelineBinding(AsyncArrayIO):
+    """A binding whose `_bind` chooses its own pipeline for small arrays only."""
+
+    def _bind(self, *args: Any) -> None:
+        source, *rest, pipeline_class = args
+        bind: Any = super()._bind
+        bind(source, *rest, _OwnPipeline if source.shape[0] <= 4 else pipeline_class)
+
+
+async def test_a_resize_runs_the_pipeline_its_binding_records() -> None:
+    """A resize after which `_bind` chooses another pipeline class runs that class."""
+    context = Context(codec_pipeline=_MarkedPipeline)
+    array = _ShapePipelineBinding.build_v3(
+        MemoryStore(), shape=(4,), data_type="uint8", chunk_grid=(4,), context=context
+    ).to_array()
+    assert isinstance(array.codec_pipeline, _OwnPipeline)
+    await array.resize((8,))
+    assert array.io._pipeline_class is _MarkedPipeline
+    assert isinstance(array.codec_pipeline, _MarkedPipeline)
+
+
+async def test_a_scoped_write_repairs_a_matching_document_its_scope_cannot_read() -> None:
+    """A recorded document the scope cannot read is compared by its layout, read
+    under the defaults, as with no context: one laid out as the binding is gets
+    its repair stored before the write."""
+    store = MemoryStore()
+    document = {
+        "zarr_format": 3,
+        "node_type": "array",
+        "shape": [3],
+        "data_type": "int32",
+        "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [0]}},
+        "chunk_key_encoding": {"name": "default"},
+        "fill_value": 0,
+        "codecs": [{"name": "bytes", "configuration": {"endian": "little"}}],
+    }
+    await store.set(
+        "a/zarr.json", default_buffer_prototype().buffer.from_bytes(json.dumps(document).encode())
+    )
+    with pytest.warns(ZarrUserWarning):
+        await open_array(store=store, path="a")
+    context = Context(data_types=_scoped_uint16_registry())
+    binding = AsyncArrayIO.build_v3(
+        store, name="a", shape=(3,), data_type="uint16", chunk_grid=(1,), context=context
+    )
+    await binding.setitem(slice(None), np.array([1, 2, 3], dtype="uint16"))
+    stored = await store.get("a/zarr.json", prototype=default_buffer_prototype())
+    assert stored is not None
+    chunk_grid = json.loads(stored.to_bytes())["chunk_grid"]
+    assert chunk_grid["configuration"]["chunk_shape"] == [1]
+
+
+def test_arrays_expose_their_context() -> None:
+    context = Context(codec_pipeline=_MarkedPipeline)
+    binding = ArrayIO.build_v3(
+        MemoryStore(), shape=(4,), data_type="uint8", chunk_grid=(4,), context=context
+    )
+    array = binding.to_array()
+    assert array.async_array.context == array.io.context == context
+
+
+class _OrderPipelineBinding(AsyncArrayIO):
+    """A binding whose `_bind` chooses its own pipeline for C order only."""
+
+    def _bind(self, source: Any, store_path: Any, config: Any, *rest: Any) -> None:
+        *context, pipeline_class = rest
+        chosen = _OwnPipeline if config.order == "C" else pipeline_class
+        bind: Any = super()._bind
+        bind(source, store_path, config, *context, chosen)
+
+
+def test_setting_a_config_runs_the_pipeline_its_binding_records() -> None:
+    """Setting an array's config, after which `_bind` chooses another pipeline class,
+    runs that class."""
+    context = Context(codec_pipeline=_MarkedPipeline)
+    array = _OrderPipelineBinding.build_v3(
+        MemoryStore(), shape=(4,), data_type="uint8", chunk_grid=(4,), context=context
+    ).to_array()
+    assert isinstance(array.codec_pipeline, _OwnPipeline)
+    object.__setattr__(array, "config", parse_array_config({"order": "F"}))
+    assert array.io._pipeline_class is _MarkedPipeline
+    assert isinstance(array.codec_pipeline, _MarkedPipeline)
+
+
+async def test_a_scoped_write_reads_a_newer_document_its_scope_cannot_read() -> None:
+    """The document stored now is laid out under the defaults when the binding's
+    scope cannot read it, as the recorded one is: a newer valid document another
+    writer stored lets the write go ahead, as with no context."""
+    store = MemoryStore()
+    prototype = default_buffer_prototype()
+    document = {
+        "zarr_format": 3,
+        "node_type": "array",
+        "shape": [3],
+        "data_type": "uint16",
+        "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [0]}},
+        "chunk_key_encoding": {"name": "default"},
+        "fill_value": 0,
+        "codecs": [{"name": "bytes", "configuration": {"endian": "little"}}],
+    }
+    await store.set("a/zarr.json", prototype.buffer.from_bytes(json.dumps(document).encode()))
+    with pytest.warns(ZarrUserWarning):
+        await open_array(store=store, path="a")
+    newer = {
+        **document,
+        "data_type": "int32",
+        "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [1]}},
+    }
+    await store.set("a/zarr.json", prototype.buffer.from_bytes(json.dumps(newer).encode()))
+    context = Context(data_types=_scoped_uint16_registry())
+    binding = AsyncArrayIO.build_v3(
+        store, name="a", shape=(3,), data_type="uint16", chunk_grid=(1,), context=context
+    )
+    await binding.setitem(slice(None), np.array([1, 2, 3], dtype="uint16"))
+    assert {"a/c/0", "a/c/1", "a/c/2"} <= await _store_keys(store)
+    stored = await store.get("a/zarr.json", prototype=default_buffer_prototype())
+    assert stored is not None
+    assert json.loads(stored.to_bytes()) == newer
+
+
+async def test_a_scoped_write_over_a_document_no_registry_reads_raises() -> None:
+    """A recorded document that neither the writing binding's scope nor the
+    defaults can read refuses the write, storing nothing."""
+    store = MemoryStore()
+    document = {
+        "zarr_format": 3,
+        "node_type": "array",
+        "shape": [3],
+        "data_type": "uint16",
+        "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [0]}},
+        "chunk_key_encoding": {"name": "default"},
+        "fill_value": 0,
+        "codecs": [{"name": "local_bytes", "configuration": {"endian": "little"}}],
+        "attributes": {},
+    }
+    with pytest.warns(ZarrUserWarning):
+        AsyncArray(
+            cast("Any", document),
+            StorePath(store, "a"),
+            context=Context(codecs={"local_bytes": _LocalBytes}),
+        )
+    binding = AsyncArrayIO.build_v3(
+        store,
+        name="a",
+        shape=(3,),
+        data_type="uint16",
+        chunk_grid=(1,),
+        context=Context(data_types=_scoped_uint16_registry()),
+    )
+    with pytest.raises(UnknownCodecError):
+        await binding.setitem(slice(None), np.array([1, 2, 3], dtype="uint16"))
+    assert await _store_keys(store) == set()
+
+
+def test_without_a_context_a_derived_binding_runs_the_class_bind_chose(tmp_path: Path) -> None:
+    """With no context, the pipeline class a `_bind` chose is the one bindings made
+    from that binding are given."""
+    local = _LocalPipelineBinding.build_v3(
+        LocalStore(tmp_path), shape=(4,), data_type="uint8", chunk_grid=(4,)
+    )
+    assert local._pipeline_class is _OwnPipeline
+    assert local.with_store(MemoryStore())._pipeline_class is _OwnPipeline
+
+
+def test_leaving_a_scope_fails_for_a_name_the_defaults_do_not_know() -> None:
+    binding = AsyncArrayIO.build_v3(
+        MemoryStore(),
+        shape=(4,),
+        data_type="uint16",
+        chunk_grid=(4,),
+        codecs=[{"name": "local_bytes", "configuration": {"endian": "little"}}],
+        context=Context(codecs={"local_bytes": _LocalBytes}),
+    )
+    with pytest.raises(UnknownCodecError, match="local_bytes"):
+        binding.with_context(None)
+
+
+@dataclass(frozen=True)
+class _PlainZstd(ZstdCodec):
+    """A zstd class whose constructor takes no `checksum`."""
+
+    def __init__(self, *, level: int = 0) -> None:
+        super().__init__(level=level)
+
+
+async def test_a_scoped_write_reads_a_document_a_scope_class_refuses_under_the_defaults() -> None:
+    """A document a scope's class refuses to read (its constructor rejects the stored
+    configuration) is laid out under the defaults, as with no context."""
+    store = MemoryStore()
+    prototype = default_buffer_prototype()
+    document = {
+        "zarr_format": 3,
+        "node_type": "array",
+        "shape": [3],
+        "data_type": "uint16",
+        "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [0]}},
+        "chunk_key_encoding": {"name": "default"},
+        "fill_value": 0,
+        "codecs": [
+            {"name": "bytes", "configuration": {"endian": "little"}},
+            {"name": "zstd", "configuration": {"level": 0, "checksum": True}},
+        ],
+    }
+    await store.set("a/zarr.json", prototype.buffer.from_bytes(json.dumps(document).encode()))
+    with pytest.warns(ZarrUserWarning):
+        await open_array(store=store, path="a")
+    context = Context(codecs={"bytes": BytesCodec, "zstd": _PlainZstd})
+    binding = AsyncArrayIO.build_v3(
+        store,
+        name="a",
+        shape=(3,),
+        data_type="uint16",
+        chunk_grid=(1,),
+        codecs=[BYTES_JSON],
+        context=context,
+    )
+    await binding.setitem(slice(None), np.array([1, 2, 3], dtype="uint16"))
+    assert {"a/c/0", "a/c/1", "a/c/2"} <= await _store_keys(store)
+
+
+@dataclass(frozen=True)
+class _ScopedGzip(GzipCodec):
+    """A gzip class only a scope knows, under a name of its own."""
+
+    def to_dict(self) -> dict[str, JSON]:
+        return {"name": "scoped_gzip", "configuration": {"level": self.level}}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, JSON]) -> Self:
+        configuration = cast("dict[str, JSON]", data["configuration"])
+        return cls(level=cast("int", configuration["level"]))
+
+
+async def test_a_scoped_write_reads_each_document_under_its_scope_first() -> None:
+    """The current document is read under the binding's scope even when the recorded
+    one needed the defaults."""
+    store = MemoryStore()
+    prototype = default_buffer_prototype()
+    document = {
+        "zarr_format": 3,
+        "node_type": "array",
+        "shape": [3],
+        "data_type": "uint16",
+        "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [0]}},
+        "chunk_key_encoding": {"name": "default"},
+        "fill_value": 0,
+        "codecs": [
+            {"name": "bytes", "configuration": {"endian": "little"}},
+            {"name": "gzip", "configuration": {"level": 1}},
+        ],
+    }
+    await store.set("a/zarr.json", prototype.buffer.from_bytes(json.dumps(document).encode()))
+    with pytest.warns(ZarrUserWarning):
+        await open_array(store=store, path="a")
+    newer = {
+        **document,
+        "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [1]}},
+        "codecs": [
+            {"name": "bytes", "configuration": {"endian": "little"}},
+            {"name": "scoped_gzip", "configuration": {"level": 1}},
+        ],
+    }
+    await store.set("a/zarr.json", prototype.buffer.from_bytes(json.dumps(newer).encode()))
+    context = Context(codecs={"bytes": BytesCodec, "scoped_gzip": _ScopedGzip})
+    binding = AsyncArrayIO.build_v3(
+        store,
+        name="a",
+        shape=(3,),
+        data_type="uint16",
+        chunk_grid=(1,),
+        codecs=[BYTES_JSON],
+        context=context,
+    )
+    await binding.setitem(slice(None), np.array([1, 2, 3], dtype="uint16"))
+    assert {"a/c/0", "a/c/1", "a/c/2"} <= await _store_keys(store)
+
+
+def test_a_codec_scope_held_under_an_alias_admits_no_instance() -> None:
+    """A scope names codecs by the name each writes: one that holds `BytesCodec`
+    only as `endian` admits no `BytesCodec` instance (it writes `bytes`, which the
+    scope could not read back), whether built or entering the scope."""
+    context = Context(codecs={"endian": BytesCodec})
+    with pytest.raises(UnknownCodecError, match="'bytes' is not in this context"):
+        AsyncArrayIO.build_v3(
+            MemoryStore(),
+            shape=(4,),
+            data_type="uint16",
+            chunk_grid=(4,),
+            codecs=[BytesCodec()],
+            context=context,
+        )
+    with pytest.raises(UnknownCodecError, match="'bytes' is not in this context") as raised:
+        AsyncArrayIO.build_v3(
+            MemoryStore(), shape=(4,), data_type="uint16", chunk_grid=(4,), codecs=[BytesCodec()]
+        ).with_context(context)
+    assert raised.value.__notes__ == ["'bytes' is the name a BytesCodec writes."]
+
+
+async def test_a_rebind_that_switches_pipeline_builds_it_on_first_use() -> None:
+    """A resize has stored its shape before the binding rebinds, so a pipeline class
+    `_bind` switches to is built when next used, never failing the resize."""
+    context = Context(codec_pipeline=_MarkedPipeline)
+    array = _ShapePipelineBinding.build_v3(
+        MemoryStore(), shape=(4,), data_type="uint8", chunk_grid=(4,), context=context
+    ).to_array()
+    await array.resize((8,))
+    assert array.io._codec_pipeline_cache is None
+    assert isinstance(array.codec_pipeline, _MarkedPipeline)
+
+
+class _NamedBinding(AsyncArrayIO):
+    """A binding whose constructor takes a signature of its own."""
+
+    def __init__(self, name: str) -> None:
+        raise AssertionError("derivations do not run the constructor")
+
+
+def test_with_context_derives_without_the_constructor() -> None:
+    """`with_context` makes its binding as the other derivations do, so a subclass
+    whose constructor has its own signature derives, and a legacy source is
+    never shared with the original binding."""
+    built = AsyncArrayIO.build_v3(
+        MemoryStore(), shape=(4,), data_type="uint16", chunk_grid=(4,), codecs=[BytesCodec()]
+    )
+    binding = object.__new__(_NamedBinding)
+    binding._bind(
+        built._source,
+        built.store_path,
+        built.config,
+        None,
+        built._pipeline_class,
+    )
+    context = Context(codecs={"bytes": BytesCodec})
+    derived = binding.with_context(context)
+    assert type(derived) is _NamedBinding
+    assert derived.context == context
+    assert derived.metadata_legacy == binding.metadata_legacy
+    assert derived._source is not binding._source
+    assert type(derived.with_context(None)) is _NamedBinding
+
+
 class _ResolvedFirstElsewhere:
     """Stands in for `parse_array_metadata` while another thread stores its own
     resolution of `binding` first."""
@@ -1479,3 +2977,147 @@ async def test_bindings_resolving_at_once_share_the_first_resolution() -> None:
     ):
         assert binding.metadata_legacy is elsewhere
     assert binding.metadata_legacy is elsewhere
+
+
+def test_a_data_type_scope_rereads_without_unstable_specification_warnings() -> None:
+    """Reading a resolved data type again under a scope, or leaving one, writes
+    nothing, so it gives no warning of an unstable specification (warnings are
+    errors in this suite); only storing the metadata does, as with no context."""
+    registry = DataTypeRegistry()
+    registry.register(NullTerminatedBytes._zarr_v3_name, NullTerminatedBytes)
+    context = Context(data_types=registry)
+    data_type = NullTerminatedBytes(length=4)
+    scoped = AsyncArrayIO.build_v3(
+        MemoryStore(), shape=(4,), data_type=data_type, chunk_grid=(4,), context=context
+    )
+    left = scoped.with_context(None)
+    entered = AsyncArrayIO.build_v3(
+        MemoryStore(), shape=(4,), data_type=data_type, chunk_grid=(4,)
+    ).with_context(context)
+    assert scoped.metadata_legacy.dtype == left.metadata_legacy.dtype == data_type
+    assert entered.metadata_legacy.dtype == data_type
+
+
+def test_bindings_that_run_different_pipelines_are_unequal() -> None:
+    """A binding's pipeline class is part of it: bindings over one document made
+    under different global pipeline settings run different pipelines, so they are
+    unequal."""
+    store = MemoryStore()
+    default = AsyncArrayIO.build_v3(store, name="a", shape=(4,), data_type="uint8", chunk_grid=(4,))
+    with zarr.config.set({"codec_pipeline.path": "zarr.core.codec_pipeline.FusedCodecPipeline"}):
+        fused = AsyncArrayIO.build_v3(
+            store, name="a", shape=(4,), data_type="uint8", chunk_grid=(4,)
+        )
+    assert default._pipeline_class is not fused._pipeline_class
+    assert default != fused
+
+
+def test_a_data_type_scope_leaves_the_warning_filters_alone() -> None:
+    """Silencing the unstable-specification warning for a reread touches no global
+    warning state: a context-free warning shown once stays shown once around
+    scoped reads, and the filters are unchanged."""
+    registry = DataTypeRegistry()
+    registry.register(NullTerminatedBytes._zarr_v3_name, NullTerminatedBytes)
+    context = Context(data_types=registry)
+    data_type = NullTerminatedBytes(length=4)
+    with warnings.catch_warnings(record=True) as shown:
+        warnings.simplefilter("default")
+        filters = list(warnings.filters)
+        for _ in range(3):
+            data_type.to_json(zarr_format=3)
+            parse_dtype(data_type, zarr_format=3, context=context)
+        assert warnings.filters == filters
+    assert [type(w.message) for w in shown] == [UnstableSpecificationWarning]
+
+
+class _FixedSignatureBinding(AsyncArrayIO):
+    """A binding subclass whose constructor was written without a `context`."""
+
+    def __init__(
+        self, metadata: Any, store_path: StorePath, config: ArrayConfigLike | None = None
+    ) -> None:
+        super().__init__(metadata, store_path, config)
+
+
+async def test_builders_and_open_need_no_context_keyword_without_a_context() -> None:
+    store = MemoryStore()
+    built = _FixedSignatureBinding.build_v3(
+        store, name="a", shape=(4,), data_type="uint8", chunk_grid=(4,)
+    )
+    await built.store_metadata()
+    v2 = _FixedSignatureBinding.build_v2(MemoryStore(), shape=(4,), dtype="uint8", chunks=(4,))
+    opened = await _FixedSignatureBinding.open(store, name="a")
+    assert type(built) is type(v2) is type(opened) is _FixedSignatureBinding
+    assert opened.metadata_legacy == built.metadata_legacy
+
+
+async def test_an_opened_binding_entering_a_codec_scope_resolves_its_classes() -> None:
+    """A binding over a model (one `open` made) entering a codec scope resolves its
+    stored names through the scope when its legacy metadata is first built."""
+    store = MemoryStore()
+    await AsyncArrayIO.build_v3(
+        store, name="a", shape=(4,), data_type="uint8", chunk_grid=(4,), codecs=[BytesCodec()]
+    ).store_metadata()
+    opened = await AsyncArrayIO.open(store, name="a")
+    scoped = opened.with_context(Context(codecs={"bytes": _UnregisteredBytes}))
+    assert [type(codec) for codec in scoped.metadata_legacy.codecs] == [_UnregisteredBytes]  # type: ignore[union-attr]
+
+
+async def test_an_opened_binding_entering_a_scope_without_its_codec_fails_on_use() -> None:
+    store = MemoryStore()
+    await AsyncArrayIO.build_v3(
+        store, name="a", shape=(4,), data_type="uint8", chunk_grid=(4,)
+    ).store_metadata()
+    opened = await AsyncArrayIO.open(store, name="a")
+    scoped = opened.with_context(Context(codecs={"zstd": ZstdCodec}))
+    with pytest.raises(UnknownCodecError, match="'bytes' is not in this context"):
+        await scoped.getitem(slice(None))
+
+
+def test_a_scope_class_refusing_a_codec_configuration_names_it() -> None:
+    built = AsyncArrayIO.build_v3(
+        MemoryStore(),
+        shape=(4,),
+        data_type="uint8",
+        chunk_grid=(4,),
+        codecs=[BytesCodec(), ZstdCodec(level=0, checksum=True)],
+    )
+    context = Context(codecs={"bytes": BytesCodec, "zstd": _PlainZstd})
+    with pytest.raises(ZarrMetadataValidationError, match="'zstd'.*_PlainZstd, which refuses"):
+        built.with_context(context)
+    # The same refusal read from JSON reports alike.
+    with pytest.raises(ZarrMetadataValidationError, match="'zstd'.*_PlainZstd, which refuses"):
+        AsyncArrayIO.build_v3(
+            MemoryStore(),
+            shape=(4,),
+            data_type="uint8",
+            chunk_grid=(4,),
+            codecs=[
+                {"name": "bytes"},
+                {"name": "zstd", "configuration": {"level": 0, "checksum": True}},
+            ],
+            context=context,
+        )
+
+
+class _RenamingZstd(ZstdCodec):
+    """A zstd class that writes a name of its own."""
+
+    def to_dict(self) -> dict[str, JSON]:
+        return {**super().to_dict(), "name": "my.zstd"}
+
+
+def test_a_scope_class_rebuilding_a_codec_must_read_back_in_the_scope() -> None:
+    built = AsyncArrayIO.build_v3(
+        MemoryStore(),
+        shape=(4,),
+        data_type="uint8",
+        chunk_grid=(4,),
+        codecs=[BytesCodec(), ZstdCodec()],
+    )
+    context = Context(codecs={"bytes": BytesCodec, "zstd": _RenamingZstd})
+    with pytest.raises(UnknownCodecError, match="'my.zstd' is not in this context") as raised:
+        built.with_context(context)
+    assert raised.value.__notes__ == [
+        "'my.zstd' is the name a _RenamingZstd writes, read from 'zstd'."
+    ]

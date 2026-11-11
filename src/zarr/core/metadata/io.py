@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
     from zarr.core.buffer import Buffer
     from zarr.core.common import JSON, ZarrFormat
+    from zarr.core.context import Context
     from zarr.core.group import GroupMetadata
     from zarr.core.metadata import ArrayMetadata
     from zarr.core.metadata.repair import ArrayDocument
@@ -151,10 +152,13 @@ def reads_as(document: ArrayDocument, metadata: ArrayMetadata) -> bool:
     return read_repaired(document, metadata.zarr_format).to_dict() == metadata.to_dict()
 
 
-def read_repaired(document: ArrayDocument, zarr_format: ZarrFormat) -> ArrayMetadata:
-    """The metadata the stored array document `document` reads as, without warnings."""
+def read_repaired(
+    document: ArrayDocument, zarr_format: ZarrFormat, context: Context | None = None
+) -> ArrayMetadata:
+    """The metadata the stored array document `document` reads as, without warnings,
+    resolving its names in `context`."""
     reader = ArrayV2Metadata if zarr_format == 2 else ArrayV3Metadata
-    metadata, _ = reader._read_stored(dict(document))
+    metadata, _ = reader._read_stored(dict(document), context=context)
     return metadata
 
 
@@ -219,7 +223,11 @@ ARRAY_DOCUMENTS: Final[Mapping[ZarrFormat, tuple[str, ...]]] = {
 
 
 def parse_stored_array(
-    documents: Mapping[str, Buffer], zarr_format: ZarrFormat, path: str | None = None
+    documents: Mapping[str, Buffer],
+    zarr_format: ZarrFormat,
+    path: str | None = None,
+    *,
+    context: Context | None = None,
 ) -> ArrayMetadata:
     """The metadata of an array from its documents (by store key, see `ARRAY_DOCUMENTS`),
     read with the repairs but without their warnings (whoever asks has warned, or reads
@@ -242,7 +250,7 @@ def parse_stored_array(
     else:
         raise ArrayNotFoundError(f"No Zarr format {zarr_format} array metadata document.")
     repaired, _ = repair_array_document(stored, zarr_format)
-    return parse_array_metadata(dict(repaired), path)
+    return parse_array_metadata(dict(repaired), path, context=context)
 
 
 def _build_parents(store_path: StorePath, zarr_format: ZarrFormat) -> dict[str, GroupMetadata]:

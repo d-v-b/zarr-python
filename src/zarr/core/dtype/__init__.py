@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Final
+from dataclasses import replace
+from typing import TYPE_CHECKING, Any, Final, cast
 
+from zarr.core.dtype.common import _UNSTABLE_WARNING_SILENCED, HasEndianness
 from zarr.core.dtype.npy.bool import Bool
 from zarr.core.dtype.npy.bytes import (
     NullTerminatedBytes,
@@ -35,6 +37,7 @@ from zarr.core.dtype.npy.time import (
 
 if TYPE_CHECKING:
     from zarr.core.common import ZarrFormat
+    from zarr.core.context import Context
     from zarr.core.dtype.common import DTypeJSON
 
 from collections.abc import Mapping
@@ -161,9 +164,14 @@ for dtype in ANY_DTYPE:
 
 
 # TODO: find a better name for this function
-def get_data_type_from_native_dtype(dtype: npt.DTypeLike) -> ZDType[TBaseDType, TBaseScalar]:
+def get_data_type_from_native_dtype(
+    dtype: npt.DTypeLike, *, context: Context | None = None
+) -> ZDType[TBaseDType, TBaseScalar]:
     """
     Get a data type wrapper (an instance of ``ZDType``) from a native data type, e.g. a numpy dtype.
+
+    With a `context`, the match is made against the data types it holds instead of the
+    default data type registry.
     """
     if not isinstance(dtype, np.dtype):
         na_dtype: np.dtype[np.generic]
@@ -174,17 +182,24 @@ def get_data_type_from_native_dtype(dtype: npt.DTypeLike) -> ZDType[TBaseDType, 
             na_dtype = np.dtype(dtype)
     else:
         na_dtype = dtype
-    return data_type_registry.match_dtype(dtype=na_dtype)
+    # A context's own data types, if it sets them; otherwise the default registry.
+    registry = data_type_registry if context is None else context.data_type_registry()
+    return registry.match_dtype(dtype=na_dtype)
 
 
 def get_data_type_from_json(
-    dtype_spec: DTypeJSON, *, zarr_format: ZarrFormat
+    dtype_spec: DTypeJSON, *, zarr_format: ZarrFormat, context: Context | None = None
 ) -> ZDType[TBaseDType, TBaseScalar]:
     """
     Given a JSON representation of a data type and a Zarr format version,
     attempt to create a ZDType instance from the registered ZDType classes.
+
+    With a `context`, the match is made against the data types it holds instead of the
+    default data type registry.
     """
-    return data_type_registry.match_json(dtype_spec, zarr_format=zarr_format)
+    # A context's own data types, if it sets them; otherwise the default registry.
+    registry = data_type_registry if context is None else context.data_type_registry()
+    return registry.match_json(dtype_spec, zarr_format=zarr_format)
 
 
 def parse_data_type(
@@ -234,6 +249,7 @@ def parse_dtype(
     dtype_spec: ZDTypeLike,
     *,
     zarr_format: ZarrFormat,
+    context: Context | None = None,
 ) -> ZDType[TBaseDType, TBaseScalar]:
     """
     Convert the input as a ZDType.
@@ -268,21 +284,45 @@ def parse_dtype(
     ```
     """
     if isinstance(dtype_spec, ZDType):
+        # Without a data type scope, an instance stands as given, as it always has.
+        if context is None or context.data_types is None:
+            return dtype_spec
+        # A closed world checks instances too: the scope must read the instance's
+        # JSON as the instance's own class, as a closed codec scope requires.
+        matched = _matched_in_scope(dtype_spec, context, zarr_format)
+        if not _same_classes(matched, dtype_spec):
+            raise ValueError(
+                f"Data type {dtype_spec!r} is not of the classes this context's scope "
+                f"reads its JSON as, {matched!r}. Give an instance of those classes, or "
+                "the data type's name."
+            )
         return dtype_spec
     # First attempt to interpret the input as JSON
     if isinstance(dtype_spec, Mapping | str | Sequence):
         try:
-            return get_data_type_from_json(dtype_spec, zarr_format=zarr_format)
+            return get_data_type_from_json(dtype_spec, zarr_format=zarr_format, context=context)
         except ValueError:
             # no data type matched this JSON-like input
             pass
     if dtype_spec in VLEN_UTF8_ALIAS:
         # If the dtype request is one of the aliases for variable-length UTF-8 strings,
         # return that dtype.
-        return VariableLengthUTF8()  # type: ignore[return-value]
+        utf8 = VariableLengthUTF8()
+        if context is not None and context.data_types is not None:
+            # The shortcut must not widen a closed world, and the context may
+            # map this JSON to its own class: return the registry's match.
+            return _matched_in_scope(
+                cast("ZDType[TBaseDType, TBaseScalar]", utf8), context, zarr_format
+            )
+        return utf8  # type: ignore[return-value]
     # otherwise, we have either a numpy dtype string, or a zarr v3 dtype string, and in either case
     # we can create a native dtype from it, and do the dtype inference from that
-    return get_data_type_from_native_dtype(dtype_spec)  # type: ignore[arg-type]
+    zdtype = get_data_type_from_native_dtype(dtype_spec, context=context)  # type: ignore[arg-type]
+    if context is not None and context.data_types is not None:
+        # A native data type can hold others (a structured dtype's fields), which
+        # resolve from the defaults: check the whole through the closed world.
+        return _matched_in_scope(zdtype, context, zarr_format)
+    return zdtype
 
 
 def __getattr__(name: str) -> object:
@@ -299,3 +339,66 @@ def __getattr__(name: str) -> object:
         )
         return DataTypeValidationError
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def _json_to_reread(zdtype: ZDType[TBaseDType, TBaseScalar], zarr_format: ZarrFormat) -> DTypeJSON:
+    """`zdtype`'s JSON, for reading it again: without the warning a data type with
+    no stable specification gives when it is written (nothing is written). Only the
+    warning given through `v3_unstable_dtype_warning` is silenced; a data type that
+    calls `warnings.warn` itself warns here as well."""
+    token = _UNSTABLE_WARNING_SILENCED.set(True)
+    try:
+        return zdtype.to_json(zarr_format=zarr_format)
+    finally:
+        _UNSTABLE_WARNING_SILENCED.reset(token)
+
+
+def _matched_in_scope(
+    zdtype: ZDType[TBaseDType, TBaseScalar], context: Context, zarr_format: ZarrFormat
+) -> ZDType[TBaseDType, TBaseScalar]:
+    """The data type a closed data type scope matches `zdtype`'s JSON to, in the byte
+    order of `zdtype` (see `_with_byte_order_of`): how a resolved data type is read
+    again under a scope, which rebinds the scope's class for its name."""
+    matched = context.data_type_registry().match_json(
+        _json_to_reread(zdtype, zarr_format), zarr_format=zarr_format
+    )
+    return _with_byte_order_of(matched, zdtype)
+
+
+def _same_classes(
+    zdtype: ZDType[TBaseDType, TBaseScalar], other: ZDType[TBaseDType, TBaseScalar]
+) -> bool:
+    """Whether `zdtype` and `other` are of the same class, and so are their fields, for
+    a structured data type."""
+    if type(zdtype) is not type(other):
+        return False
+    if isinstance(zdtype, Structured) and isinstance(other, Structured):
+        return len(zdtype.fields) == len(other.fields) and all(
+            _same_classes(field, other_field)
+            for (_, field), (_, other_field) in zip(zdtype.fields, other.fields, strict=True)
+        )
+    return True
+
+
+def _with_byte_order_of(
+    zdtype: ZDType[TBaseDType, TBaseScalar], source: ZDType[TBaseDType, TBaseScalar]
+) -> ZDType[TBaseDType, TBaseScalar]:
+    """`zdtype`, read again from `source`'s JSON, in `source`'s byte order (its fields',
+    for a structured data type): Zarr format 3 data type JSON carries none, so reading
+    it alone gives the host's byte order."""
+    if (
+        isinstance(source, Structured)
+        and isinstance(zdtype, Structured)
+        and len(source.fields) == len(zdtype.fields)
+    ):
+        fields = tuple(
+            (name, _with_byte_order_of(field, source_field))
+            for (name, field), (_, source_field) in zip(zdtype.fields, source.fields, strict=True)
+        )
+        return cast("ZDType[TBaseDType, TBaseScalar]", replace(cast("Any", zdtype), fields=fields))
+    if isinstance(source, HasEndianness) and isinstance(zdtype, HasEndianness):
+        return cast(
+            "ZDType[TBaseDType, TBaseScalar]",
+            replace(cast("Any", zdtype), endianness=source.endianness),
+        )
+    return zdtype
