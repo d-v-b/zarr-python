@@ -183,6 +183,7 @@ if TYPE_CHECKING:
 
     import numpy.typing as npt
     from zarr_metadata import (
+        JSONValue,
         ValidationProblem,
         ZarrV2ArrayMetadata,
         ZarrV2ArrayMetadataJSON,
@@ -6790,7 +6791,7 @@ def _v2_chunk_problems(chunks: Sequence[object]) -> list[ValidationProblem]:
             ("chunks", index),
             f"expected an integer >= 1, got {size!r}",
             "invalid_value",
-            input=cast("JSON", size),
+            input=cast("JSONValue", size),
         )
         for index, size in enumerate(chunks)
         if not (type(size) is int and size >= 1)
