@@ -182,6 +182,7 @@ def get_data_type_from_native_dtype(
             na_dtype = np.dtype(dtype)
     else:
         na_dtype = dtype
+    # A context's own data types, if it sets them; otherwise the default registry.
     registry = data_type_registry if context is None else context.data_type_registry()
     return registry.match_dtype(dtype=na_dtype)
 
@@ -196,6 +197,7 @@ def get_data_type_from_json(
     With a `context`, the match is made against the data types it holds instead of the
     default data type registry.
     """
+    # A context's own data types, if it sets them; otherwise the default registry.
     registry = data_type_registry if context is None else context.data_type_registry()
     return registry.match_json(dtype_spec, zarr_format=zarr_format)
 
@@ -282,6 +284,7 @@ def parse_dtype(
     ```
     """
     if isinstance(dtype_spec, ZDType):
+        # Without a data type scope, an instance stands as given, as it always has.
         if context is None or context.data_types is None:
             return dtype_spec
         # A closed world checks instances too: the scope must read the instance's
