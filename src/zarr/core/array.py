@@ -5211,6 +5211,8 @@ def build_array_metadata_v3(
         dimension_names=tuple(dimension_names) if dimension_names is not None else None,
         attributes=attributes if attributes is not None else {},
     )
+    # Codecs that fitting to the array rebuilt outside a closed codec scope's
+    # classes are read again as the scope's own.
     return _rescoped(metadata, context)
 
 
@@ -5514,6 +5516,8 @@ async def _store_repaired_document(
         stored = cache.copy_needing_repair(path, zarr_format)
     if stored is None:
         return
+    # Both reads resolve under the binding's context, or the defaults where its scope
+    # cannot read the document: only the chunk layout is compared.
     recorded = _read_in_scope_or_defaults(
         functools.partial(read_repaired, stored, zarr_format), context
     )
@@ -7217,6 +7221,7 @@ class AsyncArrayIO:
             build_array_metadata_v2(context=context, **kwargs),
             _bound_store_path(store, name),
             config,
+            # Passed only when given, so a subclass constructor without one still builds.
             **_context_kwargs(context),
         )
 
@@ -7240,6 +7245,7 @@ class AsyncArrayIO:
             build_array_metadata_v3(context=context, **kwargs),
             _bound_store_path(store, name),
             config,
+            # Passed only when given, so a subclass constructor without one still builds.
             **_context_kwargs(context),
         )
 
@@ -7264,6 +7270,8 @@ class AsyncArrayIO:
         mode: AccessModeLiteral | None = "r+" if isinstance(store, str | os.PathLike) else None
         store_path = await make_store_path(store, path=name, mode=mode)
         data = await get_array_metadata(store_path, zarr_format=zarr_format)
+        # The context is passed only when given, so a subclass constructor without one
+        # still opens.
         binding = cls(_array_metadata_model(data), store_path, config, **_context_kwargs(context))
         observe_read(store_path, data)
         return binding
@@ -7342,6 +7350,7 @@ class AsyncArrayIO:
             # Resolved under this binding's context, as a constructor given it
             # under that context resolves it.
             metadata = _legacy_resolved_in_context(metadata, str(built._store_path), context)
+        # The pipeline class is chosen anew, as `built` chose it, unless the context chose it.
         chosen_anew = context is None or context.codec_pipeline is None
         pipeline_class = built._pipeline_class if chosen_anew else self._given_pipeline_class()
         rebound._bind(
@@ -7417,6 +7426,7 @@ class AsyncArrayIO:
         pipeline, pipeline_class = self._codec_pipeline_cache, self._pipeline_class
         self._bind(self._source, store_path, config, self._context, self._given_pipeline_class())
         self._resolved_cache, self._chunk_grid_cache, self._chunk_key_encoding_cache = caches
+        # The built pipeline is kept only while `_bind` kept its class.
         if self._pipeline_class is pipeline_class:
             self._codec_pipeline_cache = pipeline
 
@@ -7432,6 +7442,7 @@ class AsyncArrayIO:
         self._bind(
             resolved, self._store_path, self._config, self._context, self._given_pipeline_class()
         )
+        # The built pipeline is kept only while `_bind` kept its class.
         if self._pipeline_class is pipeline_class:
             self._codec_pipeline_cache = pipeline
         self._chunk_grid_cache = chunk_grid

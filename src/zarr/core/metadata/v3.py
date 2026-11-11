@@ -106,6 +106,7 @@ def parse_codecs(data: object, *, context: Context | None = None) -> tuple[Codec
         else:
             name_parsed, _ = parse_named_configuration(c, require_configuration=False)
 
+            # A context resolves the name in its own scope (or the default registry).
             codec_cls = (
                 get_codec_class(name_parsed)
                 if context is None
@@ -778,6 +779,8 @@ class ArrayV3Metadata(Metadata):
             extra_fields=allowed_extra_fields,
             storage_transformers=_data_typed.get("storage_transformers", ()),  # type: ignore[arg-type]
         )
+        # Codecs that fitting to the array rebuilt outside a closed codec scope's
+        # classes are read again as the scope's own.
         return cast("Self", _rescoped(metadata, context)), readings
 
     def to_dict(self) -> dict[str, JSON]:

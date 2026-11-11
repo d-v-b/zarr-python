@@ -259,6 +259,7 @@ def v3_unstable_dtype_warning(dtype: object) -> None:
     """
     Emit this warning when a data type does not have a stable zarr v3 spec
     """
+    # Silent while zarr reads a data type's JSON back without writing it.
     if _UNSTABLE_WARNING_SILENCED.get():
         return
     msg = (
