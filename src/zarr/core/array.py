@@ -2003,9 +2003,11 @@ class _BindingField:
 
     def __init__(
         self,
+        name: str,
         get: Callable[[AsyncArray[Any]], Any],
         set_: Callable[[AsyncArray[Any], Any], None],
     ) -> None:
+        self._name = name
         self._get = get
         self._set = set_
         self.__doc__ = get.__doc__
@@ -2016,7 +2018,34 @@ class _BindingField:
         return self._get(instance)
 
     def __set__(self, instance: AsyncArray[Any], value: object) -> None:
-        self._set(instance, value)
+        if "_io" in vars(instance):
+            self._set(instance, value)
+        else:
+            _assign_unbound(instance, self._name, value)
+
+
+_UNBOUND_FIELDS: Final = "_zarr_unbound_fields"
+"""The key an array without a binding yet keeps the fields assigned to it under."""
+
+_BINDING_ARGUMENTS: Final = ("metadata", "store_path", "config")
+
+
+def _assign_unbound(array: AsyncArray[Any], name: str, value: object) -> None:
+    """Keep a field assigned to an array that has no binding yet, and bind the array once
+    its metadata, store path and configuration are all assigned, as `AsyncArray.__init__`
+    binds them; any other field assigned before then is set on the binding after.
+
+    The `__init__` a `@dataclass` subclass generates assigns each field in turn,
+    without calling `AsyncArray.__init__`.
+    """
+    assigned: dict[str, Any] = vars(array).setdefault(_UNBOUND_FIELDS, {})
+    assigned[name] = value
+    if assigned.keys() >= set(_BINDING_ARGUMENTS):
+        del vars(array)[_UNBOUND_FIELDS]
+        metadata, store_path, config = (assigned.pop(key) for key in _BINDING_ARGUMENTS)
+        AsyncArray.__init__(array, metadata, store_path, config)
+        for key, rest in assigned.items():
+            object.__setattr__(array, key, rest)
 
 
 def _get_metadata(self: AsyncArray[Any]) -> ArrayMetadata:
@@ -2121,13 +2150,15 @@ def _set_chunk_grid(self: AsyncArray[Any], value: ChunkGrid) -> None:
 # The dataclass fields of `AsyncArray` read the wrapped binding. They are
 # attached once the dataclass is made, so `@dataclass` sees fields, not
 # defaults; the setters keep `object.__setattr__(array, name, value)` working.
-setattr(AsyncArray, "metadata", _BindingField(_get_metadata, _set_metadata))  # noqa: B010
-setattr(AsyncArray, "store_path", _BindingField(_get_store_path, _set_store_path))  # noqa: B010
-setattr(AsyncArray, "config", _BindingField(_get_config, _set_config))  # noqa: B010
-setattr(  # noqa: B010
-    AsyncArray, "codec_pipeline", _BindingField(_get_codec_pipeline, _set_codec_pipeline)
-)
-setattr(AsyncArray, "_chunk_grid", _BindingField(_get_chunk_grid, _set_chunk_grid))  # noqa: B010
+for _name, _get, _set in (
+    ("metadata", _get_metadata, _set_metadata),
+    ("store_path", _get_store_path, _set_store_path),
+    ("config", _get_config, _set_config),
+    ("codec_pipeline", _get_codec_pipeline, _set_codec_pipeline),
+    ("_chunk_grid", _get_chunk_grid, _set_chunk_grid),
+):
+    setattr(AsyncArray, _name, _BindingField(_name, _get, _set))
+del _name, _get, _set
 
 
 # TODO: Array can be a frozen data class again once property setters (e.g. shape) are removed

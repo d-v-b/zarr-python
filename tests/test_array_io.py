@@ -1011,6 +1011,28 @@ def test_a_dataclass_subclass_may_annotate_fields_again() -> None:
     assert dataclasses.replace(typed, label="y").label == "y"
 
 
+@dataclass(frozen=True)
+class _Tagged(AsyncArray[Any]):
+    """A `@dataclass` subclass with a field of its own and the `__init__` it generates."""
+
+    tag: str = "untagged"
+
+
+def test_a_dataclass_subclass_binds_through_its_generated_init() -> None:
+    """The `__init__` a `@dataclass` subclass generates assigns each field in turn,
+    without calling `AsyncArray.__init__`; the array binds once its metadata, store path
+    and configuration are assigned, and reads, writes, copies and pickles."""
+    created = zarr.create_array(MemoryStore(), shape=(4,), dtype="uint8", chunks=(2,))
+    tagged = _Tagged(created.metadata, created.store_path, created.config, tag="t")
+
+    zarr.Array(tagged)[...] = np.arange(4)
+
+    for kept in (tagged, copy.copy(tagged), pickle.loads(pickle.dumps(tagged))):
+        assert kept.tag == "t"
+        np.testing.assert_array_equal(zarr.Array(kept)[...], np.arange(4))
+    assert dataclasses.replace(tagged, tag="u").tag == "u"
+
+
 class _NativeBinding(AsyncArrayIO):
     """A binding that derives state of its own (a native handle's shape) in `_bind`."""
 
