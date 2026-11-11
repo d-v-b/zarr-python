@@ -3,7 +3,6 @@ from __future__ import annotations
 import contextlib
 import copy
 import copyreg
-import functools
 import json
 import math
 import operator
@@ -30,7 +29,9 @@ from typing import (
 from warnings import warn
 
 import numpy as np
+import zarr_metadata
 from typing_extensions import Sentinel, deprecated
+from zarr_metadata import ValidationProblem, ZarrV2ArrayMetadata, ZarrV3ArrayMetadata
 
 import zarr
 from zarr.abc.codec import ArrayArrayCodec, ArrayBytesCodec, BytesBytesCodec, Codec
@@ -182,14 +183,7 @@ if TYPE_CHECKING:
     from typing import Self
 
     import numpy.typing as npt
-    from zarr_metadata import (
-        JSONValue,
-        ValidationProblem,
-        ZarrV2ArrayMetadata,
-        ZarrV2ArrayMetadataJSON,
-        ZarrV3ArrayMetadata,
-        ZarrV3ArrayMetadataJSON,
-    )
+    from zarr_metadata import JSONValue, ZarrV2ArrayMetadataJSON, ZarrV3ArrayMetadataJSON
 
     from zarr.abc.codec import CodecPipeline
     from zarr.abc.store import Store
@@ -2070,8 +2064,7 @@ def _model_from_documents(
     documents: Mapping[str, bytes], metadata: ArrayMetadata
 ) -> ArrayMetadataModel:
     """The model a pickled `AsyncArray` carried as its documents' bytes."""
-    model_v2, model_v3 = _model_classes()
-    model_class = model_v2 if metadata.zarr_format == 2 else model_v3
+    model_class = ZarrV2ArrayMetadata if metadata.zarr_format == 2 else ZarrV3ArrayMetadata
     return model_class.from_key_value(cast("Any", documents))
 
 
@@ -6455,7 +6448,6 @@ async def _resize(
                 min(limit, n_delete),
             )
 
-    # Write new metadata
     await store_documents(array.store_path, documents, written=new_metadata)
 
     # Update the wrapped binding in place; the codec pipeline is kept, as before.
@@ -6608,8 +6600,6 @@ def _bound_metadata_dict(
     otherwise (metadata built in code, or an invalid document zarr reads as
     repaired) read into the legacy classes now, warning as `AsyncArray` always
     has."""
-    from zarr_metadata import MetadataValidationError
-
     path = str(store_path)
     # Metadata written in Python may hold tuples where its JSON holds lists; the
     # repairs read JSON.
@@ -6623,7 +6613,7 @@ def _bound_metadata_dict(
         # model, also where the model accepts it.
         try:
             return _array_metadata_model(data)
-        except MetadataValidationError:
+        except zarr_metadata.MetadataValidationError:
             pass
     legacy = parse_array_metadata(data, path)
     # An invalid document given as a dict stands for what the store holds, as
@@ -6661,8 +6651,6 @@ def _differing_fields(
     them: a field whose JSON differs (so `-0.0` from `0.0`) counts unless putting
     the bound value in `stored` leaves it equal (an absent field against its
     default)."""
-    from zarr_metadata import MetadataValidationError
-
     differing = []
     for key in sorted(stored_json.keys() | bound_json.keys()):
         stored_value, bound_value = stored_json.get(key), bound_json.get(key)
@@ -6675,7 +6663,7 @@ def _differing_fields(
             patched.pop(key)
         try:
             unchanged = type(stored)(patched) == stored
-        except MetadataValidationError:
+        except zarr_metadata.MetadataValidationError:
             unchanged = False
         if not unchanged:
             differing.append(key)
@@ -6751,8 +6739,9 @@ def _model_of_legacy(metadata: ArrayMetadata) -> ArrayMetadataModel:
     """The document `metadata` encodes, as a model."""
     buffers = metadata.to_buffer_dict(default_buffer_prototype())
     key_value = {key: buffer.to_bytes() for key, buffer in buffers.items()}
-    model_v2, model_v3 = _model_classes()
-    model_class = model_v2 if isinstance(metadata, ArrayV2Metadata) else model_v3
+    model_class = (
+        ZarrV2ArrayMetadata if isinstance(metadata, ArrayV2Metadata) else ZarrV3ArrayMetadata
+    )
     return model_class.from_key_value(key_value)
 
 
@@ -6777,16 +6766,13 @@ def _array_metadata_model(data: dict[str, JSON]) -> ArrayMetadataModel:
     `zarr_metadata.MetadataValidationError`. Unknown extension names read as
     unclaimed fields, not errors.
     """
-    from zarr_metadata import MetadataValidationError
-
-    model_v2, model_v3 = _model_classes()
     if data.get("zarr_format") != 2:
-        return model_v3(data)
+        return ZarrV3ArrayMetadata(data)
     chunks = data.get("chunks")
     chunk_problems = _v2_chunk_problems(chunks) if isinstance(chunks, list | tuple) else []
     try:
-        model = model_v2(data)
-    except MetadataValidationError as error:
+        model = ZarrV2ArrayMetadata(data)
+    except zarr_metadata.MetadataValidationError as error:
         # The model rejects other chunk sizes itself: add those it accepts, a 0.
         unreported = [
             problem
@@ -6795,28 +6781,24 @@ def _array_metadata_model(data: dict[str, JSON]) -> ArrayMetadataModel:
         ]
         if not unreported:
             raise
-        raise MetadataValidationError([*error.problems, *unreported]) from None
+        raise zarr_metadata.MetadataValidationError([*error.problems, *unreported]) from None
     if chunk_problems:
-        raise MetadataValidationError(chunk_problems)
+        raise zarr_metadata.MetadataValidationError(chunk_problems)
     return model
 
 
 def _checked_model(model: ArrayMetadataModel) -> ArrayMetadataModel:
     """`model`, once checked as zarr checks a model it binds: it declares no storage
     transformers, and a Zarr format 2 model no chunk size zarr reads as repaired."""
-    from zarr_metadata import MetadataValidationError
-
     _reject_storage_transformers(model)
-    if isinstance(model, _model_classes()[0]) and (problems := _v2_chunk_problems(model.chunks)):
-        raise MetadataValidationError(problems)
+    if isinstance(model, ZarrV2ArrayMetadata) and (problems := _v2_chunk_problems(model.chunks)):
+        raise zarr_metadata.MetadataValidationError(problems)
     return model
 
 
 def _v2_chunk_problems(chunks: Sequence[object]) -> list[ValidationProblem]:
     """A problem for each Zarr format 2 chunk size that is not an integer >= 1: the v2
     model accepts a 0, which zarr reads as repaired."""
-    from zarr_metadata import ValidationProblem
-
     return [
         ValidationProblem(
             ("chunks", index),
@@ -6827,15 +6809,6 @@ def _v2_chunk_problems(chunks: Sequence[object]) -> list[ValidationProblem]:
         for index, size in enumerate(chunks)
         if not (type(size) is int and size >= 1)
     ]
-
-
-@functools.cache
-def _model_classes() -> tuple[type[ZarrV2ArrayMetadata], type[ZarrV3ArrayMetadata]]:
-    """The `zarr_metadata` model classes, imported on first use: the import is
-    slow, and only bindings that hold a model need it."""
-    from zarr_metadata import ZarrV2ArrayMetadata, ZarrV3ArrayMetadata
-
-    return ZarrV2ArrayMetadata, ZarrV3ArrayMetadata
 
 
 class ArrayV2DeclarationKwargs(TypedDict, total=False):
@@ -6928,7 +6901,7 @@ class AsyncArrayIO:
             source = parse_array_metadata(metadata, str(store_path))
             if source is metadata:
                 source = _copied_legacy(source)
-        elif isinstance(metadata, _model_classes()):
+        elif isinstance(metadata, ZarrV2ArrayMetadata | ZarrV3ArrayMetadata):
             source = _checked_model(metadata)
         elif isinstance(metadata, Mapping):
             source = _bound_metadata_dict(cast("dict[str, Any]", metadata), store_path)
@@ -7065,7 +7038,7 @@ class AsyncArrayIO:
             return source
         if self._resolved_cache is None:
             data = _metadata_model_json(source)
-            if isinstance(source, _model_classes()[0]):
+            if isinstance(source, ZarrV2ArrayMetadata):
                 data.setdefault("attributes", {})
             resolved = parse_array_metadata(data, str(self._store_path))
             # Threads resolving at once all keep the first object stored: an
@@ -7135,7 +7108,7 @@ class AsyncArrayIO:
             return 2
         if isinstance(source, ArrayV3Metadata):
             return 3
-        return 2 if isinstance(source, _model_classes()[0]) else 3
+        return 2 if isinstance(source, ZarrV2ArrayMetadata) else 3
 
     @property
     def _resolved_if_any(self) -> ArrayMetadata | None:
@@ -7183,7 +7156,7 @@ class AsyncArrayIO:
                 return self._chunk_grid_cache
             document = self.metadata
             doc = _metadata_model_json(document)
-            if isinstance(document, _model_classes()[0]):
+            if isinstance(document, ZarrV2ArrayMetadata):
                 self._chunk_grid_cache = ChunkGrid.from_sizes(document.shape, tuple(doc["chunks"]))
             else:
                 grid = doc["chunk_grid"]
@@ -7224,7 +7197,7 @@ class AsyncArrayIO:
         if self._chunk_key_encoding_cache is None:
             document = self.metadata
             doc = _metadata_model_json(document)
-            if isinstance(document, _model_classes()[0]):
+            if isinstance(document, ZarrV2ArrayMetadata):
                 self._chunk_key_encoding_cache = V2ChunkKeyEncoding(
                     separator=doc.get("dimension_separator", ".")
                 )
@@ -7328,7 +7301,7 @@ class AsyncArrayIO:
         source: ArrayMetadataModel | ArrayMetadata
         if isinstance(metadata, ArrayV2Metadata | ArrayV3Metadata):
             source = _copied_legacy(parse_array_metadata(metadata, str(self._store_path)))
-        elif isinstance(metadata, _model_classes()):
+        elif isinstance(metadata, ZarrV2ArrayMetadata | ZarrV3ArrayMetadata):
             source = _checked_model(metadata)
         elif isinstance(metadata, Mapping):
             source = _bound_metadata_dict(dict(metadata), self._store_path)
@@ -7403,14 +7376,14 @@ class AsyncArrayIO:
         if stored == bound:
             return
         if type(stored) is not type(bound):
-            stored_format = 2 if isinstance(stored, _model_classes()[0]) else 3
+            stored_format = 2 if isinstance(stored, ZarrV2ArrayMetadata) else 3
             raise ValueError(
                 f"Array {str(self.store_path)!r}: the stored array is Zarr format "
                 f"{stored_format}; the bound metadata is Zarr format {self._zarr_format}."
             )
         stored_json = _metadata_model_json(stored)
         bound_json = _metadata_model_json(bound)
-        if isinstance(stored, _model_classes()[0]) and isinstance(bound, _model_classes()[0]):
+        if isinstance(stored, ZarrV2ArrayMetadata) and isinstance(bound, ZarrV2ArrayMetadata):
             stored_json["attributes"] = _plain_json(stored.attributes)
             bound_json["attributes"] = _plain_json(bound.attributes)
         differing = _differing_fields(stored, stored_json, bound_json)

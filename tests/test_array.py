@@ -1,3 +1,4 @@
+import copy
 import dataclasses
 import inspect
 import json
@@ -56,7 +57,7 @@ from zarr.core.chunk_grids import (
     resolve_outer_and_inner_chunks,
 )
 from zarr.core.chunk_key_encodings import ChunkKeyEncodingParams
-from zarr.core.codec_pipeline import BatchedCodecPipeline
+from zarr.core.codec_pipeline import BatchedCodecPipeline, FusedCodecPipeline
 from zarr.core.common import JSON, ChunksLike, ZarrFormat, ceildiv
 from zarr.core.dtype import (
     DateTime64,
@@ -2646,11 +2647,6 @@ def test_async_array_keeps_its_dataclass_surface() -> None:
     state, swapping a field with `object.__setattr__`, and copies whose binding
     (shape, pipeline) is their own; like before, a copy shares the metadata
     object, so attribute updates made in place are seen through both."""
-    import copy
-    import pickle
-
-    from zarr.core.codec_pipeline import BatchedCodecPipeline, FusedCodecPipeline
-
     arr = zarr.create_array(MemoryStore(), shape=(4,), dtype="uint8", chunks=(2,))
     aa = arr.async_array
 
@@ -2744,19 +2740,6 @@ def test_pickled_array_keeps_the_pipeline_class_it_chose() -> None:
     # A binding derived from the revived one builds its pipeline from the class.
     derived = revived.io.with_store(MemoryStore())
     assert type(derived.to_array().codec_pipeline) is _ChosenPipeline
-
-
-def test_import_zarr_leaves_zarr_metadata_unimported() -> None:
-    """`zarr_metadata` is imported when a binding first holds a model, not by
-    `import zarr`, whose cost stays what it was."""
-    import subprocess
-
-    code = "import sys, zarr; print('zarr_metadata' in sys.modules)"
-    result = subprocess.run(
-        [sys.executable, "-c", code], capture_output=True, text=True, check=False
-    )
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "False"
 
 
 def test_async_array_rejects_metadata_that_is_not_a_mapping() -> None:

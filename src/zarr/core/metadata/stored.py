@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Final, Literal, cast
 from zarr.core._json import buffer_to_json_object
 from zarr.core.common import ZARR_JSON, ZARRAY_JSON, ZATTRS_JSON
 from zarr.core.metadata.repair import may_move_chunks, repair_array_document
+from zarr.core.metadata.v3 import ArrayV3Metadata
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -177,8 +178,6 @@ class StoredDocuments:
 
 def _may_move(written: WrittenArrayMetadata) -> bool:
     """`may_move_chunks` for the document `written` encodes, read from its chunk sizes."""
-    from zarr.core.metadata import ArrayV3Metadata
-
     if written.zarr_format == 2:
         return may_move_chunks({"chunks": list(written.chunks)}, 2)
     grid: object = (

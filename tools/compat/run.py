@@ -1,12 +1,12 @@
 """
 Run the compatibility scenarios under one zarr source tree.
 
-    python run.py SRC OUT.json --tmp DIR [--seeds N] [--dump-pickles DIR --stores DIR]
-    python run.py SRC OUT.json --tmp DIR --load-pickles DIR
+    PYTHONPATH=SRC python run.py SRC OUT.json --tmp DIR [--seeds N] [--dump-pickles DIR --stores DIR]
+    PYTHONPATH=SRC python run.py SRC OUT.json --tmp DIR --load-pickles DIR
 
-`SRC` is the directory that holds the `zarr` package; it is put first on `sys.path`, so
-it wins over an installed zarr. `--tmp` is wiped first; give both runs the same path, so
-the paths they record agree.
+`SRC` is the directory that holds the `zarr` package. Put it on `PYTHONPATH`, which
+comes before an installed zarr; the run stops unless zarr was imported from `SRC`.
+`--tmp` is wiped first; give both runs the same path, so the paths they record agree.
 """
 
 from __future__ import annotations
@@ -14,10 +14,11 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
-import sys
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
+import compat_scenarios as scenarios
+
+import zarr
 
 
 def main() -> None:
@@ -31,13 +32,8 @@ def main() -> None:
     parser.add_argument("--load-pickles", type=Path)
     args = parser.parse_args()
 
-    sys.path[:0] = [str(args.src.resolve()), str(HERE)]
-    import zarr
-
     if not Path(zarr.__file__).resolve().is_relative_to(args.src.resolve()):
         raise SystemExit(f"imported {zarr.__file__}, not zarr from {args.src}")
-
-    import compat_scenarios as scenarios
 
     shutil.rmtree(args.tmp, ignore_errors=True)
     args.tmp.mkdir(parents=True)

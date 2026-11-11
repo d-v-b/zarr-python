@@ -9,6 +9,7 @@ import math
 import pickle
 import threading
 from dataclasses import MISSING, dataclass
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, SupportsIndex, cast
 from unittest import mock
 
@@ -18,6 +19,7 @@ from zarr_metadata import UNSET, MetadataValidationError, ZarrV3ArrayMetadata
 from zarr_metadata import ZarrV2ArrayMetadata as ModelV2
 
 import zarr
+import zarr.core.metadata.stored as stored_module
 from zarr import ArrayIO, AsyncArray, AsyncArrayIO
 from zarr.api.asynchronous import open_array
 from zarr.core.array import create_codec_pipeline, parse_array_metadata
@@ -749,8 +751,6 @@ async def test_erase_metadata_removes_array_documents_however_written(
 
 
 async def test_with_metadata_takes_any_mapping() -> None:
-    from types import MappingProxyType
-
     aio = AsyncArrayIO.build_v3(
         MemoryStore(), name="foo", shape=(4,), data_type="uint8", chunk_grid=(4,)
     )
@@ -810,8 +810,6 @@ async def test_copying_an_array_shares_its_metadata() -> None:
 async def test_writing_valid_metadata_parses_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     """Storing metadata that cannot move chunks, at a path the store's cache knows
     nothing about, records nothing and parses no document."""
-    import zarr.core.metadata.stored as stored_module
-
     monkeypatch.setattr(
         stored_module,
         "buffer_to_json_object",

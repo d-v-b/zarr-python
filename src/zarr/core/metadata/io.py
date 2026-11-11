@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from enum import Enum
 from itertools import zip_longest
-from typing import TYPE_CHECKING, Final, NamedTuple, cast
+from typing import TYPE_CHECKING, Final, NamedTuple
 
 from zarr.abc.store import set_or_delete
 from zarr.core._json import buffer_to_json_object, json_equal
@@ -12,8 +12,11 @@ from zarr.core.buffer.cpu import buffer_prototype as cpu_buffer_prototype
 from zarr.core.common import ZARR_JSON, ZARRAY_JSON, ZATTRS_JSON
 from zarr.core.metadata.repair import repair_array_document
 from zarr.core.metadata.stored import stored_documents
+from zarr.core.metadata.v2 import ArrayV2Metadata
+from zarr.core.metadata.v3 import ArrayV3Metadata
 from zarr.errors import ArrayNotFoundError, ContainsArrayError
 from zarr.storage._common import StorePath, ensure_no_existing_node
+from zarr.storage._utils import _join_paths
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator, Mapping
@@ -121,16 +124,13 @@ def members_as_stored(store_path: StorePath, metadata: GroupMetadata) -> dict[st
     member does. A group write then leaves those copies as they were stored, so every
     reader of the consolidated metadata reads them as repaired again. An array whose
     own document zarr knows needs no such repair is stored as it reads."""
-    from zarr.core.group import GroupMetadata
-    from zarr.storage._utils import _join_paths
-
     consolidated = metadata.consolidated_metadata
     if consolidated is None:
         return {}
     cache = stored_documents(store_path.store)
     as_stored: dict[str, ArrayDocument] = {}
     for key, member in consolidated.flattened_metadata.items():
-        if isinstance(member, GroupMetadata):
+        if not isinstance(member, ArrayV2Metadata | ArrayV3Metadata):
             continue
         path = _join_paths([store_path.path, key])
         zarr_format = member.zarr_format
@@ -151,8 +151,6 @@ def reads_as(document: ArrayDocument, metadata: ArrayMetadata) -> bool:
 
 def read_repaired(document: ArrayDocument, zarr_format: ZarrFormat) -> ArrayMetadata:
     """The metadata the stored array document `document` reads as, without warnings."""
-    from zarr.core.metadata import ArrayV2Metadata, ArrayV3Metadata
-
     reader = ArrayV2Metadata if zarr_format == 2 else ArrayV3Metadata
     metadata, _ = reader._read_stored(dict(document))
     return metadata
@@ -332,13 +330,7 @@ async def save_new_metadata(
 
 def _written_array(metadata: ArrayMetadata | GroupMetadata) -> ArrayMetadata | None:
     """`metadata` as the array metadata a write records, or `None` for a group."""
-    return None if _is_group(metadata) else cast("ArrayMetadata", metadata)
-
-
-def _is_group(metadata: ArrayMetadata | GroupMetadata) -> bool:
-    from zarr.core.group import GroupMetadata
-
-    return isinstance(metadata, GroupMetadata)
+    return metadata if isinstance(metadata, ArrayV2Metadata | ArrayV3Metadata) else None
 
 
 async def _write_metadata(

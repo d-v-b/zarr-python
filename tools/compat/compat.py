@@ -13,6 +13,7 @@ environment's.
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -50,6 +51,8 @@ def export(ref: str, into: Path) -> Path:
 
 
 def run(src: Path, out: Path, work: Path, *args: str) -> None:
+    # `src` goes on PYTHONPATH, ahead of any installed zarr, so `run.py` imports it.
+    pythonpath = os.pathsep.join([str(src), os.environ.get("PYTHONPATH", "")]).rstrip(os.pathsep)
     subprocess.run(
         [
             sys.executable,
@@ -61,6 +64,7 @@ def run(src: Path, out: Path, work: Path, *args: str) -> None:
             *args,
         ],
         check=True,
+        env={**os.environ, "PYTHONPATH": pythonpath},
     )
 
 

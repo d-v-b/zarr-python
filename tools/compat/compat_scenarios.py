@@ -32,6 +32,7 @@ import zarr
 import zarr.core.sync
 import zarr.storage
 from zarr.core.array import AsyncArray
+from zarr.core.buffer import default_buffer_prototype
 
 _ADDRESS = re.compile(r"0x[0-9a-fA-F]+")
 _MEMORY_STORE = re.compile(r"memory://\d+")
@@ -149,8 +150,6 @@ def put_document(store: Any, key: str, document: dict[str, Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(text)
     else:
-        from zarr.core.buffer import default_buffer_prototype
-
         store._store_dict[key] = default_buffer_prototype().buffer.from_bytes(text)
 
 
