@@ -20,6 +20,7 @@ from zarr_metadata import UNSET, MetadataValidationError, ZarrV3ArrayMetadata
 from zarr_metadata import ZarrV2ArrayMetadata as ModelV2
 
 import zarr
+import zarr.core.context as context_module
 import zarr.core.metadata.stored as stored_module
 from zarr import ArrayIO, AsyncArray, AsyncArrayIO
 from zarr.api.asynchronous import open_array
@@ -2357,8 +2358,6 @@ def test_a_closed_data_type_scope_rejects_an_instance_of_another_class() -> None
 
 
 def test_matching_in_a_registry_does_not_copy_it(monkeypatch: pytest.MonkeyPatch) -> None:
-    import zarr.core.context as context_module
-
     registry = _scoped_uint16_registry()
     monkeypatch.setattr(
         context_module,

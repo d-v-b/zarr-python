@@ -33,11 +33,18 @@ if TYPE_CHECKING:
 _DEFAULT_DATA_TYPES = "zarr.dtype.data_type_registry"
 
 
-def _registry_snapshot(registry: DataTypeRegistry) -> DataTypeRegistry:
-    """A copy of `registry` as it is now, or the default registry itself."""
+def _default_data_types() -> DataTypeRegistry:
+    """The default data type registry, `zarr.dtype.data_type_registry`."""
+    # Imported on use: `zarr.core.dtype` imports this module (its registry and
+    # structured data type read with a `Resolver`), so this module cannot import it.
     from zarr.core.dtype import data_type_registry
 
-    if registry is data_type_registry:
+    return data_type_registry
+
+
+def _registry_snapshot(registry: DataTypeRegistry) -> DataTypeRegistry:
+    """A copy of `registry` as it is now, or the default registry itself."""
+    if registry is _default_data_types():
         return registry
     # A copy of the registry's own class (a subclass may match names its own way),
     # with its own contents.
@@ -124,12 +131,10 @@ class Context:
         # default data type registry is carried by reference, so it unpickles
         # as the receiving process's registry rather than a snapshot of ours;
         # any other registry unpickles as a copy.
-        from zarr.core.dtype import data_type_registry
-
         state = dict(self.__dict__)
         if self.codecs is not None:
             state["codecs"] = dict(self.codecs)
-        if self.data_types is data_type_registry:
+        if self.data_types is _default_data_types():
             state["data_types"] = _DEFAULT_DATA_TYPES
         return state
 
@@ -139,9 +144,7 @@ class Context:
         if codecs is not None:
             object.__setattr__(self, "codecs", MappingProxyType(dict(codecs)))  # type: ignore[call-overload]
         if state.get("data_types") == _DEFAULT_DATA_TYPES:
-            from zarr.core.dtype import data_type_registry
-
-            object.__setattr__(self, "data_types", data_type_registry)
+            object.__setattr__(self, "data_types", _default_data_types())
 
     @classmethod
     def _over(cls, data_types: DataTypeRegistry) -> Context:
@@ -173,9 +176,7 @@ class Context:
     def data_type_registry(self) -> DataTypeRegistry:
         """The data types this context resolves: its own, or the default registry."""
         if self.data_types is None:
-            from zarr.core.dtype import data_type_registry
-
-            return data_type_registry
+            return _default_data_types()
         return self.data_types
 
     def codec_class(self, name: str) -> type[Codec]:
@@ -185,6 +186,8 @@ class Context:
         when `name` is not among them.
         """
         if self.codecs is None:
+            # Imported on use: `zarr.registry` imports `zarr.core.dtype`, which
+            # imports this module (see `_default_data_types`).
             from zarr.registry import get_codec_class
 
             return get_codec_class(name)
@@ -198,6 +201,7 @@ class Context:
     def pipeline_class(self) -> type[CodecPipeline]:
         """The codec pipeline class this context resolves to."""
         if self.codec_pipeline is None:
+            # Imported on use, as in `codec_class`.
             from zarr.registry import get_pipeline_class
 
             return get_pipeline_class()
