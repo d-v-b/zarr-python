@@ -153,6 +153,8 @@ class ArrayV2Metadata(Metadata):
         """Read a stored `.zarray` document (with its attributes). An invalid document
         that `zarr.core.metadata.repair` can read is read as repaired; a reading the user
         must act on warns, naming the array at `path`."""
+        # Read apart from warning, so a re-read of a stored document
+        # (`zarr.core.metadata.io.read_repaired`) is silent.
         metadata, readings = cls._read_stored(data)
         warn_repairs(readings, path)
         return metadata

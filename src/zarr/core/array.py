@@ -253,6 +253,7 @@ def parse_array_metadata(data: Any, path: str | None = None) -> ArrayMetadata:
         zarr_format = data.get("zarr_format")
         if zarr_format == 3:
             meta_out = ArrayV3Metadata.from_dict(data, path=path)
+            # The same check every binding makes, on a model or legacy metadata.
             _reject_storage_transformers(meta_out)
             return meta_out
         elif zarr_format == 2:
@@ -271,6 +272,7 @@ def create_codec_pipeline(
     store: Store | None = None,
     pipeline_class: type[CodecPipeline] | None = None,
 ) -> CodecPipeline:
+    # A binding passes the pipeline class it was built with; otherwise the configured one.
     if pipeline_class is None:
         pipeline_class = get_pipeline_class()
     if store is not None:
@@ -961,6 +963,8 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         # TODO: remove this cast when we have better type hints
         _metadata_dict = cast("ArrayMetadataJSON_V3", metadata_dict)
         array = cls(store_path=store_path, metadata=_metadata_dict, config=config)
+        # Record the document read in the store's cache, so a chunk write through this
+        # array stores a repair that moves chunks first.
         observe_read(store_path, metadata_dict)
         return array
 
@@ -1623,6 +1627,7 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         out: NDBuffer | None = None,
         fields: Fields | None = None,
     ) -> NDArrayLikeOrScalar:
+        # The wrapped binding reads; this array holds no IO state of its own.
         return await self._io._get_selection(indexer, prototype=prototype, out=out, fields=fields)
 
     async def getitem(
@@ -1667,6 +1672,7 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         np.int32(0)
         """
 
+        # The wrapped binding reads; this array holds no IO state of its own.
         return await self._io.getitem(selection, prototype=prototype)
 
     async def get_orthogonal_selection(
@@ -1746,8 +1752,11 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         """Store `metadata` as this array's own documents: through the wrapped
         `AsyncArrayIO` when it is this array's metadata."""
         if metadata is self.metadata:
+            # The binding stores the document it holds: a model's as it was stored,
+            # which the legacy metadata cannot always reproduce.
             await self._io.store_metadata(ensure_parents=ensure_parents)
         else:
+            # Other metadata (a caller's, not yet bound) is encoded as it always was.
             await save_metadata(self.store_path, metadata, ensure_parents=ensure_parents)
 
     async def _set_selection(
@@ -1758,6 +1767,7 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         prototype: BufferPrototype,
         fields: Fields | None = None,
     ) -> None:
+        # The wrapped binding writes, storing a repair that moves chunks first.
         return await self._io._set_selection(indexer, value, prototype=prototype, fields=fields)
 
     async def setitem(
@@ -1799,6 +1809,7 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         - This method is asynchronous and should be awaited.
         - Supports basic indexing, where the selection is contiguous and does not involve advanced indexing.
         """
+        # The wrapped binding writes, storing a repair that moves chunks first.
         return await self._io.setitem(selection, value, prototype=prototype)
 
     @property
@@ -4900,6 +4911,7 @@ async def init_array(
             order_parsed = order
         chunk_key_encoding_parsed = cast("V2ChunkKeyEncoding", chunk_key_encoding_parsed)
 
+        # Without the object codec check: `_parse_chunk_encoding_v2` made it above.
         meta = _array_metadata_v2(
             shape=shape_parsed,
             dtype=zdtype,
@@ -4950,6 +4962,7 @@ async def init_array(
 
         if order is not None:
             _warn_order_kwarg()
+        # The builder `AsyncArrayIO.build_v3` uses, which `_create_metadata_v3` now wraps.
         meta = build_array_metadata_v3(
             shape=shape_parsed,
             data_type=zdtype,
@@ -5662,6 +5675,7 @@ def _parse_chunk_encoding_v2(
                     )
                     raise TypeError(msg)
         _filters = parse_filters(filters)
+    # Split out so `build_array_metadata_v2` makes the same check.
     _check_object_codec_v2(dtype, _filters, _compressor)
     return _filters, _compressor
 
@@ -6448,6 +6462,7 @@ async def _resize(
                 min(limit, n_delete),
             )
 
+    # Write new metadata, recording it in the store's cache
     await store_documents(array.store_path, documents, written=new_metadata)
 
     # Update the wrapped binding in place; the codec pipeline is kept, as before.

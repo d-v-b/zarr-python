@@ -89,6 +89,7 @@ def encode_documents(
     from zarr.core.group import GroupMetadata
 
     try:
+        # A group keeps consolidated members that need a repair as they are stored.
         if isinstance(metadata, GroupMetadata):
             return metadata.to_buffer_dict(
                 default_buffer_prototype(),
@@ -113,6 +114,7 @@ async def store_documents(
     await asyncio.gather(
         *(set_or_delete(store_path / key, value) for key, value in documents.items())
     )
+    # Record what an array write stored in the store's cache.
     if written is not None:
         stored_documents(store_path.store).observe_written(store_path.path, documents, written)
 
@@ -203,6 +205,7 @@ async def upsert_metadata(
     await store_documents(
         store_path,
         {k: v for k, v in documents.items() if k in changed},
+        # The store's cache records an array's documents, not a group's.
         written=_written_array(metadata),
     )
     return changes
@@ -285,6 +288,7 @@ async def save_metadata(
         to_save,
         metadata.zarr_format,
         ensure_parents=ensure_parents,
+        # The store's cache records an array's documents, not a group's.
         written=_written_array(metadata),
     )
 
@@ -324,6 +328,7 @@ async def save_new_metadata(
         to_save,
         metadata.zarr_format,
         ensure_parents=ensure_parents,
+        # The store's cache records an array's documents, not a group's.
         written=_written_array(metadata),
     )
 
@@ -379,5 +384,6 @@ async def _write_metadata(
             ) from e
 
     await asyncio.gather(*set_awaitables)
+    # Record what an array write stored in the store's cache.
     if written is not None:
         stored_documents(store_path.store).observe_written(store_path.path, to_save, written)

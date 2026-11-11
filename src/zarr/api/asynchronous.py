@@ -429,6 +429,8 @@ async def open(
                     array = AsyncArray(
                         store_path=store_path, metadata=_metadata_dict, config=config
                     )
+                    # Record the document read in the store's cache, so a chunk write
+                    # through this array stores a repair that moves chunks first.
                     observe_read(store_path, metadata_dict)
                     return array
             except (FileNotFoundError, NodeTypeValidationError):

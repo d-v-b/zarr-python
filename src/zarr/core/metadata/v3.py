@@ -676,6 +676,8 @@ class ArrayV3Metadata(Metadata):
                 if path is not None:
                     e.add_note(f"Array {path!r}: nothing was read.")
                 raise
+        # Read apart from warning, so a re-read of a stored document
+        # (`zarr.core.metadata.io.read_repaired`) is silent.
         metadata, readings = cls._read_stored(data)
         warn_repairs(readings, path)
         return metadata

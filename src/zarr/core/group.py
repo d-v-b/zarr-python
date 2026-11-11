@@ -193,6 +193,7 @@ class ConsolidatedMetadata:
             "kind": self.kind,
             "must_understand": self.must_understand,
             "metadata": {
+                # A member kept as stored is written as the document the store holds.
                 k: dict(as_stored[k]) if k in as_stored else v.to_dict()
                 for k, v in sorted(
                     self.flattened_metadata.items(),
@@ -426,6 +427,8 @@ class GroupMetadata(Metadata):
         as_stored = {} if members_as_stored is None else members_as_stored
         if self.consolidated_metadata is not None:
             for path, member in self.consolidated_metadata.flattened_metadata.items():
+                # A member kept as stored is not encoded from its metadata, so it
+                # needs no check (see `ConsolidatedMetadata.to_dict`).
                 if isinstance(member, ArrayV3Metadata) and path not in as_stored:
                     try:
                         check_storable(member)
@@ -453,6 +456,7 @@ class GroupMetadata(Metadata):
                     ZGROUP_JSON: {"zarr_format": self.zarr_format},
                     ZATTRS_JSON: self.attributes,
                 }
+                # `.zmetadata` keeps members as stored, as `zarr.json` does above.
                 consolidated_metadata = self.consolidated_metadata.to_dict(
                     members_as_stored=as_stored
                 )["metadata"]
@@ -860,6 +864,8 @@ class AsyncGroup:
             metadata=GroupMetadata.from_dict(data, path=str(store_path)),
             store_path=store_path,
         )
+        # Record the consolidated copies of array documents as stored, so a group write
+        # can keep a member that needs a repair as it was stored.
         consolidated = group.metadata.consolidated_metadata
         raw_consolidated = data.get("consolidated_metadata")
         if consolidated is not None and isinstance(raw_consolidated, dict):
@@ -2371,7 +2377,8 @@ class Group(SyncMixin):
         """
         new_metadata = replace(self.metadata, attributes=new_attributes)
 
-        # Write new metadata
+        # Write new metadata; `encode_documents` keeps consolidated members that need a
+        # repair as they are stored.
         await store_documents(self.store_path, encode_documents(self.store_path, new_metadata))
 
         async_group = replace(self._async_group, metadata=new_metadata)
@@ -3541,6 +3548,7 @@ async def _store_nodes(
     ]
 
     created_object_keys = []
+    # The documents written for each node, for the store's cache to record an array's.
     node_documents: defaultdict[str, dict[str, Buffer]] = defaultdict(dict)
     for key, value in documents.items():
         node, _, name = key.rpartition("/")
@@ -3563,6 +3571,7 @@ async def _store_nodes(
             node_name = created_key[: created_key.rfind("/")]
             meta_out = nodes[node_name]
         if meta_out.zarr_format == 3:
+            # Record an array's documents in the store's cache once they are written.
             if not isinstance(meta_out, GroupMetadata):
                 cache.observe_written(node_name, node_documents[node_name], meta_out)
             yield node_name, built[node_name]
@@ -3580,6 +3589,7 @@ async def _store_nodes(
                 meta_done = _join_paths([node_name, ZARRAY_JSON]) in created_object_keys
 
             if meta_done and attrs_done:
+                # As above: record an array once both of its documents are written.
                 if not isinstance(meta_out, GroupMetadata):
                     cache.observe_written(node_name, node_documents[node_name], meta_out)
                 yield node_name, built[node_name]
@@ -3839,6 +3849,8 @@ async def _read_metadata_v3(store: Store, path: str) -> ArrayV3Metadata | GroupM
         raise FileNotFoundError(path)
     document = buffer_to_json_object(zarr_json_bytes)
     metadata = _build_metadata_v3(document, path=str(StorePath(store, path)))
+    # Record an array's document in the store's cache, so a chunk write through it
+    # stores a repair that moves chunks first.
     if isinstance(metadata, ArrayV3Metadata):
         stored_documents(store).observe(path, document, 3)
     return metadata
@@ -3877,6 +3889,7 @@ async def _read_metadata_v2(store: Store, path: str) -> ArrayV2Metadata | GroupM
             zmeta = buffer_to_json_object(zgroup_bytes)
 
     metadata = _build_metadata_v2(zmeta, zattrs, path=str(StorePath(store, path)))
+    # As for v3: record an array's documents in the store's cache.
     if isinstance(metadata, ArrayV2Metadata):
         stored_documents(store).observe(path, {**zmeta, "attributes": zattrs}, 2)
     return metadata
