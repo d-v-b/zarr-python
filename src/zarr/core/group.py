@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import unicodedata
 import warnings
@@ -13,7 +14,9 @@ import numpy as np
 
 import zarr.api.asynchronous as async_api
 from zarr.abc.metadata import Metadata
-from zarr.abc.store import Store, set_or_delete
+
+# Importable from here, as they have been, though this module no longer uses them.
+from zarr.abc.store import Store, set_or_delete  # noqa: F401, TC001
 from zarr.core._info import GroupInfo
 from zarr.core._json import buffer_to_json_object, json_to_buffer
 from zarr.core.array import (
@@ -55,6 +58,7 @@ from zarr.core.metadata.io import (
     save_new_metadata,
     store_documents,
 )
+from zarr.core.metadata.stored import stored_documents
 from zarr.core.metadata.v3 import AllowedExtraField, check_storable, parse_extra_fields
 from zarr.core.sync import SyncMixin, sync
 from zarr.errors import (
@@ -87,6 +91,8 @@ if TYPE_CHECKING:
     from zarr.core.chunk_key_encodings import ChunkKeyEncodingLike
     from zarr.core.common import MemoryOrder
     from zarr.core.dtype import ZDTypeLike
+    from zarr.core.metadata.repair import ArrayDocument
+    from zarr.core.metadata.stored import CarriedEntry
     from zarr.types import AnyArray, AnyAsyncArray, ArrayV2, ArrayV3, AsyncArrayV2, AsyncArrayV3
 
 logger = logging.getLogger("zarr.group")
@@ -140,6 +146,28 @@ def _parse_async_node(
         raise TypeError(f"Unknown node type, got {type(node)}")
 
 
+def _with_member_marks(
+    consolidated: ConsolidatedMetadata, prefix: str, marks: Mapping[str, ArrayDocument]
+) -> ConsolidatedMetadata:
+    """A copy of `consolidated` whose array members at the paths in `marks` (relative
+    to the group, below `prefix`) are copies carrying their mark as the
+    `_stored_document` attribute zarr 3.4.1 and 3.4.2 read."""
+    members: dict[str, ArrayV2Metadata | ArrayV3Metadata | GroupMetadata] = {}
+    for name, member in consolidated.metadata.items():
+        key = f"{prefix}{name}"
+        if isinstance(member, GroupMetadata):
+            nested = member.consolidated_metadata
+            if nested is not None:
+                member = replace(
+                    member, consolidated_metadata=_with_member_marks(nested, f"{key}/", marks)
+                )
+        elif key in marks:
+            member = copy.copy(member)
+            object.__setattr__(member, "_stored_document", copy.deepcopy(marks[key]))
+        members[name] = member
+    return replace(consolidated, metadata=members)
+
+
 @dataclass(frozen=True)
 class ConsolidatedMetadata:
     """
@@ -153,17 +181,20 @@ class ConsolidatedMetadata:
     kind: Literal["inline"] = "inline"
     must_understand: Literal[False] = False
 
-    def to_dict(self) -> dict[str, JSON]:
-        """The consolidated metadata document. An array read from a stored document that
-        had to be repaired is written as that document was stored, so every reader of
-        the consolidated metadata reads it as repaired again (see `mark_repaired`)."""
+    def to_dict(
+        self, *, members_as_stored: Mapping[str, ArrayDocument] | None = None
+    ) -> dict[str, JSON]:
+        """The consolidated metadata document. A member in `members_as_stored` (by its
+        path here) is written as that stored document, so every reader of the
+        consolidated metadata reads it as repaired again (see
+        `zarr.core.metadata.io.members_as_stored`)."""
+        as_stored = {} if members_as_stored is None else members_as_stored
         return {
             "kind": self.kind,
             "must_understand": self.must_understand,
             "metadata": {
-                k: v.to_dict()
-                if isinstance(v, GroupMetadata) or v._stored_document is None
-                else dict(v._stored_document)
+                # A member kept as stored is written as the document the store holds.
+                k: dict(as_stored[k]) if k in as_stored else v.to_dict()
                 for k, v in sorted(
                     self.flattened_metadata.items(),
                     key=lambda item: (
@@ -384,12 +415,21 @@ class GroupMetadata(Metadata):
     node_type: Literal["group"] = field(default="group", init=False)
     extra_fields: dict[str, AllowedExtraField] = field(default_factory=dict)
 
-    def to_buffer_dict(self, prototype: BufferPrototype) -> dict[str, Buffer]:
+    def to_buffer_dict(
+        self,
+        prototype: BufferPrototype,
+        *,
+        members_as_stored: Mapping[str, ArrayDocument] | None = None,
+    ) -> dict[str, Buffer]:
+        """The group's metadata documents, by key. A consolidated member in
+        `members_as_stored` is written as that stored document (see
+        `ConsolidatedMetadata.to_dict`)."""
+        as_stored = {} if members_as_stored is None else members_as_stored
         if self.consolidated_metadata is not None:
             for path, member in self.consolidated_metadata.flattened_metadata.items():
-                # A member read from a document that had to be repaired is stored as it
-                # was stored (see `ConsolidatedMetadata.to_dict`).
-                if isinstance(member, ArrayV3Metadata) and member._stored_document is None:
+                # A member kept as stored is not encoded from its metadata, so it
+                # needs no check (see `ConsolidatedMetadata.to_dict`).
+                if isinstance(member, ArrayV3Metadata) and path not in as_stored:
                     try:
                         check_storable(member)
                     except ValueError as e:
@@ -397,7 +437,13 @@ class GroupMetadata(Metadata):
                         raise
         indent = config.get("json_indent")
         if self.zarr_format == 3:
-            return {ZARR_JSON: json_to_buffer(self.to_dict(), prototype=prototype, indent=indent)}
+            document = self.to_dict()
+            if self.consolidated_metadata is not None and as_stored:
+                # Encoded again only where a member is kept as stored.
+                document["consolidated_metadata"] = self.consolidated_metadata.to_dict(
+                    members_as_stored=as_stored
+                )
+            return {ZARR_JSON: json_to_buffer(document, prototype=prototype, indent=indent)}
         else:
             items = {
                 ZGROUP_JSON: json_to_buffer(
@@ -410,7 +456,10 @@ class GroupMetadata(Metadata):
                     ZGROUP_JSON: {"zarr_format": self.zarr_format},
                     ZATTRS_JSON: self.attributes,
                 }
-                consolidated_metadata = self.consolidated_metadata.to_dict()["metadata"]
+                # `.zmetadata` keeps members as stored, as `zarr.json` does above.
+                consolidated_metadata = self.consolidated_metadata.to_dict(
+                    members_as_stored=as_stored
+                )["metadata"]
                 if not isinstance(consolidated_metadata, dict):
                     raise TypeError(
                         "Expected consolidated metadata to serialize to a dict, "
@@ -672,6 +721,71 @@ class AsyncGroup:
                 use_consolidated=use_consolidated,
             )
 
+    def __getstate__(self) -> dict[str, object]:
+        # A store's cache does not pickle with the store: carry what it knows of the
+        # consolidated members, so a write through the unpickled group keeps the
+        # members it would have kept as stored.
+        state = dict(self.__dict__)
+        consolidated = self.metadata.consolidated_metadata
+        if consolidated is not None:
+            paths = [
+                _join_paths([self.store_path.path, key]) for key in consolidated.flattened_metadata
+            ]
+            entries = stored_documents(self.store_path.store).entries(
+                paths, self.metadata.zarr_format
+            )
+            if entries:
+                state["_stored_members"] = entries
+                # zarr 3.4.1 and 3.4.2 read a member's repair from a mark on the
+                # member itself: pickle marked copies for them to read.
+                prefix = f"{self.store_path.path}/" if self.store_path.path else ""
+                marks = {
+                    path.removeprefix(prefix): entry[1]
+                    for path, entry in entries.items()
+                    if entry[1] is not None
+                }
+                if marks:
+                    state["metadata"] = replace(
+                        self.metadata,
+                        consolidated_metadata=_with_member_marks(consolidated, "", marks),
+                    )
+        return state
+
+    def __setstate__(self, state: dict[str, object]) -> None:
+        state = dict(state)
+        entries = cast("dict[str, CarriedEntry] | None", state.pop("_stored_members", None))
+        self.__dict__.update(state)
+        if entries is None:
+            entries = self._legacy_member_marks()
+        self._clear_member_marks()
+        if entries:
+            stored_documents(self.store_path.store).restore_entries(
+                entries, self.metadata.zarr_format
+            )
+
+    def _legacy_member_marks(self) -> dict[str, CarriedEntry]:
+        """The consolidated members a pickle from zarr 3.4.1 or 3.4.2 marks as read
+        from a document that needs a repair, as the entries this version carries."""
+        consolidated = self.metadata.consolidated_metadata
+        if consolidated is None:
+            return {}
+        marks: dict[str, CarriedEntry] = {}
+        for key, member in consolidated.flattened_metadata.items():
+            mark = vars(member).get("_stored_document")
+            if mark is not None:
+                marks[_join_paths([self.store_path.path, key])] = ("copy", mark)
+        return marks
+
+    def _clear_member_marks(self) -> None:
+        """Drop the marks a pickle leaves on consolidated members: once read, the
+        store's cache holds them."""
+        consolidated = self.metadata.consolidated_metadata
+        if consolidated is None:
+            return
+        for member in consolidated.flattened_metadata.values():
+            if "_stored_document" in vars(member):
+                object.__delattr__(member, "_stored_document")
+
     @classmethod
     def _from_bytes_v2(
         cls,
@@ -746,10 +860,21 @@ class AsyncGroup:
         elif node_type not in ("group", None):
             msg = f"Node type in metadata ({node_type}) is not 'group'"
             raise GroupNotFoundError(msg)
-        return cls(
+        group = cls(
             metadata=GroupMetadata.from_dict(data, path=str(store_path)),
             store_path=store_path,
         )
+        # Record the consolidated copies of array documents as stored, so a group write
+        # can keep a member that needs a repair as it was stored.
+        consolidated = group.metadata.consolidated_metadata
+        raw_consolidated = data.get("consolidated_metadata")
+        if consolidated is not None and isinstance(raw_consolidated, dict):
+            members = raw_consolidated.get("metadata")
+            if isinstance(members, dict):
+                stored_documents(store_path.store).observe_consolidated(
+                    store_path.path, members, group.metadata.zarr_format
+                )
+        return group
 
     async def setitem(self, key: str, value: Any) -> None:
         """
@@ -2252,10 +2377,9 @@ class Group(SyncMixin):
         """
         new_metadata = replace(self.metadata, attributes=new_attributes)
 
-        # Write new metadata
-        to_save = new_metadata.to_buffer_dict(default_buffer_prototype())
-        awaitables = [set_or_delete(self.store_path / key, value) for key, value in to_save.items()]
-        await asyncio.gather(*awaitables)
+        # Write new metadata; `encode_documents` keeps consolidated members that need a
+        # repair as they are stored.
+        await store_documents(self.store_path, encode_documents(self.store_path, new_metadata))
 
         async_group = replace(self._async_group, metadata=new_metadata)
         return replace(self, _async_group=async_group)
@@ -3424,6 +3548,12 @@ async def _store_nodes(
     ]
 
     created_object_keys = []
+    # The documents written for each node, for the store's cache to record an array's.
+    node_documents: defaultdict[str, dict[str, Buffer]] = defaultdict(dict)
+    for key, value in documents.items():
+        node, _, name = key.rpartition("/")
+        node_documents[node][name] = value
+    cache = stored_documents(store)
 
     for coro in asyncio.as_completed(create_tasks):
         created_key = await coro
@@ -3441,6 +3571,9 @@ async def _store_nodes(
             node_name = created_key[: created_key.rfind("/")]
             meta_out = nodes[node_name]
         if meta_out.zarr_format == 3:
+            # Record an array's documents in the store's cache once they are written.
+            if not isinstance(meta_out, GroupMetadata):
+                cache.observe_written(node_name, node_documents[node_name], meta_out)
             yield node_name, built[node_name]
         else:
             # For zarr v2
@@ -3456,6 +3589,9 @@ async def _store_nodes(
                 meta_done = _join_paths([node_name, ZARRAY_JSON]) in created_object_keys
 
             if meta_done and attrs_done:
+                # As above: record an array once both of its documents are written.
+                if not isinstance(meta_out, GroupMetadata):
+                    cache.observe_written(node_name, node_documents[node_name], meta_out)
                 yield node_name, built[node_name]
 
             continue
@@ -3711,9 +3847,13 @@ async def _read_metadata_v3(store: Store, path: str) -> ArrayV3Metadata | GroupM
     )
     if zarr_json_bytes is None:
         raise FileNotFoundError(path)
-    return _build_metadata_v3(
-        buffer_to_json_object(zarr_json_bytes), path=str(StorePath(store, path))
-    )
+    document = buffer_to_json_object(zarr_json_bytes)
+    metadata = _build_metadata_v3(document, path=str(StorePath(store, path)))
+    # Record an array's document in the store's cache, so a chunk write through it
+    # stores a repair that moves chunks first.
+    if isinstance(metadata, ArrayV3Metadata):
+        stored_documents(store).observe(path, document, 3)
+    return metadata
 
 
 async def _read_metadata_v2(store: Store, path: str) -> ArrayV2Metadata | GroupMetadata:
@@ -3748,7 +3888,11 @@ async def _read_metadata_v2(store: Store, path: str) -> ArrayV2Metadata | GroupM
         else:
             zmeta = buffer_to_json_object(zgroup_bytes)
 
-    return _build_metadata_v2(zmeta, zattrs, path=str(StorePath(store, path)))
+    metadata = _build_metadata_v2(zmeta, zattrs, path=str(StorePath(store, path)))
+    # As for v3: record an array's documents in the store's cache.
+    if isinstance(metadata, ArrayV2Metadata):
+        stored_documents(store).observe(path, {**zmeta, "attributes": zattrs}, 2)
+    return metadata
 
 
 async def _read_group_metadata_v2(store: Store, path: str) -> GroupMetadata:

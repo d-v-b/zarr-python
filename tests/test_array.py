@@ -1,3 +1,4 @@
+import copy
 import dataclasses
 import inspect
 import json
@@ -7,7 +8,7 @@ import pickle
 import re
 import sys
 from itertools import accumulate, starmap
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 from unittest import mock
 
 import numcodecs
@@ -56,6 +57,7 @@ from zarr.core.chunk_grids import (
     resolve_outer_and_inner_chunks,
 )
 from zarr.core.chunk_key_encodings import ChunkKeyEncodingParams
+from zarr.core.codec_pipeline import BatchedCodecPipeline, FusedCodecPipeline
 from zarr.core.common import JSON, ChunksLike, ZarrFormat, ceildiv
 from zarr.core.dtype import (
     DateTime64,
@@ -2637,3 +2639,111 @@ async def test_create_array_huge_chunk_count() -> None:
     arr = await create_array(store={}, shape=(2**62,), chunks=(1,), dtype="int32")
     assert arr.shape == (2**62,)
     assert arr.chunks == (1,)
+
+
+def test_async_array_keeps_its_dataclass_surface() -> None:
+    """`AsyncArray` wraps an `AsyncArrayIO` but keeps the dataclass surface it has
+    always had: its fields, `replace`, `asdict`, equality, (un)hashability, pickled
+    state, swapping a field with `object.__setattr__`, and copies whose binding
+    (shape, pipeline) is their own; like before, a copy shares the metadata
+    object, so attribute updates made in place are seen through both."""
+    arr = zarr.create_array(MemoryStore(), shape=(4,), dtype="uint8", chunks=(2,))
+    aa = arr.async_array
+
+    assert [f.name for f in dataclasses.fields(aa)] == [
+        "metadata",
+        "store_path",
+        "codec_pipeline",
+        "_chunk_grid",
+        "config",
+    ]
+    assert set(dataclasses.asdict(aa)) == {
+        "metadata",
+        "store_path",
+        "codec_pipeline",
+        "_chunk_grid",
+        "config",
+    }
+    resized = dataclasses.replace(aa, metadata=dataclasses.replace(aa.metadata, shape=(8,)))
+    assert isinstance(resized, type(aa))
+    assert (resized.shape, aa.shape) == ((8,), (4,))
+
+    with pytest.raises(TypeError, match="unhashable"):
+        hash(aa)
+    with zarr.config.set({"codec_pipeline.path": "zarr.core.codec_pipeline.FusedCodecPipeline"}):
+        fused = aa.with_config({})
+    assert isinstance(fused.codec_pipeline, FusedCodecPipeline)
+    assert fused != aa
+
+    swapped = copy.copy(aa)
+    object.__setattr__(swapped, "codec_pipeline", fused.codec_pipeline)
+    assert isinstance(swapped.codec_pipeline, FusedCodecPipeline)
+    assert isinstance(aa.codec_pipeline, BatchedCodecPipeline)
+
+    copied = copy.copy(aa)
+    sync(copied.resize((6,)))
+    assert (copied.shape, aa.shape) == ((6,), (4,))
+
+    state = aa.__getstate__()
+    assert {"metadata", "store_path", "codec_pipeline", "_chunk_grid", "config"} <= set(state)
+    revived = pickle.loads(pickle.dumps(aa))
+    assert revived == aa
+
+
+def test_async_array_loads_a_pickled_field_state() -> None:
+    """A pickle of an `AsyncArray` holds its field state, as it always has, so an
+    array pickled before it wrapped an `AsyncArrayIO` loads."""
+    arr = zarr.create_array(MemoryStore(), shape=(4,), dtype="uint8", chunks=(2,))
+    aa = arr.async_array
+    sync(aa.setitem(slice(None), np.arange(4, dtype="uint8")))
+    old_state = pickle.loads(
+        pickle.dumps(
+            {
+                "metadata": aa.metadata,
+                "store_path": aa.store_path,
+                "codec_pipeline": aa.codec_pipeline,
+                "_chunk_grid": aa._chunk_grid,
+                "config": aa.config,
+            }
+        )
+    )
+    revived = object.__new__(type(aa))
+    revived.__setstate__(old_state)
+    assert revived == aa
+    np.testing.assert_array_equal(sync(revived.getitem(slice(None))), np.arange(4))
+    sync(revived.setitem(slice(None), np.full(4, 7, dtype="uint8")))
+    np.testing.assert_array_equal(sync(revived.getitem(slice(None))), np.full(4, 7))
+
+
+def test_dask_token_of_an_array_is_deterministic() -> None:
+    dask_base = pytest.importorskip("dask.base")
+    store = MemoryStore()
+    arr = zarr.create_array(store, shape=(4,), dtype="uint8", chunks=(2,))
+    before = dask_base.tokenize(arr)
+    _ = arr[:]
+    assert dask_base.tokenize(arr) == before
+    assert dask_base.tokenize(zarr.open_array(store)) == before
+
+
+class _ChosenPipeline(BatchedCodecPipeline):
+    """A pipeline class whose instances may be another class's."""
+
+
+def test_pickled_array_keeps_the_pipeline_class_it_chose() -> None:
+    """A pickled array keeps the pipeline class its binding chose, also when that
+    class built an instance of another one (as zarrs-python does for stores it
+    cannot use)."""
+    aa = zarr.create_array(MemoryStore(), shape=(4,), dtype="uint8", chunks=(2,)).async_array
+    aa.io._pipeline_class = _ChosenPipeline
+    revived = pickle.loads(pickle.dumps(aa))
+    assert type(revived.codec_pipeline) is BatchedCodecPipeline
+    # A binding derived from the revived one builds its pipeline from the class.
+    derived = revived.io.with_store(MemoryStore())
+    assert type(derived.to_array().codec_pipeline) is _ChosenPipeline
+
+
+def test_async_array_rejects_metadata_that_is_not_a_mapping() -> None:
+    with pytest.raises(TypeError):
+        AsyncArray(cast("Any", 42), StorePath(MemoryStore()))
+    with pytest.raises(TypeError):
+        zarr.AsyncArrayIO(cast("Any", 42), StorePath(MemoryStore()))
