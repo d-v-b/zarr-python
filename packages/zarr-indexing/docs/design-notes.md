@@ -137,6 +137,15 @@ gather.to_json()["output"][0]
 #  'index_array_bounds': ['-inf', '+inf']}
 ```
 
+The `index_array_bounds` an `index_array` map carries are a declaration the
+engine keeps, as the `ArrayMap`'s `IndexRange`, and checks when a value is
+read to address storage — not a constraint verified at load. That is
+TensorStore's model (its `index_range`), adopted so that a document whose
+array leaves its bounds behaves the same in both engines: it loads, a point
+that gathers the offending value fails, and a selection that avoids it does
+not. See [the ndsel page](ndsel.md#lowering-to-a-transform) for the rule and
+`IndexRange` for the source permalinks.
+
 The representation helps a consumer choose a lowering strategy. Independent
 affine axes can often be read with slices plus reversal, permutation, or
 broadcasting. Arbitrary affine maps can also express diagonals, so the absence
