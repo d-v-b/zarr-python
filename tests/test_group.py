@@ -1675,6 +1675,21 @@ async def test_open_ambiguous_node():
         await AsyncGroup.open(store, zarr_format=None)
 
 
+@pytest.mark.parametrize(
+    ("key", "zarr_format"), [(".zgroup", 2), (".zgroup", None), ("zarr.json", None)]
+)
+async def test_open_group_missing_zarr_format(key: str, zarr_format: ZarrFormat | None) -> None:
+    """
+    A stored group document without `zarr_format` is rejected, not opened as Zarr format 3.
+    """
+    doc = {} if key == ".zgroup" else {"node_type": "group"}
+    store: dict[str, Buffer] = {
+        key: default_buffer_prototype().buffer.from_bytes(json.dumps(doc).encode("utf-8"))
+    }
+    with pytest.raises(MetadataValidationError, match="zarr_format"):
+        await AsyncGroup.open(store, zarr_format=zarr_format)
+
+
 class TestConsolidated:
     async def test_group_getitem_consolidated(self, store: Store) -> None:
         root = await AsyncGroup.from_store(store=store)
@@ -1921,6 +1936,29 @@ class TestGroupMetadata:
     def test_from_dict_v3_disallowed_extra_fields(self, value: object) -> None:
         data = {"zarr_format": 3, "node_type": "group", "my_extension": value}
         with pytest.raises(MetadataValidationError, match="my_extension"):
+            GroupMetadata.from_dict(data)
+
+    @pytest.mark.parametrize(
+        "data",
+        [
+            {"zarr_format": 2},
+            {"zarr_format": 2, "attributes": {"a": 1}},
+            {"zarr_format": 3, "node_type": "group"},
+            {"zarr_format": 3, "node_type": "group", "attributes": {"a": 1}},
+        ],
+    )
+    def test_from_dict_zarr_format(self, data: dict[str, Any]) -> None:
+        """
+        A group document is read with the format it declares.
+        """
+        assert GroupMetadata.from_dict(data).zarr_format == data["zarr_format"]
+
+    @pytest.mark.parametrize("data", [{}, {"node_type": "group"}, {"attributes": {}}])
+    def test_from_dict_missing_zarr_format(self, data: dict[str, Any]) -> None:
+        """
+        A group document without `zarr_format` is rejected rather than read as Zarr format 3.
+        """
+        with pytest.raises(MetadataValidationError, match="zarr_format"):
             GroupMetadata.from_dict(data)
 
     @pytest.mark.parametrize("value", [{"must_understand": True}, {}, "not an object", 1])
