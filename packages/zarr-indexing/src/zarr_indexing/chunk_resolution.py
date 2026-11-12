@@ -688,13 +688,18 @@ def _chunk_keys(
     n = int(chunk_ids[0].size)
     if len(chunk_ids) == 1:
         return np.asarray(chunk_ids[0], dtype=np.intp)
-    # Mixed-radix key with the first dimension most significant. Negative
-    # chunk ids do not fit these zero-based digits; group their tuples directly.
+    # Mixed-radix key with the first dimension most significant; chunk ids are
+    # `[0, n)` per axis (`DimensionGridLike`), so they are its digits. When the
+    # radices outgrow intp, group the tuples directly instead.
     keys = np.zeros(n, dtype=np.intp)
     multiplier = 1
     for ids in reversed(chunk_ids):
+        if int(ids.min()) < 0:
+            # A negative digit would collide with another tuple's key, so a
+            # grid that breaks the `[0, n)` contract is reported, not grouped.
+            raise ValueError(f"grid returned a negative chunk id: {int(ids.min())}")
         radix = int(ids.max()) + 1
-        if int(ids.min()) < 0 or multiplier * radix >= 2**62:
+        if multiplier * radix >= 2**62:
             stacked = np.stack([np.asarray(i, dtype=np.intp).ravel() for i in chunk_ids], axis=1)
             _, inverse = np.unique(stacked, axis=0, return_inverse=True)
             return np.asarray(inverse, dtype=np.intp).reshape(-1)
@@ -1081,7 +1086,10 @@ def _component_joint_sets(
     transform: IndexTransform, grids: tuple[DimensionGridLike, ...]
 ) -> tuple[JointSet, ...]:
     """Partition the input/index-array dependency graph into connected components."""
-    affine_axes = {m.input_dimension for m in transform.output if isinstance(m, DimensionMap)}
+    if transform.index_array_shares_affine_axis:
+        raise NotImplementedError(
+            "index array varies over an input dimension also bound by a slice map"
+        )
     # Accumulated components have disjoint input axes. A new map can bridge
     # several of them; merging every overlap maintains that invariant.
     components: list[tuple[set[int], list[int]]] = []
@@ -1089,10 +1097,6 @@ def _component_joint_sets(
         if not isinstance(m, ArrayMap):
             continue
         axes = set(m.dependency_axes)
-        if axes.intersection(affine_axes):
-            raise NotImplementedError(
-                "index array varies over an input dimension also bound by a slice map"
-            )
         dimensions = [dimension]
         separate = []
         for other_axes, other_dimensions in components:

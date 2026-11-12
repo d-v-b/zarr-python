@@ -82,10 +82,13 @@ class IndexDomain:
     def _unchecked(
         cls, inclusive_min: tuple[int, ...], exclusive_max: tuple[int, ...]
     ) -> IndexDomain:
-        """Build an unlabeled domain from validated bounds.
+        """Build an unlabeled domain from bounds the caller has already established.
 
-        Skip __post_init__; internal callers must ensure equal bound lengths
-        and inclusive_min <= exclusive_max in every dimension."""
+        Skips `__post_init__`, so callers must ensure equal bound lengths and
+        `inclusive_min <= exclusive_max` in every dimension. It exists for
+        internal producers that derive bounds from an already-valid domain:
+        chunk resolution builds two domains per chunk, and re-validating them
+        was a measurable share of a plan's cost."""
         domain = object.__new__(cls)
         object.__setattr__(domain, "inclusive_min", inclusive_min)
         object.__setattr__(domain, "exclusive_max", exclusive_max)
