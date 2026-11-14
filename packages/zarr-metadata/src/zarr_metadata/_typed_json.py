@@ -938,7 +938,7 @@ _EXCLUSIVE: Final = frozenset({"gt", "lt"})
 
 
 def constraints_of(metadata: Sequence[object]) -> dict[str, int | float]:
-    """The constraints in an `Annotated` type's metadata, by name: at most one lower and one upper bound.
+    """The constraints in an `Annotated` type's metadata, by name: at most one lower bound, one upper bound and one step.
 
     The supported constraints are annotated-types' `Gt`, `Ge`, `Lt` and
     `Le`, which bound a number, `MultipleOf`, which is a step an integer
@@ -1046,14 +1046,15 @@ def constrained(
     A bound limits a number, a step what an integer is a multiple of, and
     a length bound the number of `unit`s in the value: the elements of an
     array, or the characters of a string, which are its code points, as
-    JSON Schema counts them. The message states
-    what the type allows, for example "expected an integer in [0, 9], got
-    12", "expected an integer > 0 that is a multiple of 4, got 6" or
-    "expected an array of integers with at least 1 element, got []", and
-    the problem's `ctx`
-    holds the constraints, as pydantic names them. The constraints are
-    checked only when `parse` reports no problem, in the same way that
-    rules run only on a value of their type.
+    JSON Schema counts them. The message states what the type allows, for
+    example "expected an integer in [0, 9], got 12", "expected an integer
+    > 0 that is a multiple of 4, got 6" or "expected an array of integers
+    with at least 1 element, got []", and the problem's `ctx` holds the
+    constraints, as pydantic names them. The constraints are checked only
+    on a value of the type, in the same way that rules are: when `parse`
+    reports no problem, or only keys that a closed TypedDict does not
+    declare. Such a key is left out and the value is still returned, so
+    the value it returns is held to the constraints too.
     """
     expected = f"expected {description} {_admitted(said, unit)}"
     ctx: dict[str, JSONValue] = dict(said)
@@ -1064,14 +1065,14 @@ def constrained(
 
     def parse_constrained(value: object, loc: Loc) -> Parsed:
         typed, found = parse(value, loc)
-        if len(found) != 0:
+        if any(each.kind != "unknown_key" for each in found):
             return typed, found
         for keeps, bound, length in checks:
             measured = len(cast("Sized", typed)) if length else cast("float", typed)
             if not keeps(measured, bound):
                 message = f"{expected}, got {shown(value)}"
-                return typed, (ValidationProblem(loc, message, "invalid_value", ctx=ctx),)
-        return typed, ()
+                return typed, (*found, ValidationProblem(loc, message, "invalid_value", ctx=ctx))
+        return typed, found
 
     return parse_constrained
 

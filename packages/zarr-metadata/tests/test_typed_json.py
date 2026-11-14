@@ -1014,6 +1014,10 @@ class Noted(TypedDict, extra_items=Annotated[object, "any JSON"]):
     level: int
 
 
+class _Item(TypedDict, closed=True):
+    a: int
+
+
 @pytest.mark.parametrize(
     ("annotation", "value", "found"),
     [
@@ -1155,6 +1159,23 @@ class Noted(TypedDict, extra_items=Annotated[object, "any JSON"]):
                 )
             ],
         ),
+        # A key the element's closed TypedDict does not declare is left out
+        # and the value is still returned, so its length is held too.
+        (
+            Annotated[tuple[_Item, ...], MaxLen(1)],
+            [{"a": 1, "zzz": 0}, {"a": 2}],
+            [
+                ((0, "zzz"), "unexpected key 'zzz'", {}),
+                (
+                    (),
+                    (
+                        "expected an array of objects with at most 1 element, got "
+                        '[{"a": 1, "zzz": 0}, {"a": 2}]'
+                    ),
+                    {"max_length": 1},
+                ),
+            ],
+        ),
         # One code point outside the Basic Multilingual Plane is one
         # character, as JSON Schema's `maxLength` counts it.
         (Annotated[str, MaxLen(1)], "\U0001d11e", []),
@@ -1190,6 +1211,7 @@ class Noted(TypedDict, extra_items=Annotated[object, "any JSON"]):
         "a-string-length-within",
         "a-string-length-below",
         "an-exact-string-length",
+        "a-length-held-beside-an-unknown-key",
         "a-string-length-counts-code-points",
     ],
 )
