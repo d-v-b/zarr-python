@@ -26,6 +26,10 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
+
+# Not installed in the `min_deps` env: see the `conformance` dependency group.
+pytest.importorskip("zarr_metadata.testing")
+
 from hypothesis import event, given, reject
 from hypothesis import strategies as st
 from zarr_metadata.model import read_array_metadata_v3
@@ -77,7 +81,14 @@ _DIVERGENCES: Final = {
         "zarr-metadata accepts an empty list of edge lengths for an axis of length 0. "
         "No such grid is drawn."
     ),
+    "expanded rectilinear runs": (
+        "zarr-python expands each run-length pair of rectilinear edges into a list, so a "
+        "valid run of many chunks exhausts memory. No grid listing more than "
+        "`_MAX_LISTED_CHUNKS` chunks along an axis is drawn."
+    ),
 }
+
+_MAX_LISTED_CHUNKS: Final = 10_000
 
 
 def _base64_fill_values(
@@ -86,16 +97,27 @@ def _base64_fill_values(
     return st.binary(max_size=16).map(lambda data: base64.standard_b64encode(data).decode())
 
 
-def _has_edges(configuration: Mapping[str, Any]) -> bool:
-    return all(dimension != () for dimension in configuration["chunk_shapes"])
+def _listed_chunks(dimension: Any) -> int:
+    """How many chunks a dimension's edges list, counting each run; 0 for a bare length."""
+    if isinstance(dimension, int):
+        return 0
+    return sum(edge[1] if isinstance(edge, tuple | list) else 1 for edge in dimension)
 
 
-def _with_edges(
+def _readable(configuration: Mapping[str, Any]) -> bool:
+    """Whether zarr-python reads the rectilinear grid without a known divergence."""
+    return all(
+        dimension != () and _listed_chunks(dimension) <= _MAX_LISTED_CHUNKS
+        for dimension in configuration["chunk_shapes"]
+    )
+
+
+def _readable_grids(
     configurations: Callable[[tuple[int, ...] | None, Strategies], Configurations],
     shape: tuple[int, ...] | None,
     strategies: Strategies,
 ) -> Configurations:
-    return configurations(shape, strategies).filter(_has_edges)
+    return configurations(shape, strategies).filter(_readable)
 
 
 def _supported(strategies: Strategies) -> Strategies:
@@ -112,7 +134,7 @@ def _supported(strategies: Strategies) -> Strategies:
     grid_strategy = out.get(RECTILINEAR_CHUNK_GRID)
     if isinstance(grid_strategy, ChunkGridStrategy):
         out[RECTILINEAR_CHUNK_GRID] = dataclasses.replace(
-            grid_strategy, configurations=partial(_with_edges, grid_strategy.configurations)
+            grid_strategy, configurations=partial(_readable_grids, grid_strategy.configurations)
         )
     return out
 
@@ -313,3 +335,17 @@ def test_zarr_metadata_refuses_empty_rectilinear_edges() -> None:
         "configuration": {"kind": "inline", "chunk_shapes": [[]]},
     }
     assert len(read_array_metadata_v3(document).problems) != 0
+
+
+@pytest.mark.xfail(
+    strict=True, raises=MemoryError, reason=_DIVERGENCES["expanded rectilinear runs"]
+)
+def test_rectilinear_run_is_not_expanded() -> None:
+    """A run of 2**62 chunks of length 2 is read without listing them."""
+    document = _document("uint8", 0, [{"name": "bytes"}], chunk_shape=(2**63 - 1,))
+    document["chunk_grid"] = {
+        "name": "rectilinear",
+        "configuration": {"kind": "inline", "chunk_shapes": [[[2, 2**62]]]},
+    }
+    with zarr.config.set({"array.rectilinear_chunks": True}):
+        ArrayV3Metadata.from_dict(document)

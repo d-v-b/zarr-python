@@ -3830,6 +3830,9 @@ remote = [
 ]
 
 [package.dev-dependencies]
+conformance = [
+    { name = "zarr-metadata", extra = ["testing"] },
+]
 dev = [
     { name = "astroid" },
     { name = "botocore" },
@@ -3901,7 +3904,6 @@ remote-tests = [
     { name = "requests" },
     { name = "s3fs" },
     { name = "uv" },
-    { name = "zarr-metadata", extra = ["testing"] },
 ]
 test = [
     { name = "coverage" },
@@ -3915,7 +3917,6 @@ test = [
     { name = "pytest-reportlog" },
     { name = "pytest-xdist" },
     { name = "uv" },
-    { name = "zarr-metadata", extra = ["testing"] },
 ]
 
 [package.metadata]
@@ -3937,6 +3938,7 @@ requires-dist = [
 provides-extras = ["cast-value-rs", "cli", "gpu", "optional", "remote"]
 
 [package.metadata.requires-dev]
+conformance = [{ name = "zarr-metadata", extras = ["testing"], specifier = "==0.8.0" }]
 dev = [
     { name = "astroid", specifier = "==4.3.4" },
     { name = "botocore" },
@@ -4006,7 +4008,6 @@ remote-tests = [
     { name = "requests", specifier = "==2.34.2" },
     { name = "s3fs", specifier = ">=2023.10.0" },
     { name = "uv", specifier = "==0.13.7" },
-    { name = "zarr-metadata", extras = ["testing"], specifier = "==0.8.0" },
 ]
 test = [
     { name = "coverage", specifier = "==7.17.2" },
@@ -4020,7 +4021,6 @@ test = [
     { name = "pytest-reportlog", specifier = "==1.0.0" },
     { name = "pytest-xdist", specifier = "==3.8.0" },
     { name = "uv", specifier = "==0.13.7" },
-    { name = "zarr-metadata", extras = ["testing"], specifier = "==0.8.0" },
 ]
 
 [[package]]
