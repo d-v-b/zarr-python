@@ -164,8 +164,8 @@ type may carry bounds, written with annotated-types and read the way
 pydantic reads them: `Gt`, `Ge`, `Lt`, `Le` and `Interval`, at most one
 from each side, at any depth. For example,
 `tuple[Annotated[int, Ge(1)], ...]` bounds each element. An integer's
-type may carry a step, `MultipleOf`, at most one. An array's type may
-bound its length with `MinLen`, `MaxLen` and `Len`, so
+type may carry a step, `MultipleOf`, at most one. An array's or a
+string's type may bound its length with `MinLen`, `MaxLen` and `Len`, so
 `Annotated[tuple[int, ...], MinLen(1)]` is never empty. A value out of
 bounds is an `invalid_value` problem. Its message says what the type
 admits ("expected an integer >= 1, got 0"), and its `ctx` holds the

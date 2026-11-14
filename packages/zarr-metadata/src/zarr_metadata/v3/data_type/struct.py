@@ -32,7 +32,7 @@ from zarr_metadata.v3._types.data_type import (
 
 
 def _rules(configuration: StructConfiguration, nested: Nested) -> Iterator[ValidationProblem]:
-    """Check that field names are non-empty and distinct, and that field types have a fixed size.
+    """Check that field names are distinct, and that field types have a fixed size.
 
     Names must be distinct because a fill value addresses fields by name.
     "Variable-length data types
@@ -46,10 +46,6 @@ def _rules(configuration: StructConfiguration, nested: Nested) -> Iterator[Valid
     seen: dict[str, int] = {}
     for index, member in enumerate(fields):
         name = member["name"]
-        if name == "":
-            yield ValidationProblem(
-                ("fields", index, "name"), "expected a non-empty field name", "invalid_value"
-            )
         first = seen.setdefault(name, index)
         if first != index:
             yield ValidationProblem(

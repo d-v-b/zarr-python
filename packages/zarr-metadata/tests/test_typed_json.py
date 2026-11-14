@@ -1138,6 +1138,26 @@ class Noted(TypedDict, extra_items=Annotated[object, "any JSON"]):
                 )
             ],
         ),
+        (Annotated[str, MinLen(1)], "a", []),
+        (
+            Annotated[str, MinLen(1)],
+            "",
+            [((), 'expected a string with at least 1 character, got ""', {"min_length": 1})],
+        ),
+        (
+            Annotated[str, Len(2, 2)],
+            "abc",
+            [
+                (
+                    (),
+                    'expected a string with 2 characters, got "abc"',
+                    {"min_length": 2, "max_length": 2},
+                )
+            ],
+        ),
+        # One code point outside the Basic Multilingual Plane is one
+        # character, as JSON Schema's `maxLength` counts it.
+        (Annotated[str, MaxLen(1)], "\U0001d11e", []),
     ],
     ids=[
         "within",
@@ -1167,6 +1187,10 @@ class Noted(TypedDict, extra_items=Annotated[object, "any JSON"]):
         "a-length-on-a-fixed-length-array",
         "a-length-checked-only-once-the-elements-are-read",
         "the-branch-it-bounds-the-length-of",
+        "a-string-length-within",
+        "a-string-length-below",
+        "an-exact-string-length",
+        "a-string-length-counts-code-points",
     ],
 )
 def test_a_value_is_held_to_the_bounds_its_type_carries(
@@ -1213,21 +1237,26 @@ def test_error_a_bound_on_what_is_not_a_number() -> None:
 @pytest.mark.parametrize(
     ("annotation", "named"),
     [
-        (Annotated[str, MinLen(1)], "min_length: a bound is on an array, and a string is not one"),
+        (
+            Annotated[bool, MinLen(1)],
+            "min_length: a bound is on an array or a string, and a boolean is not one",
+        ),
         (
             Annotated[Mapping[str, int], MaxLen(1)],
-            "max_length: a bound is on an array, and an object is not one",
+            "max_length: a bound is on an array or a string, and an object is not one",
         ),
         (
             Annotated[int, Len(1, 2)],
-            "min_length, max_length: a bound is on an array, and an integer is not one",
+            "min_length, max_length: a bound is on an array or a string, and an integer is not one",
         ),
     ],
-    ids=["min-len-on-a-string", "max-len-on-an-object", "len-on-a-number"],
+    ids=["min-len-on-a-boolean", "max-len-on-an-object", "len-on-a-number"],
 )
-def test_error_a_length_bound_on_what_is_not_an_array(annotation: object, named: str) -> None:
-    # pydantic also bounds the length of a string or an object; the checker
-    # bounds only an array's, so the type cannot promise more than it checks.
+def test_error_a_length_bound_on_what_is_not_an_array_or_a_string(
+    annotation: object, named: str
+) -> None:
+    # pydantic also bounds the number of an object's keys; the checker does
+    # not, so the type cannot promise more than it checks.
     with pytest.raises(TypeError, match=re.escape(named)):
         parser(annotation, no_leaf)
 

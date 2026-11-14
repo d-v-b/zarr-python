@@ -176,6 +176,11 @@ SHAPES: list[tuple[str, type, dict[str, Any]]] = [
         _held({"type": "integer", "exclusiveMinimum": 0, "multipleOf": 4}),
     ),
     (
+        "non-empty-string",
+        _holding(Annotated[str, MinLen(1)]),
+        _held({"type": "string", "minLength": 1}),
+    ),
+    (
         "non-empty-array",
         _holding(Annotated[tuple[int, ...], MinLen(1)]),
         _held({"type": "array", "items": {"type": "integer"}, "minItems": 1}),

@@ -9,7 +9,7 @@ and `tuple[T1, T2]`, a union of those, an object described by a TypedDict,
 `Mapping[str, V]`, a `NewType` (parsed as its supertype), and a type alias
 (parsed as the type it stands for). This short list keeps the module
 small. Any other annotation has no parser. A number type may carry bounds,
-an integer type a step, and an array type bounds on its length, written
+an integer type a step, and an array or a string bounds on its length, written
 with annotated-types as pydantic reads them, for example
 `Annotated[int, Interval(ge=0, le=9)]`, `Annotated[int, MultipleOf(4)]` or
 `Annotated[tuple[int, ...], MinLen(1)]`. A value outside the bounds is a
@@ -88,6 +88,8 @@ from zarr_metadata._json import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sized
+
     from zarr_metadata._json import ProblemKind
 
 
@@ -856,7 +858,7 @@ class _Constraint:
     slot: Literal["below", "above", "step"]
     """Which of a type's constraints it is: a lower bound, an upper bound, or a step. A type takes one of each."""
     of: Literal["number", "integer", "length"]
-    """What the bound limits: a number, an integer, or the length of an array."""
+    """What the bound limits: a number, an integer, or the length of an array or a string."""
 
 
 _CONSTRAINTS: Final[Mapping[str, _Constraint]] = {
@@ -888,10 +890,18 @@ _CONSTRAINTS: Final[Mapping[str, _Constraint]] = {
         "integer",
     ),
     "min_length": _Constraint(
-        annotated_types.MinLen, {"tuple": "minItems"}, operator.ge, "below", "length"
+        annotated_types.MinLen,
+        {"tuple": "minItems", "str": "minLength"},
+        operator.ge,
+        "below",
+        "length",
     ),
     "max_length": _Constraint(
-        annotated_types.MaxLen, {"tuple": "maxItems"}, operator.le, "above", "length"
+        annotated_types.MaxLen,
+        {"tuple": "maxItems", "str": "maxLength"},
+        operator.le,
+        "above",
+        "length",
     ),
 }
 """The annotated-types constraints the checker reads, by the name pydantic uses, which is also the attribute of the marker that holds the bound."""
@@ -905,7 +915,7 @@ _MARKERS: Final = f"{', '.join(_NAMES[:-1])} and {_NAMES[-1]}"
 _MEASURED: Final[Mapping[str, str]] = {
     "number": "a bound is on a number",
     "integer": "a step is on an integer",
-    "length": "a bound is on an array",
+    "length": "a bound is on an array or a string",
 }
 """For what each constraint limits, what an error message says it applies to."""
 
@@ -933,7 +943,7 @@ def constraints_of(metadata: Sequence[object]) -> dict[str, int | float]:
     The supported constraints are annotated-types' `Gt`, `Ge`, `Lt` and
     `Le`, which bound a number, `MultipleOf`, which is a step an integer
     is a multiple of, `MinLen` and `MaxLen`, which bound the length of an
-    array, and an `Interval` or a `Len`, which unpack to them, as pydantic
+    array or a string, and an `Interval` or a `Len`, which unpack to them, as pydantic
     reads them. A note (a string or a `Doc`) does not constrain the value
     and is skipped. Anything else raises `TypeError`:
 
@@ -1019,7 +1029,7 @@ def _length(item: object, name: str) -> int:
 
 
 def _constrainable(inner: object, said: Constraints) -> None:
-    """Raise `TypeError` for a constraint on a type it does not limit: a bound on what is not a number, a step on what is not an integer, or a length bound on what is not an array."""
+    """Raise `TypeError` for a constraint on a type it does not limit: a bound on what is not a number, a step on what is not an integer, or a length bound on what is not an array or a string."""
     shape = shape_of(inner)
     for of, applies in _MEASURED.items():
         names = [name for name in said if _CONSTRAINTS[name].of == of]
@@ -1028,11 +1038,15 @@ def _constrainable(inner: object, said: Constraints) -> None:
             raise TypeError(msg)
 
 
-def constrained(parse: Parser, description: str, said: Constraints) -> Parser:
+def constrained(
+    parse: Parser, description: str, said: Constraints, unit: str = "element"
+) -> Parser:
     """Wrap `parse` to also check the constraints its type carries: one `invalid_value` problem if any fails.
 
     A bound limits a number, a step what an integer is a multiple of, and
-    a length bound the number of elements in an array. The message states
+    a length bound the number of `unit`s in the value: the elements of an
+    array, or the characters of a string, which are its code points, as
+    JSON Schema counts them. The message states
     what the type allows, for example "expected an integer in [0, 9], got
     12", "expected an integer > 0 that is a multiple of 4, got 6" or
     "expected an array of integers with at least 1 element, got []", and
@@ -1041,7 +1055,7 @@ def constrained(parse: Parser, description: str, said: Constraints) -> Parser:
     checked only when `parse` reports no problem, in the same way that
     rules run only on a value of their type.
     """
-    expected = f"expected {description} {_admitted(said)}"
+    expected = f"expected {description} {_admitted(said, unit)}"
     ctx: dict[str, JSONValue] = dict(said)
     checks = tuple(
         (_CONSTRAINTS[name].holds, bound, _CONSTRAINTS[name].of == "length")
@@ -1053,7 +1067,7 @@ def constrained(parse: Parser, description: str, said: Constraints) -> Parser:
         if len(found) != 0:
             return typed, found
         for keeps, bound, length in checks:
-            measured = len(cast("tuple[object, ...]", typed)) if length else cast("float", typed)
+            measured = len(cast("Sized", typed)) if length else cast("float", typed)
             if not keeps(measured, bound):
                 message = f"{expected}, got {shown(value)}"
                 return typed, (ValidationProblem(loc, message, "invalid_value", ctx=ctx),)
@@ -1062,10 +1076,10 @@ def constrained(parse: Parser, description: str, said: Constraints) -> Parser:
     return parse_constrained
 
 
-def _admitted(said: Constraints) -> str:
+def _admitted(said: Constraints, unit: str) -> str:
     """What the constraints allow, as written after the type in a message: "in [0, 9]", ">= 1", "> 0 that is a multiple of 4", "with at least 1 element"."""
     if any(_CONSTRAINTS[name].of == "length" for name in said):
-        return _admitted_lengths(said.get("min_length"), said.get("max_length"))
+        return _admitted_lengths(said.get("min_length"), said.get("max_length"), unit)
     low = next(
         ((name, bound) for name, bound in said.items() if _CONSTRAINTS[name].slot == "below"), None
     )
@@ -1095,20 +1109,20 @@ def _admitted_range(
     return ""
 
 
-def _admitted_lengths(low: float | None, high: float | None) -> str:
-    """The lengths that length bounds allow, as written after the type in a message: "with at least 1 element", "with 1 to 3 elements"."""
+def _admitted_lengths(low: float | None, high: float | None, unit: str) -> str:
+    """The lengths that length bounds allow, counted in `unit`s, as written after the type in a message: "with at least 1 element", "with 1 to 3 characters"."""
     if low is not None and high is not None:
         if low == high:
-            return f"with {_elements(low)}"
-        return f"with {shown(low)} to {_elements(high)}"
+            return f"with {_counted(low, unit)}"
+        return f"with {shown(low)} to {_counted(high, unit)}"
     if low is not None:
-        return f"with at least {_elements(low)}"
-    return f"with at most {_elements(cast('float', high))}"
+        return f"with at least {_counted(low, unit)}"
+    return f"with at most {_counted(cast('float', high), unit)}"
 
 
-def _elements(count: float) -> str:
-    """A number of elements, as a message writes it: "1 element", "3 elements"."""
-    return f"{shown(count)} element{'' if count == 1 else 's'}"
+def _counted(count: float, unit: str) -> str:
+    """A number of `unit`s, as a message writes it: "1 element", "3 characters"."""
+    return f"{shown(count)} {unit}{'' if count == 1 else 's'}"
 
 
 # --- the compiler --------------------------------------------------------
@@ -1279,7 +1293,8 @@ def _compile(annotation: object, leaf: Leaf, building: _Building) -> Parser | No
     if len(said) == 0:
         return parse
     _constrainable(inner, said)
-    return constrained(parse, describe(inner), said)
+    unit = "character" if shape_of(inner) == "str" else "element"
+    return constrained(parse, describe(inner), said, unit)
 
 
 def _compile_type(inner: object, leaf: Leaf, building: _Building) -> Parser | None:
@@ -1553,7 +1568,8 @@ class Schemas:
         """The schema of `annotation` as the checker reads it: its type, with the constraints and notes from `Annotated`.
 
         Each constraint becomes the matching JSON Schema keyword (`Ge(0)`
-        becomes `minimum`, `MinLen(1)` becomes `minItems`), and a `Doc`
+        becomes `minimum`, `MinLen(1)` becomes `minItems` on an array and
+        `minLength` on a string), and a `Doc`
         becomes the `description`. The schema keeps both the type's bounds
         and the bounds of its `NewType`, or of the fixed length of its
         tuple, because the checker applies both. When both set the same
@@ -1724,7 +1740,8 @@ def json_schema(shape: type) -> JSONSchema:
     - A TypedDict becomes an object with its keys, its required keys, and
       what any other key may hold (nothing, for a closed TypedDict).
     - A constraint becomes the matching JSON Schema keyword: `Ge(0)`
-      becomes `minimum`, and `MinLen(1)` becomes `minItems`.
+      becomes `minimum`, and `MinLen(1)` becomes `minItems` on an array
+      and `minLength` on a string.
     - A `Doc` becomes the `description`. Only a `Doc` produces a
       description; docstrings are for Python readers and are not used.
       This matches zod, which writes only what `.describe()` sets.

@@ -622,8 +622,8 @@ StructDataTypeName = Literal["struct"]
 class StructField(TypedDict, closed=True):
     """A single field entry inside a structured dtype."""
 
-    name: ReadOnly[str]
-    """The field name (must be unique within a struct and non-empty)."""
+    name: ReadOnly[Annotated[str, MinLen(1)]]
+    """The field name: non-empty, and unique within the struct."""
     data_type: ReadOnly[ZarrV3DataTypeDeclaration]
     """The field's data type.
 
