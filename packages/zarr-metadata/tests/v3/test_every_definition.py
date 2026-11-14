@@ -907,12 +907,21 @@ def test_error_struct_field_type_is_judged_where_it_sits() -> None:
     ]
 
 
-@pytest.mark.parametrize("name", ["r12", "r0"])
-def test_error_a_raw_bytes_width_is_not_a_positive_multiple_of_8(name: str) -> None:
+@pytest.mark.parametrize(
+    ("name", "message"),
+    [
+        ("r12", 'bits in "r12": expected an integer > 0 that is a multiple of 8, got 12'),
+        ("r0", 'bits in "r0": expected an integer > 0 that is a multiple of 8, got 0'),
+    ],
+)
+def test_error_a_raw_bytes_width_is_not_a_positive_multiple_of_8(name: str, message: str) -> None:
     # Raw bits of a size the spec does not allow are reported, not left
     # unchecked. The document wrote a name, so the problem is located at
-    # the declaration.
-    assert _problems("data_type:r*", name) == [((), "invalid_value")]
+    # the declaration, and its message names the size the name spells.
+    _, problems = resolve(name, DataTypeDefinition, ZARR_PYTHON_CONTEXT)
+    assert [(found.loc, found.kind, found.message) for found in problems] == [
+        ((), "invalid_value", message)
+    ]
 
 
 def test_error_a_configuration_written_beside_a_raw_bits_name() -> None:
