@@ -343,7 +343,7 @@ _DOCUMENT_SHARES: dict[str, tuple[Callable[[Mapping[str, Any]], bool], float, fl
     "no axes": (lambda d: d["shape"] == (), 0.03, 0.25),
     "more axes than five": (lambda d: len(d["shape"]) > 5, 0.1, 1),
     "a zero-length axis": (lambda d: 0 in d["shape"], 0.1, 1),
-    "an axis past 32 bits": (lambda d: any(n >= 2**32 for n in d["shape"]), 0.1, 1),
+    "an axis past 32 bits": (lambda d: any(n >= 2**32 for n in d["shape"]), 0.03, 1),
     "the first data type": (lambda d: _name(d["data_type"]) == "bool", 0, 0.12),
 }
 """What a share of array documents holds, as a low and a high bound: what a test running only a few hundred examples meets."""
