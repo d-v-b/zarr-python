@@ -122,6 +122,8 @@ test = [
     "pytest-benchmark==5.3.1",
     "pytest-codspeed==5.0.4",
     "uv==0.13.7",
+    # tests/test_zarr_metadata_conformance.py draws array documents from its strategies.
+    "zarr-metadata[testing]==0.8.0",
 ]
 remote-tests = [
     {include-group = "test"},
