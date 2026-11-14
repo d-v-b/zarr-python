@@ -14,6 +14,7 @@ import itertools
 import json
 import math
 import pkgutil
+import re
 import sys
 import textwrap
 import types
@@ -41,6 +42,7 @@ from annotated_types import (
     Le,
     Len,
     Lt,
+    MaxLen,
     MinLen,
     MultipleOf,
     Predicate,
@@ -1042,6 +1044,72 @@ class Noted(TypedDict, extra_items=Annotated[object, "any JSON"]):
         (Digit | str, 10, [((), "expected an integer in [0, 9], got 10", {"ge": 0, "le": 9})]),
         (Digit, "nine", [((), 'expected an integer, got "nine"', {})]),
         (Annotated[int, "a note", Doc("another")], -1, []),
+        (Annotated[tuple[int, ...], MinLen(1)], [0], []),
+        (
+            Annotated[tuple[int, ...], MinLen(1)],
+            [],
+            [
+                (
+                    (),
+                    "expected an array of integers with at least 1 element, got []",
+                    {"min_length": 1},
+                )
+            ],
+        ),
+        (
+            Annotated[tuple[int, ...], MaxLen(2)],
+            [0, 0, 0],
+            [
+                (
+                    (),
+                    "expected an array of integers with at most 2 elements, got [0, 0, 0]",
+                    {"max_length": 2},
+                )
+            ],
+        ),
+        (
+            Annotated[tuple[int, ...], Len(1, 3)],
+            [],
+            [
+                (
+                    (),
+                    "expected an array of integers with 1 to 3 elements, got []",
+                    {"min_length": 1, "max_length": 3},
+                )
+            ],
+        ),
+        (
+            Annotated[tuple[int, ...], Len(2, 2)],
+            [0],
+            [
+                (
+                    (),
+                    "expected an array of integers with 2 elements, got [0]",
+                    {"min_length": 2, "max_length": 2},
+                )
+            ],
+        ),
+        (
+            Annotated[tuple[int, int], MinLen(1)],
+            [0, 0],
+            [],
+        ),
+        (
+            Annotated[tuple[Digit, ...], MinLen(1)],
+            [10],
+            [((0,), "expected an integer in [0, 9], got 10", {"ge": 0, "le": 9})],
+        ),
+        (
+            Digit | Annotated[tuple[Digit, ...], MinLen(1)],
+            [],
+            [
+                (
+                    (),
+                    "expected an array of integers with at least 1 element, got []",
+                    {"min_length": 1},
+                )
+            ],
+        ),
     ],
     ids=[
         "within",
@@ -1059,15 +1127,24 @@ class Noted(TypedDict, extra_items=Annotated[object, "any JSON"]):
         "the-branch-it-bounds",
         "a-value-of-another-type-is-that-problem-alone",
         "notes",
+        "a-length-within",
+        "a-length-below",
+        "a-length-above",
+        "a-length-range",
+        "an-exact-length",
+        "a-length-on-a-fixed-length-array",
+        "a-length-checked-only-once-the-elements-are-read",
+        "the-branch-it-bounds-the-length-of",
     ],
 )
 def test_a_value_is_held_to_the_bounds_its_type_carries(
     annotation: object, value: object, found: list[tuple[Loc, str, dict[str, JSONValue]]]
 ) -> None:
-    # annotated-types bounds, read as pydantic reads them. A value outside
-    # any bound gives one problem that says what the type allows, with the
-    # bounds in the problem's `ctx`. Bounds are checked only for a value of
-    # the type. A bound is compared as the number it equals, whichever of
+    # annotated-types bounds, read as pydantic reads them: on a number's
+    # value, or on an array's length. A value outside any bound gives one
+    # problem that says what the type allows, with the bounds in the
+    # problem's `ctx`, named as pydantic names them. Bounds are checked only
+    # for a value of the type. A bound is compared as the number it equals, whichever of
     # the equal values Python's `Annotated` cache returns.
     _, problems = _read(annotation, value)
     assert [(problem.loc, problem.message, dict(problem.ctx)) for problem in problems] == found
@@ -1101,6 +1178,28 @@ def test_error_a_bound_on_what_is_not_a_number() -> None:
         parser(Annotated[str, Ge(0)], no_leaf)
 
 
+@pytest.mark.parametrize(
+    ("annotation", "named"),
+    [
+        (Annotated[str, MinLen(1)], "min_length: a bound is on an array, and a string is not one"),
+        (
+            Annotated[Mapping[str, int], MaxLen(1)],
+            "max_length: a bound is on an array, and an object is not one",
+        ),
+        (
+            Annotated[int, Len(1, 2)],
+            "min_length, max_length: a bound is on an array, and an integer is not one",
+        ),
+    ],
+    ids=["min-len-on-a-string", "max-len-on-an-object", "len-on-a-number"],
+)
+def test_error_a_length_bound_on_what_is_not_an_array(annotation: object, named: str) -> None:
+    # pydantic also bounds the length of a string or an object; the checker
+    # bounds only an array's, so the type cannot promise more than it checks.
+    with pytest.raises(TypeError, match=re.escape(named)):
+        parser(annotation, no_leaf)
+
+
 def test_error_a_bound_on_the_values_an_open_typeddict_takes() -> None:
     class Loose(TypedDict, extra_items=Annotated[object, Ge(0)]):
         level: int
@@ -1117,8 +1216,6 @@ class Later(BaseMetadata):
 @pytest.mark.parametrize(
     "constraint",
     [
-        MinLen(1),
-        Len(1, 3),
         MultipleOf(2),
         Predicate(str.isdigit),
         Timezone(None),
@@ -1127,8 +1224,6 @@ class Later(BaseMetadata):
         pydantic.StringConstraints(pattern="^[a-z]+$"),
     ],
     ids=[
-        "min-len",
-        "len",
         "multiple-of",
         "predicate",
         "timezone",
@@ -1314,7 +1409,7 @@ class _SelfReferentialReadable(TypedDict, closed=True):
             _ConstrainedMember,
             Unread(
                 "_ConstrainedMember.a: MultipleOf(multiple_of=2) is not a constraint the checker "
-                "reads, which are Gt, Ge, Lt and Le",
+                "reads, which are Gt, Ge, Lt, Le, MinLen and MaxLen",
                 constraint=True,
             ),
         ),
@@ -1322,7 +1417,7 @@ class _SelfReferentialReadable(TypedDict, closed=True):
             _HoldsAConstrainedMember,
             Unread(
                 "_HoldsAConstrainedMember.inner: _ConstrainedMember.a: MultipleOf(multiple_of=2) is "
-                "not a constraint the checker reads, which are Gt, Ge, Lt and Le",
+                "not a constraint the checker reads, which are Gt, Ge, Lt, Le, MinLen and MaxLen",
                 constraint=True,
             ),
         ),
@@ -1355,7 +1450,7 @@ class _SelfReferentialReadable(TypedDict, closed=True):
             _ConstraintOnAReadableMember,
             Unread(
                 "_ConstraintOnAReadableMember.inner: MultipleOf(multiple_of=2) is not a "
-                "constraint the checker reads, which are Gt, Ge, Lt and Le",
+                "constraint the checker reads, which are Gt, Ge, Lt, Le, MinLen and MaxLen",
                 constraint=True,
             ),
         ),
@@ -1364,7 +1459,7 @@ class _SelfReferentialReadable(TypedDict, closed=True):
             Unread(
                 "_ConstraintOnAConstrainedMember.inner: _ConstrainedMember.a: "
                 "MultipleOf(multiple_of=2) is not a constraint the checker reads, which are Gt, "
-                "Ge, Lt and Le",
+                "Ge, Lt, Le, MinLen and MaxLen",
                 constraint=True,
             ),
         ),
@@ -1372,7 +1467,7 @@ class _SelfReferentialReadable(TypedDict, closed=True):
             _SelfReferentialWithAConstraint,
             Unread(
                 "_SelfReferentialWithAConstraint.a: MultipleOf(multiple_of=2) is not a constraint "
-                "the checker reads, which are Gt, Ge, Lt and Le",
+                "the checker reads, which are Gt, Ge, Lt, Le, MinLen and MaxLen",
                 constraint=True,
             ),
         ),
@@ -1388,7 +1483,7 @@ class _SelfReferentialReadable(TypedDict, closed=True):
             _SelfReferentialConstraintOnItself,
             Unread(
                 "_SelfReferentialConstraintOnItself.parent: MultipleOf(multiple_of=2) is not a "
-                "constraint the checker reads, which are Gt, Ge, Lt and Le",
+                "constraint the checker reads, which are Gt, Ge, Lt, Le, MinLen and MaxLen",
                 constraint=True,
             ),
         ),
@@ -1404,7 +1499,7 @@ class _SelfReferentialReadable(TypedDict, closed=True):
             _OuterWithAConstraintAfterACycle,
             Unread(
                 "_OuterWithAConstraintAfterACycle.a: MultipleOf(multiple_of=2) is not a "
-                "constraint the checker reads, which are Gt, Ge, Lt and Le",
+                "constraint the checker reads, which are Gt, Ge, Lt, Le, MinLen and MaxLen",
                 constraint=True,
             ),
         ),
@@ -1420,7 +1515,7 @@ class _SelfReferentialReadable(TypedDict, closed=True):
             _OuterWithAConstraintOnTheCycle,
             Unread(
                 "_OuterWithAConstraintOnTheCycle.inner: MultipleOf(multiple_of=2) is not a "
-                "constraint the checker reads, which are Gt, Ge, Lt and Le",
+                "constraint the checker reads, which are Gt, Ge, Lt, Le, MinLen and MaxLen",
                 constraint=True,
             ),
         ),
@@ -1429,7 +1524,7 @@ class _SelfReferentialReadable(TypedDict, closed=True):
             Unread(
                 "_SelfReferentialTwiceWithAConstraintOnTheSecond.constrained: "
                 "MultipleOf(multiple_of=2) is not a constraint the checker reads, which are Gt, "
-                "Ge, Lt and Le",
+                "Ge, Lt, Le, MinLen and MaxLen",
                 constraint=True,
             ),
         ),
@@ -1437,7 +1532,7 @@ class _SelfReferentialReadable(TypedDict, closed=True):
             _DocumentedThenConstrainedBackReferences,
             Unread(
                 "_DocumentedThenConstrainedBackReferences.constrained: MultipleOf(multiple_of=2) "
-                "is not a constraint the checker reads, which are Gt, Ge, Lt and Le",
+                "is not a constraint the checker reads, which are Gt, Ge, Lt, Le, MinLen and MaxLen",
                 constraint=True,
             ),
         ),
@@ -1445,7 +1540,7 @@ class _SelfReferentialReadable(TypedDict, closed=True):
             _OuterWithAConstraintAfterAnOptionalCycle,
             Unread(
                 "_OuterWithAConstraintAfterAnOptionalCycle.a: MultipleOf(multiple_of=2) is not a "
-                "constraint the checker reads, which are Gt, Ge, Lt and Le",
+                "constraint the checker reads, which are Gt, Ge, Lt, Le, MinLen and MaxLen",
                 constraint=True,
             ),
         ),
@@ -1463,7 +1558,7 @@ class _SelfReferentialReadable(TypedDict, closed=True):
             Unread(
                 "_HoldsATupleOfAConstrainedMember.inner: _ConstrainedMember.a: "
                 "MultipleOf(multiple_of=2) is not a constraint the checker reads, which are Gt, "
-                "Ge, Lt and Le",
+                "Ge, Lt, Le, MinLen and MaxLen",
                 constraint=True,
             ),
         ),
@@ -1562,8 +1657,9 @@ def test_unread_in_names_the_part_without_a_parser_and_whether_it_is_a_constrain
         Annotated[Digit, Ge(1)],
         Annotated[int, Ge(0), Gt(0)],
         Annotated[int, Interval(le=9), Lt(5)],
+        Annotated[tuple[int, ...], Len(1, 3), MinLen(2)],
     ],
-    ids=["narrowing-an-alias", "gt-and-ge", "interval-and-lt"],
+    ids=["narrowing-an-alias", "gt-and-ge", "interval-and-lt", "len-and-min-len"],
 )
 def test_error_a_second_bound_from_one_side(annotation: object) -> None:
     # Pydantic uses the last bound given; write only one.
@@ -1577,6 +1673,12 @@ def test_error_a_second_bound_from_one_side(annotation: object) -> None:
 def test_error_a_bound_that_is_not_a_finite_number(bound: object) -> None:
     with pytest.raises(TypeError, match="a bound is a finite number"):
         parser(Annotated[int, Ge(bound)], no_leaf)  # pyright: ignore[reportArgumentType]
+
+
+@pytest.mark.parametrize("length", [-1, 1.5], ids=["negative", "fractional"])
+def test_error_a_length_bound_that_is_not_a_non_negative_integer(length: object) -> None:
+    with pytest.raises(TypeError, match="a length bound is a non-negative integer"):
+        parser(Annotated[tuple[int, ...], MinLen(length)], no_leaf)  # pyright: ignore[reportArgumentType]
 
 
 # --- check: the public door ------------------------------------------------
@@ -1669,6 +1771,16 @@ def test_error_check_refuses_a_value_of_another_type() -> None:
     typed, problems = check({"level": "high"}, Options)
     assert typed is None
     assert [(problem.loc, problem.kind) for problem in problems] == [(("level",), "invalid_type")]
+
+
+def test_error_check_refuses_an_array_document_without_codecs() -> None:
+    # The document's type says `codecs` is never empty, so `check` refuses
+    # an empty list at `codecs`, as the reader and the JSON Schema do.
+    typed, problems = check({**_V3_DOCUMENT, "codecs": []}, ZarrV3ArrayMetadataJSON)
+    assert typed is None
+    assert [(problem.loc, problem.kind, dict(problem.ctx)) for problem in problems] == [
+        (("codecs",), "invalid_value", {"min_length": 1})
+    ]
 
 
 _NOT_DOCUMENTS: Final = frozenset({"ZarrV3ContextSlots", "ZarrV2ContextSlots"})

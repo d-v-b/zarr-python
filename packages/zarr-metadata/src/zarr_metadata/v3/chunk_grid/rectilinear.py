@@ -72,28 +72,6 @@ def _canonical(
     )
 
 
-def _rules(
-    configuration: RectilinearChunkGridConfiguration, nested: Nested
-) -> Iterator[ValidationProblem]:
-    """Check that each dimension's list of chunk edge lengths has at least one.
-
-    "as a non-empty array", and "For an axis of length 0, the array form
-    still requires at least one edge length"
-    (https://github.com/zarr-developers/zarr-extensions/blob/cadd1dab6c9aebafb66080b78b583f6507466b3d/chunk-grids/rectilinear/README.md?plain=1#L89-L95).
-    A dimension that has no chunks, because its length is 0, writes a bare
-    integer instead. The type cannot declare a minimum length, so this rule
-    checks it.
-    """
-    for axis, spec in enumerate(configuration["chunk_shapes"]):
-        if isinstance(spec, tuple) and len(spec) == 0:
-            yield ValidationProblem(
-                ("chunk_shapes", axis),
-                "expected at least one chunk edge length, got an empty list",
-                "invalid_value",
-                ctx={"min_length": 1},
-            )
-
-
 def _shape_rules(
     configuration: RectilinearChunkGridConfiguration, nested: Nested, shape: tuple[int, ...]
 ) -> Iterator[ValidationProblem]:
@@ -149,7 +127,6 @@ def _chunk_lengths(
 RECTILINEAR_CHUNK_GRID: Final = ChunkGridDefinition(
     name=RECTILINEAR_CHUNK_GRID_NAME,
     configuration=RectilinearChunkGridConfiguration,
-    rules=_rules,
     canonical=_canonical,
     shape_rules=_shape_rules,
     chunk_lengths=_chunk_lengths,
