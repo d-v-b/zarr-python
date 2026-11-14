@@ -12,6 +12,7 @@ import pickle
 from typing import Any
 
 import pytest
+from typing_extensions import TypedDict
 
 from zarr_metadata import ValidationProblem
 from zarr_metadata._json import value_at
@@ -26,7 +27,7 @@ from zarr_metadata.definition import (
 )
 from zarr_metadata.definition._definition import canonicalize
 from zarr_metadata.v3.codec.gzip import GZIP_CODEC
-from zarr_metadata.v3.data_type.raw import RAW_BYTES_DATA_TYPE, RawBytesConfiguration
+from zarr_metadata.v3.data_type.raw import RAW_BYTES_DATA_TYPE
 from zarr_metadata.v3.definition import (
     CORE_AND_EXTENSIONS_CONTEXT,
     CORE_CONTEXT,
@@ -385,11 +386,17 @@ def test_raw_bits_read_as_r_star_with_the_size_their_name_carries(
     )
 
 
+class AnyRawSize(TypedDict, closed=True):
+    """A raw-bits configuration of any size, which the package's own type does not allow."""
+
+    bits: int
+
+
 def test_a_reader_reads_raw_bits_its_own_way_by_defining_r_star() -> None:
     # This definition accepts any size. Filed under `r*` in place of the
     # package's own, it reads every raw-bits name. Filed back, the package's
     # definition reads them again.
-    mine = DataTypeDefinition(name="r*", configuration=RawBytesConfiguration)
+    mine = DataTypeDefinition(name="r*", configuration=AnyRawSize)
     context = CORE_AND_EXTENSIONS_CONTEXT.copy(
         update={"data_types": {**CORE_AND_EXTENSIONS_CONTEXT.data_types, "r*": mine}}
     )

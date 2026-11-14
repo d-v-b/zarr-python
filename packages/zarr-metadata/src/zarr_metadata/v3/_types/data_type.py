@@ -13,7 +13,7 @@ the data type's definition and rules.
 from collections.abc import Mapping
 from typing import Annotated, Final, Literal, NewType, NotRequired, get_args
 
-from annotated_types import Ge, Interval, MinLen
+from annotated_types import Ge, Gt, Interval, MinLen, MultipleOf
 from typing_extensions import ReadOnly, TypedDict
 
 from zarr_metadata._common import JSONValue
@@ -352,10 +352,11 @@ class RawBytesConfiguration(TypedDict, closed=True):
     back as the name.
     """
 
-    bits: int
+    bits: Annotated[int, Gt(0), MultipleOf(8)]
     """The size in bits that the name writes, `16` for `r16`.
 
-    A positive multiple of 8.
+    A positive multiple of 8: "raw bits, variable size given by *, limited
+    to be a multiple of 8". Zero bits is not a valid type.
     """
 
 
@@ -411,9 +412,11 @@ FixedLengthUtf32DataTypeName = Literal["fixed_length_utf32"]
 class FixedLengthUtf32Configuration(TypedDict, closed=True):
     """Configuration for the `fixed_length_utf32` data type."""
 
-    length_bytes: ReadOnly[int]
-    """The size in bytes of every value: a positive multiple of 4, since
-    each code point takes 4 bytes."""
+    length_bytes: ReadOnly[Annotated[int, Gt(0), MultipleOf(4)]]
+    """The size in bytes of every value: a "positive integer, multiple of `4`", since each code point takes 4 bytes.
+
+    https://github.com/zarr-developers/zarr-extensions/blob/cadd1dab6c9aebafb66080b78b583f6507466b3d/data-types/fixed_length_utf32/README.md?plain=1#L41
+    """
 
 
 class FixedLengthUtf32(TypedDict, closed=True):

@@ -41,9 +41,11 @@ how its module writes annotations:
 - A number type may carry bounds, written with annotated-types as
   pydantic reads them: `Gt`, `Ge`, `Lt`, `Le` and `Interval`, at any
   depth. For example, `tuple[Annotated[int, Ge(1)], ...]` bounds each
-  element. An array type may bound its length the same way, with
-  `MinLen`, `MaxLen` and `Len`: `Annotated[tuple[int, ...], MinLen(1)]`
-  is a non-empty array. A value outside the bounds is an `invalid_value`
+  element. An integer type may also carry a step, `MultipleOf`:
+  `Annotated[int, Gt(0), MultipleOf(4)]` is a positive multiple of 4. An
+  array type may bound its length the same way, with `MinLen`, `MaxLen`
+  and `Len`: `Annotated[tuple[int, ...], MinLen(1)]` is a non-empty
+  array. A value outside the bounds is an `invalid_value`
   problem. Its message states what the type allows, and its `ctx` holds
   the bounds, as pydantic names them (`ge`, `min_length`).
   `Annotated` may also carry a note (a string or a `Doc`). Any other
