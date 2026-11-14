@@ -207,6 +207,7 @@ def test_error_an_inner_chunk_length_that_does_not_divide_the_shard(
     [
         # Each pipeline is read as the array's pipeline is, at its own location.
         (_shard([4, 4], codecs=[]), [((0, "configuration", "codecs"), "invalid_value")]),
+        (_shard([4, 4], index=[]), [((0, "configuration", "index_codecs"), "invalid_value")]),
         (
             _shard([4, 4], codecs=["crc32c", LITTLE]),
             [((0, "configuration", "codecs", 1), "invalid_value")],
