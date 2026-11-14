@@ -22,6 +22,7 @@ from zarr_metadata.v3._definition import (
     ExtraFieldDefinition,
     GroupExtraFieldDefinition,
 )
+from zarr_metadata.v3._types.chunk_grid import RectilinearChunkGridConfiguration
 from zarr_metadata.v3.array import ZarrV3ArrayMetadataJSON
 from zarr_metadata.v3.group import ZarrV3GroupMetadataJSON
 
@@ -82,6 +83,10 @@ def declaration_schemas(context: ZarrV3Context) -> SchemaLeaf:
     """The schema leaf that `declaration_json_schema_v3` uses. It writes each declaration alias as a declaration of its kind, as `context` reads it."""
 
     def leaf(annotation: object, schemas: Schemas) -> JSONSchema | None:
+        if annotation is RectilinearChunkGridConfiguration:
+            return schemas.defined(
+                annotation, annotation.__name__, lambda: _rectilinear_configuration(schemas)
+            )
         kind = declaration_kind(annotation)
         if kind is None or not is_alias(annotation):
             return None
@@ -271,6 +276,34 @@ def _member_object(schema: Mapping[str, JSONValue], key: str) -> Mapping[str, JS
         msg = f"the schema member {key!r} is an object, got {found!r}"
         raise TypeError(msg)
     return found
+
+
+def _rectilinear_configuration(schemas: Schemas) -> JSONSchema:
+    """The rectilinear chunk grid's configuration: its TypedDict, with at least one edge length in each dimension's list.
+
+    The TypedDict cannot declare a minimum length, so the schema adds it,
+    as the grid's rules check it: the spec requires "a non-empty array",
+    even for a dimension of length 0.
+    """
+    schema = schemas.object_of(RectilinearChunkGridConfiguration)
+    properties = _member_object(schema, "properties")
+    chunk_shapes = _member_object(properties, "chunk_shapes")
+    dimension = _member_object(chunk_shapes, "items")
+    branches = dimension.get("anyOf")
+    if not isinstance(branches, list):
+        msg = f"the schema of a rectilinear dimension is a union, got {dimension!r}"
+        raise TypeError(msg)
+    nonempty: list[JSONValue] = [
+        {**branch, "minItems": 1}
+        if isinstance(branch, Mapping) and branch.get("type") == "array"
+        else branch
+        for branch in branches
+    ]
+    items: JSONSchema = {**dimension, "anyOf": nonempty}
+    return {
+        **schema,
+        "properties": {**properties, "chunk_shapes": {**chunk_shapes, "items": items}},
+    }
 
 
 def _array(context: ZarrV3Context, schemas: Schemas) -> JSONSchema:
