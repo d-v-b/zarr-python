@@ -3,8 +3,10 @@
 Checks that this checkout behaves as a baseline zarr does wherever existing code can
 look: the synchronous `Array` API, `AsyncArray` used as a dataclass (fields, `replace`,
 `asdict`, equality, `object.__setattr__`), copies, pickles carried between the two
-versions in both directions, `AsyncArray` subclasses of several shapes, and arrays whose
-metadata documents another writer stored (chunk sizes zarr reads only by repairing them).
+versions in both directions, `AsyncArray` subclasses of several shapes (one overrides
+`_set_selection`), arrays whose metadata documents another writer stored (chunk sizes
+zarr reads only by repairing them), and writes through groups whose consolidated
+metadata holds copies of such documents, at the root and in a subgroup.
 
 ```bash
 hatch run test.py3.12-optional:python tools/compat/compat.py --baseline "$(git merge-base HEAD upstream/main)" --seeds 2000

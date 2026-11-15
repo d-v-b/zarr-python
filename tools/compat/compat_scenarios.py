@@ -109,6 +109,8 @@ class Recorder:
             return {"Array": type(value).__qualname__, "shape": list(value.shape)}
         if isinstance(value, AsyncArray):
             return {"AsyncArray": type(value).__qualname__, "shape": list(value.shape)}
+        if isinstance(value, zarr.Group):
+            return {"Group": type(value).__qualname__, "path": value.path}
         return {"type": type(value).__qualname__, "repr": self.norm(repr(value))}
 
 
@@ -595,6 +597,112 @@ def run_document(rec: Recorder, name: str, tmp: Path) -> None:
     rec.step("store.end", lambda: snapshot(store))
 
 
+# Groups -------------------------------------------------------------------------------------
+
+
+def put_consolidated_group(store: Any, prefix: str, document: dict[str, Any]) -> None:
+    """Store, as other software would, a group at `prefix` holding the array `a` with
+    `document`, and consolidated metadata holding a copy of it."""
+    at = f"{prefix}/" if prefix else ""
+    if document["zarr_format"] == 2:
+        attributes = {"z": 1, "a": 2}
+        zgroup = {"zarr_format": 2}
+        put_document(store, f"{at}.zgroup", zgroup)
+        put_document(store, f"{at}a/.zarray", document)
+        put_document(store, f"{at}a/.zattrs", attributes)
+        members = {".zgroup": zgroup, "a/.zarray": document, "a/.zattrs": attributes}
+        put_document(store, f"{at}.zmetadata", {"zarr_consolidated_format": 1, "metadata": members})
+    else:
+        consolidated = {"kind": "inline", "must_understand": False, "metadata": {"a": document}}
+        put_document(store, f"{at}a/zarr.json", document)
+        put_document(
+            store,
+            f"{at}zarr.json",
+            {
+                "zarr_format": 3,
+                "node_type": "group",
+                "attributes": {},
+                "consolidated_metadata": consolidated,
+            },
+        )
+
+
+def _open_group_at(store: Any, prefix: str) -> Any:
+    """The group at `prefix`, reached through the root group when it is not the root."""
+    root = zarr.open_group(store, mode="r+")
+    return root[prefix] if prefix else root
+
+
+def _set_group_attribute(group: Any) -> None:
+    group.attrs["x"] = 1
+
+
+GROUP_FLOWS = (
+    "attrs",
+    "array_then_attrs",
+    "attrs_then_array",
+    "members_then_attrs",
+    "member_write",
+    "create_array",
+    "reconsolidate",
+    "resaved_elsewhere",
+)
+GROUP_PREFIXES = ("", "g")
+
+
+def run_group(rec: Recorder, name: str, prefix: str, flow: str, tmp: Path) -> None:
+    """Write through a group whose consolidated metadata other software stored: at the
+    root, or (`prefix`) in a subgroup of a root group that holds none."""
+    document = DOCUMENTS[name]
+    zarr_format = document["zarr_format"]
+    store = new_store("local", tmp, f"group-{name}-{prefix or 'root'}-{flow}")
+    if prefix:
+        if zarr_format == 2:
+            put_document(store, ".zgroup", {"zarr_format": 2})
+        else:
+            root = {"zarr_format": 3, "node_type": "group", "attributes": {}}
+            put_document(store, "zarr.json", root)
+    put_consolidated_group(store, prefix, document)
+    array_path = f"{prefix}/a" if prefix else "a"
+
+    if flow in ("array_then_attrs", "resaved_elsewhere"):
+        rec.step("open_array", lambda: zarr.open_array(store, path=array_path, mode="r+").shape)
+    if flow == "resaved_elsewhere":
+        # Another store object over the same directory re-saves the array and consolidates.
+        other = zarr.storage.LocalStore(store.root)
+        rec.step(
+            "elsewhere.resave",
+            lambda: zarr.open_array(other, path=array_path, mode="r+").update_attributes({}).shape,
+        )
+        rec.step(
+            "elsewhere.consolidate",
+            lambda: zarr.consolidate_metadata(other, path=prefix or None).metadata.to_dict(),
+        )
+    ok, group = rec.step("open", lambda: _open_group_at(store, prefix))
+    if ok:
+        if flow == "attrs_then_array":
+            rec.step("open_array", lambda: zarr.open_array(store, path=array_path, mode="r+").shape)
+        if flow == "members_then_attrs":
+            rec.step("members", lambda: sorted(k for k, _ in group.members()))
+        if flow == "member_write":
+            ok_member, member = rec.step("member", lambda: group["a"])
+            if ok_member and all(n > 0 for n in member.shape):
+                rec.step("member.write", lambda: member.__setitem__(..., 1))
+                rec.step("member.read", lambda: member[...])
+        elif flow == "create_array":
+            rec.step(
+                "create_array", lambda: group.create_array("b", shape=(2,), dtype="int8").shape
+            )
+        elif flow == "reconsolidate":
+            rec.step(
+                "consolidate",
+                lambda: zarr.consolidate_metadata(store, path=prefix or None).metadata.to_dict(),
+            )
+        else:
+            rec.step("attrs", lambda: _set_group_attribute(group))
+    rec.step("store.end", lambda: snapshot(store))
+
+
 # Subclasses --------------------------------------------------------------------------------
 
 
@@ -644,6 +752,17 @@ class ClassAttrAsyncArray(AsyncArray):  # type: ignore[type-arg]
     _io = "subclass-owned"
 
 
+class OverridingAsyncArray(AsyncArray):  # type: ignore[type-arg]
+    """A subclass that stores one more than each write gives it."""
+
+    async def _set_selection(
+        self, indexer: Any, value: Any, *, prototype: Any, fields: Any = None
+    ) -> None:
+        await super()._set_selection(
+            indexer, np.asarray(value) + 1, prototype=prototype, fields=fields
+        )
+
+
 SUBCLASSES = {
     "tagged": TaggedAsyncArray,
     "plain": PlainAsyncArray,
@@ -651,6 +770,7 @@ SUBCLASSES = {
     "reducing": ReducingAsyncArray,
     "init": InitAsyncArray,
     "classattr": ClassAttrAsyncArray,
+    "overriding": OverridingAsyncArray,
 }
 
 
@@ -693,6 +813,8 @@ def run_subclass(rec: Recorder, name: str, zarr_format: int, tmp: Path) -> None:
     rec.step("describe", lambda: sub.describe() if hasattr(sub, "describe") else None)
     rec.step("eq.copy", lambda: sub == copy.copy(sub))
     rec.step("read", lambda: zarr.Array(sub)[...])
+    rec.step("async.setitem", lambda: zarr.core.sync.sync(sub.setitem((0, 0), 41)))
+    rec.step("async.getitem", lambda: zarr.core.sync.sync(sub.getitem((0, 0))))
     for how, make in {
         "copy": lambda: copy.copy(sub),
         "deepcopy": lambda: copy.deepcopy(sub),
@@ -764,6 +886,11 @@ def dump_pickles(directory: Path, stores: Path) -> None:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             _dump(directory, f"doc.{doc}", lambda s=store: zarr.open_array(s, path="a", mode="r+"))
+        store = zarr.storage.LocalStore(stores / f"group-{doc}")
+        put_consolidated_group(store, "", DOCUMENTS[doc])
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            _dump(directory, f"group.{doc}", lambda s=store: zarr.open_group(s, mode="r+"))
 
 
 def load_pickles(rec: Recorder, directory: Path) -> None:
@@ -777,6 +904,15 @@ def load_pickles(rec: Recorder, directory: Path) -> None:
 def _observe_loaded(rec: Recorder, obj: Any) -> None:
     """Record what a caller sees of an object loaded from a pickle, and use it."""
     rec.step("type", lambda: type(obj).__qualname__)
+    if isinstance(obj, zarr.Group):
+        rec.step("metadata", lambda: obj.metadata.to_dict())
+        rec.step("attrs.set", lambda: _set_group_attribute(obj))
+        rec.step("store", lambda: snapshot(obj.store))
+        ok, member = rec.step("member", lambda: obj["a"])
+        if ok and all(n > 0 for n in member.shape):
+            rec.step("member.write", lambda: member.__setitem__(..., 1))
+            rec.step("store.after_write", lambda: snapshot(obj.store))
+        return
     if not isinstance(obj, zarr.Array | AsyncArray):
         rec.step("to_dict", lambda: obj.to_dict())
         return
@@ -801,6 +937,11 @@ def run_all(rec: Recorder, tmp: Path, seeds: range) -> None:
     for name in DOCUMENTS:
         rec.scenario = f"document:{name}"
         _guard(rec, lambda n=name: run_document(rec, n, tmp))
+    for name in DOCUMENTS:
+        for prefix in GROUP_PREFIXES:
+            for flow in GROUP_FLOWS:
+                rec.scenario = f"group:{name}:{prefix or 'root'}:{flow}"
+                _guard(rec, lambda n=name, p=prefix, f=flow: run_group(rec, n, p, f, tmp))
     for name in SUBCLASSES:
         for zarr_format in (2, 3):
             rec.scenario = f"subclass:{name}:v{zarr_format}"
