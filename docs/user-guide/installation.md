@@ -11,6 +11,7 @@ Required dependencies include:
 - [google-crc32c](https://github.com/googleapis/python-crc32c) (1.5 or later)
 - [typing_extensions](https://typing-extensions.readthedocs.io/en/latest/) (4.16 or later)
 - [donfig](https://donfig.readthedocs.io/en/latest/) (0.8 or later)
+- [zarr-metadata](https://pypi.org/project/zarr-metadata/) (0.8 or later)
 
 ## pip
 

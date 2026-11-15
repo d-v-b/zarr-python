@@ -6747,7 +6747,7 @@ def _document_without_attributes(binding: AsyncArrayIO) -> ArrayMetadataModel:
     source = binding._source
     if isinstance(source, ArrayV2Metadata | ArrayV3Metadata):
         return _model_of_legacy(replace(source, attributes={}))
-    return source.update(attributes={})
+    return source.replace(attributes={})
 
 
 def _model_of_legacy(metadata: ArrayMetadata) -> ArrayMetadataModel:
@@ -7037,7 +7037,7 @@ class AsyncArrayIO:
             if cached is None or cached[0] != text:
                 same = text == _json_text(source.attributes)
                 attributes = _plain_json(resolved.attributes)
-                cached = (text, source if same else source.update(attributes=attributes))
+                cached = (text, source if same else source.replace(attributes=attributes))
                 self._attributes_cache = cached
             return cached[1]
         # Derived on every access, not cached: a legacy object's attributes may be
@@ -7359,7 +7359,7 @@ class AsyncArrayIO:
         else:
             source = self.metadata
             prototype = default_buffer_prototype()
-            key_value = source.to_key_value(indent=zarr_config.get("json_indent"))
+            key_value = source.to_key_value({"indent": zarr_config.get("json_indent")})
             to_save = {
                 str(key): prototype.buffer.from_bytes(value) for key, value in key_value.items()
             }

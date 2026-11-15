@@ -53,7 +53,7 @@ dependencies = [
     'typing_extensions>=4.16',
     'donfig>=0.8',
     'msgspec>=0.19',
-    'zarr-metadata>=0.6.0',
+    'zarr-metadata>=0.8.0',
 ]
 
 dynamic = [
@@ -262,6 +262,7 @@ extra-dependencies = [
     'donfig==0.8.*',
     'obstore==0.5.*',
     'msgspec==0.19.*',
+    'zarr-metadata==0.8.*',
 ]
 
 [tool.hatch.envs.default]

@@ -239,7 +239,7 @@ async def test_with_methods_rebind() -> None:
     await aio.setitem(Ellipsis, data)
     await aio.store_metadata()
 
-    relabeled = aio.with_metadata(aio.metadata.update(attributes={"a": 1}))
+    relabeled = aio.with_metadata(aio.metadata.replace(attributes={"a": 1}))
     assert relabeled.store_path == aio.store_path
     assert dict(relabeled.metadata.attributes) == {"a": 1}
     await relabeled.store_metadata()
@@ -336,7 +336,7 @@ async def test_store_metadata_of_model_without_attributes_clears_zattrs() -> Non
     opened = await AsyncArrayIO.open(store, name="foo")
     model = opened.metadata
     assert isinstance(model, ModelV2)
-    bare = opened.with_metadata(model.update(attributes=UNSET))
+    bare = opened.with_metadata(model.replace(attributes=UNSET))
     await bare.store_metadata()
     assert "foo/.zattrs" not in await _store_keys(store)
     reread = await AsyncArrayIO.open(store, name="foo")
@@ -583,7 +583,7 @@ async def test_erase_and_store_metadata_leave_a_group_in_place(zarr_format: Zarr
     if zarr_format == 2:
         model = declared.metadata
         assert isinstance(model, ModelV2)
-        await declared.with_metadata(model.update(attributes=UNSET)).store_metadata()
+        await declared.with_metadata(model.replace(attributes=UNSET)).store_metadata()
         reopened = await zarr.api.asynchronous.open_group(store, path="g", mode="r", zarr_format=2)
         assert dict(reopened.attrs) == {"owner": "group"}
 
@@ -647,7 +647,7 @@ async def test_verify_names_the_fields_that_differ(zarr_format: ZarrFormat) -> N
         )
     )
     await aio.store_metadata()
-    other = aio.with_metadata(aio.metadata.update(fill_value=-0.0))
+    other = aio.with_metadata(aio.metadata.replace(fill_value=-0.0))
     with pytest.raises(ValueError, match=r"differing fields: fill_value\.$"):
         await other.verify()
 
@@ -680,7 +680,7 @@ def test_equality_is_canonical_whatever_is_resolved() -> None:
     positive = AsyncArrayIO.build_v3(
         store_path, shape=(4,), data_type="float32", chunk_grid=(4,), fill_value=0.0
     )
-    negative = positive.with_metadata(positive.metadata.update(fill_value=-0.0))
+    negative = positive.with_metadata(positive.metadata.replace(fill_value=-0.0))
     legacy_negative = AsyncArrayIO(negative.metadata_legacy, store_path)
     assert positive != negative
     assert positive != legacy_negative
