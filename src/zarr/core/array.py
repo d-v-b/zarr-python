@@ -1809,8 +1809,12 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         - This method is asynchronous and should be awaited.
         - Supports basic indexing, where the selection is contiguous and does not involve advanced indexing.
         """
-        # The wrapped binding writes, storing a repair that moves chunks first.
-        return await self._io.setitem(selection, value, prototype=prototype)
+        if prototype is None:
+            prototype = default_buffer_prototype()
+        indexer = BasicIndexer(selection, shape=self.metadata.shape, chunk_grid=self._chunk_grid)
+        # Through `_set_selection`, the one method every write of this array goes
+        # through, so a subclass that overrides it sees this write too.
+        return await self._set_selection(indexer, value, prototype=prototype)
 
     @property
     def oindex(self) -> AsyncOIndex[T_ArrayMetadata]:

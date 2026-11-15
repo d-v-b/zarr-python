@@ -1031,6 +1031,46 @@ def test_a_dataclass_subclass_binds_through_its_generated_init() -> None:
     assert dataclasses.replace(tagged, tag="u").tag == "u"
 
 
+class _IncrementingAsyncArray(AsyncArray[Any]):
+    """A subclass that stores one more than each write gives it, by overriding
+    `_set_selection`."""
+
+    async def _set_selection(
+        self, indexer: Any, value: Any, *, prototype: Any, fields: Any = None
+    ) -> None:
+        await super()._set_selection(
+            indexer, np.asarray(value) + 1, prototype=prototype, fields=fields
+        )
+
+
+def _write_with_setitem(array: AsyncArray[Any], data: np.ndarray[Any, Any]) -> None:
+    sync(array.setitem(slice(None), data))
+
+
+def _write_with_array_setitem(array: AsyncArray[Any], data: np.ndarray[Any, Any]) -> None:
+    zarr.Array(array)[...] = data
+
+
+def _write_with_orthogonal_selection(array: AsyncArray[Any], data: np.ndarray[Any, Any]) -> None:
+    zarr.Array(array).set_orthogonal_selection((slice(None),), data)
+
+
+@pytest.mark.parametrize(
+    "write", [_write_with_setitem, _write_with_array_setitem, _write_with_orthogonal_selection]
+)
+def test_every_write_goes_through_a_subclass_set_selection(
+    write: Callable[[AsyncArray[Any], np.ndarray[Any, Any]], None],
+) -> None:
+    """Every write of an array goes through `AsyncArray._set_selection`, so a
+    subclass that overrides it changes what each of them stores."""
+    created = zarr.create_array(MemoryStore(), shape=(4,), dtype="uint8", chunks=(2,))
+    array = _IncrementingAsyncArray(created.metadata, created.store_path)
+
+    write(array, np.arange(4, dtype="uint8"))
+
+    np.testing.assert_array_equal(created[...], np.arange(4) + 1)
+
+
 class _NativeBinding(AsyncArrayIO):
     """A binding that derives state of its own (a native handle's shape) in `_bind`."""
 
