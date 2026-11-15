@@ -58,7 +58,7 @@ from zarr.core.metadata.io import (
     save_new_metadata,
     store_documents,
 )
-from zarr.core.metadata.stored import stored_documents
+from zarr.core.metadata.stored import CarriedEntries, stored_documents
 from zarr.core.metadata.v3 import AllowedExtraField, check_storable, parse_extra_fields
 from zarr.core.sync import SyncMixin, sync
 from zarr.errors import (
@@ -92,7 +92,6 @@ if TYPE_CHECKING:
     from zarr.core.common import MemoryOrder
     from zarr.core.dtype import ZDTypeLike
     from zarr.core.metadata.repair import ArrayDocument
-    from zarr.core.metadata.stored import CarriedEntry
     from zarr.types import AnyArray, AnyAsyncArray, ArrayV2, ArrayV3, AsyncArrayV2, AsyncArrayV3
 
 logger = logging.getLogger("zarr.group")
@@ -734,15 +733,17 @@ class AsyncGroup:
             entries = stored_documents(self.store_path.store).entries(
                 paths, self.metadata.zarr_format
             )
-            if entries:
-                state["_stored_members"] = entries
+            if entries.documents or entries.copies:
+                # As a plain tuple, which every version unpickles.
+                state["_stored_members"] = tuple(entries)
                 # zarr 3.4.1 and 3.4.2 read a member's repair from a mark on the
-                # member itself: pickle marked copies for them to read.
+                # member itself: pickle marked copies for them to read. A member's
+                # own document, where it is known, stands before its copy.
                 prefix = f"{self.store_path.path}/" if self.store_path.path else ""
                 marks = {
-                    path.removeprefix(prefix): entry[1]
-                    for path, entry in entries.items()
-                    if entry[1] is not None
+                    path.removeprefix(prefix): mark
+                    for path, mark in {**entries.copies, **entries.documents}.items()
+                    if mark is not None
                 }
                 if marks:
                     state["metadata"] = replace(
@@ -753,28 +754,27 @@ class AsyncGroup:
 
     def __setstate__(self, state: dict[str, object]) -> None:
         state = dict(state)
-        entries = cast("dict[str, CarriedEntry] | None", state.pop("_stored_members", None))
+        carried = cast(
+            "tuple[dict[str, ArrayDocument | None], dict[str, ArrayDocument]] | None",
+            state.pop("_stored_members", None),
+        )
         self.__dict__.update(state)
-        if entries is None:
-            entries = self._legacy_member_marks()
+        entries = self._legacy_member_marks() if carried is None else CarriedEntries(*carried)
         self._clear_member_marks()
-        if entries:
-            stored_documents(self.store_path.store).restore_entries(
-                entries, self.metadata.zarr_format
-            )
+        stored_documents(self.store_path.store).restore_entries(entries, self.metadata.zarr_format)
 
-    def _legacy_member_marks(self) -> dict[str, CarriedEntry]:
+    def _legacy_member_marks(self) -> CarriedEntries:
         """The consolidated members a pickle from zarr 3.4.1 or 3.4.2 marks as read
         from a document that needs a repair, as the entries this version carries."""
+        entries = CarriedEntries({}, {})
         consolidated = self.metadata.consolidated_metadata
         if consolidated is None:
-            return {}
-        marks: dict[str, CarriedEntry] = {}
+            return entries
         for key, member in consolidated.flattened_metadata.items():
             mark = vars(member).get("_stored_document")
             if mark is not None:
-                marks[_join_paths([self.store_path.path, key])] = ("copy", mark)
-        return marks
+                entries.copies[_join_paths([self.store_path.path, key])] = mark
+        return entries
 
     def _clear_member_marks(self) -> None:
         """Drop the marks a pickle leaves on consolidated members: once read, the
@@ -866,14 +866,9 @@ class AsyncGroup:
         )
         # Record the consolidated copies of array documents as stored, so a group write
         # can keep a member that needs a repair as it was stored.
-        consolidated = group.metadata.consolidated_metadata
-        raw_consolidated = data.get("consolidated_metadata")
-        if consolidated is not None and isinstance(raw_consolidated, dict):
-            members = raw_consolidated.get("metadata")
-            if isinstance(members, dict):
-                stored_documents(store_path.store).observe_consolidated(
-                    store_path.path, members, group.metadata.zarr_format
-                )
+        stored_documents(store_path.store).observe_group(
+            store_path.path, data, group.metadata.zarr_format
+        )
         return group
 
     async def setitem(self, key: str, value: Any) -> None:
@@ -3850,9 +3845,12 @@ async def _read_metadata_v3(store: Store, path: str) -> ArrayV3Metadata | GroupM
     document = buffer_to_json_object(zarr_json_bytes)
     metadata = _build_metadata_v3(document, path=str(StorePath(store, path)))
     # Record an array's document in the store's cache, so a chunk write through it
-    # stores a repair that moves chunks first.
+    # stores a repair that moves chunks first; and the consolidated copies a group's
+    # document holds, as `AsyncGroup.from_dict` does for a group that is opened.
     if isinstance(metadata, ArrayV3Metadata):
         stored_documents(store).observe(path, document, 3)
+    else:
+        stored_documents(store).observe_group(path, document, 3)
     return metadata
 
 

@@ -812,6 +812,11 @@ def _store_zero(doc: dict[str, Any]) -> None:
     _stored_chunks(doc)[0] = 0
 
 
+def _store_one(doc: dict[str, Any]) -> None:
+    """Store the chunk size a stored chunk size of 0 is read as."""
+    _stored_chunks(doc)[0] = 1
+
+
 def _resize_to_10(doc: dict[str, Any]) -> None:
     doc["shape"] = [10]
 
@@ -1957,6 +1962,87 @@ def test_subgroup_write_keeps_nested_members_as_stored(
     sub.attrs["x"] = 1
 
     assert _stored_chunks(_consolidated_member(path / "g", zarr_format, "a")) == [0]
+
+
+@pytest.mark.filterwarnings("ignore:Consolidated metadata is currently not part:UserWarning")
+@pytest.mark.filterwarnings("ignore:.*is read as:zarr.errors.ZarrUserWarning")
+@pytest.mark.parametrize("zarr_format", [2, 3])
+def test_member_of_consolidated_subgroup_stores_its_repair(
+    tmp_path: Path, zarr_format: Literal[2, 3]
+) -> None:
+    """A member of a subgroup that holds consolidated metadata, reached through a
+    parent group that holds none, stores its repair with its first chunk write: the
+    subgroup's document is read as any group's is, and its copies recorded."""
+    path = tmp_path / "root.zarr"
+    zarr.open_group(path, mode="w", zarr_format=zarr_format)
+    document = _consolidated_legacy_member(path / "g", zarr_format)
+    sub = zarr.open_group(LocalStore(path), mode="r+")["g"]
+    assert isinstance(sub, zarr.Group)
+    member = sub["a"]
+    assert isinstance(member, zarr.Array)
+
+    member[:] = [7, 8, 9]
+
+    assert _stored_chunks(json.loads(document.read_text())) == [1]
+
+
+@pytest.mark.filterwarnings("ignore:Consolidated metadata is currently not part:UserWarning")
+@pytest.mark.filterwarnings("ignore:.*is read as:zarr.errors.ZarrUserWarning")
+def test_consolidated_subgroup_write_keeps_members_as_stored(tmp_path: Path) -> None:
+    """A subgroup that holds consolidated metadata, reached through a parent group
+    that holds none, keeps a member read from a repaired copy as it was stored when
+    it writes its own document."""
+    path = tmp_path / "root.zarr"
+    zarr.open_group(path, mode="w", zarr_format=3)
+    _consolidated_legacy_member(path / "g", 3)
+    sub = zarr.open_group(LocalStore(path), mode="r+")["g"]
+    assert isinstance(sub, zarr.Group)
+
+    sub.attrs["x"] = 1
+
+    assert _stored_chunks(_consolidated_member(path / "g", 3, "a")) == [0]
+
+
+@pytest.mark.filterwarnings("ignore:Consolidated metadata is currently not part:UserWarning")
+@pytest.mark.filterwarnings("ignore:.*is read as:zarr.errors.ZarrUserWarning")
+@pytest.mark.parametrize("zarr_format", [2, 3])
+@pytest.mark.parametrize("document_read", ["before the group", "after the group"])
+def test_group_write_keeps_a_valid_copy_of_a_document_needing_repair(
+    tmp_path: Path, zarr_format: Literal[2, 3], document_read: str
+) -> None:
+    """A group write stores a consolidated copy as the group read it. Where the copy
+    is valid and the array's own document needs a repair (another writer consolidated
+    the repair), the copy stays valid, whenever this store object read the document:
+    the document says nothing of the copy."""
+    path = tmp_path / "group.zarr"
+    _consolidated_legacy_member(path, zarr_format)
+    _rewrite_consolidated(path, zarr_format, "a", _store_one)
+    store = LocalStore(path)
+    if document_read == "before the group":
+        zarr.open_array(store, path="a", mode="r+")
+    group = zarr.open_group(store, mode="r+", use_consolidated=True)
+    if document_read == "after the group":
+        zarr.open_array(store, path="a", mode="r+")
+
+    group.attrs["x"] = 1
+
+    assert _stored_chunks(_consolidated_member(path, zarr_format, "a")) == [1]
+
+
+def test_entries_carry_documents_and_copies_apart() -> None:
+    """What one cache carries to another keeps an array's own document and its
+    consolidated copy apart, and carries nothing for a path it knows nothing of."""
+    cache = StoredDocuments()
+    broken = _v2_doc([3], [0])
+    cache.observe("a", broken, 2)
+    cache.observe_consolidated("", {"b": broken}, 2)
+
+    other = StoredDocuments()
+    other.restore_entries(cache.entries(["a", "b", "c"], 2), 2)
+
+    assert (other.needing_repair("a", 2), other.copy_needing_repair("a", 2)) == (broken, None)
+    assert (other.needing_repair("b", 2), other.copy_needing_repair("b", 2)) == (None, broken)
+    assert not other.knows("c", 2)
 
 
 @pytest.mark.filterwarnings("ignore:.*is read as:zarr.errors.ZarrUserWarning")

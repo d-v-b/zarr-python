@@ -121,11 +121,16 @@ async def store_documents(
 
 def members_as_stored(store_path: StorePath, metadata: GroupMetadata) -> dict[str, ArrayDocument]:
     """The members of the consolidated metadata of the group at `store_path` to store as
-    they are stored, by their paths in it: each array whose stored document, or else
-    whose stored consolidated copy, needs a repair that moves chunks and reads as the
-    member does. A group write then leaves those copies as they were stored, so every
-    reader of the consolidated metadata reads them as repaired again. An array whose
-    own document zarr knows needs no such repair is stored as it reads."""
+    they are stored, by their paths in it: each array whose stored consolidated copy
+    needs a repair that moves chunks and reads as the member does. A group write then
+    leaves those copies as they were stored, so every reader of the consolidated
+    metadata reads them as repaired again. An array whose own document zarr knows
+    needs no such repair is stored as it reads.
+
+    Only the copy decides: the array's own document may have been read long before
+    the group was, so a document that needed a repair says nothing of a copy read as
+    valid since. Consolidating a hierarchy, which writes the copies from the
+    documents, records them first (`copies_from_documents`)."""
     consolidated = metadata.consolidated_metadata
     if consolidated is None:
         return {}
@@ -136,14 +141,25 @@ def members_as_stored(store_path: StorePath, metadata: GroupMetadata) -> dict[st
             continue
         path = _join_paths([store_path.path, key])
         zarr_format = member.zarr_format
-        own = cache.needing_repair(path, zarr_format)
-        if cache.knows(path, zarr_format) and own is None:
+        if cache.knows(path, zarr_format) and cache.needing_repair(path, zarr_format) is None:
             continue
-        for document in (own, cache.copy_needing_repair(path, zarr_format)):
-            if document is not None and reads_as(document, member):
-                as_stored[key] = document
-                break
+        document = cache.copy_needing_repair(path, zarr_format)
+        if document is not None and reads_as(document, member):
+            as_stored[key] = document
     return as_stored
+
+
+def copies_from_documents(
+    store_path: StorePath, members: Mapping[str, ArrayMetadata | GroupMetadata]
+) -> None:
+    """Record in the store's cache that the consolidated metadata of the group at
+    `store_path` is about to be written from the documents of `members` (by their
+    paths under the group), which were just read: an array whose document needs a
+    repair that moves chunks is then consolidated as it is stored."""
+    cache = stored_documents(store_path.store)
+    for key, member in members.items():
+        if isinstance(member, ArrayV2Metadata | ArrayV3Metadata):
+            cache.copy_from_document(_join_paths([store_path.path, key]), member.zarr_format)
 
 
 def reads_as(document: ArrayDocument, metadata: ArrayMetadata) -> bool:

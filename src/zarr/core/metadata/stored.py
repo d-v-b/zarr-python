@@ -17,7 +17,7 @@ import copy
 import threading
 import weakref
 from functools import partial
-from typing import TYPE_CHECKING, Final, Literal, cast
+from typing import TYPE_CHECKING, Final, NamedTuple, cast
 
 from zarr.core._json import buffer_to_json_object
 from zarr.core.common import ZARR_JSON, ZARRAY_JSON, ZATTRS_JSON
@@ -38,11 +38,14 @@ if TYPE_CHECKING:
     type WrittenArrayMetadata = ArrayMetadata | ZarrV2ArrayMetadata | ZarrV3ArrayMetadata
 
 
-type CarriedEntry = (
-    tuple[Literal["document"], ArrayDocument | None] | tuple[Literal["copy"], ArrayDocument]
-)
-"""What a cache records of one array document, carried in a pickle: the document's
-entry, or else a consolidated copy's."""
+class CarriedEntries(NamedTuple):
+    """What a cache records of some array documents, carried in a pickle to another
+    store object's cache (see `StoredDocuments.entries`)."""
+
+    documents: dict[str, ArrayDocument | None]
+    """By array path, what `needing_repair` returns for each document the cache knows."""
+    copies: dict[str, ArrayDocument]
+    """By array path, each consolidated copy that needs a repair that moves chunks."""
 
 
 def moves_chunks(document: ArrayDocument, zarr_format: ZarrFormat) -> bool:
@@ -64,7 +67,10 @@ class StoredDocuments:
     what stands for a repair. Copies of array documents in
     consolidated metadata are recorded apart, by the array's path and format, only
     when reading them needs such a repair, so a group write can store them as they
-    were stored. A document zarr reads to open an array is recorded only once it has
+    were stored. The two are separate documents and are recorded separately: a copy
+    from the group documents zarr reads (`observe_group`) and from the consolidation
+    that writes it (`copy_from_document`), never from a later reading of the array's
+    own document. A document zarr reads to open an array is recorded only once it has
     been read as metadata, so one it could not open is unknown; one a chunk write reads
     is recorded as read.
     """
@@ -100,9 +106,19 @@ class StoredDocuments:
 
     def restore_copy(self, path: str, zarr_format: ZarrFormat, document: ArrayDocument) -> None:
         """Record a consolidated copy as `copy_needing_repair` returned it from another
-        store object's cache, unless this cache already knows the array's document."""
-        if not self.knows(path, zarr_format):
-            self._copies.setdefault((path, zarr_format), document)
+        store object's cache, unless this cache already records a copy there."""
+        self._copies.setdefault((path, zarr_format), document)
+
+    def copy_from_document(self, path: str, zarr_format: ZarrFormat) -> None:
+        """Record that the consolidated copy of the array document of `zarr_format` at
+        `path` is about to be written from the document itself, as consolidating a
+        hierarchy does: the copy then needs the repair the document needs."""
+        key = (path, zarr_format)
+        document = self._arrays.get(key)
+        if document is None:
+            self._copies.pop(key, None)
+        else:
+            self._copies[key] = copy.deepcopy(document)
 
     def observe(self, path: str, document: ArrayDocument | None, zarr_format: ZarrFormat) -> None:
         """Record that the array document of `zarr_format` at `path` is `document`
@@ -113,24 +129,24 @@ class StoredDocuments:
         elif key in self._arrays or key in self._copies:
             self._arrays[key] = None
 
-    def entries(self, paths: Iterable[str], zarr_format: ZarrFormat) -> dict[str, CarriedEntry]:
-        """What this cache records of the array documents at `paths`, to carry to
-        another store object's cache (see `restore_entries`)."""
-        carried: dict[str, CarriedEntry] = {}
+    def entries(self, paths: Iterable[str], zarr_format: ZarrFormat) -> CarriedEntries:
+        """What this cache records of the array documents at `paths` and of their
+        consolidated copies, to carry to another store object's cache (see
+        `restore_entries`)."""
+        carried = CarriedEntries({}, {})
         for path in paths:
             if self.knows(path, zarr_format):
-                carried[path] = ("document", self.needing_repair(path, zarr_format))
-            elif (copy_entry := self.copy_needing_repair(path, zarr_format)) is not None:
-                carried[path] = ("copy", copy_entry)
+                carried.documents[path] = self.needing_repair(path, zarr_format)
+            if (copy_entry := self.copy_needing_repair(path, zarr_format)) is not None:
+                carried.copies[path] = copy_entry
         return carried
 
-    def restore_entries(self, entries: Mapping[str, CarriedEntry], zarr_format: ZarrFormat) -> None:
+    def restore_entries(self, entries: CarriedEntries, zarr_format: ZarrFormat) -> None:
         """Record what `entries` carried, keeping what this cache already knows."""
-        for path, entry in entries.items():
-            if entry[0] == "document":
-                self.restore(path, zarr_format, entry[1])
-            else:
-                self.restore_copy(path, zarr_format, entry[1])
+        for path, document in entries.documents.items():
+            self.restore(path, zarr_format, document)
+        for path, copy_entry in entries.copies.items():
+            self.restore_copy(path, zarr_format, copy_entry)
 
     def observe_written(
         self, path: str, documents: Mapping[str, Buffer | None], written: WrittenArrayMetadata
@@ -157,6 +173,19 @@ class StoredDocuments:
                 v2_document: dict[str, JSON] = buffer_to_json_object(zarray)
                 v2_document["attributes"] = {} if zattrs is None else buffer_to_json_object(zattrs)
                 self.observe(path, v2_document, 2)
+
+    def observe_group(
+        self, path: str, document: Mapping[str, object], zarr_format: ZarrFormat
+    ) -> None:
+        """Record the consolidated copies of array documents that the group document
+        `document`, read at `path`, holds; one with no consolidated metadata holds
+        none. Every read of a group document from a store records here, so a member
+        reached through any group is known as it was stored."""
+        consolidated = document.get("consolidated_metadata")
+        if isinstance(consolidated, dict):
+            members = consolidated.get("metadata")
+            if isinstance(members, dict):
+                self.observe_consolidated(path, members, zarr_format)
 
     def observe_consolidated(
         self, group_path: str, members: Mapping[str, JSON], zarr_format: ZarrFormat

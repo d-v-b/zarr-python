@@ -40,6 +40,7 @@ from zarr.core.group import (
     create_hierarchy,
 )
 from zarr.core.metadata import ArrayMetadataDict, ArrayV2Metadata
+from zarr.core.metadata.io import copies_from_documents
 from zarr.errors import (
     ArrayNotFoundError,
     GroupNotFoundError,
@@ -266,6 +267,9 @@ async def consolidate_metadata(
             stacklevel=1,
         )
 
+    # The copies are written from the documents just read: record them as such, so an
+    # array whose document needs a repair that moves chunks is consolidated as stored.
+    copies_from_documents(store_path, members_metadata)
     ConsolidatedMetadata._flat_to_nested(members_metadata)
 
     consolidated_metadata = ConsolidatedMetadata(metadata=members_metadata)
