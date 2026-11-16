@@ -45,6 +45,9 @@ Custom codecs should also implement the following methods:
   array metadata. It should raise errors if not.
 - `resolve_metadata` (optional), which is important for codecs that change the shape,
   dtype or fill value of a chunk.
+- `resolve_chunk_grid` (optional), which codecs that change the shape of a chunk use to
+  return the array's chunk grid as the codecs after them see it. The `validate` method of
+  each later codec receives that grid.
 - `evolve_from_array_spec` (optional), which can be useful for automatically filling in
   codec configuration metadata from the array metadata.
 

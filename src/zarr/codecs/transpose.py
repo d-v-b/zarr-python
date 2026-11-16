@@ -9,6 +9,7 @@ import numpy as np
 from zarr.abc.codec import ArrayArrayCodec
 from zarr.core.array_spec import ArraySpec
 from zarr.core.common import JSON, parse_named_configuration
+from zarr.core.metadata.v3 import RegularChunkGridMetadata
 
 if TYPE_CHECKING:
     from typing import Self
@@ -93,6 +94,19 @@ class TransposeCodec(ArrayArrayCodec):
             fill_value=chunk_spec.fill_value,
             config=chunk_spec.config,
             prototype=chunk_spec.prototype,
+        )
+
+    def resolve_chunk_grid(self, chunk_grid: ChunkGridMetadata) -> ChunkGridMetadata:
+        """Permute the grid's dimensions as `resolve_metadata` permutes the chunk shape.
+
+        A rectilinear grid's edge lists move with their dimensions.
+        """
+        if isinstance(chunk_grid, RegularChunkGridMetadata):
+            return replace(
+                chunk_grid, chunk_shape=tuple(chunk_grid.chunk_shape[i] for i in self.order)
+            )
+        return replace(
+            chunk_grid, chunk_shapes=tuple(chunk_grid.chunk_shapes[i] for i in self.order)
         )
 
     def _decode_sync(

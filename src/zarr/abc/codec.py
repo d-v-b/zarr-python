@@ -148,6 +148,24 @@ class BaseCodec[CI: CodecInput, CO: CodecOutput](Metadata):
         """
         return chunk_spec
 
+    def resolve_chunk_grid(self, chunk_grid: ChunkGridMetadata) -> ChunkGridMetadata:
+        """The array's chunk grid as the codecs after this one see it.
+
+        A codec that changes the shape of a chunk returns the grid of the chunks it
+        encodes to, as `resolve_metadata` returns their spec. Array metadata validates
+        each codec against the grid the codecs before it leave. The default returns
+        `chunk_grid` unchanged, which holds for any codec that keeps a chunk's shape.
+
+        Parameters
+        ----------
+        chunk_grid : ChunkGridMetadata
+
+        Returns
+        -------
+        ChunkGridMetadata
+        """
+        return chunk_grid
+
     def evolve_from_array_spec(self, array_spec: ArraySpec) -> Self:
         """Fills in codec configuration parameters that can be automatically
         inferred from the array metadata.

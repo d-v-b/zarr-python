@@ -5,7 +5,7 @@ import zarr
 from zarr import AsyncArray, config
 from zarr.abc.codec import SupportsSyncCodec
 from zarr.abc.store import Store
-from zarr.codecs import TransposeCodec
+from zarr.codecs import ShardingCodec, TransposeCodec
 from zarr.core.array_spec import ArrayConfig, ArraySpec
 from zarr.core.buffer import NDBuffer, default_buffer_prototype
 from zarr.core.common import MemoryOrder
@@ -97,6 +97,91 @@ def test_transpose_invalid(
                 chunk_key_encoding={"name": "v2", "separator": "."},
                 filters=[TransposeCodec(order=order)],  # type: ignore[arg-type]
             )
+
+
+# Each case pairs a chunk grid with array->array filters and a sharding serializer whose
+# inner chunk shape divides the grid only as the filters leave it, not as stored.
+# The rectilinear cases use a square array, whose shape a transpose leaves unchanged,
+# so only the permuted edge lists tell the grids apart.
+TRANSPOSED_SHARDING_CASES = [
+    pytest.param((12, 40), (6, 20), [TransposeCodec(order=(1, 0))], (10, 3), id="regular"),
+    pytest.param(
+        (12, 40),
+        (6, 20),
+        [TransposeCodec(order=(1, 0)), TransposeCodec(order=(1, 0))],
+        (3, 10),
+        id="regular-transposed-twice",
+    ),
+    pytest.param(
+        (4, 12, 40), (2, 6, 20), [TransposeCodec(order=(1, 2, 0))], (3, 5, 2), id="regular-3d"
+    ),
+    pytest.param(
+        (12, 12), [[4, 8], [6, 6]], [TransposeCodec(order=(1, 0))], (6, 4), id="rectilinear"
+    ),
+    pytest.param(
+        (12, 40), [6, [10, 10, 20]], [TransposeCodec(order=(1, 0))], (10, 3), id="rectilinear-int"
+    ),
+]
+
+
+# A transpose before the sharding codec disables partial reads and writes, which warns.
+@pytest.mark.filterwarnings("ignore:Combining a `sharding_indexed` codec")
+@pytest.mark.parametrize(("shape", "chunks", "filters", "inner_chunks"), TRANSPOSED_SHARDING_CASES)
+def test_sharding_after_transpose(
+    shape: tuple[int, ...],
+    chunks: tuple[int, ...] | list[int | list[int]],
+    filters: list[TransposeCodec],
+    inner_chunks: tuple[int, ...],
+) -> None:
+    """
+    A serializer after a transpose filter is validated against the transposed chunk
+    grid, and the array round-trips.
+    """
+    data = np.arange(np.prod(shape), dtype="uint16").reshape(shape)
+    with config.set({"array.rectilinear_chunks": True}):
+        a = zarr.create_array(
+            zarr.storage.MemoryStore(),
+            shape=shape,
+            chunks=chunks,
+            dtype=data.dtype,
+            filters=filters,
+            serializer=ShardingCodec(chunk_shape=inner_chunks),
+        )
+        a[...] = data
+        assert np.array_equal(a[...], data)
+
+
+@pytest.mark.parametrize(
+    ("shape", "chunks", "filters", "inner_chunks"),
+    [
+        pytest.param((12, 40), (6, 20), [TransposeCodec(order=(1, 0))], (3, 10), id="regular"),
+        pytest.param(
+            (12, 12), [[4, 8], [6, 6]], [TransposeCodec(order=(1, 0))], (4, 6), id="rectilinear"
+        ),
+    ],
+)
+def test_sharding_after_transpose_indivisible(
+    shape: tuple[int, ...],
+    chunks: tuple[int, ...] | list[list[int]],
+    filters: list[TransposeCodec],
+    inner_chunks: tuple[int, ...],
+) -> None:
+    """
+    An inner chunk shape that divides the stored chunk grid but not the transposed one
+    is rejected.
+    """
+    with (
+        config.set({"array.rectilinear_chunks": True}),
+        pytest.raises(ValueError, match="is not divisible by the shard's inner chunk size"),
+    ):
+        zarr.create_array(
+            zarr.storage.MemoryStore(),
+            shape=shape,
+            chunks=chunks,
+            dtype="uint16",
+            filters=filters,
+            serializer=ShardingCodec(chunk_shape=inner_chunks),
+        )
 
 
 def test_transpose_codec_supports_sync() -> None:
