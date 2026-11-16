@@ -239,12 +239,20 @@ class Shuffle(_NumcodecsBytesBytesCodec, codec_name="shuffle"):
 
 
 # array-to-array codecs ("filters")
+def _resolve_astype(codec_config: dict[str, JSON], chunk_spec: ArraySpec) -> ArraySpec:
+    """
+    Return the spec of a filter's output when its ``astype`` parameter sets the encoded
+    data type, and ``chunk_spec`` unchanged when ``astype`` is absent.
+    """
+    if astype := codec_config.get("astype"):
+        dtype = parse_dtype(np.dtype(astype), zarr_format=3)  # type: ignore[call-overload]
+        return replace(chunk_spec, dtype=dtype)
+    return chunk_spec
+
+
 class Delta(_NumcodecsArrayArrayCodec, codec_name="delta"):
     def resolve_metadata(self, chunk_spec: ArraySpec) -> ArraySpec:
-        if astype := self.codec_config.get("astype"):
-            dtype = parse_dtype(np.dtype(astype), zarr_format=3)  # type: ignore[call-overload]
-            return replace(chunk_spec, dtype=dtype)
-        return chunk_spec
+        return _resolve_astype(self.codec_config, chunk_spec)
 
 
 class BitRound(_NumcodecsArrayArrayCodec, codec_name="bitround"):
@@ -253,10 +261,7 @@ class BitRound(_NumcodecsArrayArrayCodec, codec_name="bitround"):
 
 class FixedScaleOffset(_NumcodecsArrayArrayCodec, codec_name="fixedscaleoffset"):
     def resolve_metadata(self, chunk_spec: ArraySpec) -> ArraySpec:
-        if astype := self.codec_config.get("astype"):
-            dtype = parse_dtype(np.dtype(astype), zarr_format=3)  # type: ignore[call-overload]
-            return replace(chunk_spec, dtype=dtype)
-        return chunk_spec
+        return _resolve_astype(self.codec_config, chunk_spec)
 
     def evolve_from_array_spec(self, array_spec: ArraySpec) -> FixedScaleOffset:
         if self.codec_config.get("dtype") is None:
@@ -268,6 +273,9 @@ class FixedScaleOffset(_NumcodecsArrayArrayCodec, codec_name="fixedscaleoffset")
 class Quantize(_NumcodecsArrayArrayCodec, codec_name="quantize"):
     def __init__(self, **codec_config: JSON) -> None:
         super().__init__(**codec_config)
+
+    def resolve_metadata(self, chunk_spec: ArraySpec) -> ArraySpec:
+        return _resolve_astype(self.codec_config, chunk_spec)
 
     def evolve_from_array_spec(self, array_spec: ArraySpec) -> Quantize:
         if self.codec_config.get("dtype") is None:

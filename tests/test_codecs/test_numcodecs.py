@@ -4,6 +4,7 @@ import contextlib
 import pickle
 from typing import TYPE_CHECKING, Any
 
+import numcodecs
 import numpy as np
 import pytest
 from numcodecs import GZip
@@ -271,8 +272,18 @@ def test_generic_filter_bitround() -> None:
     assert np.allclose(data, b[:, :], atol=0.1)
 
 
-def test_generic_filter_quantize() -> None:
-    data = np.linspace(0, 10, 256, dtype="float32").reshape((16, 16))
+@pytest.mark.parametrize(
+    ("dtype", "astype"),
+    [("float32", None), ("float64", "float32"), ("float32", "float16"), ("float32", "float64")],
+)
+def test_generic_filter_quantize(dtype: str, astype: str | None) -> None:
+    """
+    Quantize round-trips with and without an ``astype`` that differs from the array data type.
+    """
+    data = np.linspace(0, 10, 256, dtype=dtype).reshape((16, 16))
+    codec_config: dict[str, Any] = {"digits": 3}
+    if astype is not None:
+        codec_config["astype"] = astype
 
     a = create_array(
         {},
@@ -280,12 +291,14 @@ def test_generic_filter_quantize() -> None:
         chunks=(16, 16),
         dtype=data.dtype,
         fill_value=0,
-        filters=[_numcodecs.Quantize(digits=3)],
+        filters=[_numcodecs.Quantize(**codec_config)],
     )
 
     a[:, :] = data.copy()
     b = open_array(a.store, mode="r")
-    assert np.allclose(data, b[:, :], atol=0.001)
+    reference = numcodecs.Quantize(dtype=dtype, **codec_config)
+    expected = reference.decode(reference.encode(data)).reshape(data.shape)
+    np.testing.assert_array_equal(b[:, :], expected)
 
 
 def test_generic_filter_packbits() -> None:
