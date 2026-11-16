@@ -2,15 +2,9 @@ import warnings
 from collections.abc import Callable
 from functools import wraps
 from inspect import Parameter, signature
-from typing import TYPE_CHECKING, Any
-
-import numpy as np
-from packaging.version import Version
+from typing import Any
 
 from zarr.errors import ZarrFutureWarning
-
-if TYPE_CHECKING:
-    from numpy.typing import NDArray
 
 # Based off https://github.com/scikit-learn/scikit-learn/blob/e87b32a81c70abed8f2e97483758eb64df8255e9/sklearn/utils/validation.py#L63
 
@@ -72,37 +66,3 @@ def _deprecate_positional_args[T](
         return _inner_deprecate_positional_args(func)
 
     return _inner_deprecate_positional_args  # type: ignore[return-value]
-
-
-def _reshape_view(arr: "NDArray[Any]", shape: tuple[int, ...]) -> "NDArray[Any]":
-    """Reshape an array without copying data.
-
-    This function provides compatibility across NumPy versions for reshaping arrays
-    as views. On NumPy >= 2.1, it uses ``reshape(copy=False)`` which explicitly
-    fails if a view cannot be created. On older versions, it uses direct shape
-    assignment which has the same behavior but is deprecated in 2.5+.
-
-    Parameters
-    ----------
-    arr : NDArray
-        The array to reshape.
-    shape : tuple of int
-        The new shape.
-
-    Returns
-    -------
-    NDArray
-        A reshaped view of the array.
-
-    Raises
-    ------
-    AttributeError
-        If a view cannot be created (the array is not contiguous) on NumPy < 2.1.
-    ValueError
-        If a view cannot be created (the array is not contiguous) on NumPy >= 2.1.
-    """
-    if Version(np.__version__) >= Version("2.1"):
-        return arr.reshape(shape, copy=False)
-    else:
-        arr.shape = shape
-        return arr
