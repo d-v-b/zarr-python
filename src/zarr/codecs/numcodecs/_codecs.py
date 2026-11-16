@@ -41,6 +41,7 @@ from zarr.abc.codec import ArrayArrayCodec, ArrayBytesCodec, BytesBytesCodec
 from zarr.abc.metadata import Metadata
 from zarr.core.buffer.cpu import as_numpy_array_wrapper
 from zarr.core.common import JSON, parse_named_configuration, product
+from zarr.core.dtype.common import HasItemSize
 from zarr.dtype import UInt8, ZDType, parse_dtype
 from zarr.registry import get_numcodec
 
@@ -203,7 +204,18 @@ class _NumcodecsArrayBytesCodec(_NumcodecsCodec, ArrayBytesCodec):
 
 # bytes-to-bytes codecs
 class Blosc(_NumcodecsBytesBytesCodec, codec_name="blosc"):
-    pass
+    def _encode_sync(self, chunk_data: Buffer, chunk_spec: ArraySpec) -> Buffer:
+        if "typesize" in self.codec_config:
+            return super()._encode_sync(chunk_data, chunk_spec)
+        # numcodecs.Blosc takes its typesize from the item size of the array it encodes,
+        # as it did for Zarr V2 arrays. Passing raw bytes would always mean a typesize
+        # of 1, which makes byte shuffling a no-op, so view the bytes with the item size
+        # of the chunk's data type when the bytes divide into whole items.
+        data = chunk_data.as_numpy_array()
+        item_size = chunk_spec.dtype.item_size if isinstance(chunk_spec.dtype, HasItemSize) else 1
+        if item_size > 1 and data.nbytes % item_size == 0:
+            data = data.view(f"V{item_size}")
+        return chunk_spec.prototype.buffer.from_bytes(self._codec.encode(data))
 
 
 class LZ4(_NumcodecsBytesBytesCodec, codec_name="lz4"):
