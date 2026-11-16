@@ -97,10 +97,7 @@ from zarr.core.dtype import (
     VariableLengthUTF8,
     ZDType,
     ZDTypeLike,
-    _json_to_reread,
-    _matched_in_scope,
-    _with_byte_order_of,
-    get_data_type_from_json,
+    _data_type_in,
     parse_dtype,
 )
 from zarr.core.dtype.common import HasEndianness, HasItemSize, HasObjectCodec
@@ -164,7 +161,7 @@ from zarr.core.metadata.v3 import (
     RectilinearChunkGridMetadataJSON,
     RegularChunkGridMetadata,
     RegularChunkGridMetadataJSON,
-    _codec_in_scope,
+    _codec_in,
     _rescoped,
     create_chunk_grid_metadata,
     parse_codecs,
@@ -5181,9 +5178,8 @@ def build_array_metadata_v3(
         if context is not None and context.codecs is not None:
             # The defaults resolve under the context too: a closed codec scope
             # must not store a chain it could not read back.
-            codecs_parsed = parse_codecs(
-                tuple(_codec_in_scope(codec, context) for codec in default_chain),
-                context=context,
+            codecs_parsed = tuple(
+                _codec_in(codec, context, refuse=False) for codec in default_chain
             )
     elif context is not None and context.codecs is not None:
         # Codec names resolve here, under the context; the metadata's own
@@ -6869,61 +6865,45 @@ def _legacy_resolved_in_context(
     """`source` as `parse_array_metadata` takes a metadata object: v2 metadata
     with a chunk size of 0 is read as repaired, silently, under `context`, and
     any other object is returned itself, or, when `context` limits names, with
-    each kind it limits resolved through it (see `_checked_in_scope`), so the scope
+    each kind it limits resolved again under it (see `_resolved_again`), so the scope
     checks those names."""
     v2_chunk_zero = isinstance(source, ArrayV2Metadata) and 0 in source.chunks
     if context is None or not context.limits_names or v2_chunk_zero:
         return parse_array_metadata(source, path, context=context)
-    return _checked_in_scope(source, context)
+    return _resolved_again(
+        source,
+        context,
+        data_types=context.data_types is not None,
+        codecs=context.codecs is not None,
+    )
 
 
 def _dtype_field(source: ArrayMetadata) -> str:
     return "dtype" if isinstance(source, ArrayV2Metadata) else "data_type"
 
 
-def _checked_in_scope(source: ArrayMetadata, context: Context) -> ArrayMetadata:
-    """`source` with each kind `context` limits resolved through it, so an instance
-    outside the scope fails and the scope's class for a name is the one bound; the
-    kinds it leaves unset are kept. A copy (with its attributes copied) when that
-    changes a class, else `source` itself."""
+def _resolved_again(
+    source: ArrayMetadata, context: Context, *, data_types: bool, codecs: bool
+) -> ArrayMetadata:
+    """`source` with its data type (`data_types`) and its top-level codecs (`codecs`,
+    Zarr format 3 only) resolved again under `context`, which for a kind it sets no
+    scope for is the default registry: each instance already of the class its name
+    resolves to there is kept, and each other is resolved from its JSON (see
+    `_data_type_in`, `_codec_in`). A copy (with its attributes copied) when that
+    changes a class, else `source` itself, shared as one given with no context is."""
     zarr_format = source.zarr_format
     changes: dict[str, Any] = {}
-    if context.data_types is not None:
-        dtype = _matched_in_scope(source.dtype, context, zarr_format)
-        if dtype != source.dtype:
+    if data_types:
+        dtype = _data_type_in(source.dtype, context, zarr_format, refuse=False)
+        if dtype is not source.dtype:
             changes[_dtype_field(source)] = dtype
-    if context.codecs is not None and isinstance(source, ArrayV3Metadata):
-        # Each is the scope's class for the name it writes once `_codec_in_scope`
-        # returns it.
-        codecs = tuple(_codec_in_scope(codec, context) for codec in source.codecs)
-        if any(new is not old for new, old in zip(codecs, source.codecs, strict=True)):
-            changes["codecs"] = codecs
+    if codecs and isinstance(source, ArrayV3Metadata):
+        resolved = tuple(_codec_in(codec, context, refuse=False) for codec in source.codecs)
+        if any(new is not old for new, old in zip(resolved, source.codecs, strict=True)):
+            changes["codecs"] = resolved
     if not changes:
-        # Everything is the scope's already: the object itself, shared as one
-        # given with no context is.
         return source
     return replace(source, attributes=dict(source.attributes), **changes)
-
-
-def _reread_in_defaults(source: ArrayMetadata, *, data_types: bool, codecs: bool) -> ArrayMetadata:
-    """A copy of `source` with its data type (`data_types`) and its top-level codecs
-    (`codecs`, Zarr format 3 only) read again from their JSON in the default
-    registries, dropping the classes a scope bound; the rest, and the attributes
-    (copied), are kept."""
-    zarr_format = source.zarr_format
-    changes: dict[str, Any] = {"attributes": dict(source.attributes)}
-    if data_types:
-        reread = get_data_type_from_json(
-            _json_to_reread(source.dtype, zarr_format), zarr_format=zarr_format
-        )
-        changes[_dtype_field(source)] = _with_byte_order_of(reread, source.dtype)
-    if codecs and isinstance(source, ArrayV3Metadata):
-        # An instance of the default class for its name is kept whole (with the
-        # codecs nested in it, which no scope governed).
-        changes["codecs"] = parse_codecs(
-            [_codec_in_scope(codec, _NO_CONTEXT) for codec in source.codecs]
-        )
-    return replace(source, **changes)
 
 
 def _context_kwargs(context: Context | None) -> dict[str, Context]:
@@ -7663,7 +7643,9 @@ class AsyncArrayIO:
             )
             left_codecs = old.codecs is not None and (context is None or context.codecs is None)
             if left_data_types or left_codecs:
-                source = _reread_in_defaults(source, data_types=left_data_types, codecs=left_codecs)
+                source = _resolved_again(
+                    source, _NO_CONTEXT, data_types=left_data_types, codecs=left_codecs
+                )
         if isinstance(source, ArrayV2Metadata | ArrayV3Metadata):
             resolved = _legacy_resolved_in_context(source, str(self._store_path), context)
             source = _copied_legacy(resolved) if resolved is self._source else resolved

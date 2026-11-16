@@ -90,11 +90,12 @@ class Context:
         its instances, as it could not read back the chain it would store. List
         the class under each name it reads and writes. Each class's `from_dict`
         must return an instance of that class, which is what the scope binds, and
-        so must its `evolve_from_array_spec` (returning the instance unchanged once
-        its JSON is complete): a class that fitting replaces is not held to the
-        scope. The scope governs Zarr format 3 codecs
-        only: a Zarr format 2 array's filters and compressor are numcodecs
-        objects, which no context governs.
+        must read the JSON its instances write; a codec that does not is refused
+        wherever it is resolved. Its `evolve_from_array_spec` must return an
+        instance of the class too (the instance unchanged once its JSON is
+        complete): a class that fitting replaces is not held to the scope. The
+        scope governs Zarr format 3 codecs only: a Zarr format 2 array's filters
+        and compressor are numcodecs objects, which no context governs.
     codec_pipeline : type[CodecPipeline] | None
         The codec pipeline class arrays are read and written with, or `None`
         for the pipeline the global configuration selects. A pipeline reads

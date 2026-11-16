@@ -87,54 +87,94 @@ def parse_codecs(data: object, *, context: Context | None = None) -> tuple[Codec
         if isinstance(
             c, ArrayArrayCodec | ArrayBytesCodec | BytesBytesCodec
         ):  # Can't use Codec here because of mypy limitation
-            if context is None or context.codecs is None:
-                out += (c,)
-            else:
-                # A closed world checks instances too: the instance's name must
-                # be in it, and the instance must be of the class it maps the name
-                # to (rebuilding one would drop state its JSON does not hold, such
-                # as a codec's attributes still to be fitted to the data type).
-                name = _written_name(c)
-                scoped_class = context.codec_class(name)
-                if type(c) is not scoped_class:
-                    raise UnknownCodecError(
-                        f"Codec {name!r} is a {type(c).__name__} instance; this context's "
-                        f"scope maps {name!r} to {scoped_class.__name__}. Give a "
-                        f"{scoped_class.__name__} instance, or the codec's JSON."
-                    )
-                out += (c,)
+            # A closed codec scope checks an instance too; one may hold state its JSON
+            # does not (attributes still to be fitted to the data type), so it is
+            # refused, not rebuilt, when it is not of the scope's class.
+            closed = context is not None and context.codecs is not None
+            out += (_codec_in(c, context, refuse=True) if closed else c,)  # type: ignore[arg-type]
         else:
-            name_parsed, _ = parse_named_configuration(c, require_configuration=False)
-
-            # A context resolves the name in its own scope (or the default registry).
-            codec_cls = (
-                get_codec_class(name_parsed)
-                if context is None
-                else context.codec_class(name_parsed)
-            )
-            try:
-                out += (codec_cls.from_dict(c),)
-            except KeyError as e:
-                # A codec's `from_dict` may index its configuration directly, so a malformed
-                # configuration surfaces as a KeyError. Convert it: a bare KeyError escaping
-                # metadata parsing is swallowed by the array-then-group fallback in
-                # `zarr.api.asynchronous.open`, which then reports an unrelated group error.
-                # The KeyError may carry no arguments (`raise KeyError`), and it may come from
-                # an internal lookup rather than the configuration mapping itself, so name the
-                # key only when there is one and don't claim it was a missing configuration key.
-                key_text = f" {e.args[0]!r}" if e.args else ""
-                raise MetadataValidationError(
-                    f"KeyError{key_text} while parsing the configuration for codec {name_parsed!r}."
-                ) from e
-            except TypeError as e:
-                # A closed scope's class refusing the JSON reports as it does when
-                # already resolved metadata enters the scope (`_codec_in_scope`).
-                # Caught after `KeyError`, so an error that is both converts as before.
-                if context is None or context.codecs is None:
-                    raise
-                raise _refused_by_scope(name_parsed, codec_cls, c, e) from e
+            out += (_resolve_codec(cast("JSON", c), context),)
 
     return out
+
+
+def _resolve_codec(data: JSON, context: Context | None) -> Codec:
+    """The codec the JSON `data` resolves to under `context` (with none, or a context
+    that sets no codec scope, the default registry): the one place a codec name is
+    resolved. Under a closed codec scope, a class refusing the JSON raises
+    `MetadataValidationError`, and the codec built must read back there: be of the
+    class its own written name resolves to, which reads the JSON it writes."""
+    name, _ = parse_named_configuration(data, require_configuration=False)
+    codec_cls = get_codec_class(name) if context is None else context.codec_class(name)
+    closed = context is not None and context.codecs is not None
+    try:
+        codec = codec_cls.from_dict(cast("dict[str, JSON]", data))
+    except KeyError as e:
+        # A codec's `from_dict` may index its configuration directly, so a malformed
+        # configuration surfaces as a KeyError. Convert it: a bare KeyError escaping
+        # metadata parsing is swallowed by the array-then-group fallback in
+        # `zarr.api.asynchronous.open`, which then reports an unrelated group error.
+        # The KeyError may carry no arguments (`raise KeyError`), and it may come from
+        # an internal lookup rather than the configuration mapping itself, so name the
+        # key only when there is one and don't claim it was a missing configuration key.
+        key_text = f" {e.args[0]!r}" if e.args else ""
+        raise MetadataValidationError(
+            f"KeyError{key_text} while parsing the configuration for codec {name!r}."
+        ) from e
+    except TypeError as e:
+        # Caught after `KeyError`, so an error that is both converts as before.
+        if not closed:
+            raise
+        raise MetadataValidationError(
+            f"Codec {name!r} resolves to {codec_cls.__name__}, which refuses {data!r} ({e!r})."
+        ) from e
+    if closed:
+        written = _written_name(codec)
+        try:
+            written_class = cast("Context", context).codec_class(written)
+        except UnknownCodecError as e:
+            e.add_note(
+                f"{written!r} is the name a {type(codec).__name__} writes, read from {name!r}."
+            )
+            raise
+        if written_class is not type(codec):
+            raise UnknownCodecError(
+                f"Codec {name!r} resolves to {codec_cls.__name__}, whose from_dict built "
+                f"a {type(codec).__name__} writing {written!r}, which resolves to "
+                f"{written_class.__name__} here."
+            )
+        # And it reads the JSON it writes, so the scope reads back what it stores.
+        try:
+            written_class.from_dict(codec.to_dict())
+        except (ValueError, TypeError, KeyError) as e:
+            raise MetadataValidationError(
+                f"Codec {name!r} resolves to {codec_cls.__name__}, which cannot read back "
+                f"the JSON it writes, {codec.to_dict()!r} ({e!r})."
+            ) from e
+    return codec
+
+
+def _codec_in(codec: Codec, context: Context, *, refuse: bool) -> Codec:
+    """`codec` under `context`'s codecs (the default registry when it sets none): the
+    instance itself when it is of the class its written name resolves to there;
+    otherwise refused (`refuse`, for an instance given to a builder, which may hold
+    state its JSON does not) or that name's codec resolved from its JSON (for metadata
+    already resolved, whose JSON is complete)."""
+    name = _written_name(codec)
+    try:
+        resolved_class = context.codec_class(name)
+    except UnknownCodecError as e:
+        e.add_note(f"{name!r} is the name a {type(codec).__name__} writes.")
+        raise
+    if type(codec) is resolved_class:
+        return codec
+    if refuse:
+        raise UnknownCodecError(
+            f"Codec {name!r} is a {type(codec).__name__} instance; this context's "
+            f"scope maps {name!r} to {resolved_class.__name__}. Give a "
+            f"{resolved_class.__name__} instance, or the codec's JSON."
+        )
+    return _resolve_codec(codec.to_dict(), context)
 
 
 def validate_array_bytes_codec(codecs: tuple[Codec, ...]) -> ArrayBytesCodec:
@@ -833,61 +873,13 @@ class ArrayV3Metadata(Metadata):
         return replace(self, attributes=attributes)
 
 
-def _codec_in_scope(codec: Codec, context: Context) -> Codec:
-    """`codec`, of metadata already resolved, read again by name under `context`: the
-    instance itself if it is of the class `context` maps its name to (with no codec
-    scope, the default registry's), else that class read from its JSON, which
-    carries only the state the JSON holds. A builder refuses such an instance
-    instead, as a codec it is given may not be fitted to the array yet."""
-    name = _written_name(codec)
-    try:
-        scoped_class = context.codec_class(name)
-    except UnknownCodecError as e:
-        e.add_note(f"{name!r} is the name a {type(codec).__name__} writes.")
-        raise
-    if type(codec) is scoped_class:
-        return codec
-    spec = codec.to_dict()
-    try:
-        rebuilt = scoped_class.from_dict(spec)
-    except (TypeError, KeyError) as e:
-        raise _refused_by_scope(name, scoped_class, spec, e) from e
-    # What it built must read back here: of the class its own written name maps to.
-    written = _written_name(rebuilt)
-    try:
-        written_class = context.codec_class(written)
-    except UnknownCodecError as e:
-        e.add_note(
-            f"{written!r} is the name a {type(rebuilt).__name__} writes, read from {name!r}."
-        )
-        raise
-    if written_class is not type(rebuilt):
-        raise UnknownCodecError(
-            f"Codec {name!r} resolves to {scoped_class.__name__}, whose from_dict built "
-            f"a {type(rebuilt).__name__} writing {written!r}, which resolves to "
-            f"{written_class.__name__} here."
-        )
-    return rebuilt
-
-
-def _refused_by_scope(
-    name: str, scoped_class: type[Codec], spec: object, error: Exception
-) -> MetadataValidationError:
-    """The error for a codec whose JSON the class its name resolves to refuses: the
-    same whichever route read the codec."""
-    return MetadataValidationError(
-        f"Codec {name!r} resolves to {scoped_class.__name__}, which refuses {spec!r} ({error!r})."
-    )
-
-
 def _rescoped(metadata: ArrayV3Metadata, context: Context | None) -> ArrayV3Metadata:
     """`metadata` with the codecs that fitting to the array rebuilt as another class
     than a closed codec scope's (the numcodecs wrappers rebuild as their own base
-    class) read again as the scope's class, from their JSON, which fitting has
-    completed; itself when there are none."""
+    class) resolved again under it (see `_codec_in`); itself when there are none."""
     if context is None or context.codecs is None:
         return metadata
-    codecs = tuple(_codec_in_scope(codec, context) for codec in metadata.codecs)
+    codecs = tuple(_codec_in(codec, context, refuse=False) for codec in metadata.codecs)
     if all(new is old for new, old in zip(codecs, metadata.codecs, strict=True)):
         return metadata
     return replace(metadata, codecs=codecs)

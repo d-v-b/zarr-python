@@ -195,11 +195,22 @@ def get_data_type_from_json(
     attempt to create a ZDType instance from the registered ZDType classes.
 
     With a `context`, the match is made against the data types it holds instead of the
-    default data type registry.
+    default data type registry; under a closed data type scope the data type matched
+    must read back there, as the same classes. This is the one place a data type's
+    JSON is resolved.
     """
-    # A context's own data types, if it sets them; otherwise the default registry.
-    registry = data_type_registry if context is None else context.data_type_registry()
-    return registry.match_json(dtype_spec, zarr_format=zarr_format)
+    if context is None or context.data_types is None:
+        return data_type_registry.match_json(dtype_spec, zarr_format=zarr_format)
+    matched = context.data_types.match_json(dtype_spec, zarr_format=zarr_format)
+    again = context.data_types.match_json(
+        _json_to_reread(matched, zarr_format), zarr_format=zarr_format
+    )
+    if not _same_classes(again, matched):
+        raise ValueError(
+            f"Data type {dtype_spec!r} matches {matched!r} in this context's scope, whose "
+            f"JSON matches {again!r} there: the scope could not read back what it stores."
+        )
+    return matched
 
 
 def parse_data_type(
@@ -284,19 +295,11 @@ def parse_dtype(
     ```
     """
     if isinstance(dtype_spec, ZDType):
-        # Without a data type scope, an instance stands as given, as it always has.
+        # Without a data type scope, an instance stands as given, as it always has; a
+        # closed one refuses an instance that is not of the classes it resolves to.
         if context is None or context.data_types is None:
             return dtype_spec
-        # A closed world checks instances too: the scope must read the instance's
-        # JSON as the instance's own class, as a closed codec scope requires.
-        matched = _matched_in_scope(dtype_spec, context, zarr_format)
-        if not _same_classes(matched, dtype_spec):
-            raise ValueError(
-                f"Data type {dtype_spec!r} is not of the classes this context's scope "
-                f"reads its JSON as, {matched!r}. Give an instance of those classes, or "
-                "the data type's name."
-            )
-        return dtype_spec
+        return _data_type_in(dtype_spec, context, zarr_format, refuse=True)
     # First attempt to interpret the input as JSON
     if isinstance(dtype_spec, Mapping | str | Sequence):
         try:
@@ -310,9 +313,9 @@ def parse_dtype(
         utf8 = VariableLengthUTF8()
         if context is not None and context.data_types is not None:
             # The shortcut must not widen a closed world, and the context may
-            # map this JSON to its own class: return the registry's match.
-            return _matched_in_scope(
-                cast("ZDType[TBaseDType, TBaseScalar]", utf8), context, zarr_format
+            # map this JSON to its own class: resolve it there.
+            return _data_type_in(
+                cast("ZDType[TBaseDType, TBaseScalar]", utf8), context, zarr_format, refuse=False
             )
         return utf8  # type: ignore[return-value]
     # otherwise, we have either a numpy dtype string, or a zarr v3 dtype string, and in either case
@@ -320,8 +323,8 @@ def parse_dtype(
     zdtype = get_data_type_from_native_dtype(dtype_spec, context=context)  # type: ignore[arg-type]
     if context is not None and context.data_types is not None:
         # A native data type can hold others (a structured dtype's fields), which
-        # resolve from the defaults: check the whole through the closed world.
-        return _matched_in_scope(zdtype, context, zarr_format)
+        # resolve from the defaults: resolve the whole in the closed world.
+        return _data_type_in(zdtype, context, zarr_format, refuse=False)
     return zdtype
 
 
@@ -353,16 +356,32 @@ def _json_to_reread(zdtype: ZDType[TBaseDType, TBaseScalar], zarr_format: ZarrFo
         _UNSTABLE_WARNING_SILENCED.reset(token)
 
 
-def _matched_in_scope(
-    zdtype: ZDType[TBaseDType, TBaseScalar], context: Context, zarr_format: ZarrFormat
+def _data_type_in(
+    zdtype: ZDType[TBaseDType, TBaseScalar],
+    context: Context,
+    zarr_format: ZarrFormat,
+    *,
+    refuse: bool,
 ) -> ZDType[TBaseDType, TBaseScalar]:
-    """The data type a closed data type scope matches `zdtype`'s JSON to, in the byte
-    order of `zdtype` (see `_with_byte_order_of`): how a resolved data type is read
-    again under a scope, which rebinds the scope's class for its name."""
-    matched = context.data_type_registry().match_json(
-        _json_to_reread(zdtype, zarr_format), zarr_format=zarr_format
+    """`zdtype` under `context`'s data types (the default registry when it sets none):
+    the instance itself when its JSON resolves there to the same classes; otherwise
+    refused (`refuse`, for an instance given to a builder) or the data type its JSON
+    resolves to, in `zdtype`'s byte order (see `_with_byte_order_of`)."""
+    resolved = _with_byte_order_of(
+        get_data_type_from_json(
+            _json_to_reread(zdtype, zarr_format), zarr_format=zarr_format, context=context
+        ),
+        zdtype,
     )
-    return _with_byte_order_of(matched, zdtype)
+    if _same_classes(resolved, zdtype):
+        return zdtype
+    if refuse:
+        raise ValueError(
+            f"Data type {zdtype!r} is not of the classes this context's scope "
+            f"reads its JSON as, {resolved!r}. Give an instance of those classes, or "
+            "the data type's name."
+        )
+    return resolved
 
 
 def _same_classes(
