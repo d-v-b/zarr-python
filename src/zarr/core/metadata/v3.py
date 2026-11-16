@@ -44,7 +44,7 @@ from zarr.core.metadata.repair import (
     repair_array_document,
     warn_repairs,
 )
-from zarr.errors import MetadataValidationError, NodeTypeValidationError
+from zarr.errors import MetadataValidationError, NodeTypeValidationError, UnknownCodecError
 from zarr.registry import get_codec_class
 
 if TYPE_CHECKING:
@@ -53,6 +53,7 @@ if TYPE_CHECKING:
     from zarr.codecs.sharding import ShardingCodec
     from zarr.core.buffer import Buffer, BufferPrototype
     from zarr.core.chunk_grids import ChunkGrid
+    from zarr.core.context import Context
     from zarr.core.dtype.wrapper import TBaseDType, TBaseScalar
     from zarr.core.metadata.repair import Reading
 
@@ -70,7 +71,13 @@ def parse_node_type_array(data: object) -> Literal["array"]:
     )
 
 
-def parse_codecs(data: object) -> tuple[Codec, ...]:
+def _written_name(codec: Codec) -> str:
+    """The name `codec` writes in its JSON, which a codec scope looks it up by."""
+    name, _ = parse_named_configuration(codec.to_dict(), require_configuration=False)
+    return name
+
+
+def parse_codecs(data: object, *, context: Context | None = None) -> tuple[Codec, ...]:
     out: tuple[Codec, ...] = ()
 
     if not isinstance(data, Iterable):
@@ -80,27 +87,94 @@ def parse_codecs(data: object) -> tuple[Codec, ...]:
         if isinstance(
             c, ArrayArrayCodec | ArrayBytesCodec | BytesBytesCodec
         ):  # Can't use Codec here because of mypy limitation
-            out += (c,)
+            # A closed codec scope checks an instance too; one may hold state its JSON
+            # does not (attributes still to be fitted to the data type), so it is
+            # refused, not rebuilt, when it is not of the scope's class.
+            closed = context is not None and context.codecs is not None
+            out += (_codec_in(c, context, refuse=True) if closed else c,)  # type: ignore[arg-type]
         else:
-            name_parsed, _ = parse_named_configuration(c, require_configuration=False)
-
-            codec_cls = get_codec_class(name_parsed)
-            try:
-                out += (codec_cls.from_dict(c),)
-            except KeyError as e:
-                # A codec's `from_dict` may index its configuration directly, so a malformed
-                # configuration surfaces as a KeyError. Convert it: a bare KeyError escaping
-                # metadata parsing is swallowed by the array-then-group fallback in
-                # `zarr.api.asynchronous.open`, which then reports an unrelated group error.
-                # The KeyError may carry no arguments (`raise KeyError`), and it may come from
-                # an internal lookup rather than the configuration mapping itself, so name the
-                # key only when there is one and don't claim it was a missing configuration key.
-                key_text = f" {e.args[0]!r}" if e.args else ""
-                raise MetadataValidationError(
-                    f"KeyError{key_text} while parsing the configuration for codec {name_parsed!r}."
-                ) from e
+            out += (_resolve_codec(cast("JSON", c), context),)
 
     return out
+
+
+def _resolve_codec(data: JSON, context: Context | None) -> Codec:
+    """The codec the JSON `data` resolves to under `context` (with none, or a context
+    that sets no codec scope, the default registry): the one place a codec name is
+    resolved. Under a closed codec scope, a class refusing the JSON raises
+    `MetadataValidationError`, and the codec built must read back there: be of the
+    class its own written name resolves to, which reads the JSON it writes."""
+    name, _ = parse_named_configuration(data, require_configuration=False)
+    codec_cls = get_codec_class(name) if context is None else context.codec_class(name)
+    closed = context is not None and context.codecs is not None
+    try:
+        codec = codec_cls.from_dict(cast("dict[str, JSON]", data))
+    except KeyError as e:
+        # A codec's `from_dict` may index its configuration directly, so a malformed
+        # configuration surfaces as a KeyError. Convert it: a bare KeyError escaping
+        # metadata parsing is swallowed by the array-then-group fallback in
+        # `zarr.api.asynchronous.open`, which then reports an unrelated group error.
+        # The KeyError may carry no arguments (`raise KeyError`), and it may come from
+        # an internal lookup rather than the configuration mapping itself, so name the
+        # key only when there is one and don't claim it was a missing configuration key.
+        key_text = f" {e.args[0]!r}" if e.args else ""
+        raise MetadataValidationError(
+            f"KeyError{key_text} while parsing the configuration for codec {name!r}."
+        ) from e
+    except TypeError as e:
+        # Caught after `KeyError`, so an error that is both converts as before.
+        if not closed:
+            raise
+        raise MetadataValidationError(
+            f"Codec {name!r} resolves to {codec_cls.__name__}, which refuses {data!r} ({e!r})."
+        ) from e
+    if closed:
+        written = _written_name(codec)
+        try:
+            written_class = cast("Context", context).codec_class(written)
+        except UnknownCodecError as e:
+            e.add_note(
+                f"{written!r} is the name a {type(codec).__name__} writes, read from {name!r}."
+            )
+            raise
+        if written_class is not type(codec):
+            raise UnknownCodecError(
+                f"Codec {name!r} resolves to {codec_cls.__name__}, whose from_dict built "
+                f"a {type(codec).__name__} writing {written!r}, which resolves to "
+                f"{written_class.__name__} here."
+            )
+        # And it reads the JSON it writes, so the scope reads back what it stores.
+        try:
+            written_class.from_dict(codec.to_dict())
+        except (ValueError, TypeError, KeyError) as e:
+            raise MetadataValidationError(
+                f"Codec {name!r} resolves to {codec_cls.__name__}, which cannot read back "
+                f"the JSON it writes, {codec.to_dict()!r} ({e!r})."
+            ) from e
+    return codec
+
+
+def _codec_in(codec: Codec, context: Context, *, refuse: bool) -> Codec:
+    """`codec` under `context`'s codecs (the default registry when it sets none): the
+    instance itself when it is of the class its written name resolves to there;
+    otherwise refused (`refuse`, for an instance given to a builder, which may hold
+    state its JSON does not) or that name's codec resolved from its JSON (for metadata
+    already resolved, whose JSON is complete)."""
+    name = _written_name(codec)
+    try:
+        resolved_class = context.codec_class(name)
+    except UnknownCodecError as e:
+        e.add_note(f"{name!r} is the name a {type(codec).__name__} writes.")
+        raise
+    if type(codec) is resolved_class:
+        return codec
+    if refuse:
+        raise UnknownCodecError(
+            f"Codec {name!r} is a {type(codec).__name__} instance; this context's "
+            f"scope maps {name!r} to {resolved_class.__name__}. Give a "
+            f"{resolved_class.__name__} instance, or the codec's JSON."
+        )
+    return _resolve_codec(codec.to_dict(), context)
 
 
 def validate_array_bytes_codec(codecs: tuple[Codec, ...]) -> ArrayBytesCodec:
@@ -662,11 +736,16 @@ class ArrayV3Metadata(Metadata):
         return {ZARR_JSON: json_to_buffer(self.to_dict(), prototype=prototype, indent=indent)}
 
     @classmethod
-    def from_dict(cls, data: dict[str, JSON], *, path: str | None = None) -> Self:
+    def from_dict(
+        cls, data: dict[str, JSON], *, path: str | None = None, context: Context | None = None
+    ) -> Self:
         """Read a stored `zarr.json` array document. An invalid document that
         `zarr.core.metadata.repair` can read is read as repaired; a reading the user
         must act on warns, and a document the rectilinear chunks flag refuses raises,
-        naming the array at `path`."""
+        naming the array at `path`. With a `context`, the document's data type and
+        codec names resolve through it instead of the default registries; under a
+        context that limits codecs they resolve before the other fields are
+        checked, so a document with several invalid fields reports a codec first."""
         # The flag gates what the document declares, so it is checked before repairs.
         chunk_grid = data.get("chunk_grid")
         if isinstance(chunk_grid, Mapping) and chunk_grid.get("name") == "rectilinear":
@@ -678,12 +757,14 @@ class ArrayV3Metadata(Metadata):
                 raise
         # Read apart from warning, so a re-read of a stored document
         # (`zarr.core.metadata.io.read_repaired`) is silent.
-        metadata, readings = cls._read_stored(data)
+        metadata, readings = cls._read_stored(data, context=context)
         warn_repairs(readings, path)
         return metadata
 
     @classmethod
-    def _read_stored(cls, data: dict[str, JSON]) -> tuple[Self, list[Reading]]:
+    def _read_stored(
+        cls, data: dict[str, JSON], *, context: Context | None = None
+    ) -> tuple[Self, list[Reading]]:
         """`from_dict` without its warnings or the rectilinear chunks flag: the
         metadata, and how the repairs read it."""
         repaired, readings = repair_array_document(data, 3)
@@ -698,7 +779,7 @@ class ArrayV3Metadata(Metadata):
         data_type_json = _data.pop("data_type")
         if not check_dtype_spec_v3(data_type_json):
             raise ValueError(f"Invalid data_type: {data_type_json!r}")
-        data_type = get_data_type_from_json(data_type_json, zarr_format=3)
+        data_type = get_data_type_from_json(data_type_json, zarr_format=3, context=context)
 
         # check that the fill value is consistent with the data type
         try:
@@ -720,7 +801,15 @@ class ArrayV3Metadata(Metadata):
             shape=_data_typed["shape"],
             chunk_grid=_data_typed["chunk_grid"],  # type: ignore[arg-type]
             chunk_key_encoding=_data_typed["chunk_key_encoding"],  # type: ignore[arg-type]
-            codecs=_data_typed["codecs"],
+            # Under a context, codec names resolve here, through it; `__init__`'s
+            # own `parse_codecs` passes the resolved instances through untouched.
+            # Without one, `__init__` parses them, after the other fields, as it
+            # always has.
+            codecs=(
+                _data_typed["codecs"]
+                if context is None or context.codecs is None
+                else parse_codecs(_data_typed["codecs"], context=context)
+            ),
             # Attribute values are arbitrary JSON, so they have no field-specific
             # schema to validate. `__init__` checks the outer dict via `parse_attributes`.
             attributes=_data_typed.get("attributes", {}),  # type: ignore[arg-type]
@@ -730,7 +819,9 @@ class ArrayV3Metadata(Metadata):
             extra_fields=allowed_extra_fields,
             storage_transformers=_data_typed.get("storage_transformers", ()),  # type: ignore[arg-type]
         )
-        return metadata, readings
+        # Codecs that fitting to the array rebuilt outside a closed codec scope's
+        # classes are read again as the scope's own.
+        return cast("Self", _rescoped(metadata, context)), readings
 
     def to_dict(self) -> dict[str, JSON]:
         out_dict = super().to_dict()
@@ -780,3 +871,15 @@ class ArrayV3Metadata(Metadata):
 
     def update_attributes(self, attributes: dict[str, JSON]) -> Self:
         return replace(self, attributes=attributes)
+
+
+def _rescoped(metadata: ArrayV3Metadata, context: Context | None) -> ArrayV3Metadata:
+    """`metadata` with the codecs that fitting to the array rebuilt as another class
+    than a closed codec scope's (the numcodecs wrappers rebuild as their own base
+    class) resolved again under it (see `_codec_in`); itself when there are none."""
+    if context is None or context.codecs is None:
+        return metadata
+    codecs = tuple(_codec_in(codec, context, refuse=False) for codec in metadata.codecs)
+    if all(new is old for new, old in zip(codecs, metadata.codecs, strict=True)):
+        return metadata
+    return replace(metadata, codecs=codecs)
