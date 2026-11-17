@@ -563,28 +563,10 @@ class ArrayV3Metadata(Metadata):
             config=ArrayConfig.from_dict({}),  # TODO: config is not needed here.
             prototype=default_buffer_prototype(),  # TODO: prototype is not needed here.
         )
-        # Thread the spec through evolution: each codec must be evolved against
-        # the spec it will actually see at run-time, not the original array spec.
-        # Earlier array->array codecs may transform the dtype (e.g. cast_value),
-        # so the spec passed to later codecs must reflect those transformations.
-        # Per-codec validate() must run before resolve_metadata(), since the
-        # latter may rely on invariants the former checks (e.g. cast_value
-        # rejects complex source dtypes that would otherwise crash _do_cast).
-        evolved: list[Codec] = []
-        spec = array_spec
-        for c in codecs_parsed_partial:
-            evolved_codec = c.evolve_from_array_spec(spec)
-            evolved_codec.validate(shape=spec.shape, dtype=spec.dtype, chunk_grid=chunk_grid_parsed)
-            evolved.append(evolved_codec)
-            spec = evolved_codec.resolve_metadata(spec)
-        codecs_parsed = tuple(evolved)
-        validate_codecs(codecs_parsed_partial, data_type)
-
         object.__setattr__(self, "shape", shape_parsed)
         object.__setattr__(self, "data_type", data_type)
         object.__setattr__(self, "chunk_grid", chunk_grid_parsed)
         object.__setattr__(self, "chunk_key_encoding", chunk_key_encoding_parsed)
-        object.__setattr__(self, "codecs", codecs_parsed)
         object.__setattr__(self, "dimension_names", dimension_names_parsed)
         object.__setattr__(self, "fill_value", fill_value_parsed)
         object.__setattr__(self, "attributes", attributes_parsed)
@@ -592,6 +574,26 @@ class ArrayV3Metadata(Metadata):
         object.__setattr__(self, "extra_fields", extra_fields_parsed)
 
         self._validate_metadata()
+
+        # Thread the spec and the chunk grid through evolution: each codec is
+        # evolved and validated against what it will actually see at run-time,
+        # not the original array spec and grid. Earlier array->array codecs may
+        # transform the dtype (e.g. cast_value) or permute the chunk shape
+        # (transpose), so later codecs must see those transformations.
+        # Per-codec validate() must run before resolve_metadata(), since the
+        # latter may rely on invariants the former checks (e.g. cast_value
+        # rejects complex source dtypes that would otherwise crash _do_cast).
+        evolved: list[Codec] = []
+        spec = array_spec
+        grid = chunk_grid_parsed
+        for c in codecs_parsed_partial:
+            evolved_codec = c.evolve_from_array_spec(spec)
+            evolved_codec.validate(shape=spec.shape, dtype=spec.dtype, chunk_grid=grid)
+            evolved.append(evolved_codec)
+            spec = evolved_codec.resolve_metadata(spec)
+            grid = evolved_codec.resolve_chunk_grid(grid)
+        validate_codecs(codecs_parsed_partial, data_type)
+        object.__setattr__(self, "codecs", tuple(evolved))
 
     def _validate_metadata(self) -> None:
         if len(self.shape) != self.chunk_grid.ndim:
@@ -604,8 +606,6 @@ class ArrayV3Metadata(Metadata):
             )
         if self.fill_value is None:
             raise ValueError("`fill_value` is required.")
-        for codec in self.codecs:
-            codec.validate(shape=self.shape, dtype=self.data_type, chunk_grid=self.chunk_grid)
 
     @property
     def ndim(self) -> int:
