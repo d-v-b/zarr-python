@@ -8,7 +8,7 @@ from itertools import starmap
 from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Sequence
+    from collections.abc import AsyncGenerator, AsyncIterator, Hashable, Iterable, Sequence
     from types import TracebackType
     from typing import Any, Self
 
@@ -191,6 +191,15 @@ class Store(ABC):
     def __eq__(self, value: object) -> bool:
         """Equality comparison."""
         ...
+
+    def _data_location(self) -> tuple[Hashable, str] | None:
+        """The data this store reads and writes, as `(backend, root)`, or `None` if unknown.
+
+        Two stores with equal `backend` values see the same keys, and `root` is the
+        `/`-separated path of this store's keys within that backend. Stores with
+        different roots in one backend can overlap, which `__eq__` can't detect.
+        """
+        return None
 
     @abstractmethod
     async def get(

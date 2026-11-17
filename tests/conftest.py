@@ -153,12 +153,14 @@ async def store(request: pytest.FixtureRequest, tmp_path: pathlib.Path) -> Store
 
 
 @pytest.fixture
-async def store2(request: pytest.FixtureRequest, tmp_path: pathlib.Path) -> Store:
-    """Fixture to create a second store for testing copy operations between stores"""
+async def store2(request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory) -> Store:
+    """Fixture to create a second store for testing copy operations between stores.
+
+    Its directory is separate from `store`'s, so a copy from one to the other never
+    writes inside the source array's directory.
+    """
     param = request.param
-    store2_path = tmp_path / "store2"
-    store2_path.mkdir()
-    return await parse_store(param, str(store2_path))
+    return await parse_store(param, str(tmp_path_factory.mktemp("store2")))
 
 
 @pytest.fixture(params=["local", "memory", "zip"])

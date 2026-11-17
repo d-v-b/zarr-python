@@ -19,7 +19,7 @@ from zarr.abc.store import (
 from zarr.core.buffer import Buffer, BufferPrototype
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterable
+    from collections.abc import AsyncIterator, Hashable, Iterable
 
 ZipStoreAccessModeLiteral = Literal["r", "w", "a", "x"]
 
@@ -335,6 +335,12 @@ class ZipStore(Store):
             and self.path == other.path
             and self._fileobj is other._fileobj
         )
+
+    def _data_location(self) -> tuple[Hashable, str]:
+        # docstring inherited
+        if self.path is None:
+            return ("zip", id(self._fileobj)), ""
+        return ("zip", self.path.resolve().as_posix()), ""
 
     def _get(
         self,

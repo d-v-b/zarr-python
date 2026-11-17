@@ -7,6 +7,7 @@ import pickle
 import re
 import sys
 from itertools import accumulate, starmap
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 from unittest import mock
 
@@ -43,6 +44,7 @@ from zarr.core.array import (
     _parse_chunk_encoding_v2,
     _parse_chunk_encoding_v3,
     _shards_initialized,
+    _store_paths_overlap,
     create_array,
     default_filters_v2,
     default_serializer_v3,
@@ -81,7 +83,14 @@ from zarr.errors import (
     ContainsGroupError,
     ZarrUserWarning,
 )
-from zarr.storage import LocalStore, MemoryStore, StorePath
+from zarr.storage import (
+    FsspecStore,
+    LocalStore,
+    ManagedMemoryStore,
+    MemoryStore,
+    StorePath,
+    ZipStore,
+)
 from zarr.storage._logging import LoggingStore
 from zarr.types import AnyArray, AnyAsyncArray
 
@@ -2008,6 +2017,85 @@ def test_from_array_overwrite_equal_memory_stores() -> None:
     zarr.create_array(dest_store, name="a", data=np.arange(4.0), fill_value=-1.0)
     result = zarr.from_array(dest_store, name="a", data=src, overwrite=True)
     np.testing.assert_array_equal(result[...], np.arange(4.0))
+
+
+def _store_path_pair(case: str, tmp_path: Path) -> tuple[StorePath, StorePath]:
+    """Two store paths for `test_store_paths_overlap`, built for one named case."""
+    managed_name = f"overlap-{tmp_path.name}"
+    match case:
+        case "local-nested-root":
+            return StorePath(LocalStore(tmp_path), "a"), StorePath(LocalStore(tmp_path / "a"))
+        case "local-sibling-root":
+            return StorePath(LocalStore(tmp_path), "a"), StorePath(LocalStore(tmp_path / "ab"))
+        case "local-read-only":
+            local_store = LocalStore(tmp_path)
+            return StorePath(local_store, "a"), StorePath(local_store.with_read_only(True), "a/b")
+        case "memory-same-dict":
+            memory_store = MemoryStore()
+            return StorePath(memory_store, "g/a"), StorePath(memory_store, "g")
+        case "memory-equal-contents":
+            return StorePath(MemoryStore(), "a"), StorePath(MemoryStore(), "a")
+        case "managed-memory-path":
+            return (
+                StorePath(ManagedMemoryStore(name=managed_name), "g/a"),
+                StorePath(ManagedMemoryStore(name=managed_name, path="g"), "a"),
+            )
+        case "managed-memory-other-path":
+            return (
+                StorePath(ManagedMemoryStore(name=managed_name), "g/a"),
+                StorePath(ManagedMemoryStore(name=managed_name, path="h")),
+            )
+        case "zip-same-file":
+            return (
+                StorePath(ZipStore(tmp_path / "x.zip", mode="w"), "a"),
+                StorePath(ZipStore(tmp_path / "x.zip", mode="r")),
+            )
+        case "fsspec-nested-root":
+            return (
+                StorePath(FsspecStore.from_url(f"memory://{tmp_path.name}"), "x/a"),
+                StorePath(FsspecStore.from_url(f"memory://{tmp_path.name}/x"), "a"),
+            )
+        case "wrapper":
+            return (
+                StorePath(LoggingStore(LocalStore(tmp_path)), "a"),
+                StorePath(LocalStore(tmp_path / "a")),
+            )
+        case "different-backends":
+            return StorePath(LocalStore(tmp_path), "a"), StorePath(MemoryStore(), "a")
+    raise ValueError(case)
+
+
+@pytest.mark.parametrize(
+    ("case", "expected"),
+    [
+        ("local-nested-root", True),
+        ("local-sibling-root", False),
+        ("local-read-only", True),
+        ("memory-same-dict", True),
+        ("memory-equal-contents", False),
+        ("managed-memory-path", True),
+        ("managed-memory-other-path", False),
+        ("zip-same-file", True),
+        ("fsspec-nested-root", True),
+        ("wrapper", True),
+        ("different-backends", False),
+    ],
+)
+def test_store_paths_overlap(case: str, expected: bool, tmp_path: Path) -> None:
+    """Two store paths overlap when their stores share a backend and the stores' roots
+    joined with the paths nest, whatever root each store was given."""
+    a, b = _store_path_pair(case, tmp_path)
+    assert _store_paths_overlap(a, b) is expected
+    assert _store_paths_overlap(b, a) is expected
+
+
+def test_from_array_overwrite_nested_store_root_raises(tmp_path: Path) -> None:
+    """A destination store rooted inside the source array's directory overlaps the
+    source, so the overwrite raises instead of deleting the source's chunks."""
+    src = zarr.create_array(LocalStore(tmp_path), name="a", data=np.arange(1.0, 5.0))
+    with pytest.raises(ValueError, match="paths overlap"):
+        zarr.from_array(LocalStore(tmp_path / "a"), data=src, overwrite=True)
+    np.testing.assert_array_equal(src[...], np.arange(1.0, 5.0))
 
 
 @pytest.mark.parametrize("store", ["memory"], indirect=True)
