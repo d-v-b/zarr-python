@@ -9,18 +9,18 @@ A reading warns only where the user must act on it; a reading that gives what za
 read from the same document before these repairs existed is silent, so a document
 that opened without a warning still does. The warnings are given once per document,
 after the repaired document has passed the metadata constructor, so an invalid
-document raises its own error, not a warning about how it was read. Metadata read
-from a document whose repair moves chunks (a chunk size read as another size) is
-marked (see `mark_repaired`), silent or not, so the array stores the repair before it
-writes chunks under it. A repair that only respells a value zarr already read the
-same way (`true` as 1, `4.0` as 4) moves no chunks, so it is not marked.
+document raises its own error, not a warning about how it was read. A store whose
+document needs a repair that moves chunks (a chunk size read as another size) gets
+that repair stored before zarr writes chunks under it, silent or not; whether a
+stored document needs one is recorded per store (see `zarr.core.metadata.stored`),
+not on the metadata read from it. A repair that only respells a value zarr already
+read the same way (`true` as 1, `4.0` as 4) moves no chunks.
 
 To read another kind of invalid document, add a repair to `ARRAY_REPAIRS`.
 """
 
 from __future__ import annotations
 
-import copy
 import json
 import warnings
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -71,30 +71,16 @@ as the smallest chunk size, which is a poor chunk shape for the data the array g
 and a re-save would keep it."""
 
 
-def mark_repaired[M](
-    metadata: M,
-    stored: ArrayDocument,
-    readings: Sequence[Reading],
-    path: str | None,
-    *,
-    warn: bool = True,
-) -> M:
-    """Record that `metadata` was read from the document `stored`, which needed the
-    repairs whose `readings` `repair_array_document` returned, if any. If a reading
-    moves chunks, keep a copy of `stored` as `_stored_document` on `metadata`, so the
-    array stores the repair before it writes chunks under it and consolidated metadata
-    stores it as it was stored. If `warn`, warn once with the readings' warnings (each
-    says what the user must act on and how), naming the array at `path` when the caller
-    knows it."""
-    if any(reading.moves_chunks for reading in readings):
-        object.__setattr__(metadata, "_stored_document", copy.deepcopy(stored))
+def warn_repairs(readings: Sequence[Reading], path: str | None) -> None:
+    """Warn once with the warnings of the `readings` `repair_array_document` returned
+    (each says what the user must act on and how), naming the array at `path` when
+    the caller knows it."""
     messages = [reading.warning for reading in readings if reading.warning is not None]
-    if warn and messages:
+    if messages:
         subject = "" if path is None else f"Array {path!r}: "
         # The synchronous API parses metadata on zarr's IO thread, whose stack holds no
         # user code, so the warning points at the `from_dict` that read the document.
         warnings.warn(f"{subject}{' '.join(messages)}", ZarrUserWarning, stacklevel=2)
-    return metadata
 
 
 def _is_int_list(value: object) -> TypeGuard[list[int]]:
@@ -369,13 +355,36 @@ ARRAY_REPAIRS: Final[Mapping[ZarrFormat, tuple[Repair, ...]]] = {
 """The repairs of an array document of each Zarr format, applied in order."""
 
 
+def may_move_chunks(doc: ArrayDocument, zarr_format: ZarrFormat) -> bool:
+    """Whether some repair might move chunks in `doc`: `False` for a rectilinear
+    grid, and when every stored regular chunk size is a JSON int >= 1 or `true`,
+    for only a stored 0 (or `false`) or an edge list in a regular grid is read so
+    that it moves chunks (see `_read_chunk_size` and `_invalid_chunk_sizes_v3`).
+    A cheap check that answers for most documents before `repair_array_document`
+    runs."""
+    if zarr_format == 2:
+        sizes = doc.get("chunks")
+    else:
+        grid = doc.get("chunk_grid")
+        if isinstance(grid, Mapping) and grid.get("name") == "rectilinear":
+            # Its only repair (`_invalid_edge_lengths_v3`) respells edges in place.
+            return False
+        if not isinstance(grid, Mapping) or grid.get("name") != "regular":
+            return True
+        configuration = grid.get("configuration")
+        sizes = configuration.get("chunk_shape") if isinstance(configuration, Mapping) else None
+    if not isinstance(sizes, list | tuple):
+        return True
+    return not all(size is True or (type(size) is int and size >= 1) for size in sizes)
+
+
 def repair_array_document(
     doc: ArrayDocument, zarr_format: ZarrFormat
 ) -> tuple[ArrayDocument, list[Reading]]:
     """Apply the repairs for `zarr_format` to a stored array metadata document.
 
     Returns the repaired document and the reading of each repair that changed it, for
-    `mark_repaired` once the document has been validated.
+    `warn_repairs` once the document has been validated.
     """
     readings: list[Reading] = []
     for repair in ARRAY_REPAIRS[zarr_format]:

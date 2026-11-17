@@ -37,6 +37,7 @@ from hypothesis.stateful import (
 import zarr
 from zarr.core.buffer import cpu, default_buffer_prototype
 from zarr.core.chunk_grids import ChunkGrid
+from zarr.core.metadata.stored import stored_documents
 from zarr.core.sync import sync
 from zarr.errors import ZarrUserWarning
 from zarr.storage import MemoryStore
@@ -157,7 +158,11 @@ class ArrayLifecycle(RuleBasedStateMachine):
         warned = any(issubclass(w.category, ZarrUserWarning) for w in record)
         must_warn = any(self.shape[axis] > 0 for axis in self.legacy_axes)
         assert warned is must_warn, [str(w.message) for w in record]
-        assert (arr.metadata._stored_document is not None) is bool(self.legacy_axes)
+        cache = stored_documents(arr.store_path.store)
+        needs_repair = (
+            cache.needing_repair(arr.store_path.path, arr.metadata.zarr_format) is not None
+        )
+        assert needs_repair is bool(self.legacy_axes)
         return arr
 
     # ----------------------------------------------------------------- model

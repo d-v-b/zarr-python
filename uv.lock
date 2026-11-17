@@ -3809,6 +3809,7 @@ dependencies = [
     { name = "numpy" },
     { name = "packaging" },
     { name = "typing-extensions" },
+    { name = "zarr-metadata" },
 ]
 
 [package.optional-dependencies]
@@ -3928,8 +3929,9 @@ requires-dist = [
     { name = "obstore", marker = "extra == 'remote'", specifier = ">=0.5.1" },
     { name = "packaging", specifier = ">=24.0" },
     { name = "typer", marker = "extra == 'cli'" },
-    { name = "typing-extensions", specifier = ">=4.14" },
+    { name = "typing-extensions", specifier = ">=4.16" },
     { name = "universal-pathlib", marker = "extra == 'optional'" },
+    { name = "zarr-metadata", specifier = ">=0.8.0" },
 ]
 provides-extras = ["cast-value-rs", "cli", "gpu", "optional", "remote"]
 
@@ -4015,4 +4017,17 @@ test = [
     { name = "pytest-reportlog", specifier = "==1.0.0" },
     { name = "pytest-xdist", specifier = "==3.8.0" },
     { name = "uv", specifier = "==0.13.7" },
+]
+
+[[package]]
+name = "zarr-metadata"
+version = "0.8.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "annotated-types" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/95/e2/8e1f15171c0a21e9fda74e17ba6ed5820dc2ee10e500d2594ceec4eaf1ff/zarr_metadata-0.8.0.tar.gz", hash = "sha256:cd91855317118014f84c670a6f73c568cafdc781750e4f071651084a73b5c71f", size = 607925, upload-time = "2026-11-13T08:15:50.448Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9a/da/f7d2d72d44a6bd4f361d9e6b4f81166fed0254ff3856573ca2949c0eb150/zarr_metadata-0.8.0-py3-none-any.whl", hash = "sha256:6cb20d7c96665dbf5ba2eaebe49f9a2f416a73b8f8dbb2e0ed95ece67cf5a0b6", size = 336024, upload-time = "2026-11-13T08:15:49.029Z" },
 ]
