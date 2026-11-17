@@ -14,9 +14,19 @@ wire's structurally discriminated union back to the right kind. This module is w
 
 The engine lowering rules include:
 
-- **Validated index arrays.** Raw index values must satisfy the inclusive
-  `index_array_bounds` before offset and stride are applied. Lowering checks
-  all supplied values eagerly; validated immutable maps need not retain bounds.
+- **Retained index-array bounds.** `index_array_bounds` — the inclusive
+  interval the raw `index_array` values are declared to lie in, before offset
+  and stride — lowers to the map's `IndexRange` as given. Lowering validates
+  the interval's syntax and never compares it with the values: a document
+  whose array holds a value outside its bounds loads, and the value fails
+  with `BoundsCheckError` at the use that reads it (`IndexTransform.apply`,
+  `intersect`, chunk planning, reading through the transform), while a
+  selection that avoids it never trips over it. This copies TensorStore
+  ([`json.cc#L200-L215`](https://github.com/google/tensorstore/blob/5c6997751f4b4855de72d6e7f696c572aae3a4e5/tensorstore/index_space/json.cc#L200-L215)
+  parses the bounds without consulting the array;
+  [`transform_rep.cc#L471-L497`](https://github.com/google/tensorstore/blob/5c6997751f4b4855de72d6e7f696c572aae3a4e5/tensorstore/index_space/internal/transform_rep.cc#L471-L497)
+  checks a value when a point is evaluated) and replaces an earlier eager
+  rejection at load. Serialization emits the retained range.
 - **Finite bounds.** An `IndexDomain` addresses a finite array, so a canonical
   body carrying a `"-inf"`/`"+inf"` bound cannot be lowered; `from_json` raises.
 - **Implicit bounds lower by value.** The `[n]`-bracket implicit/explicit flag
@@ -50,8 +60,11 @@ so there is nothing to reconstruct on load. On serialize (`to_json`):
    `[]` once the leading axis is zero-length, and nested lists cannot spell
    the shape back —
    `[[]]` is `(1, 0)` and nothing spells `(0, 1)`.
-3. Non-degenerate `index_array` maps are emitted with their array and bounds
-   only.
+3. Non-degenerate `index_array` maps are emitted with their array and their
+   retained `index_array_bounds`, always present as the canonical form
+   requires (spec section 4.3); TensorStore omits a range its values satisfy.
+   A one-element map whose value lies *outside* its range is not collapsed:
+   the constant it would become is not the map, which fails at use.
 
 """
 
@@ -133,11 +146,11 @@ class OutputIndexMapJSON(TypedDict, total=False):
     """Nested lists of output coordinates, one nesting level per input dimension."""
 
     index_array_bounds: list[IndexValueJSON]
-    """Wire bounds on index-array values; `["-inf", "+inf"]` if unconstrained.
+    """Inclusive bounds on the raw index-array values; `["-inf", "+inf"]` if unconstrained.
 
-    The message layer preserves these inclusive constraints on raw index values.
-    Engine lowering validates all values eagerly before offset and stride.
-    Serialization emits unconstrained bounds for validated non-degenerate maps.
+    Lowered as given to the map's `IndexRange` (`zarr_indexing.output_map.IndexRange`)
+    and emitted back from it. The values are checked against it when they are
+    used, not when the document is loaded.
     """
 
 

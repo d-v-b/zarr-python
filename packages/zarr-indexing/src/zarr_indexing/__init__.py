@@ -10,7 +10,9 @@ Key types:
 - `IndexDomain` — a rectangular region of integer coordinates
 - `IndexTransform` — maps input coordinates to storage coordinates
 - `ConstantMap`, `DimensionMap`, `ArrayMap` — the three ways a single
-  output dimension can depend on the input (see `output_map.py`)
+  output dimension can depend on the input (see `output_map.py`), and
+  `IndexRange`, the declared bounds an `ArrayMap`'s values are checked
+  against when they are used
 - `IndexTransform.compose` — chain two transforms into one
 
 `LazyArray` wraps a system-memory/basic-indexing source and gives it deferred
@@ -62,6 +64,7 @@ from zarr_indexing.output_map import (
     ArrayMap,
     ConstantMap,
     DimensionMap,
+    IndexRange,
     OutputIndexMap,
     output_index_map_from_json,
 )
@@ -100,6 +103,7 @@ __all__ = [
     "GridPartition",
     "IndexDomain",
     "IndexDomainJSON",
+    "IndexRange",
     "IndexTransform",
     "IndexTransformJSON",
     "IndexedSet",
