@@ -2020,6 +2020,24 @@ def test_dask_from_array_roundtrip() -> None:
     np.testing.assert_array_equal(blocked[2:, ::2].compute(), reference()[2:, ::2])
 
 
+def test_dask_reads_blocks_from_a_bare_view_but_infers_a_lazy_prototype() -> None:
+    """Pins why `EagerArrayAdapter` exists: block reads need no adapter, the prototype does."""
+    da = pytest.importorskip("dask.array")
+    source = make_source("zarr")
+
+    bare = da.from_array(source, chunks=(4, 3, 3))
+    np.testing.assert_array_equal(bare.compute(), reference())
+    # Dask derives `_meta` from `source[0:0, 0:0, 0:0]`, which is another view,
+    # so anything that calls an ndarray method on the prototype fails.
+    assert isinstance(bare._meta, LazyArray)
+    with pytest.raises(AttributeError, match="astype"):
+        bare.mean().compute()
+
+    adapted = da.from_array(EagerArrayAdapter(source), chunks=(4, 3, 3))
+    assert isinstance(adapted._meta, np.ndarray)
+    assert adapted.mean().compute() == reference().mean()
+
+
 # ---------------------------------------------------------------------------
 # Errors
 # ---------------------------------------------------------------------------

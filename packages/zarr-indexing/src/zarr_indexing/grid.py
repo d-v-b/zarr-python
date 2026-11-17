@@ -41,9 +41,8 @@ class DimensionGridLike(Protocol):
     def index_to_chunk(self, idx: int) -> int:
         """Map a global source index to the index of the chunk that contains it.
 
-        Raise `IndexError` outside the coordinates supported by the grid.
-        The built-in bounded grids use `[0, extent)`; custom grids may support
-        negative coordinates or an unbounded region.
+        Chunk ids are `[0, n)` for a grid of `n` chunks. Implementers must raise
+        `IndexError` when `idx` lies outside the grid's extent.
         """
         ...
 
@@ -58,8 +57,8 @@ class DimensionGridLike(Protocol):
     def indices_to_chunks(self, indices: npt.NDArray[np.intp]) -> npt.NDArray[np.intp]:
         """Vectorized `index_to_chunk`: map global source indices to chunk indices.
 
-        Raise `IndexError` if any index is outside the grid's supported region,
-        consistently with the scalar method.
+        Implementers must raise `IndexError` if any index lies outside the grid's
+        extent, as the scalar method does.
         """
         ...
 

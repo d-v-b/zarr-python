@@ -21,9 +21,11 @@ its own block size unless one is given. The partitioning that `parts()` reports
 is discovered from the wrapped array and is independent of Dask's blocks.
 
 `LazyArray[...]` returns another lazy view. `EagerArrayAdapter(view)[...]`
-returns materialized values, providing the block reads Dask expects. Import
-both classes from `zarr_indexing`. Use the adapter for `from_array`; passing
-a lazy view directly is not a reliable integration.
+returns materialized values. Import both classes from `zarr_indexing`. Dask
+can read blocks from a bare view through NumPy conversion, but it infers its
+block prototype by indexing the input with empty slices, and a view's empty
+slice is another view, which breaks reductions such as `mean`; the adapter
+gives it an ndarray prototype.
 
 ## Choosing Between Them
 

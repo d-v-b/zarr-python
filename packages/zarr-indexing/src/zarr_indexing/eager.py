@@ -1,4 +1,4 @@
-"""Explicit eager indexing for consumers such as Dask's ``from_array``."""
+"""An eager indexing surface for consumers that infer a block prototype, such as Dask's ``from_array``."""
 
 from __future__ import annotations
 
@@ -10,6 +10,14 @@ if TYPE_CHECKING:
 
 class EagerArrayAdapter:
     """Expose an eager array interface over a lazy view.
+
+    `dask.array.from_array` reads blocks by indexing its input and converting
+    the result with NumPy, which a bare `LazyArray` already supports. It also
+    infers the array's block prototype (`_meta`) by indexing the input with
+    empty slices, and a view's empty slice is another view, so operations that
+    call NumPy methods on the prototype (`mean`, for one) fail. The adapter's
+    indexing returns materialized arrays, so the prototype is an `ndarray`.
+    Passing `meta=` to `from_array` is the alternative.
 
     Constructing the adapter does not read source values. Indexing materializes
     the selected view in fresh memory, using its existing reader and partitioning.
