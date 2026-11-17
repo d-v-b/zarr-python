@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Sequence
+    from collections.abc import AsyncGenerator, AsyncIterator, Hashable, Iterable, Sequence
     from types import TracebackType
     from typing import Any, Self
 
@@ -90,6 +90,10 @@ class WrapperStore[T_Store: Store](Store):
 
     def __eq__(self, value: object) -> bool:
         return type(self) is type(value) and self._store.__eq__(value._store)
+
+    def _data_location(self) -> tuple[Hashable, str] | None:
+        # docstring inherited
+        return self._store._data_location()
 
     def __str__(self) -> str:
         return f"wrapping-{self._store}"

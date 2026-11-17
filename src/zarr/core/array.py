@@ -157,8 +157,7 @@ from zarr.registry import (
     get_pipeline_class,
 )
 from zarr.storage._common import StorePath, make_store_path, resolve_zarr_format
-from zarr.storage._memory import MemoryStore
-from zarr.storage._utils import _relativize_path
+from zarr.storage._utils import _join_paths, _relativize_path
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -4166,19 +4165,30 @@ class ShardsConfigParam(TypedDict):
 type ShardsLike = ChunksLike | ShardsConfigParam | Literal["auto"]
 
 
-def _stores_share_data(a: Store, b: Store) -> bool:
-    """Whether two stores are views onto the same underlying data.
+def _store_paths_overlap(a: StorePath, b: StorePath) -> bool:
+    """Whether the keys under two store paths can overlap.
 
-    ``Store.__eq__`` can't answer this directly. Several stores include ``read_only`` in
-    their equality check, so a read-only and a writable view of the same data are
-    unequal. ``MemoryStore`` compares its dicts by value, so two distinct stores with
-    equal contents are equal.
+    Stores that report a data location are compared by backend and by their root joined
+    with the path, so two stores rooted at nested directories of one backend overlap.
+    For a store that can't report a location, this falls back to comparing the stores,
+    ignoring ``read_only``, and then the paths alone.
     """
-    if type(a) is MemoryStore and type(b) is MemoryStore:
-        return a._store_dict is b._store_dict
-    with contextlib.suppress(NotImplementedError):
-        a = a.with_read_only(b.read_only)
-    return a == b
+    location_a, location_b = a.store._data_location(), b.store._data_location()
+    if location_a is not None and location_b is not None:
+        (backend_a, root_a), (backend_b, root_b) = location_a, location_b
+        if backend_a != backend_b:
+            return False
+        path_a, path_b = _join_paths([root_a, a.path]), _join_paths([root_b, b.path])
+    else:
+        store_a = a.store
+        with contextlib.suppress(NotImplementedError):
+            store_a = store_a.with_read_only(b.store.read_only)
+        if store_a != b.store:
+            return False
+        path_a, path_b = a.path, b.path
+    prefix_a = f"{path_a}/" if path_a else ""
+    prefix_b = f"{path_b}/" if path_b else ""
+    return prefix_a.startswith(prefix_b) or prefix_b.startswith(prefix_a)
 
 
 async def from_array(
@@ -4423,16 +4433,12 @@ async def from_array(
         write_data
         and overwrite
         and isinstance(data, Array)
-        and _stores_share_data(data.store_path.store, store_path.store)
+        and _store_paths_overlap(data.store_path, store_path)
     ):
-        src_prefix = f"{data.store_path.path}/" if data.store_path.path else ""
-        dest_prefix = f"{store_path.path}/" if store_path.path else ""
-        if src_prefix.startswith(dest_prefix) or dest_prefix.startswith(src_prefix):
-            raise ValueError(
-                f"Cannot overwrite {store_path.path!r} with the array at "
-                f"{data.store_path.path!r} because the paths overlap. Write to a different "
-                "path, or pass data=array[...]."
-            )
+        raise ValueError(
+            f"Cannot overwrite {store_path} with the array at {data.store_path} because "
+            "the paths overlap. Write to a different path, or pass data=array[...]."
+        )
 
     result = await init_array(
         store_path=store_path,

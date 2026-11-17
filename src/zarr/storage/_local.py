@@ -23,7 +23,7 @@ from zarr.core.buffer.core import default_buffer_prototype
 from zarr.core.common import AccessModeLiteral, concurrent_map
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Iterable, Iterator
+    from collections.abc import AsyncIterator, Callable, Hashable, Iterable, Iterator
 
     from zarr.core.buffer import BufferPrototype
 
@@ -299,6 +299,10 @@ class LocalStore(Store):
 
     def __eq__(self, other: object) -> bool:
         return isinstance(other, type(self)) and self.root == other.root
+
+    def _data_location(self) -> tuple[Hashable, str]:
+        # docstring inherited
+        return ("file",), self.root.resolve().as_posix()
 
     # -------------------------------------------------------------------
     # Synchronous store methods

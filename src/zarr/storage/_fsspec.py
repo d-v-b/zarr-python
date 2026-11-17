@@ -19,7 +19,7 @@ from zarr.errors import ZarrUserWarning
 from zarr.storage._utils import _dereference_path
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterable
+    from collections.abc import AsyncIterator, Hashable, Iterable
 
     from fsspec import AbstractFileSystem
     from fsspec.asyn import AsyncFileSystem
@@ -285,6 +285,12 @@ class FsspecStore(Store):
             and self.read_only == other.read_only
             and self.fs == other.fs
         )
+
+    def _data_location(self) -> tuple[Hashable, str]:
+        # docstring inherited
+        # fsspec caches filesystem instances by this token, so two stores built with the
+        # same filesystem arguments share a backend.
+        return ("fsspec", self.fs._fs_token), self.path.rstrip("/")
 
     async def get(
         self,

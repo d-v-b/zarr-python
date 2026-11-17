@@ -18,7 +18,7 @@ from zarr.storage._utils import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterable, MutableMapping
+    from collections.abc import AsyncIterator, Hashable, Iterable, MutableMapping
 
     from zarr.core.buffer import BufferPrototype
 
@@ -102,6 +102,10 @@ class MemoryStore(Store):
             and self._store_dict == other._store_dict
             and self.read_only == other.read_only
         )
+
+    def _data_location(self) -> tuple[Hashable, str]:
+        # docstring inherited
+        return ("memory", id(self._store_dict)), ""
 
     # -------------------------------------------------------------------
     # Synchronous store methods
@@ -507,6 +511,10 @@ class ManagedMemoryStore(MemoryStore):
             and self.path == other.path
             and self.read_only == other.read_only
         )
+
+    def _data_location(self) -> tuple[Hashable, str]:
+        # docstring inherited
+        return ("memory", id(self._store_dict)), self.path
 
     @property
     def name(self) -> str:
