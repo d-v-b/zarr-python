@@ -15,7 +15,7 @@ of its own, since many stores can't do it; `put_if_absent` is part of `Writable`
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, TypeVar
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator, Sequence
@@ -50,6 +50,10 @@ __all__ = [
     "WritableIfMatch",
     "WritableIfMatchAsync",
 ]
+
+
+O_contra = TypeVar("O_contra", contravariant=True)
+"""The type of buffer a backend's `get_into` writes into."""
 
 
 class Backend(Protocol):
@@ -90,13 +94,19 @@ class Readable(Backend, Protocol):
         ...
 
 
-class ReadableInto(Backend, Protocol):
-    def get_into(
-        self, path: str, out: memoryview, byte_range: ByteRange | None
-    ) -> Copied | Missing:
+class ReadableInto(Backend, Protocol[O_contra]):
+    """Reads into a buffer the caller allocated, of the type the backend names.
+
+    A backend over host memory takes any `Buffer` (`ReadableInto[Buffer]`). A backend that reads
+    into another device's memory, such as GPU direct storage, takes that device's buffer type
+    instead, and `Store.get_into` then accepts exactly that type. Where the bytes land is the
+    backend's business; `Copied` reports how many and from which generation.
+    """
+
+    def get_into(self, path: str, out: O_contra, byte_range: ByteRange | None) -> Copied | Missing:
         """Copy the value (or part) into `out`.
 
-        Raises `ValueError` if `out` is shorter than the bytes to copy.
+        Raises `ValueError` if `out` is shorter than the bytes to copy, or can't be written.
         """
         ...
 
@@ -157,9 +167,9 @@ class ReadableAsync(Backend, Protocol):
     async def head_async(self, path: str) -> ObjectMetadata | Missing: ...
 
 
-class ReadableIntoAsync(Backend, Protocol):
+class ReadableIntoAsync(Backend, Protocol[O_contra]):
     async def get_into_async(
-        self, path: str, out: memoryview, byte_range: ByteRange | None
+        self, path: str, out: O_contra, byte_range: ByteRange | None
     ) -> Copied | Missing: ...
 
 

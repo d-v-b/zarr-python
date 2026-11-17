@@ -6,18 +6,19 @@ for every backend. A backend only sees backend paths.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Final, Generic, Self, TypeVar, cast, final
+from typing import TYPE_CHECKING, Final, Generic, Self, TypeVar, final
 
-from typing_extensions import Buffer
-
+from zarr_storage._buffers import byte_view
 from zarr_storage._errors import ReadOnlyError, StoreClosedError
 from zarr_storage._keys import check_key, is_within, join, normalize_directory, relativize
 from zarr_storage._protocols import Backend
-from zarr_storage._types import Copied, Found, Missing
+from zarr_storage._types import Missing
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator, Sequence
     from types import TracebackType
+
+    from typing_extensions import Buffer
 
     from zarr_storage._protocols import (
         DeletableIfMatch,
@@ -35,7 +36,9 @@ if TYPE_CHECKING:
     )
     from zarr_storage._types import (
         ByteRange,
+        Copied,
         Deleted,
+        Found,
         FoundRanges,
         Generation,
         ListItem,
@@ -48,17 +51,8 @@ if TYPE_CHECKING:
 __all__ = ["Store"]
 
 B_co = TypeVar("B_co", bound=Backend, covariant=True)
+O = TypeVar("O")
 T = TypeVar("T")
-
-
-def _as_bytes_view(value: Buffer, *, writable: bool) -> memoryview:
-    """A flat, C-contiguous byte view of a buffer."""
-    view = memoryview(value)
-    if not view.c_contiguous:
-        raise ValueError("The buffer must be C-contiguous.")
-    if writable and view.readonly:
-        raise ValueError("The output buffer must be writable.")
-    return view.cast("B") if view.format != "B" or view.ndim != 1 else view
 
 
 @final
@@ -237,19 +231,15 @@ class Store(Generic[B_co]):
         return self._backend.get_ranges(self._path(key), ranges)
 
     def get_into(
-        self: Store[Readable], key: str, out: Buffer, *, byte_range: ByteRange | None = None
+        self: Store[ReadableInto[O]], key: str, out: O, *, byte_range: ByteRange | None = None
     ) -> Copied | Missing:
-        """Copy the value at `key` (or part of it) into `out`.
+        """Copy the value at `key` (or part of it) into `out`, a buffer the caller allocated.
 
-        Raises `ValueError` if `out` is shorter than the bytes to copy, read-only, or not
-        C-contiguous.
+        `out` is whatever buffer type the backend reads into: any writable C-contiguous `Buffer`
+        for the built-in backends, device memory for a GPU direct storage backend. Raises
+        `ValueError` if `out` is shorter than the bytes to copy or can't be written.
         """
-        path = self._path(key)
-        view = _as_bytes_view(out, writable=True)
-        if hasattr(self._backend, "get_into"):
-            backend = cast("ReadableInto", self._backend)
-            return backend.get_into(path, view, byte_range)
-        return _copy_into(self._backend.get(path, byte_range), view)
+        return self._backend.get_into(self._path(key), out, byte_range)
 
     def head(self: Store[Readable], key: str) -> ObjectMetadata | Missing:
         """The size and generation of the value at `key`."""
@@ -263,12 +253,12 @@ class Store(Generic[B_co]):
 
     def put(self: Store[Writable], key: str, value: Buffer) -> Written:
         """Write `value` at `key`."""
-        return self._backend.put(self._writable_path(key), _as_bytes_view(value, writable=False))
+        return self._backend.put(self._writable_path(key), byte_view(value, writable=False))
 
     def put_if_absent(self: Store[Writable], key: str, value: Buffer) -> Written | Rejected:
         """Write `value` at `key` if the key holds no value; `Rejected` if it holds one."""
         return self._backend.put_if_absent(
-            self._writable_path(key), _as_bytes_view(value, writable=False)
+            self._writable_path(key), byte_view(value, writable=False)
         )
 
     def put_if_match(
@@ -279,7 +269,7 @@ class Store(Generic[B_co]):
         `Rejected` if the key holds another generation, `Missing` if it holds no value.
         """
         return self._backend.put_if_match(
-            self._writable_path(key), _as_bytes_view(value, writable=False), generation
+            self._writable_path(key), byte_view(value, writable=False), generation
         )
 
     def delete(self: Store[Writable], key: str) -> Deleted | Missing:
@@ -340,15 +330,14 @@ class Store(Generic[B_co]):
         return await self._backend.get_ranges_async(self._path(key), ranges)
 
     async def get_into_async(
-        self: Store[ReadableAsync], key: str, out: Buffer, *, byte_range: ByteRange | None = None
+        self: Store[ReadableIntoAsync[O]],
+        key: str,
+        out: O,
+        *,
+        byte_range: ByteRange | None = None,
     ) -> Copied | Missing:
         """Async `get_into`."""
-        path = self._path(key)
-        view = _as_bytes_view(out, writable=True)
-        if hasattr(self._backend, "get_into_async"):
-            backend = cast("ReadableIntoAsync", self._backend)
-            return await backend.get_into_async(path, view, byte_range)
-        return _copy_into(await self._backend.get_async(path, byte_range), view)
+        return await self._backend.get_into_async(self._path(key), out, byte_range)
 
     async def head_async(self: Store[ReadableAsync], key: str) -> ObjectMetadata | Missing:
         """Async `head`."""
@@ -363,7 +352,7 @@ class Store(Generic[B_co]):
     async def put_async(self: Store[WritableAsync], key: str, value: Buffer) -> Written:
         """Async `put`."""
         return await self._backend.put_async(
-            self._writable_path(key), _as_bytes_view(value, writable=False)
+            self._writable_path(key), byte_view(value, writable=False)
         )
 
     async def put_if_absent_async(
@@ -371,7 +360,7 @@ class Store(Generic[B_co]):
     ) -> Written | Rejected:
         """Async `put_if_absent`."""
         return await self._backend.put_if_absent_async(
-            self._writable_path(key), _as_bytes_view(value, writable=False)
+            self._writable_path(key), byte_view(value, writable=False)
         )
 
     async def put_if_match_async(
@@ -379,7 +368,7 @@ class Store(Generic[B_co]):
     ) -> Written | Rejected | Missing:
         """Async `put_if_match`."""
         return await self._backend.put_if_match_async(
-            self._writable_path(key), _as_bytes_view(value, writable=False), generation
+            self._writable_path(key), byte_view(value, writable=False), generation
         )
 
     async def delete_async(self: Store[WritableAsync], key: str) -> Deleted | Missing:
@@ -411,19 +400,6 @@ class Store(Generic[B_co]):
 async def _relativized(paths: AsyncIterator[str], root: str) -> AsyncIterator[str]:
     async for path in paths:
         yield relativize(path, root)
-
-
-def _copy_into(result: Found | Missing, out: memoryview) -> Copied | Missing:
-    """The `get_into` outcome of a `get`, copying a found value into `out`."""
-    match result:
-        case Found(value=value, generation=generation, read_at=read_at):
-            n = len(value)
-            if n > len(out):
-                raise ValueError(f"The output buffer holds {len(out)} bytes; the value has {n}.")
-            out[:n] = value
-            return Copied(n, generation, read_at)
-        case Missing():
-            return result
 
 
 def _restore_store(

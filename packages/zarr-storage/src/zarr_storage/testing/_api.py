@@ -9,11 +9,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol, Self, cast
 
+from typing_extensions import Buffer
+
 from zarr_storage._protocols import (
     Listable,
     ListableAsync,
     Readable,
     ReadableAsync,
+    ReadableInto,
+    ReadableIntoAsync,
     Writable,
     WritableAsync,
     WritableIfMatch,
@@ -24,8 +28,6 @@ if TYPE_CHECKING:
     import asyncio
     from collections.abc import AsyncIterator, Iterator, Sequence
     from types import TracebackType
-
-    from typing_extensions import Buffer
 
     from zarr_storage._protocols import DeletableIfMatch, DeletableIfMatchAsync
     from zarr_storage._store import Store
@@ -49,10 +51,12 @@ __all__ = ["AsyncAPI", "FullBackend", "StoreAPI", "delete_if_match", "unwrap"]
 
 class FullBackend(
     Readable,
+    ReadableInto[Buffer],
     Writable,
     WritableIfMatch,
     Listable,
     ReadableAsync,
+    ReadableIntoAsync[Buffer],
     WritableAsync,
     WritableIfMatchAsync,
     ListableAsync,

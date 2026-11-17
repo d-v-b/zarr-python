@@ -24,6 +24,7 @@ from obstore.exceptions import (
 )
 from obstore.store import HTTPStore, LocalStore
 
+from zarr_storage._buffers import byte_view, copy_into
 from zarr_storage._byte_range import resolve
 from zarr_storage._errors import InvalidKeyError, KeyConflictError, UnsupportedOperationError
 from zarr_storage._keys import check_key, relativize
@@ -50,8 +51,9 @@ if TYPE_CHECKING:
 
     from obstore import GetOptions, GetResult, ListResult, ListStream, ObjectMeta, PutMode
     from obstore.store import ObjectStore
+    from typing_extensions import Buffer
 
-    from zarr_storage._types import ByteRange, ListItem
+    from zarr_storage._types import ByteRange, Copied, ListItem
 
 __all__ = ["ObjectStoreBackend"]
 
@@ -400,6 +402,17 @@ class ObjectStoreBackend:
 
     async def get_async(self, path: str, byte_range: ByteRange | None) -> Found | Missing:
         return await self._get_async(path, byte_range, {})
+
+    def get_into(self, path: str, out: Buffer, byte_range: ByteRange | None) -> Copied | Missing:
+        """A read, copied into `out`: obstore can't read into a caller's buffer."""
+        view = byte_view(out, writable=True)
+        return copy_into(self.get(path, byte_range), view)
+
+    async def get_into_async(
+        self, path: str, out: Buffer, byte_range: ByteRange | None
+    ) -> Copied | Missing:
+        view = byte_view(out, writable=True)
+        return copy_into(await self.get_async(path, byte_range), view)
 
     def get_if_changed(
         self, path: str, generation: Generation, byte_range: ByteRange | None

@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypedDict, TypeVar
 
+from zarr_storage._buffers import byte_view
 from zarr_storage._byte_range import resolve
 from zarr_storage._types import (
     Copied,
@@ -23,6 +24,8 @@ from zarr_storage.backends._common import IfMatch, always, children, if_absent, 
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator, Sequence
+
+    from typing_extensions import Buffer
 
     from zarr_storage._types import ByteRange, ListItem, Rejected
 
@@ -118,17 +121,16 @@ class MemoryBackend:
             return Missing(time.time())
         return ObjectMetadata(len(value.data), Generation(value.generation), value.last_modified)
 
-    def get_into(
-        self, path: str, out: memoryview, byte_range: ByteRange | None
-    ) -> Copied | Missing:
+    def get_into(self, path: str, out: Buffer, byte_range: ByteRange | None) -> Copied | Missing:
+        view = byte_view(out, writable=True)
         value = self._values.get(path)
         if value is None:
             return Missing(time.time())
         start, end = resolve(byte_range, len(value.data))
         n = end - start
-        if n > len(out):
-            raise ValueError(f"The output buffer holds {len(out)} bytes; the value has {n}.")
-        out[:n] = memoryview(value.data)[start:end]
+        if n > len(view):
+            raise ValueError(f"The output buffer holds {len(view)} bytes; the value has {n}.")
+        view[:n] = memoryview(value.data)[start:end]
         return Copied(n, Generation(value.generation), time.time())
 
     # --- Writable
@@ -214,7 +216,7 @@ class MemoryBackend:
         return self.head(path)
 
     async def get_into_async(
-        self, path: str, out: memoryview, byte_range: ByteRange | None
+        self, path: str, out: Buffer, byte_range: ByteRange | None
     ) -> Copied | Missing:
         return self.get_into(path, out, byte_range)
 

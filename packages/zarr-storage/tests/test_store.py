@@ -65,23 +65,57 @@ class _ReadOnlyBackend:
         return Missing() if data is None else ObjectMetadata(len(data), Generation(0), None)
 
 
+class _DeviceBuffer:
+    """Stands in for device memory (a GPU array): no buffer protocol, so host code can't view it."""
+
+    def __init__(self, size: int) -> None:
+        self._data = bytearray(size)
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    def upload(self, data: memoryview) -> None:
+        self._data[: len(data)] = data
+
+    def download(self, n: int) -> bytes:
+        return bytes(self._data[:n])
+
+
+class _DeviceBackend(_ReadOnlyBackend):
+    """A backend that reads into `_DeviceBuffer`s only, as a GPU direct storage backend would."""
+
+    def get_into(
+        self, path: str, out: _DeviceBuffer, byte_range: ByteRange | None
+    ) -> Copied | Missing:
+        found = self.get(path, byte_range)
+        if isinstance(found, Missing):
+            return found
+        if len(found.value) > len(out):
+            raise ValueError("The output buffer is too short.")
+        out.upload(found.value)
+        return Copied(len(found.value), found.generation)
+
+
 @pytest.mark.parametrize(
     ("byte_range", "expected"),
     [(None, b"0123"), (RangeRequest(1, 3), b"12"), (SuffixRequest(1), b"3")],
 )
-def test_get_into_without_backend_support(byte_range: ByteRange | None, expected: bytes) -> None:
-    """A backend without `get_into` is read with `get` and copied into the buffer."""
-    store = Store(_ReadOnlyBackend({"a/k": b"0123"})) / "a"
-    out = bytearray(4)
+def test_get_into_a_device_buffer(byte_range: ByteRange | None, expected: bytes) -> None:
+    """`get_into` takes the buffer type the backend reads into, and applies the store's root."""
+    store = Store(_DeviceBackend({"a/k": b"0123"})) / "a"
+    out = _DeviceBuffer(4)
     assert store.get_into("k", out, byte_range=byte_range) == Copied(len(expected), Generation(0))
-    assert bytes(out[: len(expected)]) == expected
+    assert out.download(len(expected)) == expected
     assert store.get_into("missing", out) == Missing()
 
 
-def test_get_into_without_backend_support_short_buffer_raises() -> None:
-    store = Store(_ReadOnlyBackend({"k": b"0123"}))
-    with pytest.raises(ValueError, match="holds"):
-        store.get_into("k", bytearray(3))
+def _static_buffer_checks(host: Store[MemoryBackend], device: Store[_DeviceBackend]) -> None:
+    """Never run; pyright checks that each marked call is a type error."""
+    host.get_into("k", bytearray(4))
+    device.get_into("k", _DeviceBuffer(4))
+    device.get_into("k", bytearray(4))  # pyright: ignore[reportArgumentType]
+    host.get_into("k", _DeviceBuffer(4))  # pyright: ignore[reportArgumentType]
+    Store(_ReadOnlyBackend({})).get_into("k", bytearray(4))  # pyright: ignore[reportAttributeAccessIssue]
 
 
 def test_store_over_unwritable_backend_is_read_only() -> None:

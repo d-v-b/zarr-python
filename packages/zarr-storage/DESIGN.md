@@ -60,7 +60,7 @@ get them wrong on its own (the source of most bugs in the legacy API: #2190, #24
 | `get(key, *, byte_range=None)` | `Found \| Missing` | |
 | `get_if_changed(key, generation, *, byte_range=None)` | `Found \| Missing \| Unchanged` | `Unchanged` without reading bytes when the value still has `generation` (HTTP `If-None-Match`), to revalidate a cached copy |
 | `get_ranges(key, ranges)` | `FoundRanges \| Missing` | all parts from one generation (object stores pin later reads to the first read's generation, and fall back to one whole read if it changed) |
-| `get_into(key, out, *, byte_range=None)` | `Copied \| Missing` | `Copied.size` bytes written into `out`, any writable C-contiguous buffer; `ValueError` if it is too small, read-only or not contiguous |
+| `get_into(key, out, *, byte_range=None)` | `Copied \| Missing` | `ReadableInto[O]` capability; `Copied.size` bytes written into `out`, a buffer the caller allocated, of the type the backend reads into (see below); `ValueError` if it is too small or can't be written |
 | `head(key)` | `ObjectMetadata \| Missing` | size, generation, last-modified |
 | `exists(key)` | `bool` | |
 | `put(key, value)` | `Written` | `value` is any C-contiguous buffer, copied; `KeyConflictError` where the backend can't hold a key and a directory with one name |
@@ -80,6 +80,17 @@ rather than keyword arguments, and it lets a capability a backend lacks be a typ
 discover at runtime (`put_if_match` on obstore's `LocalStore`, or on a filesystem that rounds file
 times) still raises `UnsupportedOperationError`. `Missing` and the read results carry `read_at`, when
 the backend read, so a cache can age an absence like a value.
+
+**Reads into caller buffers, on any device.** `ReadableInto` is generic in the buffer type the
+backend writes into, and `Store.get_into` accepts exactly that type. The built-in backends are
+`ReadableInto[Buffer]`: any writable C-contiguous host buffer. A GPU direct storage backend (cuFile,
+kvikio) would be `ReadableInto[DeviceBuffer]`, reading from disk straight into device memory, and
+passing it a host buffer is a type error (and the reverse). The caller allocates, because the caller
+knows the size and the device; the store never needs an allocator, so it stays free of Zarr's buffer
+classes (zarr-python's `prototype` argument puts allocation in the store instead). `get` keeps
+returning host bytes, which is what metadata documents need. Not yet: `get_ranges_into` (several
+ranges into several buffers, from one generation, for sharded chunks) and the write-side twin
+`put_from`.
 
 Listing arguments are checked when the method is called; the items are produced lazily, and taking
 one after the store closes raises `StoreClosedError`.

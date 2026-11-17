@@ -17,6 +17,7 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, ParamSpec, TypedDict, TypeVar
 
+from zarr_storage._buffers import byte_view
 from zarr_storage._byte_range import resolve
 from zarr_storage._errors import (
     InvalidKeyError,
@@ -42,6 +43,8 @@ from zarr_storage.backends._common import IfMatch, always, if_absent
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Generator, Iterator, Sequence
     from io import BufferedReader
+
+    from typing_extensions import Buffer
 
     from zarr_storage._types import ByteRange, ListItem, Rejected
 
@@ -499,9 +502,8 @@ class LocalBackend:
                 parts.append(memoryview(f.read(end - start)))
         return FoundRanges(tuple(parts), _generation(st), time.time())
 
-    def get_into(
-        self, path: str, out: memoryview, byte_range: ByteRange | None
-    ) -> Copied | Missing:
+    def get_into(self, path: str, out: Buffer, byte_range: ByteRange | None) -> Copied | Missing:
+        view = byte_view(out, writable=True)
         with _key_errors(path):
             f = _open_key(self._file(path))
         if f is None:
@@ -510,10 +512,10 @@ class LocalBackend:
             st = os.fstat(f.fileno())
             start, end = resolve(byte_range, st.st_size)
             n = end - start
-            if n > len(out):
-                raise ValueError(f"The output buffer holds {len(out)} bytes; the value has {n}.")
+            if n > len(view):
+                raise ValueError(f"The output buffer holds {len(view)} bytes; the value has {n}.")
             f.seek(start)
-            _read_exact_into(f, out[:n])
+            _read_exact_into(f, view[:n])
         return Copied(n, _generation(st), time.time())
 
     def head(self, path: str) -> ObjectMetadata | Missing:
@@ -735,7 +737,7 @@ class LocalBackend:
         return await self._run(self.head, path)
 
     async def get_into_async(
-        self, path: str, out: memoryview, byte_range: ByteRange | None
+        self, path: str, out: Buffer, byte_range: ByteRange | None
     ) -> Copied | Missing:
         return await self._run(self.get_into, path, out, byte_range)
 
