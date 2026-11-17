@@ -1,8 +1,14 @@
-"""The errors a store raises. A missing key is not one of them: reads return `None`."""
+"""The errors a store raises. A missing key is not one of them: reads return `Missing`."""
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Self
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
 __all__ = [
+    "BatchError",
     "InvalidByteRangeError",
     "InvalidKeyError",
     "KeyConflictError",
@@ -42,3 +48,43 @@ class StoreClosedError(StorageError):
 
 class UnsupportedOperationError(StorageError, NotImplementedError):
     """The store's backend does not implement the requested operation."""
+
+
+class BatchError(ExceptionGroup[Exception], StorageError):
+    """Some operations of a batch (`get_many`, `put_many`, ...) raised.
+
+    After the first failure a batch starts no new operations; the ones already running finish. The
+    group holds every exception those operations raised. `completed` pairs each request that
+    finished with its result, and `remaining` holds the requests that failed or never started: a
+    write among them may or may not have landed.
+    """
+
+    completed: tuple[tuple[object, object], ...]
+    remaining: tuple[object, ...]
+
+    def __new__(
+        cls,
+        message: str,
+        exceptions: Sequence[Exception],
+        *,
+        completed: tuple[tuple[object, object], ...],
+        remaining: tuple[object, ...],
+    ) -> Self:
+        self = super().__new__(cls, message, exceptions)
+        self.completed = completed
+        self.remaining = remaining
+        return self
+
+    def __init__(
+        self,
+        message: str,
+        exceptions: Sequence[Exception],
+        *,
+        completed: tuple[tuple[object, object], ...],
+        remaining: tuple[object, ...],
+    ) -> None:
+        super().__init__(message, exceptions)
+
+    def derive(self, excs: Sequence[Exception]) -> BatchError:  # pyright: ignore[reportIncompatibleMethodOverride] -- a batch only ever holds `Exception`s
+        """The same batch error, holding `excs`; `except*` builds its subgroups with this."""
+        return BatchError(self.message, excs, completed=self.completed, remaining=self.remaining)

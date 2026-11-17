@@ -69,6 +69,10 @@ get them wrong on its own (the source of most bugs in the legacy API: #2190, #24
 | `delete(key)` | `Deleted \| Missing` | one key; deleting a directory name finds it `Missing` |
 | `delete_if_match(key, generation)` | `Deleted \| Rejected \| Missing` | `DeletableIfMatch` capability |
 | `delete_dir(directory)` | `None` | everything under the directory |
+| `get_many(requests)` | `Iterator[(request, Found \| Missing)]` | a request is a key or `(key, byte_range)`, echoed back; lazy, in the order reads finish |
+| `get_into_many(requests)` | `Iterator[(request, Copied \| Missing)]` | `(key, out)` or `(key, out, byte_range)`; `out` typed as for `get_into` |
+| `put_many(items)` | `list[(key, Written)]` | `(key, value)` pairs; eager, results in the order given; a key named twice raises `ValueError` |
+| `delete_many(keys)` | `list[(key, Deleted \| Missing)]` | as `put_many` |
 | `list(directory="")` | `Iterator[str]` | every key under the directory, relative to the store's root |
 | `list_dir(directory="")` | `Iterator[Key \| Prefix \| Entry]` | direct children, names relative to the directory; `Entry` when the backend can't tell; a `Prefix` may hold no keys (an empty directory on a filesystem) |
 
@@ -91,6 +95,29 @@ classes (zarr-python's `prototype` argument puts allocation in the store instead
 returning host bytes, which is what metadata documents need. Not yet: `get_ranges_into` (several
 ranges into several buffers, from one generation, for sharded chunks) and the write-side twin
 `put_from`.
+
+**Batches are for throughput, not atomicity.** `get_many`, `get_into_many`, `put_many` and
+`delete_many` each do what a loop of the single operation would, and promise nothing more: each
+read finds whatever generation is current when it runs, and a batch of writes can land partly
+(`get_ranges`, which reads several parts of one value from one generation, is a consistency
+guarantee, not a batch). Each result is paired with its request, so `dict(store.get_many(keys))`
+works and order doesn't matter. Reads are lazy and come in the order they finish, so a caller can
+decode chunks as they arrive. Writes are eager, because a lazy write nobody iterates would silently
+write nothing; they return results in the order given. Every key is checked, and every value viewed,
+before any operation starts, and a write batch that names a key twice raises, since which write
+wins would be a race. If operations raise, the batch starts no new ones, lets those running finish,
+and raises `BatchError`, an `ExceptionGroup` of the failures whose `completed` holds the writes that
+landed with their results and whose `remaining` holds the requests that failed or never started
+(`except*` keeps both). Conditional operations have no batch form: compare-and-swap coordinates
+single documents, and a batch of it belongs to transactions.
+
+`Store` provides every batch method for any backend that can read or write, running the single
+operation one at a time; a backend that has a batch capability (`ReadableMany`,
+`ReadableIntoMany[O]`, `WritableMany`, and async twins) is used instead. The rule for such
+fallbacks: `Store` may fall back when only speed differs, never when behavior does. A serial batch
+returns what a concurrent one would; a `get_into` that read and then copied would not put the bytes
+where the backend's buffer type says, which is why `get_into` has no fallback. The batch runners in
+`zarr_storage._batch` implement the windowing and failure rule once, for `Store` and backends alike.
 
 Listing arguments are checked when the method is called; the items are produced lazily, and taking
 one after the store closes raises `StoreClosedError`.
@@ -128,7 +155,10 @@ key (`a/b` when `a` is a key): that reads as absent.
 | `LocalBackend` | `(dev, inode, mtime_ns, size)`, with each write stamping a unique ns mtime | yes / yes, on filesystems that keep ns times | no (`KeyConflictError`) | the root |
 | `ObjectStoreBackend` | ETag and version (obstore's `LocalStore` ETag can repeat on ext4) | if the store supports it / not implemented | as the store does | as the store does |
 
-Every backend has `put_if_absent` and `get_if_changed`.
+Every backend has `put_if_absent` and `get_if_changed`. `LocalBackend` runs batches, sync and
+async, `concurrency` operations at once on its threads; `ObjectStoreBackend` keeps `concurrency`
+requests of an async batch in flight and runs sync batches one request at a time; `MemoryBackend`
+uses `Store`'s serial batches, which are as fast for it.
 
 `LocalBackend` stages each write in a reserved directory under the root and renames it into place,
 holding the lock of the key's directory; the lock lives in that directory, so overlapping roots and
@@ -148,7 +178,8 @@ filesystem that rounds file times, `put_if_match` and `delete_if_match` raise
 that response, and reads the rest pinned to it (`If-Match`, and checked against each response);
 on a mismatch it reads the value once, whole, and slices it. It does not use obstore's own
 `get_ranges`, which can panic when a value shrinks mid-read. Only obstore's `LocalStore` reads a
-refusal under a file as an absent key, and only there does a write reclaim an empty directory in
+refusal under a file as an absent key (judged from the refusal's own `ENOTDIR`, since looking at
+the parents afterwards races a concurrent delete of the parent), and only there does a write reclaim an empty directory in
 its way; for every other store, an error is raised. obstore's `LocalStore` has no locking, so
 writes that concurrently create and remove the same directories can surface its errors.
 
@@ -161,22 +192,26 @@ as mixins a backend's test class adds (`ConditionalPutSuite`, `KeyAndDirectorySu
 methods, and through the async methods on one event loop, so the two surfaces meet one contract.
 
 `StoreSuite.test_state_machine` drives random sequences of `put`, `put_if_absent`, `put_if_match`,
-`delete`, `delete_if_match`, `delete_dir` and listings through random views, and checks every step against a
+`put_many`, `delete`, `delete_if_match`, `delete_many`, `delete_dir` and listings through random views, and checks every step against a
 dict model (`zarr_storage.testing._stateful.StoreMachine`), again through both surfaces. After every
-step, each stored key reads back as the model says, and `get_if_changed` with its generation is
-`Unchanged`. The obstore
+step, each stored key reads back as the model says, through `get` and `get_many`, and
+`get_if_changed` with its generation is `Unchanged`. The obstore
 tests also fail any async run that makes a blocking obstore call.
 
 ## Configuration
 
-No global configuration. Every knob (local I/O concurrency) is a constructor parameter with its
-default in the signature.
+No global configuration. Every knob (local I/O concurrency, how many requests an obstore batch
+keeps in flight) is a constructor parameter with its default in the signature.
 
 ## Open
 
 - Durability: no backend syncs to disk; a `sync` option on `LocalBackend` would.
 - Staged files left by a crash are never read but are never removed either.
 - Windows rules are implemented and unit-tested, not yet run on Windows.
+- Sync batches over obstore run one request at a time; a thread pool, or a native batch call,
+  would overlap them.
+- `get_ranges_into`, `put_from`, and a GPU direct storage backend whose `get_into_many` submits one
+  cuFile batch.
 
 ## Iterations
 

@@ -11,11 +11,17 @@ Each capability has a sync protocol and an async twin whose methods end in `_asy
 implements whichever it can; `Store`'s methods are typed so that calling one the backend lacks is a
 type error. Compare-and-swap on a generation (`WritableIfMatch`, `DeletableIfMatch`) is a capability
 of its own, since many stores can't do it; `put_if_absent` is part of `Writable`.
+
+The batch capabilities (`ReadableMany`, `ReadableIntoMany`, `WritableMany` and their async twins)
+are optional and change only speed: `Store.get_many` and its siblings work on any backend that
+can read or write, one operation at a time, and use a backend's batch methods when it has them. A
+batch method yields `(index, result)` pairs as operations finish and follows the failure rule of
+`zarr_storage._batch`, whose runners implement it.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol, TypeVar
+from typing import TYPE_CHECKING, Protocol, TypeVar, runtime_checkable
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator, Sequence
@@ -45,10 +51,16 @@ __all__ = [
     "ReadableAsync",
     "ReadableInto",
     "ReadableIntoAsync",
+    "ReadableIntoMany",
+    "ReadableIntoManyAsync",
+    "ReadableMany",
+    "ReadableManyAsync",
     "Writable",
     "WritableAsync",
     "WritableIfMatch",
     "WritableIfMatchAsync",
+    "WritableMany",
+    "WritableManyAsync",
 ]
 
 
@@ -143,6 +155,35 @@ class DeletableIfMatch(Backend, Protocol):
         ...
 
 
+@runtime_checkable
+class ReadableMany(Backend, Protocol):
+    def get_many(
+        self, requests: Sequence[tuple[str, ByteRange | None]]
+    ) -> Iterator[tuple[int, Found | Missing]]:
+        """`get` for each `(path, byte_range)`, yielding `(index, result)` as each finishes."""
+        ...
+
+
+@runtime_checkable
+class ReadableIntoMany(Backend, Protocol[O_contra]):
+    def get_into_many(
+        self, requests: Sequence[tuple[str, O_contra, ByteRange | None]]
+    ) -> Iterator[tuple[int, Copied | Missing]]:
+        """`get_into` for each `(path, out, byte_range)`, yielding `(index, result)`."""
+        ...
+
+
+@runtime_checkable
+class WritableMany(Backend, Protocol):
+    def put_many(self, requests: Sequence[tuple[str, memoryview]]) -> Iterator[tuple[int, Written]]:
+        """`put` for each `(path, value)`, yielding `(index, result)` as each finishes."""
+        ...
+
+    def delete_many(self, paths: Sequence[str]) -> Iterator[tuple[int, Deleted | Missing]]:
+        """`delete` for each path, yielding `(index, result)` as each finishes."""
+        ...
+
+
 class Listable(Backend, Protocol):
     def list(self, directory: str) -> Iterator[str]:
         """Every key under `directory`, as backend paths, in no particular order."""
@@ -193,6 +234,31 @@ class DeletableIfMatchAsync(Backend, Protocol):
     async def delete_if_match_async(
         self, path: str, generation: Generation
     ) -> Deleted | Rejected | Missing: ...
+
+
+@runtime_checkable
+class ReadableManyAsync(Backend, Protocol):
+    def get_many_async(
+        self, requests: Sequence[tuple[str, ByteRange | None]]
+    ) -> AsyncIterator[tuple[int, Found | Missing]]: ...
+
+
+@runtime_checkable
+class ReadableIntoManyAsync(Backend, Protocol[O_contra]):
+    def get_into_many_async(
+        self, requests: Sequence[tuple[str, O_contra, ByteRange | None]]
+    ) -> AsyncIterator[tuple[int, Copied | Missing]]: ...
+
+
+@runtime_checkable
+class WritableManyAsync(Backend, Protocol):
+    def put_many_async(
+        self, requests: Sequence[tuple[str, memoryview]]
+    ) -> AsyncIterator[tuple[int, Written]]: ...
+
+    def delete_many_async(
+        self, paths: Sequence[str]
+    ) -> AsyncIterator[tuple[int, Deleted | Missing]]: ...
 
 
 class ListableAsync(Backend, Protocol):

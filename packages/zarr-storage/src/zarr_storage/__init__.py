@@ -1,11 +1,13 @@
 """A Zarr-agnostic key-value storage layer.
 
 A `Store` is a view of a backend at a root directory. Backends implement capability protocols
-(`Readable`, `Writable`, `Listable`, and async twins) over backend paths; `Store` validates keys,
-applies its root, enforces read-only access, and is the only object most callers need.
+(`Readable`, `Writable`, `Listable`, their batch variants, and async twins) over backend paths;
+`Store` validates keys, applies its root, enforces read-only access, and is the only object most
+callers need.
 """
 
 from zarr_storage._errors import (
+    BatchError,
     InvalidByteRangeError,
     InvalidKeyError,
     KeyConflictError,
@@ -24,10 +26,16 @@ from zarr_storage._protocols import (
     ReadableAsync,
     ReadableInto,
     ReadableIntoAsync,
+    ReadableIntoMany,
+    ReadableIntoManyAsync,
+    ReadableMany,
+    ReadableManyAsync,
     Writable,
     WritableAsync,
     WritableIfMatch,
     WritableIfMatchAsync,
+    WritableMany,
+    WritableManyAsync,
 )
 from zarr_storage._store import Store
 from zarr_storage._types import (
@@ -53,6 +61,7 @@ from zarr_storage._types import (
 
 __all__ = [
     "Backend",
+    "BatchError",
     "ByteRange",
     "Copied",
     "DeletableIfMatch",
@@ -79,6 +88,10 @@ __all__ = [
     "ReadableAsync",
     "ReadableInto",
     "ReadableIntoAsync",
+    "ReadableIntoMany",
+    "ReadableIntoManyAsync",
+    "ReadableMany",
+    "ReadableManyAsync",
     "Rejected",
     "StorageError",
     "Store",
@@ -90,5 +103,7 @@ __all__ = [
     "WritableAsync",
     "WritableIfMatch",
     "WritableIfMatchAsync",
+    "WritableMany",
+    "WritableManyAsync",
     "Written",
 ]

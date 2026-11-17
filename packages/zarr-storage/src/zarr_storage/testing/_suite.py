@@ -15,6 +15,7 @@ import asyncio
 import pickle
 import threading
 import time
+from collections import Counter
 from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Literal
@@ -25,6 +26,7 @@ from hypothesis import strategies as st
 from hypothesis.stateful import run_state_machine_as_test
 
 from zarr_storage._errors import (
+    BatchError,
     InvalidByteRangeError,
     InvalidKeyError,
     KeyConflictError,
@@ -167,6 +169,21 @@ IF_CHANGED_CASES = [
     ),
     IfChangedCase(present=False, generation="stale", byte_range=None, outcome=Missing),
 ]
+
+BATCH_VALUES = {"a": VALUE, "b/c": b"xy"}
+
+GET_MANY_CASES: list[tuple[list[str | tuple[str, ByteRange | None]], list[bytes | None]]] = [
+    ([], []),
+    (["a"], [VALUE]),
+    (["a", "b/c", "missing", "b"], [VALUE, b"xy", None, None]),
+    (["a", "a"], [VALUE, VALUE]),
+    (
+        [("a", RangeRequest(2, 5)), ("a", SuffixRequest(2)), ("b/c", None), ("x", None)],
+        [b"234", b"89", b"xy", None],
+    ),
+]
+"""Requests to `get_many` over `BATCH_VALUES`, and what each reads (`None`: `Missing`)."""
+
 
 TREE = [
     "zarr.json",
@@ -322,6 +339,16 @@ def _missing_get_if_changed(store: StoreAPI) -> object:
     return store.get_if_changed("missing", _stale())
 
 
+def _missing_get_many(store: StoreAPI) -> object:
+    ((_, result),) = store.get_many(["missing"])
+    return result
+
+
+def _missing_get_into_many(store: StoreAPI) -> object:
+    ((_, result),) = store.get_into_many([("missing", bytearray(1))])
+    return result
+
+
 MISSING_READS: list[Callable[[StoreAPI], object]] = [
     _missing_get,
     _missing_get_directory,
@@ -329,6 +356,8 @@ MISSING_READS: list[Callable[[StoreAPI], object]] = [
     _missing_get_if_changed,
     _missing_get_ranges,
     _missing_get_into,
+    _missing_get_many,
+    _missing_get_into_many,
     _missing_head,
 ]
 MISSING_READ_IDS = [
@@ -338,6 +367,8 @@ MISSING_READ_IDS = [
     "get_if_changed",
     "get_ranges",
     "get_into",
+    "get_many",
+    "get_into_many",
     "head",
 ]
 
@@ -355,8 +386,27 @@ def _delete_dir(store: StoreAPI) -> object:
     return None
 
 
-WRITES: list[Callable[[StoreAPI], object]] = [_put, _delete, _delete_dir]
-WRITE_IDS = ["put", "delete", "delete_dir"]
+def _put_many(store: StoreAPI) -> object:
+    return store.put_many([("k", VALUE)])
+
+
+def _delete_many(store: StoreAPI) -> object:
+    return store.delete_many(["k"])
+
+
+def _put_many_empty(store: StoreAPI) -> object:
+    return store.put_many([])
+
+
+WRITES: list[Callable[[StoreAPI], object]] = [
+    _put,
+    _delete,
+    _delete_dir,
+    _put_many,
+    _delete_many,
+    _put_many_empty,
+]
+WRITE_IDS = ["put", "delete", "delete_dir", "put_many", "delete_many", "put_many-empty"]
 
 
 def _get(store: StoreAPI) -> object:
@@ -375,6 +425,14 @@ def _head(store: StoreAPI) -> object:
     return store.head("k")
 
 
+def _get_many(store: StoreAPI) -> object:
+    return store.get_many(["k"])
+
+
+def _get_into_many(store: StoreAPI) -> object:
+    return store.get_into_many([("k", bytearray(1))])
+
+
 def _list(store: StoreAPI) -> object:
     return store.list()
 
@@ -391,6 +449,10 @@ CLOSED_OPERATIONS: list[Callable[[StoreAPI], object]] = [
     _put,
     _delete,
     _delete_dir,
+    _get_many,
+    _get_into_many,
+    _put_many,
+    _delete_many,
     _list,
     _list_dir,
 ]
@@ -402,9 +464,46 @@ CLOSED_IDS = [
     "put",
     "delete",
     "delete_dir",
+    "get_many",
+    "get_into_many",
+    "put_many",
+    "delete_many",
     "list",
     "list_dir",
 ]
+
+
+def _get_many_invalid(store: StoreAPI) -> object:
+    return store.get_many(["x", "/bad"])
+
+
+def _get_into_many_invalid(store: StoreAPI) -> object:
+    return store.get_into_many([("x", bytearray(1)), ("/bad", bytearray(1))])
+
+
+def _put_many_invalid(store: StoreAPI) -> object:
+    return store.put_many([("y", VALUE), ("/bad", VALUE)])
+
+
+def _delete_many_invalid(store: StoreAPI) -> object:
+    return store.delete_many(["x", "/bad"])
+
+
+INVALID_BATCHES: list[Callable[[StoreAPI], object]] = [
+    _get_many_invalid,
+    _get_into_many_invalid,
+    _put_many_invalid,
+    _delete_many_invalid,
+]
+INVALID_BATCH_IDS = ["get_many", "get_into_many", "put_many", "delete_many"]
+
+
+def _put_many_twice(store: StoreAPI) -> object:
+    return store.put_many([("x", b"1"), ("y", b"2"), ("x", b"3")])
+
+
+def _delete_many_twice(store: StoreAPI) -> object:
+    return store.delete_many(["x", "x"])
 
 
 def _write_repeatedly(
@@ -715,6 +814,98 @@ class StoreSuite:
         store.delete_dir(directory)
         assert set(store.list()) == remaining
 
+    # ------------------------------------------------------------------ batches
+
+    @pytest.mark.parametrize(("requests", "expected"), GET_MANY_CASES)
+    def test_get_many(
+        self,
+        store: StoreAPI,
+        requests: list[str | tuple[str, ByteRange | None]],
+        expected: list[bytes | None],
+    ) -> None:
+        written = dict(store.put_many(BATCH_VALUES.items()))
+        read: Counter[tuple[object, bytes | None]] = Counter()
+        for request, result in store.get_many(requests):
+            key = request if isinstance(request, str) else request[0]
+            match result:
+                case Found(value=value, generation=generation):
+                    assert generation == written[key].generation
+                    read[request, bytes(value)] += 1
+                case Missing():
+                    read[request, None] += 1
+        assert read == Counter(zip(requests, expected, strict=True))
+
+    def test_get_into_many(self, store: StoreAPI) -> None:
+        written = dict(store.put_many(BATCH_VALUES.items()))
+        whole, part, absent = bytearray(len(VALUE)), bytearray(2), bytearray(1)
+        results = {
+            request[0]: result
+            for request, result in store.get_into_many(
+                [("a", whole), ("b/c", part, OffsetRequest(1)), ("missing", absent)]
+            )
+        }
+        assert results["a"] == Copied(len(VALUE), written["a"].generation, results["a"].read_at)
+        assert results["b/c"] == Copied(1, written["b/c"].generation, results["b/c"].read_at)
+        assert isinstance(results["missing"], Missing)
+        assert (bytes(whole), bytes(part), bytes(absent)) == (VALUE, b"y\x00", b"\x00")
+
+    def test_put_many_and_delete_many(self, store: StoreAPI) -> None:
+        store.put("b/c", b"old")
+        items = [("b/c", b"xy"), ("a", VALUE), ("d", b"")]
+        written = store.put_many(items)
+        assert [key for key, _ in written] == ["b/c", "a", "d"]
+        for (key, value), (_, result) in zip(items, written, strict=True):
+            stored = store.get(key)
+            assert isinstance(stored, Found)
+            assert (bytes(stored.value), stored.generation) == (value, result.generation)
+        deleted = store.delete_many(["a", "missing", "b/c"])
+        assert [(key, type(result)) for key, result in deleted] == [
+            ("a", Deleted),
+            ("missing", Missing),
+            ("b/c", Deleted),
+        ]
+        assert deleted[0][1] == Deleted(written[1][1].generation)
+        assert set(store.list()) == {"d"}
+        assert store.put_many([]) == []
+        assert store.delete_many([]) == []
+
+    def test_get_many_taken_in_part(self, store: StoreAPI) -> None:
+        """A caller may stop taking results; the store stays usable."""
+        store.put_many([(f"k{i}", VALUE) for i in range(40)])
+        results = store.get_many(f"k{i}" for i in range(40))
+        assert isinstance(next(iter(results))[1], Found)
+        del results
+        assert len(list(store.get_many(f"k{i}" for i in range(40)))) == 40
+
+    def test_batches_through_a_view(self, store: StoreAPI) -> None:
+        view = store / "r"
+        view.put_many([("k", VALUE)])
+        assert set(store.list()) == {"r/k"}
+        assert [key for key, _ in (store / "r").get_many(["k"])] == ["k"]
+        assert view.delete_many(["k"])[0][1] != Missing()
+        assert set(store.list()) == set()
+
+    @pytest.mark.parametrize("batch", INVALID_BATCHES, ids=INVALID_BATCH_IDS)
+    def test_batch_with_an_invalid_key_raises_before_any_operation(
+        self, store: StoreAPI, batch: Callable[[StoreAPI], object]
+    ) -> None:
+        store.put("x", VALUE)
+        with pytest.raises(InvalidKeyError):
+            batch(store)
+        assert set(store.list()) == {"x"}
+
+    @pytest.mark.parametrize("batch", [_put_many_twice, _delete_many_twice], ids=["put", "delete"])
+    def test_write_batch_naming_a_key_twice_raises(
+        self, store: StoreAPI, batch: Callable[[StoreAPI], object]
+    ) -> None:
+        store.put("x", VALUE)
+        with pytest.raises(ValueError, match="more than once"):
+            batch(store)
+        assert set(store.list()) == {"x"}
+        result = store.get("x")
+        assert isinstance(result, Found)
+        assert bytes(result.value) == VALUE
+
     # ------------------------------------------------------------------ listing
 
     @pytest.mark.parametrize("directory", LIST_DIRECTORIES)
@@ -825,11 +1016,16 @@ class StoreSuite:
         with pytest.raises(StoreClosedError):
             operation(view)
 
-    @pytest.mark.parametrize("listing", ["list", "list_dir"])
+    @pytest.mark.parametrize("listing", ["list", "list_dir", "get_many", "get_into_many"])
     def test_iterating_after_close_raises(self, store: StoreAPI, listing: str) -> None:
         store.put("a", VALUE)
         store.put("b", VALUE)
-        items = store.list() if listing == "list" else store.list_dir()
+        items = {
+            "list": partial(store.list),
+            "list_dir": partial(store.list_dir),
+            "get_many": partial(store.get_many, ["a", "b"]),
+            "get_into_many": partial(store.get_into_many, [("a", bytearray(len(VALUE)))]),
+        }[listing]()
         store.close()
         with pytest.raises(StoreClosedError):
             next(iter(items))
@@ -972,6 +1168,16 @@ class KeyDirectoryConflictSuite:
         store.put("a", VALUE)
         with pytest.raises(KeyConflictError):
             store.put("a/b", VALUE)
+
+    def test_put_many_with_a_conflict_raises_batch_error(self, store: StoreAPI) -> None:
+        with pytest.raises(BatchError) as caught:
+            store.put_many([("a", VALUE), ("a/b", VALUE)])
+        error = caught.value
+        assert [type(e) for e in error.exceptions] == [KeyConflictError]
+        ((key, result),) = error.completed
+        assert isinstance(result, Written)
+        assert error.remaining == (({"a", "a/b"} - {key}).pop(),)
+        assert set(store.list()) == {key}
 
     def test_reads_under_a_key_find_nothing(self, store: StoreAPI) -> None:
         store.put("a", VALUE)

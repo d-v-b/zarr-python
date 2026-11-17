@@ -6,16 +6,26 @@ for every backend. A backend only sees backend paths.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Final, Generic, Self, TypeVar, final
+from collections.abc import AsyncGenerator, Generator
+from typing import TYPE_CHECKING, Final, Generic, Self, TypeVar, cast, final
 
+from zarr_storage._batch import run_many, run_many_async
 from zarr_storage._buffers import byte_view
-from zarr_storage._errors import ReadOnlyError, StoreClosedError
+from zarr_storage._errors import BatchError, ReadOnlyError, StoreClosedError
 from zarr_storage._keys import check_key, is_within, join, normalize_directory, relativize
-from zarr_storage._protocols import Backend
+from zarr_storage._protocols import (
+    Backend,
+    ReadableIntoMany,
+    ReadableIntoManyAsync,
+    ReadableMany,
+    ReadableManyAsync,
+    WritableMany,
+    WritableManyAsync,
+)
 from zarr_storage._types import Missing
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator, Sequence
+    from collections.abc import AsyncIterator, Iterable, Iterator, Sequence
     from types import TracebackType
 
     from typing_extensions import Buffer
@@ -53,6 +63,9 @@ __all__ = ["Store"]
 B_co = TypeVar("B_co", bound=Backend, covariant=True)
 O = TypeVar("O")
 T = TypeVar("T")
+R = TypeVar("R")
+Q = TypeVar("Q", bound="str | tuple[str, ByteRange | None]")
+"""A `get_many` request: a key, or a key and the part of its value to read."""
 
 
 @final
@@ -203,6 +216,99 @@ class Store(Generic[B_co]):
             raise ReadOnlyError(f"{self!r} is read-only.")
         return path
 
+    def _read_request(
+        self, request: str | tuple[str, ByteRange | None]
+    ) -> tuple[str, ByteRange | None]:
+        if isinstance(request, str):
+            return self._path(request), None
+        key, byte_range = request
+        return self._path(key), byte_range
+
+    def _into_request(
+        self, request: tuple[str, O] | tuple[str, O, ByteRange | None]
+    ) -> tuple[str, O, ByteRange | None]:
+        if len(request) == 2:
+            key, out = request
+            return self._path(key), out, None
+        key, out, byte_range = request
+        return self._path(key), out, byte_range
+
+    def _writable_paths(self, keys: Sequence[str]) -> list[str]:
+        """The backend path of each key, refusing a key named twice: its outcome would be a race."""
+        self._check_open()
+        if self._read_only:
+            raise ReadOnlyError(f"{self!r} is read-only.")
+        paths = [self._writable_path(key) for key in keys]
+        seen: set[str] = set()
+        for key, path in zip(keys, paths, strict=True):
+            if path in seen:
+                raise ValueError(f"The batch names the key {key!r} more than once.")
+            seen.add(path)
+        return paths
+
+    def _streamed(
+        self, batch: Sequence[T], results: Iterator[tuple[int, R]]
+    ) -> Iterator[tuple[T, R]]:
+        """`results` paired with their requests; a failure raises `BatchError`."""
+        done: set[int] = set()
+        try:
+            while True:
+                # Checked before each result is taken, which may start more reads.
+                self._check_open()
+                pair = next(results, None)
+                if pair is None:
+                    return
+                index, result = pair
+                done.add(index)
+                yield batch[index], result
+        except ExceptionGroup as group:
+            raise _batch_error(group, batch, {}, done) from None
+        finally:
+            # A caller that stops early must not leave the batch's reads to the garbage collector.
+            if isinstance(results, Generator):
+                results.close()
+
+    async def _streamed_async(
+        self, batch: Sequence[T], results: AsyncIterator[tuple[int, R]]
+    ) -> AsyncIterator[tuple[T, R]]:
+        done: set[int] = set()
+        try:
+            while True:
+                self._check_open()
+                pair = await anext(results, None)
+                if pair is None:
+                    return
+                index, result = pair
+                done.add(index)
+                yield batch[index], result
+        except ExceptionGroup as group:
+            raise _batch_error(group, batch, {}, done) from None
+        finally:
+            if isinstance(results, AsyncGenerator):
+                await results.aclose()
+
+    @staticmethod
+    def _finished(batch: Sequence[T], results: Iterator[tuple[int, R]]) -> list[tuple[T, R]]:
+        """Every result, in request order; a failure raises `BatchError` with those that landed."""
+        completed: dict[int, R] = {}
+        try:
+            completed.update(results)  # one pair at a time, so a failure keeps those before it
+        except ExceptionGroup as group:
+            raise _batch_error(group, batch, completed, completed.keys()) from None
+        return [(request, completed[index]) for index, request in enumerate(batch)]
+
+    @staticmethod
+    async def _finished_async(
+        batch: Sequence[T], results: AsyncIterator[tuple[int, R]]
+    ) -> list[tuple[T, R]]:
+        completed: dict[int, R] = {}
+        try:
+            async for index, result in results:
+                completed[index] = result  # noqa: PERF403 -- a failure keeps those before it
+        except ExceptionGroup as group:
+            raise _batch_error(group, batch, completed, completed.keys()) from None
+        return [(request, completed[index]) for index, request in enumerate(batch)]
+
     # ----------------------------------------------------------------- sync reads
 
     def get(
@@ -285,6 +391,81 @@ class Store(Generic[B_co]):
     def delete_dir(self: Store[Writable], directory: str = "") -> None:
         """Delete every key under `directory` (by default, every key in this store)."""
         self._backend.delete_dir(self._writable_directory(directory))
+
+    # ----------------------------------------------------------------- sync batches
+
+    def get_many(
+        self: Store[Readable], requests: Iterable[Q]
+    ) -> Iterator[tuple[Q, Found | Missing]]:
+        """`get` for many keys, yielding `(request, result)` pairs as reads finish.
+
+        A request is a key, or a `(key, byte_range)` pair, and comes back as it was given, so
+        `dict(store.get_many(keys))` maps keys to results. Keys are checked when `get_many` is
+        called; the reads happen as the pairs are taken, in no particular order. A batch is not
+        atomic: each read is its own `get`, from whatever generation it finds (`get_ranges` reads
+        several parts of one value from one generation).
+
+        If reads raise, the iterator yields the reads already running that succeed, then raises
+        `BatchError` with the requests left in `remaining`; its `completed` is empty, since those
+        results were yielded.
+        """
+        batch = list(requests)
+        self._check_open()
+        paths = [self._read_request(request) for request in batch]
+        backend = self._backend
+        if isinstance(backend, ReadableMany):
+            return self._streamed(batch, backend.get_many(paths))
+        return self._streamed(batch, run_many(backend.get, paths))
+
+    def get_into_many(
+        self: Store[ReadableInto[O]],
+        requests: Iterable[tuple[str, O] | tuple[str, O, ByteRange | None]],
+    ) -> Iterator[tuple[tuple[str, O] | tuple[str, O, ByteRange | None], Copied | Missing]]:
+        """`get_into` for many `(key, out)` or `(key, out, byte_range)` requests, as `get_many`.
+
+        Each request names its own buffer; two requests sharing one write it in no set order.
+        """
+        batch = list(requests)
+        self._check_open()
+        paths = [self._into_request(request) for request in batch]
+        backend = self._backend
+        if isinstance(backend, ReadableIntoMany):
+            many = cast("ReadableIntoMany[O]", backend)
+            return self._streamed(batch, many.get_into_many(paths))
+        return self._streamed(batch, run_many(backend.get_into, paths))
+
+    def put_many(
+        self: Store[Writable], items: Iterable[tuple[str, Buffer]]
+    ) -> list[tuple[str, Written]]:
+        """`put` each `(key, value)`, returning `(key, result)` pairs in the order given.
+
+        Every key is checked, and every value viewed, before anything is written; a key named twice
+        raises `ValueError`. A batch is not atomic. If writes raise, the writes already running
+        finish, no others start, and `BatchError` reports the keys written (`completed`, with their
+        results) and the rest (`remaining`).
+        """
+        batch = list(items)
+        keys = [key for key, _ in batch]
+        paths = self._writable_paths(keys)
+        requests = [
+            (path, byte_view(value, writable=False))
+            for path, (_, value) in zip(paths, batch, strict=True)
+        ]
+        backend = self._backend
+        if isinstance(backend, WritableMany):
+            return self._finished(keys, backend.put_many(requests))
+        return self._finished(keys, run_many(backend.put, requests))
+
+    def delete_many(
+        self: Store[Writable], keys: Iterable[str]
+    ) -> list[tuple[str, Deleted | Missing]]:
+        """`delete` each key, returning `(key, result)` pairs in the order given, as `put_many`."""
+        batch = list(keys)
+        paths = self._writable_paths(batch)
+        backend = self._backend
+        if isinstance(backend, WritableMany):
+            return self._finished(batch, backend.delete_many(paths))
+        return self._finished(batch, run_many(backend.delete, [(path,) for path in paths]))
 
     # ----------------------------------------------------------------- sync listing
 
@@ -385,6 +566,63 @@ class Store(Generic[B_co]):
         """Async `delete_dir`."""
         await self._backend.delete_dir_async(self._writable_directory(directory))
 
+    # ----------------------------------------------------------------- async batches
+
+    def get_many_async(
+        self: Store[ReadableAsync], requests: Iterable[Q]
+    ) -> AsyncIterator[tuple[Q, Found | Missing]]:
+        """Async `get_many`."""
+        batch = list(requests)
+        self._check_open()
+        paths = [self._read_request(request) for request in batch]
+        backend = self._backend
+        if isinstance(backend, ReadableManyAsync):
+            return self._streamed_async(batch, backend.get_many_async(paths))
+        return self._streamed_async(batch, run_many_async(backend.get_async, paths))
+
+    def get_into_many_async(
+        self: Store[ReadableIntoAsync[O]],
+        requests: Iterable[tuple[str, O] | tuple[str, O, ByteRange | None]],
+    ) -> AsyncIterator[tuple[tuple[str, O] | tuple[str, O, ByteRange | None], Copied | Missing]]:
+        """Async `get_into_many`."""
+        batch = list(requests)
+        self._check_open()
+        paths = [self._into_request(request) for request in batch]
+        backend = self._backend
+        if isinstance(backend, ReadableIntoManyAsync):
+            many = cast("ReadableIntoManyAsync[O]", backend)
+            return self._streamed_async(batch, many.get_into_many_async(paths))
+        return self._streamed_async(batch, run_many_async(backend.get_into_async, paths))
+
+    async def put_many_async(
+        self: Store[WritableAsync], items: Iterable[tuple[str, Buffer]]
+    ) -> list[tuple[str, Written]]:
+        """Async `put_many`."""
+        batch = list(items)
+        keys = [key for key, _ in batch]
+        paths = self._writable_paths(keys)
+        requests = [
+            (path, byte_view(value, writable=False))
+            for path, (_, value) in zip(paths, batch, strict=True)
+        ]
+        backend = self._backend
+        if isinstance(backend, WritableManyAsync):
+            return await self._finished_async(keys, backend.put_many_async(requests))
+        return await self._finished_async(keys, run_many_async(backend.put_async, requests))
+
+    async def delete_many_async(
+        self: Store[WritableAsync], keys: Iterable[str]
+    ) -> list[tuple[str, Deleted | Missing]]:
+        """Async `delete_many`."""
+        batch = list(keys)
+        paths = self._writable_paths(batch)
+        backend = self._backend
+        if isinstance(backend, WritableManyAsync):
+            return await self._finished_async(batch, backend.delete_many_async(paths))
+        return await self._finished_async(
+            batch, run_many_async(backend.delete_async, [(path,) for path in paths])
+        )
+
     # ----------------------------------------------------------------- async listing
 
     def list_async(self: Store[ListableAsync], directory: str = "") -> AsyncIterator[str]:
@@ -395,6 +633,21 @@ class Store(Generic[B_co]):
     def list_dir_async(self: Store[ListableAsync], directory: str = "") -> AsyncIterator[ListItem]:
         """Async `list_dir`."""
         return self._open_items_async(self._backend.list_dir_async(self._directory(directory)))
+
+
+def _batch_error(
+    group: ExceptionGroup[Exception],
+    batch: Sequence[T],
+    completed: dict[int, R],
+    done: Iterable[int],
+) -> BatchError:
+    finished = set(done)
+    return BatchError(
+        f"{len(group.exceptions)} of {len(batch)} operations in a batch failed.",
+        group.exceptions,
+        completed=tuple((batch[index], result) for index, result in sorted(completed.items())),
+        remaining=tuple(request for index, request in enumerate(batch) if index not in finished),
+    )
 
 
 async def _relativized(paths: AsyncIterator[str], root: str) -> AsyncIterator[str]:

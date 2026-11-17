@@ -2,7 +2,7 @@
 
 Each step reads or writes through a view at a random root, so roots, views and the key grammar are
 exercised together with the operations. Half the time a step targets a key the model holds, so
-deletes and conditional writes meet present keys, not just absent ones. Generations that a write or
+deletes, conditional writes and batches meet present keys, not just absent ones. Generations that a write or
 delete retired are kept and replayed as preconditions: a backend must never hand one out again.
 After every step the machine checks that listing, reading and metadata agree with the model.
 """
@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, initialize, invariant, precondition, rule
 
-from zarr_storage._errors import KeyConflictError
+from zarr_storage._errors import BatchError, KeyConflictError
 from zarr_storage._keys import join
 from zarr_storage._types import (
     Deleted,
@@ -62,6 +62,11 @@ class Capabilities:
 
 def _under(path: str, directory: str) -> bool:
     return directory == "" or path.startswith(f"{directory}/")
+
+
+def _nested(a: str, b: str) -> bool:
+    """Whether one of two distinct keys lies under the other."""
+    return _under(a, b) or _under(b, a)
 
 
 def _relative(path: str, root: str) -> str:
@@ -119,6 +124,12 @@ class StoreMachine(RuleBasedStateMachine):
             assert isinstance(result, Missing), result
         else:
             assert result == expected
+
+    def _batch_keys(self, data: st.DataObject, root: str) -> list[str]:
+        """Distinct keys under `root`, each half the time one the model holds."""
+        held = [_relative(p, root) for p in sorted(self.values) if _under(p, root) and p != root]
+        keys = st.one_of(KEYS, st.sampled_from(held)) if held else KEYS
+        return data.draw(st.lists(keys, max_size=4, unique=True), label="keys")
 
     def _record(self, path: str, value: bytes, generation: Generation) -> None:
         if self._capabilities.unique_generations:
@@ -201,6 +212,49 @@ class StoreMachine(RuleBasedStateMachine):
         self._check_refused(result, join(root, key))
 
     @rule(data=st.data())
+    def put_many(self, data: st.DataObject) -> None:
+        root = data.draw(ROOTS, label="root")
+        keys = self._batch_keys(data, root)
+        if not self._capabilities.holds_key_and_directory:
+            # Which of two nested keys in one batch lands is a race between threads, and a model
+            # that depends on it breaks Hypothesis's replays; `KeyDirectoryConflictSuite` checks it.
+            keys = [k for i, k in enumerate(keys) if not any(_nested(k, o) for o in keys[:i])]
+        items = [(key, data.draw(VALUES, label="value")) for key in keys]
+        paths = [join(root, key) for key in keys]
+        may_conflict = any(self._conflicts(path) for path in paths)
+        failure: BatchError | None = None
+        try:
+            written = (self.store / root).put_many(items)
+        except BatchError as error:
+            failure = error
+            written = [(str(key), result) for key, result in error.completed]
+        if failure is None:
+            assert [key for key, _ in written] == keys
+        else:
+            # Only a collision can fail a write here; the writes that landed are kept.
+            assert may_conflict, failure
+            assert all(isinstance(e, KeyConflictError) for e in failure.exceptions), failure
+            assert len(failure.completed) + len(failure.remaining) == len(items)
+        values = dict(items)
+        for key, result in written:
+            assert isinstance(result, Written)
+            self._record(join(root, key), values[key], result.generation)
+
+    @rule(data=st.data())
+    def delete_many(self, data: st.DataObject) -> None:
+        root = data.draw(ROOTS, label="root")
+        keys = self._batch_keys(data, root)
+        results = (self.store / root).delete_many(keys)
+        assert [key for key, _ in results] == keys
+        for key, result in results:
+            path = join(root, key)
+            if path in self.values:
+                assert result == Deleted(self.generations[path])
+                self._forget(path)
+            else:
+                assert isinstance(result, Missing)
+
+    @rule(data=st.data())
     def delete(self, data: st.DataObject) -> None:
         root, key = self._target(data)
         path = join(root, key)
@@ -278,6 +332,14 @@ class StoreMachine(RuleBasedStateMachine):
         if not hasattr(self, "store"):
             return
         assert set(self.store.list()) == set(self.values)
+        batch = dict(self.store.get_many(self.values))
+        assert set(batch) == set(self.values)
+        for path, result in batch.items():
+            assert isinstance(result, Found)
+            assert (bytes(result.value), result.generation) == (
+                self.values[path],
+                self.generations[path],
+            )
         for path, value in self.values.items():
             generation = self.generations[path]
             result = self.store.get(path)

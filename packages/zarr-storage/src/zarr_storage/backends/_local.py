@@ -17,6 +17,7 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, ParamSpec, TypedDict, TypeVar
 
+from zarr_storage._batch import run_many, run_many_async
 from zarr_storage._buffers import byte_view
 from zarr_storage._byte_range import resolve
 from zarr_storage._errors import (
@@ -396,7 +397,8 @@ class LocalBackend:
         Create `root` if it doesn't exist. With `create=False`, a missing root raises
         `FileNotFoundError`.
     concurrency
-        The number of threads that run the async methods' file operations.
+        The number of threads that run the async methods' file operations, and the number of
+        operations a batch (`get_many`, `put_many`, ...) runs at once.
     """
 
     def __init__(
@@ -704,6 +706,24 @@ class LocalBackend:
                 return iter(())
         return _classify(entries)
 
+    # --- batches: the operations above, `concurrency` at once on the backend's threads
+
+    def get_many(
+        self, requests: Sequence[tuple[str, ByteRange | None]]
+    ) -> Iterator[tuple[int, Found | Missing]]:
+        return run_many(self.get, requests, self._pool(), self._concurrency)
+
+    def get_into_many(
+        self, requests: Sequence[tuple[str, Buffer, ByteRange | None]]
+    ) -> Iterator[tuple[int, Copied | Missing]]:
+        return run_many(self.get_into, requests, self._pool(), self._concurrency)
+
+    def put_many(self, requests: Sequence[tuple[str, memoryview]]) -> Iterator[tuple[int, Written]]:
+        return run_many(self.put, requests, self._pool(), self._concurrency)
+
+    def delete_many(self, paths: Sequence[str]) -> Iterator[tuple[int, Deleted | Missing]]:
+        return run_many(self.delete, [(path,) for path in paths], self._pool(), self._concurrency)
+
     # --- async twins: run the sync methods on the backend's threads
 
     def _pool(self) -> ThreadPoolExecutor:
@@ -762,6 +782,26 @@ class LocalBackend:
 
     async def delete_dir_async(self, directory: str) -> None:
         await self._run(self.delete_dir, directory)
+
+    def get_many_async(
+        self, requests: Sequence[tuple[str, ByteRange | None]]
+    ) -> AsyncIterator[tuple[int, Found | Missing]]:
+        return run_many_async(self.get_async, requests, self._concurrency)
+
+    def get_into_many_async(
+        self, requests: Sequence[tuple[str, Buffer, ByteRange | None]]
+    ) -> AsyncIterator[tuple[int, Copied | Missing]]:
+        return run_many_async(self.get_into_async, requests, self._concurrency)
+
+    def put_many_async(
+        self, requests: Sequence[tuple[str, memoryview]]
+    ) -> AsyncIterator[tuple[int, Written]]:
+        return run_many_async(self.put_async, requests, self._concurrency)
+
+    def delete_many_async(
+        self, paths: Sequence[str]
+    ) -> AsyncIterator[tuple[int, Deleted | Missing]]:
+        return run_many_async(self.delete_async, [(path,) for path in paths], self._concurrency)
 
     async def list_async(self, directory: str) -> AsyncIterator[str]:
         for path in await self._run(_materialize, self.list(directory)):

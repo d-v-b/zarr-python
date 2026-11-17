@@ -7,7 +7,7 @@ one event loop. The sync and async surfaces therefore meet one contract, checked
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol, Self, cast
+from typing import TYPE_CHECKING, Protocol, Self, TypeVar, cast
 
 from typing_extensions import Buffer
 
@@ -26,7 +26,7 @@ from zarr_storage._protocols import (
 
 if TYPE_CHECKING:
     import asyncio
-    from collections.abc import AsyncIterator, Iterator, Sequence
+    from collections.abc import AsyncIterator, Iterable, Iterator, Sequence
     from types import TracebackType
 
     from zarr_storage._protocols import DeletableIfMatch, DeletableIfMatchAsync
@@ -47,6 +47,9 @@ if TYPE_CHECKING:
     )
 
 __all__ = ["AsyncAPI", "FullBackend", "StoreAPI", "delete_if_match", "unwrap"]
+
+T = TypeVar("T")
+Q = TypeVar("Q", bound="str | tuple[str, ByteRange | None]")
 
 
 class FullBackend(
@@ -95,6 +98,14 @@ class StoreAPI(Protocol):
     ) -> Written | Rejected | Missing: ...
     def delete(self, key: str) -> Deleted | Missing: ...
     def delete_dir(self, directory: str = "") -> None: ...
+    def get_many(self, requests: Iterable[Q]) -> Iterator[tuple[Q, Found | Missing]]: ...
+    def get_into_many(
+        self, requests: Iterable[tuple[str, Buffer] | tuple[str, Buffer, ByteRange | None]]
+    ) -> Iterator[
+        tuple[tuple[str, Buffer] | tuple[str, Buffer, ByteRange | None], Copied | Missing]
+    ]: ...
+    def put_many(self, items: Iterable[tuple[str, Buffer]]) -> list[tuple[str, Written]]: ...
+    def delete_many(self, keys: Iterable[str]) -> list[tuple[str, Deleted | Missing]]: ...
     def list(self, directory: str = "") -> Iterator[str]: ...
     def list_dir(self, directory: str = "") -> Iterator[ListItem]: ...
     def __truediv__(self, directory: str) -> Self: ...
@@ -125,7 +136,7 @@ def delete_if_match(
     return cast("Store[DeletableIfMatch]", store).delete_if_match(key, generation)
 
 
-async def _next(items: AsyncIterator[object]) -> object:
+async def _next(items: AsyncIterator[T]) -> T:
     return await anext(items)
 
 
@@ -197,14 +208,31 @@ class AsyncAPI:
     def delete_dir(self, directory: str = "") -> None:
         self._runner.run(self._store.delete_dir_async(directory))
 
+    def get_many(self, requests: Iterable[Q]) -> Iterator[tuple[Q, Found | Missing]]:
+        # `get_many_async` checks its requests when called; the results come one at a time.
+        return self._iterate(self._store.get_many_async(requests))
+
+    def get_into_many(
+        self, requests: Iterable[tuple[str, Buffer] | tuple[str, Buffer, ByteRange | None]]
+    ) -> Iterator[
+        tuple[tuple[str, Buffer] | tuple[str, Buffer, ByteRange | None], Copied | Missing]
+    ]:
+        return self._iterate(self._store.get_into_many_async(requests))
+
+    def put_many(self, items: Iterable[tuple[str, Buffer]]) -> list[tuple[str, Written]]:
+        return self._runner.run(self._store.put_many_async(items))
+
+    def delete_many(self, keys: Iterable[str]) -> list[tuple[str, Deleted | Missing]]:
+        return self._runner.run(self._store.delete_many_async(keys))
+
     def list(self, directory: str = "") -> Iterator[str]:
         # `list_async` checks its argument when called; the items come one at a time.
-        return self._iterate(self._store.list_async(directory))  # pyright: ignore[reportReturnType]
+        return self._iterate(self._store.list_async(directory))
 
     def list_dir(self, directory: str = "") -> Iterator[ListItem]:
-        return self._iterate(self._store.list_dir_async(directory))  # pyright: ignore[reportReturnType]
+        return self._iterate(self._store.list_dir_async(directory))
 
-    def _iterate(self, items: AsyncIterator[object]) -> Iterator[object]:
+    def _iterate(self, items: AsyncIterator[T]) -> Iterator[T]:
         while True:
             try:
                 yield self._runner.run(_next(items))

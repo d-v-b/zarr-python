@@ -24,6 +24,7 @@ from obstore.exceptions import (
 )
 from obstore.store import HTTPStore, LocalStore
 
+from zarr_storage._batch import run_many_async
 from zarr_storage._buffers import byte_view, copy_into
 from zarr_storage._byte_range import resolve
 from zarr_storage._errors import InvalidKeyError, KeyConflictError, UnsupportedOperationError
@@ -60,6 +61,9 @@ __all__ = ["ObjectStoreBackend"]
 R = TypeVar("R")
 
 _EMPTY = memoryview(b"")
+
+_NOT_A_DIRECTORY = f"(os error {errno.ENOTDIR})"
+"""How a filesystem store's refusal reads when a parent of the path is a file."""
 
 _PUT_ATTEMPTS = 16
 """How many times a write starts over when the store refused it for a state that then went away."""
@@ -263,10 +267,18 @@ class ObjectStoreBackend:
         The obstore store.
     writable
         Whether to accept writes. Defaults to `False` for `HTTPStore`, `True` otherwise.
+    concurrency
+        The number of requests an async batch (`get_many_async`, `put_many_async`, ...) keeps in
+        flight. Sync batches run one request at a time.
     """
 
-    def __init__(self, store: ObjectStore, *, writable: bool | None = None) -> None:
+    def __init__(
+        self, store: ObjectStore, *, writable: bool | None = None, concurrency: int = 32
+    ) -> None:
+        if concurrency < 1:
+            raise ValueError(f"concurrency must be >= 1; got {concurrency}.")
         self._store = store
+        self._concurrency = concurrency
         self._writable = not isinstance(store, HTTPStore) if writable is None else writable
         # Only a filesystem refuses a path that lies under a file; elsewhere a refusal is an error.
         self._filesystem = isinstance(store, LocalStore)
@@ -306,6 +318,19 @@ class ObjectStoreBackend:
             if await self._head_raw_async(p) is not None:
                 return True
         return False
+
+    def _refused_under_a_key(self, error: GenericError, path: str) -> bool:
+        """Whether a filesystem store refused `path` because a parent of it is a key.
+
+        `ENOTDIR` in the refusal says so as of the refusal. Looking at the parents afterwards can
+        race a concurrent delete of that parent, so that is only the fallback.
+        """
+        return self._filesystem and (_NOT_A_DIRECTORY in str(error) or self._under_a_key(path))
+
+    async def _refused_under_a_key_async(self, error: GenericError, path: str) -> bool:
+        return self._filesystem and (
+            _NOT_A_DIRECTORY in str(error) or await self._under_a_key_async(path)
+        )
 
     def _blocked_by_a_key(self, directory: str) -> bool:
         """Whether a filesystem store refused to list `directory` because it is, or lies under, a key."""
@@ -382,8 +407,8 @@ class ObjectStoreBackend:
             return _metadata(obstore.head(self._store, path))
         except FileNotFoundError:
             return Missing(time.time())
-        except GenericError:
-            if self._under_a_key(path):
+        except GenericError as e:
+            if self._refused_under_a_key(e, path):
                 return Missing(time.time())
             raise
 
@@ -392,8 +417,8 @@ class ObjectStoreBackend:
             return _metadata(await obstore.head_async(self._store, path))
         except FileNotFoundError:
             return Missing(time.time())
-        except GenericError:
-            if await self._under_a_key_async(path):
+        except GenericError as e:
+            if await self._refused_under_a_key_async(e, path):
                 return Missing(time.time())
             raise
 
@@ -496,8 +521,8 @@ class ObjectStoreBackend:
             result = obstore.get(self._store, path)
         except FileNotFoundError:
             return Missing(time.time())
-        except GenericError:
-            if self._under_a_key(path):
+        except GenericError as e:
+            if self._refused_under_a_key(e, path):
                 return Missing(time.time())
             raise
         generation = _generation(result.meta["e_tag"], result.meta["version"])
@@ -537,8 +562,8 @@ class ObjectStoreBackend:
             result = await obstore.get_async(self._store, path)
         except FileNotFoundError:
             return Missing(time.time())
-        except GenericError:
-            if await self._under_a_key_async(path):
+        except GenericError as e:
+            if await self._refused_under_a_key_async(e, path):
                 return Missing(time.time())
             raise
         generation = _generation(result.meta["e_tag"], result.meta["version"])
@@ -690,6 +715,28 @@ class ObjectStoreBackend:
             for path in paths:
                 with contextlib.suppress(FileNotFoundError):
                     await obstore.delete_async(self._store, path)
+
+    # --- async batches: the async operations, `concurrency` at once
+
+    def get_many_async(
+        self, requests: Sequence[tuple[str, ByteRange | None]]
+    ) -> AsyncIterator[tuple[int, Found | Missing]]:
+        return run_many_async(self.get_async, requests, self._concurrency)
+
+    def get_into_many_async(
+        self, requests: Sequence[tuple[str, Buffer, ByteRange | None]]
+    ) -> AsyncIterator[tuple[int, Copied | Missing]]:
+        return run_many_async(self.get_into_async, requests, self._concurrency)
+
+    def put_many_async(
+        self, requests: Sequence[tuple[str, memoryview]]
+    ) -> AsyncIterator[tuple[int, Written]]:
+        return run_many_async(self.put_async, requests, self._concurrency)
+
+    def delete_many_async(
+        self, paths: Sequence[str]
+    ) -> AsyncIterator[tuple[int, Deleted | Missing]]:
+        return run_many_async(self.delete_async, [(path,) for path in paths], self._concurrency)
 
     # --- Listable
 
