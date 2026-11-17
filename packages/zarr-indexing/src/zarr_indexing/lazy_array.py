@@ -160,8 +160,7 @@ import numpy as np
 
 from zarr_indexing.boundary import (
     SelectionMode,
-    normalize_positional_selection,
-    split_scalar_axes,
+    select_positional,
 )
 from zarr_indexing.chunk_resolution import (
     ChunkProjection,
@@ -1044,21 +1043,7 @@ class LazyArray:
         return _LazyVIndex(self._select)
 
     def _select(self, selection: Any, mode: SelectionMode) -> LazyArray:
-        transform = self._transform
-        if mode != "basic":
-            # This frontend applies scalar integers first, dropping their axes,
-            # then normalizes its supported advanced-indexing forms.
-            scalar_selection, selection = split_scalar_axes(selection, transform.domain, mode)
-            if scalar_selection is not None:
-                transform = transform.select(scalar_selection, "basic")
-        literal = normalize_positional_selection(selection, transform.domain, mode)
-        if mode == "basic":
-            # IndexTransform's basic path includes NumPy's `None`/newaxis.
-            # `selection_to_transform` intentionally exposes a narrower basic
-            # selection contract and rejects it.
-            composed = transform[literal]
-        else:
-            composed = transform.select(literal, mode)
+        composed = select_positional(self._transform, selection, mode)
         return LazyArray._derive(self._array, composed, self._parts, self._reader)
 
     def __getitem__(self, selection: Any) -> LazyArray:

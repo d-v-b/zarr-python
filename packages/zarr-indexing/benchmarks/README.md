@@ -39,3 +39,20 @@ These scripts measure planning rather than codec or storage throughput. Repeat
 measurements with alternating operation order before interpreting small timing
 differences. Preserve raw benchmark output as an experiment artifact rather than
 accumulating successive result tables in this README.
+
+## Partition indexer rows
+
+`execution.py` compares `zarr_indexing._indexer`, which walks a `GridPartition`
+as Zarr `Indexer` rows, with Zarr's own indexers, and with materializing the
+partition's `ChunkProjection` objects instead of reading its tables. It times
+indexer construction and row walks with no storage I/O, and cross-checks the
+chunk order against Zarr's. Run it from this package directory with the in-repo
+zarr overlaid:
+
+```sh
+uv run --with-editable ../.. --group test python benchmarks/execution.py
+```
+
+Planning wins alone do not justify replacing the existing indexers; the codec
+integration tests, not a benchmark, are what shows the rows drive Zarr's
+pipelines.
