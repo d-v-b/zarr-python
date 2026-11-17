@@ -137,12 +137,66 @@ def concurrent_iter[T: tuple[Any, ...], V](
     return [asyncio.ensure_future(run(item)) for item in items]
 
 
+async def cancel_and_drain(futures: Iterable[asyncio.Future[Any]]) -> None:
+    """Cancel every not-yet-done future/task and await its outcome.
+
+    Used to clean up work spawned concurrently when the caller exits early via
+    exception. Without this, tasks already spawned keep running unattended
+    after the caller has moved on, and an eventual failure surfaces as an
+    unraisable "exception was never retrieved" warning instead of being
+    observed here.
+    """
+    pending = [f for f in futures if not f.done()]
+    if len(pending) == 0:
+        return
+    for f in pending:
+        f.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
+
+
+async def to_thread_to_completion[**P, V](
+    func: Callable[P, V], /, *args: P.args, **kwargs: P.kwargs
+) -> V:
+    """Run `func` in a thread like `asyncio.to_thread`, but outlast cancellation.
+
+    Cancelling `asyncio.to_thread` abandons the thread: the awaiter sees
+    `CancelledError` while `func` keeps running. That is harmless for pure
+    computation, but `func` here may be changing a store, and the caller must
+    be able to rely on that having stopped once it has seen the exception. So a
+    cancellation is held back until `func` has returned, and `func`'s own
+    outcome is then discarded in its favor.
+    """
+    task = asyncio.ensure_future(asyncio.to_thread(func, *args, **kwargs))
+    cancellation: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            # Unlike awaiting `task` directly, `wait` does not forward a
+            # cancellation of this coroutine to `task`.
+            await asyncio.wait([task])
+        except asyncio.CancelledError as e:
+            cancellation = e
+    if cancellation is not None:
+        if not task.cancelled():
+            task.exception()  # mark as retrieved
+        raise cancellation
+    return task.result()
+
+
 async def concurrent_map[T: tuple[Any, ...], V](
     items: Iterable[T],
     func: Callable[..., Awaitable[V]],
     limit: int | None = None,
 ) -> list[V]:
-    return await asyncio.gather(*concurrent_iter(items, func, limit))
+    """Run `func(*item)` for every item and return the results in input order.
+
+    If a call fails, the other calls are cancelled and awaited before the
+    failure is raised, so no call is left running behind the caller.
+    """
+    tasks = concurrent_iter(items, func, limit)
+    try:
+        return await asyncio.gather(*tasks)
+    finally:
+        await cancel_and_drain(tasks)
 
 
 async def concurrent_foreach[T: tuple[Any, ...]](

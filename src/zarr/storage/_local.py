@@ -20,7 +20,7 @@ from zarr.abc.store import (
 )
 from zarr.core.buffer import Buffer
 from zarr.core.buffer.core import default_buffer_prototype
-from zarr.core.common import AccessModeLiteral, concurrent_map
+from zarr.core.common import AccessModeLiteral, concurrent_map, to_thread_to_completion
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterable, Iterator
@@ -133,7 +133,9 @@ def _put(path: Path, value: Buffer, exclusive: bool = False) -> int:
 
 # The helpers below do the blocking filesystem work behind LocalStore's async methods.
 # Each async method runs exactly one of them via `asyncio.to_thread` so that the event
-# loop is never stalled on disk I/O; the synchronous methods call them directly.
+# loop is never stalled on disk I/O; the synchronous methods call them directly. Methods
+# that change the store use `to_thread_to_completion` instead, so a cancelled caller
+# cannot go on to observe the store changing behind it.
 
 
 def _ensure_root(root: Path, *, create: bool) -> None:
@@ -289,7 +291,7 @@ class LocalStore(Store):
     async def clear(self) -> None:
         # docstring inherited
         self._check_writable()
-        await asyncio.to_thread(_clear, self.root)
+        await to_thread_to_completion(_clear, self.root)
 
     def __str__(self) -> str:
         return f"file://{self.root.as_posix()}"
@@ -389,7 +391,7 @@ class LocalStore(Store):
                 f"LocalStore.set(): `value` must be a Buffer instance. Got an instance of {type(value)} instead."
             )
         path = self.root / key
-        await asyncio.to_thread(_put, path, value, exclusive=exclusive)
+        await to_thread_to_completion(_put, path, value, exclusive=exclusive)
 
     async def delete(self, key: str) -> None:
         """
@@ -406,12 +408,12 @@ class LocalStore(Store):
         """
         # docstring inherited
         self._check_writable()
-        await asyncio.to_thread(_delete, self.root / key)
+        await to_thread_to_completion(_delete, self.root / key)
 
     async def delete_dir(self, prefix: str) -> None:
         # docstring inherited
         self._check_writable()
-        await asyncio.to_thread(_delete_dir, self.root / prefix, prefix)
+        await to_thread_to_completion(_delete_dir, self.root / prefix, prefix)
 
     async def exists(self, key: str) -> bool:
         # docstring inherited
@@ -438,7 +440,7 @@ class LocalStore(Store):
         """
         if isinstance(dest_root, str):
             dest_root = Path(dest_root)
-        await asyncio.to_thread(_move, self.root, dest_root)
+        await to_thread_to_completion(_move, self.root, dest_root)
         self.root = dest_root
 
     async def getsize(self, key: str) -> int:

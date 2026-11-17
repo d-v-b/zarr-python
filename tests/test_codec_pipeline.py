@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import threading
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -11,18 +14,24 @@ import hypothesis.strategies as st
 from hypothesis import given
 
 import zarr
+import zarr.api.asynchronous
+import zarr.storage._local
+from zarr.abc.codec import ArrayArrayCodec
 from zarr.codecs import BytesCodec, CastValue, GzipCodec, TransposeCodec
 from zarr.core.array import _get_chunk_spec
 from zarr.core.buffer.core import default_buffer_prototype
 from zarr.core.codec_pipeline import codecs_from_list
 from zarr.core.config import config as zarr_config
 from zarr.core.indexing import BasicIndexer
-from zarr.storage import MemoryStore
+from zarr.storage import LocalStore, MemoryStore
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
+    from pathlib import Path
 
     from zarr.abc.codec import Codec
+    from zarr.core.array_spec import ArraySpec
+    from zarr.core.buffer import NDBuffer
 
 
 @pytest.fixture(autouse=True)
@@ -321,3 +330,140 @@ def test_codecs_from_list_outcome_matches_order_rules(labels: list[str]) -> None
         aa, _ab, bb = codecs_from_list(codecs)
         assert labels.count(_AA) == len(aa)
         assert labels.count(_BB) == len(bb)
+
+
+# ---------------------------------------------------------------------------
+# A failed write stops changing the store before it raises
+# ---------------------------------------------------------------------------
+
+_SENTINEL = -1.0
+
+
+@dataclass
+class _WriteGate:
+    """Holds a chunk's store write open until the test has seen a sibling chunk fail."""
+
+    write_started: threading.Event = field(default_factory=threading.Event)
+    encode_failing: threading.Event = field(default_factory=threading.Event)
+    release_writes: threading.Event = field(default_factory=threading.Event)
+    writes_in_flight: int = 0
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+@dataclass(frozen=True)
+class _FailsOnSentinelCodec(ArrayArrayCodec):
+    """Raises on chunks holding the sentinel, once another chunk's write is in flight."""
+
+    gate: _WriteGate
+    is_fixed_size = True
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"name": "test-fails-on-sentinel", "configuration": {}}
+
+    def compute_encoded_size(self, input_byte_length: int, _chunk_spec: ArraySpec) -> int:
+        return input_byte_length
+
+    def _decode_sync(self, chunk_array: NDBuffer, chunk_spec: ArraySpec) -> NDBuffer:
+        return chunk_array
+
+    def _encode_sync(self, chunk_array: NDBuffer, chunk_spec: ArraySpec) -> NDBuffer:
+        if np.any(chunk_array.as_numpy_array() == _SENTINEL):
+            self.gate.write_started.wait(timeout=30)
+            self.gate.encode_failing.set()
+            raise ValueError("sentinel chunk")
+        return chunk_array
+
+    async def _decode_single(self, chunk_array: NDBuffer, chunk_spec: ArraySpec) -> NDBuffer:
+        return chunk_array
+
+    async def _encode_single(self, chunk_array: NDBuffer, chunk_spec: ArraySpec) -> NDBuffer:
+        return await asyncio.to_thread(self._encode_sync, chunk_array, chunk_spec)
+
+
+def _assign_expecting_failure(arr: zarr.Array[Any], data: Any, raised: list[BaseException]) -> None:
+    try:
+        arr[:] = data
+    except ValueError as e:
+        raised.append(e)
+
+
+def _gate_local_store_writes(monkeypatch: pytest.MonkeyPatch, gate: _WriteGate) -> None:
+    put = zarr.storage._local._put
+
+    def gated_put(*args: Any, **kwargs: Any) -> int | None:
+        with gate.lock:
+            gate.writes_in_flight += 1
+        gate.write_started.set()
+        gate.release_writes.wait(timeout=30)
+        try:
+            return put(*args, **kwargs)
+        finally:
+            with gate.lock:
+                gate.writes_in_flight -= 1
+
+    monkeypatch.setattr(zarr.storage._local, "_put", gated_put)
+
+
+def test_failed_write_stops_changing_the_store_before_raising(
+    pipeline_class: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Chunk 0 fails to encode while chunk 1 is mid-write: the write must not raise until
+    chunk 1 is done. `LocalStore` writes run in threads, which cancellation cannot stop.
+
+    The `join` timeout only gives a regression time to show. It cannot fail a correct
+    implementation, which is blocked on `release_writes` for as long as the test likes.
+    """
+    gate = _WriteGate()
+    data = np.arange(8, dtype="float64")
+    data[0] = _SENTINEL
+    raised: list[BaseException] = []
+    with zarr_config.set({"async.concurrency": 2, "codec_pipeline.max_workers": 2}):
+        arr = zarr.create_array(
+            LocalStore(tmp_path),
+            shape=(8,),
+            chunks=(1,),
+            dtype="float64",
+            filters=[_FailsOnSentinelCodec(gate)],
+            compressors=None,
+            fill_value=0.0,
+        )
+        _gate_local_store_writes(monkeypatch, gate)
+        writer = threading.Thread(target=_assign_expecting_failure, args=(arr, data, raised))
+        writer.start()
+        try:
+            assert gate.encode_failing.wait(timeout=30)
+            writer.join(timeout=0.1)
+            returned_while_a_write_was_in_flight = not writer.is_alive()
+        finally:
+            gate.release_writes.set()
+            writer.join(timeout=30)
+        writes_in_flight_on_return = gate.writes_in_flight
+
+    assert not returned_while_a_write_was_in_flight
+    assert writes_in_flight_on_return == 0
+    assert len(raised) == 1
+
+
+async def test_cancelled_write_stops_changing_the_store_before_raising(
+    pipeline_class: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cancelling a write holds the `CancelledError` back until the write threads are done."""
+    gate = _WriteGate()
+    with zarr_config.set({"async.concurrency": 2, "codec_pipeline.max_workers": 2}):
+        arr = await zarr.api.asynchronous.create_array(
+            LocalStore(tmp_path), shape=(8,), chunks=(1,), dtype="float64", compressors=None
+        )
+        _gate_local_store_writes(monkeypatch, gate)
+        task = asyncio.ensure_future(arr.setitem(slice(None), np.arange(8, dtype="float64")))
+        assert await asyncio.to_thread(gate.write_started.wait, 30)
+        task.cancel()
+        await asyncio.sleep(0)
+        returned_while_a_write_was_in_flight = task.done()
+
+        gate.release_writes.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert not returned_while_a_write_was_in_flight
+
+    assert gate.writes_in_flight == 0

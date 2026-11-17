@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, get_args
 
@@ -14,12 +15,14 @@ from zarr.core.common import (
     ceildiv,
     concurrent_foreach,
     concurrent_iter,
+    concurrent_map,
     parse_bool,
     parse_int,
     parse_name,
     parse_order,
     parse_shapelike,
     product,
+    to_thread_to_completion,
 )
 from zarr.core.config import parse_indexing_order
 
@@ -120,8 +123,91 @@ async def test_concurrent_iter_schedules_eagerly() -> None:
     assert results == [0, 1, 2]
 
 
-# todo: test
-def test_concurrent_map() -> None: ...
+async def test_concurrent_map() -> None:
+    """Results come back in input order, whatever order the calls finish in."""
+
+    async def work(i: int) -> int:
+        for _ in range(3 - i):
+            await asyncio.sleep(0)
+        return i
+
+    assert await concurrent_map([(0,), (1,), (2,)], work) == [0, 1, 2]
+    assert await concurrent_map([(0,), (1,), (2,)], work, limit=1) == [0, 1, 2]
+
+
+async def test_concurrent_map_failure_stops_other_calls_before_raising() -> None:
+    """When a call fails, every call that started has ended, and the rest never start.
+
+    Item 1 is in flight when item 0 fails and needs several event-loop iterations to
+    wind down. The failure frees a slot, so one queued item may take a first step
+    before it is cancelled too, but the last items are never reached.
+    """
+    n_items = 6
+    item_1_started = asyncio.Event()
+    never = asyncio.Event()
+    started: list[int] = []
+    running: set[int] = set()
+
+    async def work(i: int) -> None:
+        started.append(i)
+        if i == 0:
+            await item_1_started.wait()
+            raise ValueError("failed")
+        running.add(i)
+        item_1_started.set()
+        try:
+            await never.wait()
+        finally:
+            for _ in range(5):
+                await asyncio.sleep(0)
+            running.remove(i)
+
+    with pytest.raises(ValueError, match="failed"):
+        await concurrent_map([(i,) for i in range(n_items)], work, limit=2)
+
+    assert 1 in started
+    assert len(started) < n_items
+    assert running == set()
+
+
+async def test_to_thread_to_completion() -> None:
+    """Passes arguments through and returns the result, like `asyncio.to_thread`."""
+
+    def add(a: int, *, b: int) -> int:
+        return a + b
+
+    assert await to_thread_to_completion(add, 1, b=2) == 3
+
+
+async def test_to_thread_to_completion_raises_func_exception() -> None:
+    def fail() -> None:
+        raise ValueError("failed")
+
+    with pytest.raises(ValueError, match="failed"):
+        await to_thread_to_completion(fail)
+
+
+async def test_to_thread_to_completion_holds_cancellation_until_func_returns() -> None:
+    func_started = threading.Event()
+    release_func = threading.Event()
+
+    def func() -> None:
+        func_started.set()
+        release_func.wait(timeout=30)
+
+    task = asyncio.ensure_future(to_thread_to_completion(func))
+    await asyncio.to_thread(func_started.wait, 30)
+    task.cancel()
+    # Cancelled more than once, as an impatient caller might: still held back.
+    for _ in range(3):
+        await asyncio.sleep(0)
+        task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+
+    release_func.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
 
 class _Abort(BaseException):
