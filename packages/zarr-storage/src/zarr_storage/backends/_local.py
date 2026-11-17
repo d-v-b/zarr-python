@@ -455,6 +455,10 @@ class LocalBackend:
         if executor is not None:
             executor.shutdown(wait=True)
 
+    async def aclose(self) -> None:
+        """`close` on a worker thread: it waits for running file operations to finish."""
+        await asyncio.to_thread(self.close)
+
     # --- paths
 
     def _file(self, path: str) -> Path:

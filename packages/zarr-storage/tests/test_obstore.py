@@ -131,15 +131,15 @@ async def _collect(items: AsyncIterator[object]) -> list[object]:
 
 
 def _list_a_async(store: Store[ObjectStoreBackend]) -> object:
-    return asyncio.run(_collect(store.list_async("a")))
+    return asyncio.run(_collect(store.as_async().list("a")))
 
 
 def _list_dir_a_async(store: Store[ObjectStoreBackend]) -> object:
-    return asyncio.run(_collect(store.list_dir_async("a")))
+    return asyncio.run(_collect(store.as_async().list_dir("a")))
 
 
 def _get_ab_async(store: Store[ObjectStoreBackend]) -> object:
-    return asyncio.run(store.get_async("a/b"))
+    return asyncio.run(store.as_async().get("a/b"))
 
 
 @pytest.mark.parametrize(
@@ -190,5 +190,5 @@ def test_get_if_changed_without_if_none_match_is_unchanged(
     if api == "sync":
         result = store.get_if_changed("k", generation)
     else:
-        result = asyncio.run(store.get_if_changed_async("k", generation))
+        result = asyncio.run(store.as_async().get_if_changed("k", generation))
     assert result == Unchanged(generation, result.read_at)

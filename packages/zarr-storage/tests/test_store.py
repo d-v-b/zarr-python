@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
 import pytest
 
 from zarr_storage import (
+    AsyncStore,
     BatchError,
     Copied,
     Found,
@@ -253,3 +255,83 @@ def test_byte_range_out_of_order_raises(make: object) -> None:
 def test_store_is_not_value_equal() -> None:
     backend = MemoryBackend()
     assert Store(backend) != Store(backend)
+
+
+@pytest.mark.parametrize("read_only", [False, True])
+@pytest.mark.parametrize("root", ["", "a/b"])
+def test_views_across_sync_and_async(root: str, read_only: bool) -> None:
+    """`as_async` and `as_sync` keep the backend, root and read-only flag, and don't own."""
+    backend = MemoryBackend()
+    store = Store(backend, root=root, read_only=read_only)
+    async_view = store.as_async()
+    sync_view = async_view.as_sync()
+    for view in (async_view, sync_view):
+        assert (view.backend, view.root, view.read_only) == (backend, root, read_only)
+        assert view.shares_backend(store)
+        assert view.overlaps(store)
+    assert isinstance(async_view, AsyncStore)
+    assert isinstance(sync_view, Store)
+    asyncio.run(async_view.aclose())
+    sync_view.close()
+    assert not backend.closed
+    store.close()
+    assert backend.closed
+
+
+class _AsyncClosingBackend(MemoryBackend):
+    """A backend whose cleanup is a coroutine; records which close ran."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.closed_by: list[str] = []
+
+    def close(self) -> None:
+        self.closed_by.append("close")
+        super().close()
+
+    async def aclose(self) -> None:
+        self.closed_by.append("aclose")
+        super().close()
+
+
+class _SyncClosingBackend(MemoryBackend):
+    def __init__(self) -> None:
+        super().__init__()
+        self.closed_by: list[str] = []
+
+    def close(self) -> None:
+        self.closed_by.append("close")
+        super().close()
+
+
+async def _close_async(store: AsyncStore[_AsyncClosingBackend | _SyncClosingBackend]) -> None:
+    async with store:
+        pass
+
+
+@pytest.mark.parametrize(
+    ("backend", "expected"),
+    [(_AsyncClosingBackend(), ["aclose"]), (_SyncClosingBackend(), ["close"])],
+    ids=["closable-async", "sync-close"],
+)
+def test_async_store_closes_its_backend(
+    backend: _AsyncClosingBackend | _SyncClosingBackend, expected: list[str]
+) -> None:
+    """`AsyncStore` awaits a backend's `aclose` where it has one, and calls `close` otherwise."""
+    asyncio.run(_close_async(AsyncStore(backend) / "derived"))
+    assert backend.closed_by == []
+    asyncio.run(_close_async(AsyncStore(backend)))
+    assert backend.closed_by == expected
+    assert backend.closed
+
+
+async def _static_surface_checks(
+    store: Store[MemoryBackend], astore: AsyncStore[MemoryBackend]
+) -> None:
+    """Never run; pyright checks that each marked line is a type error."""
+    store.get("k")
+    await astore.get("k")
+    store.get_async("k")  # pyright: ignore[reportAttributeAccessIssue]
+    store.aclose()  # pyright: ignore[reportAttributeAccessIssue]
+    astore.close()  # pyright: ignore[reportAttributeAccessIssue]
+    AsyncStore(_ReadOnlyBackend({})).get("k")  # pyright: ignore[reportAttributeAccessIssue]

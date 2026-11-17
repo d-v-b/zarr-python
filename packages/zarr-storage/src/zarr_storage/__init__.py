@@ -1,9 +1,10 @@
 """A Zarr-agnostic key-value storage layer.
 
-A `Store` is a view of a backend at a root directory. Backends implement capability protocols
-(`Readable`, `Writable`, `Listable`, their batch variants, and async twins) over backend paths;
-`Store` validates keys, applies its root, enforces read-only access, and is the only object most
-callers need.
+A `Store` is a view of a backend at a root directory, used through sync methods; an `AsyncStore`
+is the same view used through coroutines, with the same method names. Backends implement capability
+protocols (`Readable`, `Writable`, `Listable`, their batch variants, and async twins) over backend
+paths; the stores validate keys, apply their root, enforce read-only access, and are the only
+objects most callers need.
 """
 
 from zarr_storage._errors import (
@@ -18,6 +19,7 @@ from zarr_storage._errors import (
 )
 from zarr_storage._protocols import (
     Backend,
+    ClosableAsync,
     DeletableIfMatch,
     DeletableIfMatchAsync,
     Listable,
@@ -37,7 +39,7 @@ from zarr_storage._protocols import (
     WritableMany,
     WritableManyAsync,
 )
-from zarr_storage._store import Store
+from zarr_storage._store import AsyncStore, Store
 from zarr_storage._types import (
     ByteRange,
     Copied,
@@ -60,9 +62,11 @@ from zarr_storage._types import (
 )
 
 __all__ = [
+    "AsyncStore",
     "Backend",
     "BatchError",
     "ByteRange",
+    "ClosableAsync",
     "Copied",
     "DeletableIfMatch",
     "DeletableIfMatchAsync",

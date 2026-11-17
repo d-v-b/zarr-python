@@ -3,7 +3,7 @@
 `StoreSuite` holds what every backend must do. Capabilities a backend may lack come as mixins: a
 backend's test class combines `StoreSuite` with the mixin for each capability it has, or with the
 mixin that checks it refuses that capability cleanly. Every test that takes the `store` fixture runs
-twice, through the sync methods and through the async methods (see `AsyncAPI`).
+twice, through `Store` and through `AsyncStore` (see `AsyncAPI`).
 
 Each behavior has one table-driven test for the expected outputs and one test per error case.
 """
@@ -50,7 +50,7 @@ from zarr_storage._types import (
     Unchanged,
     Written,
 )
-from zarr_storage.testing._api import AsyncAPI, FullBackend, StoreAPI, delete_if_match, unwrap
+from zarr_storage.testing._api import FullBackend, StoreAPI, async_api, delete_if_match, unwrap
 from zarr_storage.testing._stateful import Capabilities, StoreMachine
 
 if TYPE_CHECKING:
@@ -582,7 +582,7 @@ def _machine_store(
     runner: asyncio.Runner,
 ) -> StoreAPI:
     store = suite.make_store(directories.mktemp("machine"))
-    return store if api == "sync" else AsyncAPI(store, runner)
+    return store if api == "sync" else async_api(store, runner)
 
 
 # ---------------------------------------------------------------------------- the core suite
@@ -605,7 +605,7 @@ class StoreSuite:
             yield store
             return
         with asyncio.Runner() as runner:
-            yield AsyncAPI(store, runner)
+            yield async_api(store, runner)
 
     # ------------------------------------------------------------------ everything at once
 
@@ -762,7 +762,7 @@ class StoreSuite:
         writer.start()
         try:
             with asyncio.Runner() as runner:
-                reader: StoreAPI = store if api == "sync" else AsyncAPI(store, runner)
+                reader: StoreAPI = store if api == "sync" else async_api(store, runner)
                 for _ in range(200):
                     result = reader.get_ranges("k", [RangeRequest(0, 1), SuffixRequest(1)])
                     assert not isinstance(result, Missing)

@@ -25,21 +25,31 @@ Sources, and what each contributed:
 ## Shape
 
 ```
-Backend   capability protocols over backend paths; owns shared state and lifecycle
+Backend      capability protocols over backend paths; owns shared state and lifecycle
    ▲
-Store     one concrete class: (backend, root, read_only, owner); validates keys, applies the root,
-          relativizes listings, enforces read-only; `store / "a"` is a view on the same backend
+_View        (backend, root, read_only, owner): validates keys, applies the root, relativizes
+   ▲         listings, enforces read-only; `store / "a"` is a view on the same backend
+Store        the operations as sync methods; `close()`, `with`; `as_async()`
+AsyncStore   the same names as coroutines; `aclose()`, `async with`; `as_sync()`
 ```
 
 A **backend** is an object that implements some capability protocols (`Readable`, `Writable`,
-`Listable`, `WritableIfMatch`, `DeletableIfMatch`, and their async twins) on *backend paths*: `/`-separated strings, already joined with the root. Backends never
-see relative keys and never join or strip paths. They hold everything that must exist once: the dict,
+`Listable`, `WritableIfMatch`, `DeletableIfMatch`, and their async twins) on *backend paths*:
+`/`-separated strings, already joined with the root. Backends never see relative keys and never join or strip paths. They hold everything that must exist once: the dict,
 the filesystem root, a client, locks, concurrency limits.
 
-A **`Store`** is the only class users hold. It is a view: a backend plus a root. All key validation,
-root joining, listing relativization and read-only enforcement happen in `Store`, once, so no backend can
-get them wrong on its own (the source of most bugs in the legacy API: #2190, #2467, #3639, #3922, #4204,
+A **`Store`** or **`AsyncStore`** is the only object users hold. Each is a view: a backend plus a
+root. All key validation, root joining, listing relativization and read-only enforcement happen in
+their shared base, once, so no backend can get them wrong on its own (the source of most bugs in the legacy API: #2190, #2467, #3639, #3922, #4204,
 #4452).
+
+**Sync and async are two classes** (as zarrs has separate sync and async storage traits): `Store`
+calls a backend's sync protocols and `AsyncStore` its async ones, under the same method names, so
+`store.get(k)` and `await astore.get(k)` read the same way and neither class carries the other's
+methods. A backend with both surfaces serves both; `store.as_async()` and `astore.as_sync()` are
+views on the same backend that don't own it. Lifecycle differs too: `Store` has `close()` and
+`with`, `AsyncStore` has `await aclose()` and `async with`, which awaits a `ClosableAsync`
+backend's `aclose` (a backend whose cleanup awaits a client session) and calls `close` on any other.
 
 ## Keys and directories
 
@@ -53,7 +63,7 @@ get them wrong on its own (the source of most bugs in the legacy API: #2190, #24
   directory; otherwise it follows the key grammar. `list("lat")` never sees `lat_bnds/…`.
 - **Root:** a store's root is a directory in the backend. `store / "a/b"` appends to it.
 
-## Operations (sync; each has an `_async` twin)
+## Operations (`Store`; `AsyncStore` has each under the same name, as a coroutine or async iterator)
 
 | Method | Returns | Notes |
 |---|---|---|
@@ -131,10 +141,11 @@ raises `InvalidByteRangeError`; a suffix longer than the value returns the whole
 
 ## Views, lifecycle, identity
 
-- `store / "a"` and `store.with_read_only(True)` return views on the same backend. A view of a
+- `store / "a"`, `store.with_read_only(True)` and `store.as_async()` (or `as_sync()`) return views
+  on the same backend. A view of a
   read-only store is read-only; `with_read_only(False)` on one raises `ReadOnlyError`.
-- The store the user constructed owns the backend. `close()` on it closes the backend; on a derived
-  view it does nothing. After the backend closes, every view raises `StoreClosedError`.
+- The store the user constructed owns the backend. `close()` (`aclose()` on an `AsyncStore`) on it
+  closes the backend; on a derived view it does nothing. After the backend closes, every view raises `StoreClosedError`.
 - No value equality: `==` is identity. `shares_backend(other)` and `overlaps(other)` answer the questions
   callers actually ask.
 - Pickling carries the backend's configuration and the view's root. A pickled memory store carries a
@@ -188,8 +199,9 @@ writes that concurrently create and remove the same directories can surface its 
 `zarr_storage.testing.StoreSuite` holds the contract every backend meets; optional capabilities come
 as mixins a backend's test class adds (`ConditionalPutSuite`, `KeyAndDirectorySuite`,
 `PickleSuite`, ...) or their refusing counterparts (`NoConditionalPutSuite`,
-`KeyDirectoryConflictSuite`, `ConditionalRaceSuite`, ...). Every test runs twice: through the sync
-methods, and through the async methods on one event loop, so the two surfaces meet one contract.
+`KeyDirectoryConflictSuite`, `ConditionalRaceSuite`, ...). Every test runs twice: through `Store`,
+and through an `AsyncStore` over the same backend on one event loop, so the two classes meet one
+contract.
 
 `StoreSuite.test_state_machine` drives random sequences of `put`, `put_if_absent`, `put_if_match`,
 `put_many`, `delete`, `delete_if_match`, `delete_many`, `delete_dir` and listings through random views, and checks every step against a

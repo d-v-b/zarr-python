@@ -8,8 +8,8 @@ Directories are passed normalized: `""` for the backend's root, otherwise a key 
 `/`.
 
 Each capability has a sync protocol and an async twin whose methods end in `_async`. A backend
-implements whichever it can; `Store`'s methods are typed so that calling one the backend lacks is a
-type error. Compare-and-swap on a generation (`WritableIfMatch`, `DeletableIfMatch`) is a capability
+implements whichever it can. `Store` calls the sync protocols and `AsyncStore` the async ones, and
+their methods are typed so that calling one the backend lacks is a type error. Compare-and-swap on a generation (`WritableIfMatch`, `DeletableIfMatch`) is a capability
 of its own, since many stores can't do it; `put_if_absent` is part of `Writable`.
 
 The batch capabilities (`ReadableMany`, `ReadableIntoMany`, `WritableMany` and their async twins)
@@ -43,6 +43,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "Backend",
+    "ClosableAsync",
     "DeletableIfMatch",
     "DeletableIfMatchAsync",
     "Listable",
@@ -83,6 +84,18 @@ class Backend(Protocol):
 
     def close(self) -> None:
         """Release the backend's resources. Idempotent."""
+        ...
+
+
+@runtime_checkable
+class ClosableAsync(Backend, Protocol):
+    """A backend whose cleanup awaits something, such as closing a client session.
+
+    `AsyncStore.aclose` awaits `aclose` on such a backend, and calls `close` on any other.
+    """
+
+    async def aclose(self) -> None:
+        """`close`, as a coroutine. Idempotent."""
         ...
 
 
