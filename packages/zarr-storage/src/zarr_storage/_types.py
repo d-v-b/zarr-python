@@ -7,19 +7,23 @@ from typing import NewType
 
 __all__ = [
     "ByteRange",
-    "DeleteResult",
+    "Copied",
+    "Deleted",
     "Entry",
+    "Found",
+    "FoundRanges",
     "Generation",
     "Key",
     "ListItem",
+    "Missing",
     "ObjectMetadata",
     "OffsetRequest",
     "Prefix",
-    "PutResult",
     "RangeRequest",
-    "RangesResult",
-    "ReadResult",
+    "Rejected",
     "SuffixRequest",
+    "Unchanged",
+    "Written",
 ]
 
 Generation = NewType("Generation", object)
@@ -80,47 +84,75 @@ ByteRange = RangeRequest | OffsetRequest | SuffixRequest
 
 
 @dataclass(frozen=True, slots=True)
-class ReadResult:
-    """The bytes a read returned, and the generation they belong to."""
+class Found:
+    """A read found the key: its bytes (or the requested part) and their generation."""
 
     value: memoryview
     generation: Generation
+    read_at: float | None = None
+    """When the store read the value, in seconds since the UNIX epoch, if the backend knows."""
 
 
 @dataclass(frozen=True, slots=True)
-class RangesResult:
-    """The bytes of several ranges of one value, all from one read of one generation."""
+class FoundRanges:
+    """A read found the key: the bytes of several ranges, all from one generation."""
 
     values: tuple[memoryview, ...]
+    generation: Generation
+    read_at: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Copied:
+    """A read found the key and copied `size` bytes into the caller's buffer."""
+
+    size: int
+    generation: Generation
+    read_at: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Missing:
+    """The key holds no value (an HTTP store's `404`).
+
+    `read_at` records when the store looked, if the backend knows, so an absence can be cached like
+    a value.
+    """
+
+    read_at: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Unchanged:
+    """`get_if_changed` named the key's current generation, so no bytes were read (an HTTP `304`)."""
+
+    generation: Generation
+    read_at: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Written:
+    """A write stored its value, which has `generation`."""
+
     generation: Generation
 
 
 @dataclass(frozen=True, slots=True)
-class PutResult:
-    """The outcome of a write.
+class Deleted:
+    """A delete removed the key's value, which had `generation`."""
 
-    `applied` is `False` when a precondition (`if_match`, `if_none_match`) failed; `generation` is
-    then the key's current generation, or `None` if the key is absent. When `applied` is `True`,
-    `generation` is the generation of the value just written.
-    """
-
-    generation: Generation | None
-    applied: bool = True
+    generation: Generation
 
 
 @dataclass(frozen=True, slots=True)
-class DeleteResult:
-    """The outcome of a delete.
+class Rejected:
+    """A conditional write or delete changed nothing: the key holds a value with `generation`.
 
-    | case | `generation` | `applied` |
-    |---|---|---|
-    | the key was absent | `None` | `False` |
-    | `if_match` did not match | the current generation | `False` |
-    | the key was deleted | the generation of the deleted value | `True` |
+    `put_if_absent` is rejected by any value; `put_if_match` and `delete_if_match` by a value whose
+    generation is not the one they named.
     """
 
-    generation: Generation | None
-    applied: bool
+    generation: Generation
 
 
 @dataclass(frozen=True, slots=True)

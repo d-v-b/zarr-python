@@ -33,14 +33,22 @@ from zarr_storage._errors import (
     UnsupportedOperationError,
 )
 from zarr_storage._types import (
+    Copied,
+    Deleted,
+    Found,
     Generation,
     Key,
+    Missing,
+    ObjectMetadata,
     OffsetRequest,
     Prefix,
     RangeRequest,
+    Rejected,
     SuffixRequest,
+    Unchanged,
+    Written,
 )
-from zarr_storage.testing._api import AsyncAPI, FullBackend, StoreAPI, unwrap
+from zarr_storage.testing._api import AsyncAPI, FullBackend, StoreAPI, delete_if_match, unwrap
 from zarr_storage.testing._stateful import Capabilities, StoreMachine
 
 if TYPE_CHECKING:
@@ -58,7 +66,6 @@ __all__ = [
     "ConditionalRaceSuite",
     "KeyAndDirectorySuite",
     "KeyDirectoryConflictSuite",
-    "NoConditionalDeleteSuite",
     "NoConditionalPutSuite",
     "PickleSuite",
     "StoreSuite",
@@ -101,40 +108,64 @@ BYTE_RANGES: list[tuple[ByteRange | None, bytes]] = [
 @dataclass(frozen=True)
 class PutCase:
     present: bool
-    precondition: Literal["none", "if_none_match", "if_match_current", "if_match_stale"]
-    applied: bool
-    generation: Literal["new", "current", "none"]
+    operation: Literal["put", "put_if_absent", "put_if_match_current", "put_if_match_stale"]
+    outcome: type[Written | Rejected | Missing]
 
 
-UNCONDITIONAL_PUT_CASES = [
-    PutCase(present=False, precondition="none", applied=True, generation="new"),
-    PutCase(present=True, precondition="none", applied=True, generation="new"),
-    PutCase(present=False, precondition="if_none_match", applied=True, generation="new"),
-    PutCase(present=True, precondition="if_none_match", applied=False, generation="current"),
+PUT_CASES = [
+    PutCase(present=False, operation="put", outcome=Written),
+    PutCase(present=True, operation="put", outcome=Written),
+    PutCase(present=False, operation="put_if_absent", outcome=Written),
+    PutCase(present=True, operation="put_if_absent", outcome=Rejected),
 ]
-IF_MATCH_PUT_CASES = [
-    PutCase(present=True, precondition="if_match_current", applied=True, generation="new"),
-    PutCase(present=True, precondition="if_match_stale", applied=False, generation="current"),
-    PutCase(present=False, precondition="if_match_stale", applied=False, generation="none"),
+PUT_IF_MATCH_CASES = [
+    PutCase(present=True, operation="put_if_match_current", outcome=Written),
+    PutCase(present=True, operation="put_if_match_stale", outcome=Rejected),
+    PutCase(present=False, operation="put_if_match_stale", outcome=Missing),
 ]
 
 
 @dataclass(frozen=True)
 class DeleteCase:
     present: bool
-    precondition: Literal["none", "if_match_current", "if_match_stale"]
-    applied: bool
-    generation: Literal["current", "none"]
+    operation: Literal["delete", "delete_if_match_current", "delete_if_match_stale"]
+    outcome: type[Deleted | Rejected | Missing]
 
 
-UNCONDITIONAL_DELETE_CASES = [
-    DeleteCase(present=False, precondition="none", applied=False, generation="none"),
-    DeleteCase(present=True, precondition="none", applied=True, generation="current"),
+DELETE_CASES = [
+    DeleteCase(present=False, operation="delete", outcome=Missing),
+    DeleteCase(present=True, operation="delete", outcome=Deleted),
 ]
-IF_MATCH_DELETE_CASES = [
-    DeleteCase(present=True, precondition="if_match_current", applied=True, generation="current"),
-    DeleteCase(present=True, precondition="if_match_stale", applied=False, generation="current"),
-    DeleteCase(present=False, precondition="if_match_stale", applied=False, generation="none"),
+DELETE_IF_MATCH_CASES = [
+    DeleteCase(present=True, operation="delete_if_match_current", outcome=Deleted),
+    DeleteCase(present=True, operation="delete_if_match_stale", outcome=Rejected),
+    DeleteCase(present=False, operation="delete_if_match_stale", outcome=Missing),
+]
+
+
+@dataclass(frozen=True)
+class IfChangedCase:
+    present: bool
+    generation: Literal["current", "stale"]
+    byte_range: ByteRange | None
+    outcome: type[Found | Missing | Unchanged]
+    expected: bytes | None = None
+
+
+IF_CHANGED_CASES = [
+    IfChangedCase(present=True, generation="current", byte_range=None, outcome=Unchanged),
+    IfChangedCase(
+        present=True, generation="current", byte_range=RangeRequest(2, 5), outcome=Unchanged
+    ),
+    IfChangedCase(present=True, generation="stale", byte_range=None, outcome=Found, expected=VALUE),
+    IfChangedCase(
+        present=True,
+        generation="stale",
+        byte_range=RangeRequest(2, 5),
+        outcome=Found,
+        expected=b"234",
+    ),
+    IfChangedCase(present=False, generation="stale", byte_range=None, outcome=Missing),
 ]
 
 TREE = [
@@ -287,20 +318,28 @@ def _missing_head(store: StoreAPI) -> object:
     return store.head("a")
 
 
-def _missing_exists(store: StoreAPI) -> object:
-    return store.exists("a")
+def _missing_get_if_changed(store: StoreAPI) -> object:
+    return store.get_if_changed("missing", _stale())
 
 
-MISSING_READS: list[tuple[Callable[[StoreAPI], object], object]] = [
-    (_missing_get, None),
-    (_missing_get_directory, None),
-    (_missing_get_range, None),
-    (_missing_get_ranges, None),
-    (_missing_get_into, None),
-    (_missing_head, None),
-    (_missing_exists, False),
+MISSING_READS: list[Callable[[StoreAPI], object]] = [
+    _missing_get,
+    _missing_get_directory,
+    _missing_get_range,
+    _missing_get_if_changed,
+    _missing_get_ranges,
+    _missing_get_into,
+    _missing_head,
 ]
-MISSING_READ_IDS = ["get", "get-directory", "get-range", "get_ranges", "get_into", "head", "exists"]
+MISSING_READ_IDS = [
+    "get",
+    "get-directory",
+    "get-range",
+    "get_if_changed",
+    "get_ranges",
+    "get_into",
+    "head",
+]
 
 
 def _put(store: StoreAPI) -> object:
@@ -374,57 +413,60 @@ def _write_repeatedly(
     fill = 0
     while not stop.is_set():
         fill = (fill + 1) % 256
-        generation = store.put("k", bytes([fill]) * 1000).generation
-        assert generation is not None
-        written[generation] = fill
+        written[store.put("k", bytes([fill]) * 1000).generation] = fill
 
 
 def _create(
     store: Store[FullBackend], key: str, barrier: threading.Barrier, results: list[bool]
 ) -> None:
     barrier.wait()
-    results.append(store.put(key, VALUE, if_none_match=True).applied)
+    results.append(isinstance(store.put_if_absent(key, VALUE), Written))
 
 
 def _check_put(store: StoreAPI, case: PutCase) -> None:
     current = store.put("k", VALUE).generation if case.present else None
-    match case.precondition:
-        case "none":
+    match case.operation:
+        case "put":
             result = store.put("k", b"new")
-        case "if_none_match":
-            result = store.put("k", b"new", if_none_match=True)
-        case "if_match_current":
+        case "put_if_absent":
+            result = store.put_if_absent("k", b"new")
+        case "put_if_match_current":
             assert current is not None
-            result = store.put("k", b"new", if_match=current)
-        case "if_match_stale":
-            result = store.put("k", b"new", if_match=_stale())
-    assert result.applied is case.applied
-    match case.generation:
-        case "new":
-            assert result.generation is not None
-            assert result.generation != current
-        case "current":
-            assert result.generation == current
-        case "none":
-            assert result.generation is None
+            result = store.put_if_match("k", b"new", current)
+        case "put_if_match_stale":
+            result = store.put_if_match("k", b"new", _stale())
+    assert isinstance(result, case.outcome)
     stored = store.get("k")
-    expected = b"new" if case.applied else (VALUE if case.present else None)
-    assert (None if stored is None else bytes(stored.value)) == expected
+    match result:
+        case Written(generation=generation):
+            assert generation != current
+            assert isinstance(stored, Found)
+            assert (bytes(stored.value), stored.generation) == (b"new", generation)
+        case Rejected(generation=generation):
+            assert generation == current
+            assert isinstance(stored, Found)
+            assert bytes(stored.value) == VALUE
+        case Missing():
+            assert isinstance(stored, Missing)
 
 
 def _check_delete(store: StoreAPI, case: DeleteCase) -> None:
     current = store.put("k", VALUE).generation if case.present else None
-    match case.precondition:
-        case "none":
+    match case.operation:
+        case "delete":
             result = store.delete("k")
-        case "if_match_current":
+        case "delete_if_match_current":
             assert current is not None
-            result = store.delete("k", if_match=current)
-        case "if_match_stale":
-            result = store.delete("k", if_match=_stale())
-    assert result.applied is case.applied
-    assert result.generation == (current if case.generation == "current" else None)
-    assert store.exists("k") is (case.present and not case.applied)
+            result = delete_if_match(store, "k", current)
+        case "delete_if_match_stale":
+            result = delete_if_match(store, "k", _stale())
+    assert isinstance(result, case.outcome)
+    match result:
+        case Deleted(generation=generation) | Rejected(generation=generation):
+            assert generation == current
+        case Missing():
+            pass
+    assert store.exists("k") is isinstance(result, Rejected)
 
 
 def _check_listing(store: Store[FullBackend], keys: set[str], directory: str) -> None:
@@ -499,7 +541,7 @@ class StoreSuite:
     def test_valid_key_round_trips(self, store: StoreAPI, key: str) -> None:
         store.put(key, VALUE)
         result = store.get(key)
-        assert result is not None
+        assert isinstance(result, Found)
         assert bytes(result.value) == VALUE
         assert key in set(store.list())
 
@@ -526,12 +568,12 @@ class StoreSuite:
     )
     def test_put_then_get(self, store: StoreAPI, value: Buffer, expected: bytes) -> None:
         written = store.put("k", value)
-        assert written.applied
         result = store.get("k")
-        assert result is not None
+        assert isinstance(result, Found)
         assert (bytes(result.value), result.generation) == (expected, written.generation)
+        assert result.read_at is None or abs(result.read_at - time.time()) < 3600
         meta = store.head("k")
-        assert meta is not None
+        assert isinstance(meta, ObjectMetadata)
         assert (meta.size, meta.generation) == (len(expected), written.generation)
         assert meta.last_modified is None or abs(meta.last_modified - time.time()) < 3600
         assert store.exists("k")
@@ -541,15 +583,30 @@ class StoreSuite:
         store.put("k", value)
         value[0:1] = b"X"
         result = store.get("k")
-        assert result is not None
+        assert isinstance(result, Found)
         assert bytes(result.value) == VALUE
 
-    @pytest.mark.parametrize(("read", "expected"), MISSING_READS, ids=MISSING_READ_IDS)
+    @pytest.mark.parametrize("read", MISSING_READS, ids=MISSING_READ_IDS)
     def test_reads_of_missing_key(
-        self, store: StoreAPI, read: Callable[[StoreAPI], object], expected: object
+        self, store: StoreAPI, read: Callable[[StoreAPI], object]
     ) -> None:
         store.put("a/k", VALUE)
-        assert read(store) == expected
+        assert isinstance(read(store), Missing)
+        assert not store.exists("a")
+
+    @pytest.mark.parametrize("case", IF_CHANGED_CASES, ids=repr)
+    def test_get_if_changed(self, store: StoreAPI, case: IfChangedCase) -> None:
+        current = store.put("k", VALUE).generation if case.present else None
+        generation = current if case.generation == "current" and current is not None else _stale()
+        result = store.get_if_changed("k", generation, byte_range=case.byte_range)
+        assert isinstance(result, case.outcome)
+        match result:
+            case Unchanged():
+                assert result.generation == current
+            case Found():
+                assert (bytes(result.value), result.generation) == (case.expected, current)
+            case Missing():
+                pass
 
     # ------------------------------------------------------------------ byte ranges
 
@@ -559,15 +616,16 @@ class StoreSuite:
     ) -> None:
         store.put("k", VALUE)
         result = store.get("k", byte_range=byte_range)
-        assert result is not None
+        assert isinstance(result, Found)
         assert bytes(result.value) == expected
         out = bytearray(len(VALUE) + 1)
-        n = store.get_into("k", out, byte_range=byte_range)
-        assert n == len(expected)
-        assert bytes(out[:n]) == expected
+        copied = store.get_into("k", out, byte_range=byte_range)
+        assert isinstance(copied, Copied)
+        assert (copied.size, copied.generation) == (len(expected), result.generation)
+        assert bytes(out[: copied.size]) == expected
         if byte_range is not None:
             ranges = store.get_ranges("k", [byte_range, SuffixRequest(1)])
-            assert ranges is not None
+            assert not isinstance(ranges, Missing)
             assert [bytes(v) for v in ranges.values] == [expected, b"9"]
             assert ranges.generation == result.generation
 
@@ -598,9 +656,7 @@ class StoreSuite:
         generation the result reports."""
         store = self.make_store(tmp_path)
         written: dict[Generation, int] = {}
-        put = store.put("k", bytes(1000))
-        assert put.generation is not None
-        written[put.generation] = 0
+        written[store.put("k", bytes(1000)).generation] = 0
         stop = threading.Event()
         writer = threading.Thread(target=_write_repeatedly, args=(store, stop, written))
         seen: list[tuple[Generation, bytes, bytes]] = []
@@ -610,7 +666,7 @@ class StoreSuite:
                 reader: StoreAPI = store if api == "sync" else AsyncAPI(store, runner)
                 for _ in range(200):
                     result = reader.get_ranges("k", [RangeRequest(0, 1), SuffixRequest(1)])
-                    assert result is not None
+                    assert not isinstance(result, Missing)
                     first, last = (bytes(v) for v in result.values)
                     seen.append((result.generation, first, last))
         finally:
@@ -623,16 +679,12 @@ class StoreSuite:
 
     # ------------------------------------------------------------------ writes
 
-    @pytest.mark.parametrize("case", UNCONDITIONAL_PUT_CASES, ids=repr)
+    @pytest.mark.parametrize("case", PUT_CASES, ids=repr)
     def test_put(self, store: StoreAPI, case: PutCase) -> None:
         _check_put(store, case)
 
-    def test_put_with_both_preconditions_raises(self, store: StoreAPI) -> None:
-        with pytest.raises(ValueError, match="at most one"):
-            store.put("k", VALUE, if_match=_stale(), if_none_match=True)
-
     def test_concurrent_creates_apply_once(self, tmp_path: Path) -> None:
-        """Of many racing `if_none_match` writes to one key, exactly one applies."""
+        """Of many racing `put_if_absent` writes to one key, exactly one applies."""
         store = self.make_store(tmp_path)
         for round_ in range(20):
             barrier = threading.Barrier(8)
@@ -647,14 +699,13 @@ class StoreSuite:
                 thread.join()
             assert results.count(True) == 1
 
-    @pytest.mark.parametrize("case", UNCONDITIONAL_DELETE_CASES, ids=repr)
+    @pytest.mark.parametrize("case", DELETE_CASES, ids=repr)
     def test_delete(self, store: StoreAPI, case: DeleteCase) -> None:
         _check_delete(store, case)
 
     def test_delete_of_a_directory_deletes_nothing(self, store: StoreAPI) -> None:
         store.put("a/b", VALUE)
-        result = store.delete("a")
-        assert (result.applied, result.generation) == (False, None)
+        assert isinstance(store.delete("a"), Missing)
         assert store.exists("a/b")
 
     @pytest.mark.parametrize(("directory", "remaining"), DELETE_DIR_CASES)
@@ -705,10 +756,10 @@ class StoreSuite:
         assert set(child.list("b")) == {"b/c"}
         assert set(child.list_dir()) == {Key("k"), Prefix("b")}
         result = child.get_ranges("b/c", [SuffixRequest(1)])
-        assert result is not None
+        assert not isinstance(result, Missing)
         assert [bytes(v) for v in result.values] == [b"9"]
         meta = child.head("b/c")
-        assert meta is not None
+        assert isinstance(meta, ObjectMetadata)
         assert meta.size == len(VALUE)
         assert set((store / "lat").list()) == set()
         child.delete_dir()
@@ -806,34 +857,32 @@ class UniqueGenerationsSuite:
         seen: set[Generation] = set()
         for i in range(200):
             generation = store.put(f"k{i % 3}", VALUE).generation
-            assert generation is not None
             assert generation not in seen
             seen.add(generation)
             store.delete(f"k{(i + 1) % 3}")
 
 
 class ConditionalPutSuite:
-    """For backends that support `put(if_match=...)`."""
+    """For backends whose `put_if_match` works."""
 
-    @pytest.mark.parametrize("case", IF_MATCH_PUT_CASES, ids=repr)
+    @pytest.mark.parametrize("case", PUT_IF_MATCH_CASES, ids=repr)
     def test_put_if_match(self, store: StoreAPI, case: PutCase) -> None:
         _check_put(store, case)
 
 
 class NoConditionalPutSuite:
-    """For backends that refuse `put(if_match=...)`."""
+    """For backends whose `put_if_match` raises, because the store underneath can't do it."""
 
     def test_put_if_match_raises(self, store: StoreAPI) -> None:
         current = store.put("k", VALUE).generation
-        assert current is not None
         with pytest.raises(UnsupportedOperationError):
-            store.put("k", b"new", if_match=current)
+            store.put_if_match("k", b"new", current)
 
 
 class ConditionalDeleteSuite:
-    """For backends that support `delete(if_match=...)`."""
+    """For backends with `delete_if_match` (`DeletableIfMatch`)."""
 
-    @pytest.mark.parametrize("case", IF_MATCH_DELETE_CASES, ids=repr)
+    @pytest.mark.parametrize("case", DELETE_IF_MATCH_CASES, ids=repr)
     def test_delete_if_match(self, store: StoreAPI, case: DeleteCase) -> None:
         _check_delete(store, case)
 
@@ -845,7 +894,7 @@ def _race_put(
     results: list[str],
 ) -> None:
     barrier.wait()
-    if store.put("d/k", b"new", if_match=generation).applied:
+    if isinstance(store.put_if_match("d/k", b"new", generation), Written):
         results.append("put")
 
 
@@ -856,7 +905,7 @@ def _race_delete(
     results: list[str],
 ) -> None:
     barrier.wait()
-    if store.delete("d/k", if_match=generation).applied:
+    if isinstance(delete_if_match(store, "d/k", generation), Deleted):
         results.append("delete")
 
 
@@ -870,7 +919,6 @@ class ConditionalRaceSuite:
         store = self.make_store(tmp_path)
         for _ in range(100):
             generation = store.put("d/k", VALUE).generation
-            assert generation is not None
             barrier = threading.Barrier(4)
             results: list[str] = []
             threads = [
@@ -882,16 +930,6 @@ class ConditionalRaceSuite:
             for thread in threads:
                 thread.join()
             assert len(results) == 1
-
-
-class NoConditionalDeleteSuite:
-    """For backends that refuse `delete(if_match=...)`."""
-
-    def test_delete_if_match_raises(self, store: StoreAPI) -> None:
-        current = store.put("k", VALUE).generation
-        assert current is not None
-        with pytest.raises(UnsupportedOperationError):
-            store.delete("k", if_match=current)
 
 
 class KeyAndDirectorySuite:
@@ -937,12 +975,13 @@ class KeyDirectoryConflictSuite:
 
     def test_reads_under_a_key_find_nothing(self, store: StoreAPI) -> None:
         store.put("a", VALUE)
-        assert store.get("a/b") is None
-        assert store.get_into("a/b", bytearray(len(VALUE))) is None
-        assert store.head("a/b") is None
+        assert isinstance(store.get("a/b"), Missing)
+        assert isinstance(store.get_if_changed("a/b", _stale()), Missing)
+        assert isinstance(store.get_into("a/b", bytearray(len(VALUE))), Missing)
+        assert isinstance(store.head("a/b"), Missing)
         assert not store.exists("a/b")
-        assert store.get_ranges("a/b", [SuffixRequest(1)]) is None
-        assert not store.delete("a/b").applied
+        assert isinstance(store.get_ranges("a/b", [SuffixRequest(1)]), Missing)
+        assert isinstance(store.delete("a/b"), Missing)
         assert set(store.list("a")) == set()
         assert set(store.list_dir("a")) == set()
         assert set(store.list_dir("a/b")) == set()

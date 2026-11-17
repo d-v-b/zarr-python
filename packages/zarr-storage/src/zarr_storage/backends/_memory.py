@@ -5,25 +5,30 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, TypedDict, TypeVar
 
 from zarr_storage._byte_range import resolve
 from zarr_storage._types import (
-    DeleteResult,
+    Copied,
+    Deleted,
+    Found,
+    FoundRanges,
     Generation,
+    Missing,
     ObjectMetadata,
-    PutResult,
-    RangesResult,
-    ReadResult,
+    Unchanged,
+    Written,
 )
-from zarr_storage.backends._common import children, strictly_within
+from zarr_storage.backends._common import IfMatch, always, children, if_absent, strictly_within
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator, Sequence
+    from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 
-    from zarr_storage._types import ByteRange, ListItem
+    from zarr_storage._types import ByteRange, ListItem, Rejected
 
 __all__ = ["MemoryBackend"]
+
+R = TypeVar("R")
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,67 +89,94 @@ class MemoryBackend:
 
     # --- Readable
 
-    def get(self, path: str, byte_range: ByteRange | None) -> ReadResult | None:
+    def get(self, path: str, byte_range: ByteRange | None) -> Found | Missing:
         value = self._values.get(path)
         if value is None:
-            return None
+            return Missing(time.time())
         start, end = resolve(byte_range, len(value.data))
-        return ReadResult(memoryview(value.data)[start:end], Generation(value.generation))
+        return Found(memoryview(value.data)[start:end], Generation(value.generation), time.time())
 
-    def get_ranges(self, path: str, ranges: Sequence[ByteRange]) -> RangesResult | None:
+    def get_if_changed(
+        self, path: str, generation: Generation, byte_range: ByteRange | None
+    ) -> Found | Missing | Unchanged:
+        value = self._values.get(path)
+        if value is not None and Generation(value.generation) == generation:
+            return Unchanged(generation, time.time())
+        return self.get(path, byte_range)
+
+    def get_ranges(self, path: str, ranges: Sequence[ByteRange]) -> FoundRanges | Missing:
         value = self._values.get(path)
         if value is None:
-            return None
+            return Missing(time.time())
         view = memoryview(value.data)
-        size = len(value.data)
-        parts = tuple(view[slice(*resolve(r, size))] for r in ranges)
-        return RangesResult(parts, Generation(value.generation))
+        parts = tuple(view[slice(*resolve(r, len(value.data)))] for r in ranges)
+        return FoundRanges(parts, Generation(value.generation), time.time())
 
-    def head(self, path: str) -> ObjectMetadata | None:
+    def head(self, path: str) -> ObjectMetadata | Missing:
         value = self._values.get(path)
         if value is None:
-            return None
+            return Missing(time.time())
         return ObjectMetadata(len(value.data), Generation(value.generation), value.last_modified)
 
-    def get_into(self, path: str, out: memoryview, byte_range: ByteRange | None) -> int | None:
+    def get_into(
+        self, path: str, out: memoryview, byte_range: ByteRange | None
+    ) -> Copied | Missing:
         value = self._values.get(path)
         if value is None:
-            return None
+            return Missing(time.time())
         start, end = resolve(byte_range, len(value.data))
         n = end - start
         if n > len(out):
             raise ValueError(f"The output buffer holds {len(out)} bytes; the value has {n}.")
         out[:n] = memoryview(value.data)[start:end]
-        return n
+        return Copied(n, Generation(value.generation), time.time())
 
     # --- Writable
 
-    def put(
-        self, path: str, value: memoryview, *, if_match: Generation | None, if_none_match: bool
-    ) -> PutResult:
+    def _put(
+        self, path: str, value: memoryview, check: Callable[[Generation | None], R | None]
+    ) -> Written | R:
         data = bytes(value)
         with self._lock:
             current = self._values.get(path)
-            current_generation = None if current is None else Generation(current.generation)
-            if if_none_match and current is not None:
-                return PutResult(current_generation, applied=False)
-            if if_match is not None and if_match != current_generation:
-                return PutResult(current_generation, applied=False)
+            refusal = check(None if current is None else Generation(current.generation))
+            if refusal is not None:
+                return refusal
             generation = self._next_generation
             self._next_generation += 1
             self._values[path] = _Value(data, generation, time.time())
-        return PutResult(Generation(generation))
+        return Written(Generation(generation))
 
-    def delete(self, path: str, *, if_match: Generation | None) -> DeleteResult:
+    def put(self, path: str, value: memoryview) -> Written:
+        return self._put(path, value, always)
+
+    def put_if_absent(self, path: str, value: memoryview) -> Written | Rejected:
+        return self._put(path, value, if_absent)
+
+    def put_if_match(
+        self, path: str, value: memoryview, generation: Generation
+    ) -> Written | Rejected | Missing:
+        return self._put(path, value, IfMatch(generation))
+
+    def _delete(
+        self, path: str, check: Callable[[Generation | None], R | None]
+    ) -> Deleted | Missing | R:
         with self._lock:
             current = self._values.get(path)
             if current is None:
-                return DeleteResult(None, applied=False)
-            current_generation = Generation(current.generation)
-            if if_match is not None and if_match != current_generation:
-                return DeleteResult(current_generation, applied=False)
+                return Missing(time.time())
+            generation = Generation(current.generation)
+            refusal = check(generation)
+            if refusal is not None:
+                return refusal
             del self._values[path]
-        return DeleteResult(current_generation, applied=True)
+        return Deleted(generation)
+
+    def delete(self, path: str) -> Deleted | Missing:
+        return self._delete(path, always)
+
+    def delete_if_match(self, path: str, generation: Generation) -> Deleted | Rejected | Missing:
+        return self._delete(path, IfMatch(generation))
 
     def delete_dir(self, directory: str) -> None:
         with self._lock:
@@ -165,27 +197,45 @@ class MemoryBackend:
 
     # --- async twins: memory never blocks, so they run inline
 
-    async def get_async(self, path: str, byte_range: ByteRange | None) -> ReadResult | None:
+    async def get_async(self, path: str, byte_range: ByteRange | None) -> Found | Missing:
         return self.get(path, byte_range)
 
-    async def get_ranges_async(self, path: str, ranges: Sequence[ByteRange]) -> RangesResult | None:
+    async def get_if_changed_async(
+        self, path: str, generation: Generation, byte_range: ByteRange | None
+    ) -> Found | Missing | Unchanged:
+        return self.get_if_changed(path, generation, byte_range)
+
+    async def get_ranges_async(
+        self, path: str, ranges: Sequence[ByteRange]
+    ) -> FoundRanges | Missing:
         return self.get_ranges(path, ranges)
 
-    async def head_async(self, path: str) -> ObjectMetadata | None:
+    async def head_async(self, path: str) -> ObjectMetadata | Missing:
         return self.head(path)
 
     async def get_into_async(
         self, path: str, out: memoryview, byte_range: ByteRange | None
-    ) -> int | None:
+    ) -> Copied | Missing:
         return self.get_into(path, out, byte_range)
 
-    async def put_async(
-        self, path: str, value: memoryview, *, if_match: Generation | None, if_none_match: bool
-    ) -> PutResult:
-        return self.put(path, value, if_match=if_match, if_none_match=if_none_match)
+    async def put_async(self, path: str, value: memoryview) -> Written:
+        return self.put(path, value)
 
-    async def delete_async(self, path: str, *, if_match: Generation | None) -> DeleteResult:
-        return self.delete(path, if_match=if_match)
+    async def put_if_absent_async(self, path: str, value: memoryview) -> Written | Rejected:
+        return self.put_if_absent(path, value)
+
+    async def put_if_match_async(
+        self, path: str, value: memoryview, generation: Generation
+    ) -> Written | Rejected | Missing:
+        return self.put_if_match(path, value, generation)
+
+    async def delete_async(self, path: str) -> Deleted | Missing:
+        return self.delete(path)
+
+    async def delete_if_match_async(
+        self, path: str, generation: Generation
+    ) -> Deleted | Rejected | Missing:
+        return self.delete_if_match(path, generation)
 
     async def delete_dir_async(self, directory: str) -> None:
         self.delete_dir(directory)

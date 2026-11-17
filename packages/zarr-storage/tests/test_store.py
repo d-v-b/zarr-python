@@ -7,14 +7,17 @@ from typing import TYPE_CHECKING
 import pytest
 
 from zarr_storage import (
+    Copied,
+    Found,
+    FoundRanges,
     Generation,
+    Missing,
     ObjectMetadata,
     OffsetRequest,
     RangeRequest,
-    RangesResult,
-    ReadResult,
     Store,
     SuffixRequest,
+    Unchanged,
 )
 from zarr_storage._byte_range import resolve
 from zarr_storage.backends import MemoryBackend
@@ -42,19 +45,24 @@ class _ReadOnlyBackend:
     def close(self) -> None:
         pass
 
-    def get(self, path: str, byte_range: ByteRange | None) -> ReadResult | None:
+    def get(self, path: str, byte_range: ByteRange | None) -> Found | Missing:
         data = self._values.get(path)
         if data is None:
-            return None
+            return Missing()
         start, end = resolve(byte_range, len(data))
-        return ReadResult(memoryview(data)[start:end], Generation(0))
+        return Found(memoryview(data)[start:end], Generation(0))
 
-    def get_ranges(self, path: str, ranges: Sequence[ByteRange]) -> RangesResult | None:
+    def get_if_changed(
+        self, path: str, generation: Generation, byte_range: ByteRange | None
+    ) -> Found | Missing | Unchanged:
         raise NotImplementedError
 
-    def head(self, path: str) -> ObjectMetadata | None:
+    def get_ranges(self, path: str, ranges: Sequence[ByteRange]) -> FoundRanges | Missing:
+        raise NotImplementedError
+
+    def head(self, path: str) -> ObjectMetadata | Missing:
         data = self._values.get(path)
-        return None if data is None else ObjectMetadata(len(data), Generation(0), None)
+        return Missing() if data is None else ObjectMetadata(len(data), Generation(0), None)
 
 
 @pytest.mark.parametrize(
@@ -65,9 +73,9 @@ def test_get_into_without_backend_support(byte_range: ByteRange | None, expected
     """A backend without `get_into` is read with `get` and copied into the buffer."""
     store = Store(_ReadOnlyBackend({"a/k": b"0123"})) / "a"
     out = bytearray(4)
-    n = store.get_into("k", out, byte_range=byte_range)
-    assert (n, bytes(out[: n or 0])) == (len(expected), expected)
-    assert store.get_into("missing", out) is None
+    assert store.get_into("k", out, byte_range=byte_range) == Copied(len(expected), Generation(0))
+    assert bytes(out[: len(expected)]) == expected
+    assert store.get_into("missing", out) == Missing()
 
 
 def test_get_into_without_backend_support_short_buffer_raises() -> None:

@@ -8,14 +8,14 @@ import pytest
 from obstore.exceptions import GenericError
 from obstore.store import LocalStore, MemoryStore
 
-from zarr_storage import ObjectMetadata, RangeRequest, Store
+from zarr_storage import Found, ObjectMetadata, RangeRequest, Store, Unchanged
 from zarr_storage.backends import ObjectStoreBackend
+from zarr_storage.backends import _obstore as obstore_backend
 from zarr_storage.backends._obstore import _empty_read_or_raise, _generation
 from zarr_storage.testing import (
     ConditionalPutSuite,
     KeyAndDirectorySuite,
     KeyDirectoryConflictSuite,
-    NoConditionalDeleteSuite,
     NoConditionalPutSuite,
     PickleSuite,
     StoreSuite,
@@ -62,7 +62,6 @@ class TestObjectStoreMemory(
     StoreSuite,
     UniqueGenerationsSuite,
     ConditionalPutSuite,
-    NoConditionalDeleteSuite,
     KeyAndDirectorySuite,
     NoBlockingCallsInAsyncRuns,
 ):
@@ -73,7 +72,6 @@ class TestObjectStoreMemory(
 class TestObjectStoreLocal(
     StoreSuite,
     NoConditionalPutSuite,
-    NoConditionalDeleteSuite,
     KeyDirectoryConflictSuite,
     PickleSuite,
     NoBlockingCallsInAsyncRuns,
@@ -87,7 +85,7 @@ _META = ObjectMetadata(10, _generation("e", None), None)
 
 def test_refused_empty_read_is_empty() -> None:
     result = _empty_read_or_raise(_META, RangeRequest(10, 12), GenericError("refused"))
-    assert result is not None
+    assert isinstance(result, Found)
     assert (bytes(result.value), result.generation) == (b"", _META.generation)
 
 
@@ -174,3 +172,23 @@ def test_errors_on_object_stores_are_not_read_as_absent(
     monkeypatch.setattr(obstore, failing, _FailFor(getattr(obstore, failing), path))
     with pytest.raises(GenericError):
         operation(store)
+
+
+def _no_if_none_match(generation: object) -> dict[str, str]:
+    return {}
+
+
+@pytest.mark.parametrize("api", ["sync", "async"])
+def test_get_if_changed_without_if_none_match_is_unchanged(
+    api: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A store that can't skip the read (no ETag, or it ignores `If-None-Match`) still reports
+    `Unchanged` for a value that has the generation."""
+    monkeypatch.setattr(obstore_backend, "_if_none_match", _no_if_none_match)
+    store = Store(ObjectStoreBackend(MemoryStore()))
+    generation = store.put("k", b"x").generation
+    if api == "sync":
+        result = store.get_if_changed("k", generation)
+    else:
+        result = asyncio.run(store.get_if_changed_async("k", generation))
+    assert result == Unchanged(generation, result.read_at)

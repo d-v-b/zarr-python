@@ -25,21 +25,25 @@ from zarr_storage._errors import (
     UnsupportedOperationError,
 )
 from zarr_storage._types import (
-    DeleteResult,
+    Copied,
+    Deleted,
+    Found,
+    FoundRanges,
     Generation,
     Key,
+    Missing,
     ObjectMetadata,
     Prefix,
-    PutResult,
-    RangesResult,
-    ReadResult,
+    Unchanged,
+    Written,
 )
+from zarr_storage.backends._common import IfMatch, always, if_absent
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Generator, Iterator, Sequence
     from io import BufferedReader
 
-    from zarr_storage._types import ByteRange, ListItem
+    from zarr_storage._types import ByteRange, ListItem, Rejected
 
 __all__ = ["RESERVED_SUFFIX", "LocalBackend", "segment_problem"]
 
@@ -66,6 +70,7 @@ _WINDOWS_DEVICE_NAMES = frozenset(
 _WINDOWS_FORBIDDEN_CHARACTERS = frozenset('<>:"\\|?*') | frozenset(chr(i) for i in range(32))
 
 P = ParamSpec("P")
+R = TypeVar("R")
 T = TypeVar("T")
 
 
@@ -171,6 +176,13 @@ def _open_key(file: Path) -> BufferedReader | None:
         raise
 
 
+def _read(f: BufferedReader, st: os.stat_result, byte_range: ByteRange | None) -> Found:
+    """The part of the open file `f`, whose stat is `st`, that `byte_range` selects."""
+    start, end = resolve(byte_range, st.st_size)
+    f.seek(start)
+    return Found(memoryview(f.read(end - start)), _generation(st), time.time())
+
+
 def _read_exact_into(f: BufferedReader, out: memoryview) -> None:
     filled = 0
     while filled < len(out):
@@ -242,10 +254,9 @@ def _replace_if(
     path: str,
     temp: Path,
     staged: Generation,
-    if_match: Generation | None,
-    if_none_match: bool,
-) -> PutResult:
-    """Rename `temp` to `file` if the preconditions hold. The caller holds the directory's lock.
+    check: Callable[[Generation | None], R | None],
+) -> Written | R:
+    """Rename `temp` to `file` if `check` lets it. The caller holds the directory's lock.
 
     `staged` is the generation of `temp`; a rename keeps the inode, mtime and size, so it is the
     generation of the written key too. A directory in the way is a conflict, whatever the
@@ -254,9 +265,9 @@ def _replace_if(
     if _is_real_directory(file) and not _reclaim(file):
         raise KeyConflictError(f"{path!r} is a directory, so it can't also be a key.")
     st = _stat_key(file)
-    current = None if st is None else _generation(st)
-    if (if_none_match and current is not None) or (if_match is not None and if_match != current):
-        return PutResult(current, applied=False)
+    refusal = check(None if st is None else _generation(st))
+    if refusal is not None:
+        return refusal
     try:
         os.replace(temp, file)
     except (IsADirectoryError, PermissionError) as e:
@@ -274,7 +285,7 @@ def _replace_if(
         if e.errno in _TRANSIENT_ERRNOS:
             raise _Retry from e
         raise
-    return PutResult(staged)
+    return Written(staged)
 
 
 def _is_real_directory(path: Path) -> bool:
@@ -453,23 +464,32 @@ class LocalBackend:
 
     # --- Readable
 
-    def get(self, path: str, byte_range: ByteRange | None) -> ReadResult | None:
+    def get(self, path: str, byte_range: ByteRange | None) -> Found | Missing:
         with _key_errors(path):
             f = _open_key(self._file(path))
         if f is None:
-            return None
+            return Missing(time.time())
+        with f:
+            return _read(f, os.fstat(f.fileno()), byte_range)
+
+    def get_if_changed(
+        self, path: str, generation: Generation, byte_range: ByteRange | None
+    ) -> Found | Missing | Unchanged:
+        with _key_errors(path):
+            f = _open_key(self._file(path))
+        if f is None:
+            return Missing(time.time())
         with f:
             st = os.fstat(f.fileno())
-            start, end = resolve(byte_range, st.st_size)
-            f.seek(start)
-            data = f.read(end - start)
-        return ReadResult(memoryview(data), _generation(st))
+            if _generation(st) == generation:
+                return Unchanged(generation, time.time())
+            return _read(f, st, byte_range)
 
-    def get_ranges(self, path: str, ranges: Sequence[ByteRange]) -> RangesResult | None:
+    def get_ranges(self, path: str, ranges: Sequence[ByteRange]) -> FoundRanges | Missing:
         with _key_errors(path):
             f = _open_key(self._file(path))
         if f is None:
-            return None
+            return Missing(time.time())
         parts: list[memoryview] = []
         with f:
             st = os.fstat(f.fileno())
@@ -477,13 +497,15 @@ class LocalBackend:
                 start, end = resolve(byte_range, st.st_size)
                 f.seek(start)
                 parts.append(memoryview(f.read(end - start)))
-        return RangesResult(tuple(parts), _generation(st))
+        return FoundRanges(tuple(parts), _generation(st), time.time())
 
-    def get_into(self, path: str, out: memoryview, byte_range: ByteRange | None) -> int | None:
+    def get_into(
+        self, path: str, out: memoryview, byte_range: ByteRange | None
+    ) -> Copied | Missing:
         with _key_errors(path):
             f = _open_key(self._file(path))
         if f is None:
-            return None
+            return Missing(time.time())
         with f:
             st = os.fstat(f.fileno())
             start, end = resolve(byte_range, st.st_size)
@@ -492,30 +514,40 @@ class LocalBackend:
                 raise ValueError(f"The output buffer holds {len(out)} bytes; the value has {n}.")
             f.seek(start)
             _read_exact_into(f, out[:n])
-        return n
+        return Copied(n, _generation(st), time.time())
 
-    def head(self, path: str) -> ObjectMetadata | None:
+    def head(self, path: str) -> ObjectMetadata | Missing:
         with _key_errors(path):
             st = _stat_key(self._file(path))
         if st is None:
-            return None
+            return Missing(time.time())
         return ObjectMetadata(st.st_size, _generation(st), st.st_mtime)
 
     # --- Writable
 
-    def put(
-        self, path: str, value: memoryview, *, if_match: Generation | None, if_none_match: bool
-    ) -> PutResult:
+    def put(self, path: str, value: memoryview) -> Written:
+        return self._put(path, value, always)
+
+    def put_if_absent(self, path: str, value: memoryview) -> Written | Rejected:
+        return self._put(path, value, if_absent)
+
+    def put_if_match(
+        self, path: str, value: memoryview, generation: Generation
+    ) -> Written | Rejected | Missing:
+        self._require_exact_times()
+        return self._put(path, value, IfMatch(generation))
+
+    def _put(
+        self, path: str, value: memoryview, check: Callable[[Generation | None], R | None]
+    ) -> Written | R:
         file = self._file(path)
-        if if_match is not None or if_none_match:
-            self._require_exact_times()
         last = _Retry()
         with _key_errors(path):
             for attempt in range(_WRITE_ATTEMPTS):
                 temp: Path | None = None
                 try:
                     temp, staged = self._stage(value)
-                    return self._commit(file, path, temp, staged, if_match, if_none_match)
+                    return self._commit(file, path, temp, staged, check)
                 except _Retry as retry:
                     last = retry
                     time.sleep(min(1e-4 * 2**attempt, 1e-2))
@@ -595,10 +627,9 @@ class LocalBackend:
         path: str,
         temp: Path,
         staged: Generation,
-        if_match: Generation | None,
-        if_none_match: bool,
-    ) -> PutResult:
-        """Rename `temp` to `file` if the preconditions hold, under the lock of `file`'s directory.
+        check: Callable[[Generation | None], R | None],
+    ) -> Written | R:
+        """Rename `temp` to `file` if `check` lets it, under the lock of `file`'s directory.
 
         Raises `_Retry` if a concurrent `delete_dir` removed the directory on the way.
         """
@@ -617,26 +648,34 @@ class LocalBackend:
                 raise _Retry from e
             raise
         with _directory_lock(file.parent):
-            return _replace_if(file, path, temp, staged, if_match, if_none_match)
+            return _replace_if(file, path, temp, staged, check)
 
-    def delete(self, path: str, *, if_match: Generation | None) -> DeleteResult:
+    def delete(self, path: str) -> Deleted | Missing:
+        return self._delete(path, always)
+
+    def delete_if_match(self, path: str, generation: Generation) -> Deleted | Rejected | Missing:
+        self._require_exact_times()
+        return self._delete(path, IfMatch(generation))
+
+    def _delete(
+        self, path: str, check: Callable[[Generation | None], R | None]
+    ) -> Deleted | Missing | R:
         file = self._file(path)
-        if if_match is not None:
-            self._require_exact_times()
         with _key_errors(path):
             try:
                 with _directory_lock(file.parent):
                     st = _stat_key(file)
                     if st is None:
-                        return DeleteResult(None, applied=False)
+                        return Missing(time.time())
                     current = _generation(st)
-                    if if_match is not None and if_match != current:
-                        return DeleteResult(current, applied=False)
+                    refusal = check(current)
+                    if refusal is not None:
+                        return refusal
                     file.unlink()
             except (_Retry, NotADirectoryError):
                 # The key's directory doesn't exist, or a parent is a key: the key is absent.
-                return DeleteResult(None, applied=False)
-        return DeleteResult(current, applied=True)
+                return Missing(time.time())
+        return Deleted(current)
 
     def delete_dir(self, directory: str) -> None:
         target = self._directory(directory)
@@ -679,29 +718,45 @@ class LocalBackend:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(self._pool(), partial(fn, *args, **kwargs))
 
-    async def get_async(self, path: str, byte_range: ByteRange | None) -> ReadResult | None:
+    async def get_async(self, path: str, byte_range: ByteRange | None) -> Found | Missing:
         return await self._run(self.get, path, byte_range)
 
-    async def get_ranges_async(self, path: str, ranges: Sequence[ByteRange]) -> RangesResult | None:
+    async def get_if_changed_async(
+        self, path: str, generation: Generation, byte_range: ByteRange | None
+    ) -> Found | Missing | Unchanged:
+        return await self._run(self.get_if_changed, path, generation, byte_range)
+
+    async def get_ranges_async(
+        self, path: str, ranges: Sequence[ByteRange]
+    ) -> FoundRanges | Missing:
         return await self._run(self.get_ranges, path, ranges)
 
-    async def head_async(self, path: str) -> ObjectMetadata | None:
+    async def head_async(self, path: str) -> ObjectMetadata | Missing:
         return await self._run(self.head, path)
 
     async def get_into_async(
         self, path: str, out: memoryview, byte_range: ByteRange | None
-    ) -> int | None:
+    ) -> Copied | Missing:
         return await self._run(self.get_into, path, out, byte_range)
 
-    async def put_async(
-        self, path: str, value: memoryview, *, if_match: Generation | None, if_none_match: bool
-    ) -> PutResult:
-        return await self._run(
-            self.put, path, value, if_match=if_match, if_none_match=if_none_match
-        )
+    async def put_async(self, path: str, value: memoryview) -> Written:
+        return await self._run(self.put, path, value)
 
-    async def delete_async(self, path: str, *, if_match: Generation | None) -> DeleteResult:
-        return await self._run(self.delete, path, if_match=if_match)
+    async def put_if_absent_async(self, path: str, value: memoryview) -> Written | Rejected:
+        return await self._run(self.put_if_absent, path, value)
+
+    async def put_if_match_async(
+        self, path: str, value: memoryview, generation: Generation
+    ) -> Written | Rejected | Missing:
+        return await self._run(self.put_if_match, path, value, generation)
+
+    async def delete_async(self, path: str) -> Deleted | Missing:
+        return await self._run(self.delete, path)
+
+    async def delete_if_match_async(
+        self, path: str, generation: Generation
+    ) -> Deleted | Rejected | Missing:
+        return await self._run(self.delete_if_match, path, generation)
 
     async def delete_dir_async(self, directory: str) -> None:
         await self._run(self.delete_dir, directory)

@@ -10,13 +10,16 @@ from typing import TYPE_CHECKING
 import pytest
 
 from zarr_storage import (
+    Found,
     Generation,
     InvalidKeyError,
     Key,
     KeyConflictError,
     Prefix,
+    Rejected,
     Store,
     UnsupportedOperationError,
+    Written,
 )
 from zarr_storage.backends import LocalBackend
 from zarr_storage.backends._local import RESERVED_SUFFIX, _directory_lock, segment_problem
@@ -70,7 +73,7 @@ def test_delete_leaves_the_directory(tmp_path: Path) -> None:
 def test_failed_put_leaves_no_staged_files(tmp_path: Path) -> None:
     store = Store(LocalBackend(tmp_path))
     store.put("k", b"x")
-    assert not store.put("k", b"y", if_none_match=True).applied
+    assert isinstance(store.put_if_absent("k", b"y"), Rejected)
     assert list((tmp_path / f"staging{RESERVED_SUFFIX}").iterdir()) == []
 
 
@@ -82,7 +85,7 @@ def test_delete_dir_of_the_root_keeps_backend_files(tmp_path: Path) -> None:
         f"lock{RESERVED_SUFFIX}",
         f"staging{RESERVED_SUFFIX}",
     }
-    assert store.put("k", b"y", if_none_match=True).applied
+    assert isinstance(store.put_if_absent("k", b"y"), Written)
 
 
 def test_put_recreates_a_removed_root(tmp_path: Path) -> None:
@@ -90,7 +93,7 @@ def test_put_recreates_a_removed_root(tmp_path: Path) -> None:
     outer = Store(LocalBackend(tmp_path))
     inner = Store(LocalBackend(tmp_path / "sub"))
     outer.delete_dir("sub")
-    assert inner.put("k", b"x").applied
+    inner.put("k", b"x")
     assert outer.exists("sub/k")
 
 
@@ -151,14 +154,14 @@ def _create(
     store: Store[LocalBackend], key: str, barrier: threading.Barrier, results: list[bool]
 ) -> None:
     barrier.wait()
-    results.append(store.put(key, b"x", if_none_match=True).applied)
+    results.append(isinstance(store.put_if_absent(key, b"x"), Written))
 
 
 @pytest.mark.parametrize("overlapping_roots", [False, True])
 def test_concurrent_creates_through_overlapping_roots(
     tmp_path: Path, overlapping_roots: bool
 ) -> None:
-    """Of many racing `if_none_match` writes to one key, exactly one applies, even through
+    """Of many racing `put_if_absent` writes to one key, exactly one applies, even through
     backends whose roots overlap."""
     outer = Store(LocalBackend(tmp_path))
     inner = Store(LocalBackend(tmp_path / "sub")) if overlapping_roots else outer / "sub"
@@ -179,7 +182,7 @@ def test_concurrent_creates_through_overlapping_roots(
 
 def _create_in_process(root: str, key: str, start: threading.Event) -> bool:
     start.wait()
-    return Store(LocalBackend(root)).put(key, b"x", if_none_match=True).applied
+    return isinstance(Store(LocalBackend(root)).put_if_absent(key, b"x"), Written)
 
 
 def test_concurrent_creates_apply_once_across_processes(tmp_path: Path) -> None:
@@ -265,9 +268,9 @@ def test_put_retries_a_rename_into_a_removed_directory(
     store = Store(LocalBackend(tmp_path))
     failures = [OSError(errno.ENOENT, "removed"), OSError(errno.EINVAL, "removed")]
     monkeypatch.setattr(os, "replace", _FlakyReplace(failures))
-    assert store.put("a/k", b"x").applied
+    store.put("a/k", b"x")
     result = store.get("a/k")
-    assert result is not None
+    assert isinstance(result, Found)
     assert bytes(result.value) == b"x"
 
 
@@ -311,7 +314,7 @@ def test_delete_dir_waits_for_a_write_in_progress(
     deleter.join(5)
     assert outcomes == {"P/D/k": True}
     assert not store.exists("P/D/k")
-    assert store.put("P/D/k", b"y", if_none_match=True).applied
+    assert isinstance(store.put_if_absent("P/D/k", b"y"), Written)
 
 
 def test_delete_dir_leaves_a_symlinked_directory_alone(tmp_path: Path) -> None:
@@ -337,7 +340,8 @@ def _put_outcome(
 ) -> None:
     barrier.wait()
     try:
-        outcomes[key] = store.put(key, b"x").applied
+        store.put(key, b"x")
+        outcomes[key] = True
     except KeyConflictError:
         outcomes[key] = False
 
@@ -372,17 +376,17 @@ def _coarse(self: LocalBackend) -> bool:
 @pytest.mark.parametrize(
     "write",
     [
-        lambda s: s.put("k", b"x", if_none_match=True),
-        lambda s: s.put("k", b"x", if_match=Generation(object())),
-        lambda s: s.delete("k", if_match=Generation(object())),
+        lambda s: s.put_if_match("k", b"x", Generation(object())),
+        lambda s: s.delete_if_match("k", Generation(object())),
     ],
-    ids=["put-if_none_match", "put-if_match", "delete-if_match"],
+    ids=["put_if_match", "delete_if_match"],
 )
-def test_conditional_writes_on_a_filesystem_that_rounds_times_raise(
+def test_if_match_on_a_filesystem_that_rounds_times_raises(
     tmp_path: Path, write: Callable[[Store[LocalBackend]], object], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Generations need exact times only to compare against; `put_if_absent` still works."""
     monkeypatch.setattr(LocalBackend, "_probe_exact_times", _coarse)
     store = Store(LocalBackend(tmp_path))
     with pytest.raises(UnsupportedOperationError, match="rounds file times"):
         write(store)
-    assert store.put("k", b"x").applied
+    assert isinstance(store.put_if_absent("k", b"x"), Written)

@@ -11,41 +11,56 @@ import asyncio
 import contextlib
 import errno
 import os
+import time
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, TypeVar, cast
 
 import obstore
-from obstore.exceptions import AlreadyExistsError, GenericError, PreconditionError
+from obstore.exceptions import (
+    AlreadyExistsError,
+    GenericError,
+    NotModifiedError,
+    PreconditionError,
+)
 from obstore.store import HTTPStore, LocalStore
 
 from zarr_storage._byte_range import resolve
 from zarr_storage._errors import InvalidKeyError, KeyConflictError, UnsupportedOperationError
 from zarr_storage._keys import check_key, relativize
 from zarr_storage._types import (
-    DeleteResult,
+    Deleted,
+    Found,
+    FoundRanges,
     Generation,
     Key,
+    Missing,
     ObjectMetadata,
     OffsetRequest,
     Prefix,
-    PutResult,
     RangeRequest,
-    RangesResult,
-    ReadResult,
+    Rejected,
     SuffixRequest,
+    Unchanged,
+    Written,
 )
+from zarr_storage.backends._common import IfMatch, always, if_absent
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterable, Iterator, Sequence
+    from collections.abc import AsyncIterator, Callable, Iterable, Iterator, Sequence
 
-    from obstore import GetOptions, ListResult, ListStream, ObjectMeta, PutMode
+    from obstore import GetOptions, GetResult, ListResult, ListStream, ObjectMeta, PutMode
     from obstore.store import ObjectStore
 
     from zarr_storage._types import ByteRange, ListItem
 
 __all__ = ["ObjectStoreBackend"]
 
+R = TypeVar("R")
+
 _EMPTY = memoryview(b"")
+
+_PUT_ATTEMPTS = 16
+"""How many times a write starts over when the store refused it for a state that then went away."""
 
 
 # ---------------------------------------------------------------------------- generations
@@ -72,21 +87,12 @@ def _version_of(generation: object) -> tuple[str | None, str | None] | None:
             return None
 
 
-class _NeverMatches:
-    """The precondition names a generation this backend did not mint, so no stored value has it."""
-
-
-_NEVER_MATCHES = _NeverMatches()
-
-
-def _put_mode(if_match: Generation | None, if_none_match: bool) -> PutMode | _NeverMatches | None:
-    if if_none_match:
-        return "create"
-    if if_match is None:
-        return None
-    version = _version_of(if_match)
+def _if_match_mode(generation: Generation) -> PutMode | None:
+    """The put mode that writes only over `generation`; `None` for a generation this backend did
+    not mint, which no stored value has."""
+    version = _version_of(generation)
     if version is None:
-        return _NEVER_MATCHES
+        return None
     e_tag, object_version = version
     if e_tag is None and object_version is None:
         raise UnsupportedOperationError(
@@ -94,6 +100,23 @@ def _put_mode(if_match: Generation | None, if_none_match: bool) -> PutMode | _Ne
         )
     mode = {k: v for k, v in (("e_tag", e_tag), ("version", object_version)) if v is not None}
     return cast("PutMode", mode)
+
+
+def _refuse(current: ObjectMetadata | Missing) -> Rejected | Missing:
+    """The outcome of a write conditioned on a generation this backend did not mint."""
+    return current if isinstance(current, Missing) else Rejected(current.generation)
+
+
+def _found(result: GetResult, data: memoryview) -> Found:
+    return Found(data, _generation(result.meta["e_tag"], result.meta["version"]), time.time())
+
+
+def _if_none_match(generation: Generation) -> GetOptions:
+    """Read options that skip the read if the value has `generation`, where the store can tell."""
+    version = _version_of(generation)
+    if version is None or version[0] is None:
+        return {}
+    return {"if_none_match": version[0]}
 
 
 # ---------------------------------------------------------------------------- reads
@@ -123,19 +146,19 @@ def _is_empty_request(byte_range: ByteRange | None) -> bool:
 
 
 def _empty_read_or_raise(
-    meta: ObjectMetadata | None, byte_range: ByteRange | None, error: BaseException | None
-) -> ReadResult | None:
+    meta: ObjectMetadata | Missing, byte_range: ByteRange | None, error: BaseException | None
+) -> Found | Missing:
     """The result of a read the object store refused or that selects nothing.
 
     Object stores refuse a range that starts at the end of the value; the contract reads that as
     empty. A range past the end raises `InvalidByteRangeError` (from `resolve`). Any other refusal
     re-raises the store's error.
     """
-    if meta is None:
-        return None
+    if isinstance(meta, Missing):
+        return meta
     start, end = resolve(byte_range, meta.size)
     if start == end:
-        return ReadResult(_EMPTY, meta.generation)
+        return Found(_EMPTY, meta.generation, time.time())
     if error is not None:
         raise error
     raise AssertionError("A non-empty range was treated as empty.")
@@ -218,10 +241,10 @@ def _ancestors(path: str) -> list[str]:
 class ObjectStoreBackend:
     """Keys stored in an obstore store.
 
-    Generations are the store's ETag and version. Conditional writes need a store that supports them
-    (S3, GCS, Azure and obstore's `MemoryStore` do; obstore's `LocalStore` supports only
-    `if_none_match`); otherwise they raise `UnsupportedOperationError`. Conditional deletes are not
-    supported.
+    Generations are the store's ETag and version. `put_if_match` needs a store that supports it (S3,
+    GCS, Azure and obstore's `MemoryStore` do; obstore's `LocalStore` doesn't); otherwise it raises
+    `UnsupportedOperationError`. Object stores can't delete conditionally, so this backend has no
+    `delete_if_match`. `get_if_changed` sends `If-None-Match` with the generation's ETag.
 
     `get_ranges` reads the first range, then the others pinned (`If-Match`) to the generation and
     size that first response reported. If the value changed in between, or the store reports
@@ -352,58 +375,85 @@ class ObjectStoreBackend:
 
     # --- Readable
 
-    def head(self, path: str) -> ObjectMetadata | None:
+    def head(self, path: str) -> ObjectMetadata | Missing:
         try:
             return _metadata(obstore.head(self._store, path))
         except FileNotFoundError:
-            return None
+            return Missing(time.time())
         except GenericError:
             if self._under_a_key(path):
-                return None
+                return Missing(time.time())
             raise
 
-    async def head_async(self, path: str) -> ObjectMetadata | None:
+    async def head_async(self, path: str) -> ObjectMetadata | Missing:
         try:
             return _metadata(await obstore.head_async(self._store, path))
         except FileNotFoundError:
-            return None
+            return Missing(time.time())
         except GenericError:
             if await self._under_a_key_async(path):
-                return None
+                return Missing(time.time())
             raise
 
-    def get(self, path: str, byte_range: ByteRange | None) -> ReadResult | None:
+    def get(self, path: str, byte_range: ByteRange | None) -> Found | Missing:
+        return self._get(path, byte_range, {})
+
+    async def get_async(self, path: str, byte_range: ByteRange | None) -> Found | Missing:
+        return await self._get_async(path, byte_range, {})
+
+    def get_if_changed(
+        self, path: str, generation: Generation, byte_range: ByteRange | None
+    ) -> Found | Missing | Unchanged:
+        try:
+            result = self._get(path, byte_range, _if_none_match(generation))
+        except NotModifiedError:
+            return Unchanged(generation, time.time())
+        return _unless_unchanged(result, generation)
+
+    async def get_if_changed_async(
+        self, path: str, generation: Generation, byte_range: ByteRange | None
+    ) -> Found | Missing | Unchanged:
+        try:
+            result = await self._get_async(path, byte_range, _if_none_match(generation))
+        except NotModifiedError:
+            return Unchanged(generation, time.time())
+        return _unless_unchanged(result, generation)
+
+    def _get(self, path: str, byte_range: ByteRange | None, options: GetOptions) -> Found | Missing:
+        """A read with extra `options`; raises `NotModifiedError` if they include a matching
+        `if_none_match`."""
         if _is_empty_request(byte_range):
             return _empty_read_or_raise(self.head(path), byte_range, None)
         try:
-            result = obstore.get(self._store, path, options=_get_options(byte_range))
+            result = obstore.get(self._store, path, options={**options, **_get_options(byte_range)})
         except FileNotFoundError:
-            return None
+            return Missing(time.time())
         except GenericError as e:
             return _empty_read_or_raise(self.head(path), byte_range, e)
-        meta = result.meta
-        return ReadResult(memoryview(result.bytes()), _generation(meta["e_tag"], meta["version"]))
+        return _found(result, memoryview(result.bytes()))
 
-    async def get_async(self, path: str, byte_range: ByteRange | None) -> ReadResult | None:
+    async def _get_async(
+        self, path: str, byte_range: ByteRange | None, options: GetOptions
+    ) -> Found | Missing:
         if _is_empty_request(byte_range):
             return _empty_read_or_raise(await self.head_async(path), byte_range, None)
         try:
-            result = await obstore.get_async(self._store, path, options=_get_options(byte_range))
+            result = await obstore.get_async(
+                self._store, path, options={**options, **_get_options(byte_range)}
+            )
         except FileNotFoundError:
-            return None
+            return Missing(time.time())
         except GenericError as e:
             return _empty_read_or_raise(await self.head_async(path), byte_range, e)
-        meta = result.meta
-        data = await result.bytes_async()
-        return ReadResult(memoryview(data), _generation(meta["e_tag"], meta["version"]))
+        return _found(result, memoryview(await result.bytes_async()))
 
-    def get_ranges(self, path: str, ranges: Sequence[ByteRange]) -> RangesResult | None:
+    def get_ranges(self, path: str, ranges: Sequence[ByteRange]) -> FoundRanges | Missing:
         if len(ranges) == 0 or _is_empty_request(ranges[0]):
             return self._read_whole_and_slice(path, ranges)
         try:
             first = obstore.get(self._store, path, options=_get_options(ranges[0]))
         except FileNotFoundError:
-            return None
+            return Missing(time.time())
         except GenericError:
             # The first range starts at the end of the value; one whole read answers every range.
             return self._read_whole_and_slice(path, ranges)
@@ -417,7 +467,7 @@ class ObjectStoreBackend:
         except (PreconditionError, FileNotFoundError):
             # The value changed after the first read; one whole read is consistent by itself.
             return self._read_whole_and_slice(path, ranges)
-        return RangesResult((memoryview(first.bytes()), *rest), generation)
+        return FoundRanges((memoryview(first.bytes()), *rest), generation, time.time())
 
     def _read_pinned(self, path: str, pinned: GetOptions, start: int, end: int) -> memoryview:
         if start == end:
@@ -426,25 +476,29 @@ class ObjectStoreBackend:
         _check_pinned(result.meta, pinned)
         return memoryview(result.bytes())
 
-    def _read_whole_and_slice(self, path: str, ranges: Sequence[ByteRange]) -> RangesResult | None:
+    def _read_whole_and_slice(
+        self, path: str, ranges: Sequence[ByteRange]
+    ) -> FoundRanges | Missing:
         try:
             result = obstore.get(self._store, path)
         except FileNotFoundError:
-            return None
+            return Missing(time.time())
         except GenericError:
             if self._under_a_key(path):
-                return None
+                return Missing(time.time())
             raise
         generation = _generation(result.meta["e_tag"], result.meta["version"])
-        return RangesResult(_slices(memoryview(result.bytes()), ranges), generation)
+        return FoundRanges(_slices(memoryview(result.bytes()), ranges), generation, time.time())
 
-    async def get_ranges_async(self, path: str, ranges: Sequence[ByteRange]) -> RangesResult | None:
+    async def get_ranges_async(
+        self, path: str, ranges: Sequence[ByteRange]
+    ) -> FoundRanges | Missing:
         if len(ranges) == 0 or _is_empty_request(ranges[0]):
             return await self._read_whole_and_slice_async(path, ranges)
         try:
             first = await obstore.get_async(self._store, path, options=_get_options(ranges[0]))
         except FileNotFoundError:
-            return None
+            return Missing(time.time())
         except GenericError:
             return await self._read_whole_and_slice_async(path, ranges)
         meta = first.meta
@@ -461,107 +515,147 @@ class ObjectStoreBackend:
             )
         except (PreconditionError, FileNotFoundError):
             return await self._read_whole_and_slice_async(path, ranges)
-        return RangesResult((memoryview(await first.bytes_async()), *rest), generation)
+        return FoundRanges((memoryview(await first.bytes_async()), *rest), generation, time.time())
 
     async def _read_whole_and_slice_async(
         self, path: str, ranges: Sequence[ByteRange]
-    ) -> RangesResult | None:
+    ) -> FoundRanges | Missing:
         try:
             result = await obstore.get_async(self._store, path)
         except FileNotFoundError:
-            return None
+            return Missing(time.time())
         except GenericError:
             if await self._under_a_key_async(path):
-                return None
+                return Missing(time.time())
             raise
         generation = _generation(result.meta["e_tag"], result.meta["version"])
-        return RangesResult(_slices(memoryview(await result.bytes_async()), ranges), generation)
+        data = memoryview(await result.bytes_async())
+        return FoundRanges(_slices(data, ranges), generation, time.time())
 
     # --- Writable
 
-    def put(
-        self, path: str, value: memoryview, *, if_match: Generation | None, if_none_match: bool
-    ) -> PutResult:
-        mode = _put_mode(if_match, if_none_match)
-        if isinstance(mode, _NeverMatches):
-            return PutResult(_generation_or_none(self.head(path)), applied=False)
-        try:
-            # obstore keeps a reference to the buffer it's given; copy so later changes to the
-            # caller's buffer don't reach the stored value.
-            result = obstore.put(self._store, path, bytes(value), mode=mode)
-        except (AlreadyExistsError, PreconditionError):
-            current = self.head(path)
-            if current is None and self._reclaim_empty_directory(path):
-                return self.put(path, value, if_match=if_match, if_none_match=if_none_match)
-            if current is None and self._conflicts(path):
-                raise _conflict(path, self._store) from None
-            return PutResult(_generation_or_none(current), applied=False)
-        except NotImplementedError as e:
-            raise UnsupportedOperationError(
-                f"{self._store!r} does not support this conditional write."
-            ) from e
-        except GenericError as e:
-            if self._reclaim_empty_directory(path):
-                return self.put(path, value, if_match=if_match, if_none_match=if_none_match)
-            if self._conflicts(path) or self._is_directory(path):
-                raise _conflict(path, self._store) from e
-            raise
-        return PutResult(_generation(result["e_tag"], result["version"]))
+    def put(self, path: str, value: memoryview) -> Written:
+        return self._put(path, value, None, always)
 
-    async def put_async(
-        self, path: str, value: memoryview, *, if_match: Generation | None, if_none_match: bool
-    ) -> PutResult:
-        mode = _put_mode(if_match, if_none_match)
-        if isinstance(mode, _NeverMatches):
-            return PutResult(_generation_or_none(await self.head_async(path)), applied=False)
-        try:
-            result = await obstore.put_async(self._store, path, bytes(value), mode=mode)
-        except (AlreadyExistsError, PreconditionError):
-            current = await self.head_async(path)
-            if current is None and await asyncio.to_thread(self._reclaim_empty_directory, path):
-                return await self.put_async(
-                    path, value, if_match=if_match, if_none_match=if_none_match
-                )
-            if current is None and await self._conflicts_async(path):
-                raise _conflict(path, self._store) from None
-            return PutResult(_generation_or_none(current), applied=False)
-        except NotImplementedError as e:
-            raise UnsupportedOperationError(
-                f"{self._store!r} does not support this conditional write."
-            ) from e
-        except GenericError as e:
-            if await asyncio.to_thread(self._reclaim_empty_directory, path):
-                return await self.put_async(
-                    path, value, if_match=if_match, if_none_match=if_none_match
-                )
-            if await self._conflicts_async(path) or await asyncio.to_thread(
-                self._is_directory, path
-            ):
-                raise _conflict(path, self._store) from e
-            raise
-        return PutResult(_generation(result["e_tag"], result["version"]))
+    async def put_async(self, path: str, value: memoryview) -> Written:
+        return await self._put_async(path, value, None, always)
 
-    def delete(self, path: str, *, if_match: Generation | None) -> DeleteResult:
-        _refuse_conditional_delete(if_match)
+    def put_if_absent(self, path: str, value: memoryview) -> Written | Rejected:
+        return self._put(path, value, "create", if_absent)
+
+    async def put_if_absent_async(self, path: str, value: memoryview) -> Written | Rejected:
+        return await self._put_async(path, value, "create", if_absent)
+
+    def put_if_match(
+        self, path: str, value: memoryview, generation: Generation
+    ) -> Written | Rejected | Missing:
+        mode = _if_match_mode(generation)
+        if mode is None:
+            return _refuse(self.head(path))
+        return self._put(path, value, mode, IfMatch(generation))
+
+    async def put_if_match_async(
+        self, path: str, value: memoryview, generation: Generation
+    ) -> Written | Rejected | Missing:
+        mode = _if_match_mode(generation)
+        if mode is None:
+            return _refuse(await self.head_async(path))
+        return await self._put_async(path, value, mode, IfMatch(generation))
+
+    def _put(
+        self,
+        path: str,
+        value: memoryview,
+        mode: PutMode | None,
+        check: Callable[[Generation | None], R | None],
+    ) -> Written | R:
+        """Write with `mode`. When the store refuses, `check` the key's current generation: its
+        refusal is the outcome, and if it has none, the state that made the store refuse went away
+        and the write starts over."""
+        for _ in range(_PUT_ATTEMPTS):
+            try:
+                # obstore keeps a reference to the buffer it's given; copy so later changes to the
+                # caller's buffer don't reach the stored value.
+                result = obstore.put(self._store, path, bytes(value), mode=mode)
+            except (AlreadyExistsError, PreconditionError):
+                current = self.head(path)
+                if isinstance(current, Missing):
+                    if self._reclaim_empty_directory(path):
+                        continue
+                    if self._conflicts(path):
+                        raise _conflict(path, self._store) from None
+                refusal = check(None if isinstance(current, Missing) else current.generation)
+                if refusal is not None:
+                    return refusal
+                continue
+            except NotImplementedError as e:
+                raise UnsupportedOperationError(
+                    f"{self._store!r} does not support this conditional write."
+                ) from e
+            except GenericError as e:
+                if self._reclaim_empty_directory(path):
+                    continue
+                if self._conflicts(path) or self._is_directory(path):
+                    raise _conflict(path, self._store) from e
+                raise
+            return Written(_generation(result["e_tag"], result["version"]))
+        raise OSError(f"Gave up writing {path!r}: the store kept refusing it.")
+
+    async def _put_async(
+        self,
+        path: str,
+        value: memoryview,
+        mode: PutMode | None,
+        check: Callable[[Generation | None], R | None],
+    ) -> Written | R:
+        for _ in range(_PUT_ATTEMPTS):
+            try:
+                result = await obstore.put_async(self._store, path, bytes(value), mode=mode)
+            except (AlreadyExistsError, PreconditionError):
+                current = await self.head_async(path)
+                if isinstance(current, Missing):
+                    if await asyncio.to_thread(self._reclaim_empty_directory, path):
+                        continue
+                    if await self._conflicts_async(path):
+                        raise _conflict(path, self._store) from None
+                refusal = check(None if isinstance(current, Missing) else current.generation)
+                if refusal is not None:
+                    return refusal
+                continue
+            except NotImplementedError as e:
+                raise UnsupportedOperationError(
+                    f"{self._store!r} does not support this conditional write."
+                ) from e
+            except GenericError as e:
+                if await asyncio.to_thread(self._reclaim_empty_directory, path):
+                    continue
+                if await self._conflicts_async(path) or await asyncio.to_thread(
+                    self._is_directory, path
+                ):
+                    raise _conflict(path, self._store) from e
+                raise
+            return Written(_generation(result["e_tag"], result["version"]))
+        raise OSError(f"Gave up writing {path!r}: the store kept refusing it.")
+
+    def delete(self, path: str) -> Deleted | Missing:
         meta = self.head(path)
-        if meta is None:
-            return DeleteResult(None, applied=False)
+        if isinstance(meta, Missing):
+            return meta
         try:
             obstore.delete(self._store, path)
         except FileNotFoundError:
-            return DeleteResult(None, applied=False)
-        return DeleteResult(meta.generation, applied=True)
+            return Missing(time.time())
+        return Deleted(meta.generation)
 
-    async def delete_async(self, path: str, *, if_match: Generation | None) -> DeleteResult:
-        _refuse_conditional_delete(if_match)
+    async def delete_async(self, path: str) -> Deleted | Missing:
         meta = await self.head_async(path)
-        if meta is None:
-            return DeleteResult(None, applied=False)
+        if isinstance(meta, Missing):
+            return meta
         try:
             await obstore.delete_async(self._store, path)
         except FileNotFoundError:
-            return DeleteResult(None, applied=False)
-        return DeleteResult(meta.generation, applied=True)
+            return Missing(time.time())
+        return Deleted(meta.generation)
 
     def delete_dir(self, directory: str) -> None:
         paths = list(self._paths(directory))
@@ -676,13 +770,17 @@ def _remove_empty_directories(target: Path) -> bool:
     return True
 
 
-def _generation_or_none(meta: ObjectMetadata | None) -> Generation | None:
-    return None if meta is None else meta.generation
+def _unless_unchanged(
+    result: Found | Missing, generation: Generation
+) -> Found | Missing | Unchanged:
+    """`Unchanged` for a value read whole although it has `generation`.
 
-
-def _refuse_conditional_delete(if_match: Generation | None) -> None:
-    if if_match is not None:
-        raise UnsupportedOperationError("Object stores do not support conditional deletes.")
+    That happens when the store can't skip the read (no ETag to send, or it ignores
+    `If-None-Match`); the bytes are discarded so the outcome doesn't depend on the store.
+    """
+    if isinstance(result, Found) and result.generation == generation:
+        return Unchanged(generation, result.read_at)
+    return result
 
 
 def _conflict(path: str, store: ObjectStore) -> KeyConflictError:

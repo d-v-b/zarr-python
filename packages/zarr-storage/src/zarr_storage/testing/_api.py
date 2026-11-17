@@ -7,7 +7,7 @@ one event loop. The sync and async surfaces therefore meet one contract, checked
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol, Self
+from typing import TYPE_CHECKING, Protocol, Self, cast
 
 from zarr_storage._protocols import (
     Listable,
@@ -16,6 +16,8 @@ from zarr_storage._protocols import (
     ReadableAsync,
     Writable,
     WritableAsync,
+    WritableIfMatch,
+    WritableIfMatchAsync,
 )
 
 if TYPE_CHECKING:
@@ -25,25 +27,41 @@ if TYPE_CHECKING:
 
     from typing_extensions import Buffer
 
+    from zarr_storage._protocols import DeletableIfMatch, DeletableIfMatchAsync
     from zarr_storage._store import Store
     from zarr_storage._types import (
         ByteRange,
-        DeleteResult,
+        Copied,
+        Deleted,
+        Found,
+        FoundRanges,
         Generation,
         ListItem,
+        Missing,
         ObjectMetadata,
-        PutResult,
-        RangesResult,
-        ReadResult,
+        Rejected,
+        Unchanged,
+        Written,
     )
 
-__all__ = ["AsyncAPI", "FullBackend", "StoreAPI", "unwrap"]
+__all__ = ["AsyncAPI", "FullBackend", "StoreAPI", "delete_if_match", "unwrap"]
 
 
 class FullBackend(
-    Readable, Writable, Listable, ReadableAsync, WritableAsync, ListableAsync, Protocol
+    Readable,
+    Writable,
+    WritableIfMatch,
+    Listable,
+    ReadableAsync,
+    WritableAsync,
+    WritableIfMatchAsync,
+    ListableAsync,
+    Protocol,
 ):
-    """A backend with every sync and async capability."""
+    """A backend with every capability the suite needs of all backends, sync and async.
+
+    `DeletableIfMatch` is left out, since object stores lack it; `delete_if_match` reaches it.
+    """
 
 
 class StoreAPI(Protocol):
@@ -56,22 +74,22 @@ class StoreAPI(Protocol):
     @property
     def closed(self) -> bool: ...
 
-    def get(self, key: str, *, byte_range: ByteRange | None = None) -> ReadResult | None: ...
-    def get_ranges(self, key: str, ranges: Sequence[ByteRange]) -> RangesResult | None: ...
+    def get(self, key: str, *, byte_range: ByteRange | None = None) -> Found | Missing: ...
+    def get_if_changed(
+        self, key: str, generation: Generation, *, byte_range: ByteRange | None = None
+    ) -> Found | Missing | Unchanged: ...
+    def get_ranges(self, key: str, ranges: Sequence[ByteRange]) -> FoundRanges | Missing: ...
     def get_into(
         self, key: str, out: Buffer, *, byte_range: ByteRange | None = None
-    ) -> int | None: ...
-    def head(self, key: str) -> ObjectMetadata | None: ...
+    ) -> Copied | Missing: ...
+    def head(self, key: str) -> ObjectMetadata | Missing: ...
     def exists(self, key: str) -> bool: ...
-    def put(
-        self,
-        key: str,
-        value: Buffer,
-        *,
-        if_match: Generation | None = None,
-        if_none_match: bool = False,
-    ) -> PutResult: ...
-    def delete(self, key: str, *, if_match: Generation | None = None) -> DeleteResult: ...
+    def put(self, key: str, value: Buffer) -> Written: ...
+    def put_if_absent(self, key: str, value: Buffer) -> Written | Rejected: ...
+    def put_if_match(
+        self, key: str, value: Buffer, generation: Generation
+    ) -> Written | Rejected | Missing: ...
+    def delete(self, key: str) -> Deleted | Missing: ...
     def delete_dir(self, directory: str = "") -> None: ...
     def list(self, directory: str = "") -> Iterator[str]: ...
     def list_dir(self, directory: str = "") -> Iterator[ListItem]: ...
@@ -92,6 +110,15 @@ def unwrap(store: StoreAPI) -> Store[FullBackend]:
     if isinstance(store, AsyncAPI):
         return store.store
     return store  # pyright: ignore[reportReturnType]
+
+
+def delete_if_match(
+    store: StoreAPI, key: str, generation: Generation
+) -> Deleted | Rejected | Missing:
+    """`delete_if_match` through `store`'s surface, for a backend that has it."""
+    if isinstance(store, AsyncAPI):
+        return store.delete_if_match(key, generation)
+    return cast("Store[DeletableIfMatch]", store).delete_if_match(key, generation)
 
 
 async def _next(items: AsyncIterator[object]) -> object:
@@ -121,35 +148,47 @@ class AsyncAPI:
     def closed(self) -> bool:
         return self._store.closed
 
-    def get(self, key: str, *, byte_range: ByteRange | None = None) -> ReadResult | None:
+    def get(self, key: str, *, byte_range: ByteRange | None = None) -> Found | Missing:
         return self._runner.run(self._store.get_async(key, byte_range=byte_range))
 
-    def get_ranges(self, key: str, ranges: Sequence[ByteRange]) -> RangesResult | None:
+    def get_if_changed(
+        self, key: str, generation: Generation, *, byte_range: ByteRange | None = None
+    ) -> Found | Missing | Unchanged:
+        return self._runner.run(
+            self._store.get_if_changed_async(key, generation, byte_range=byte_range)
+        )
+
+    def get_ranges(self, key: str, ranges: Sequence[ByteRange]) -> FoundRanges | Missing:
         return self._runner.run(self._store.get_ranges_async(key, ranges))
 
-    def get_into(self, key: str, out: Buffer, *, byte_range: ByteRange | None = None) -> int | None:
+    def get_into(
+        self, key: str, out: Buffer, *, byte_range: ByteRange | None = None
+    ) -> Copied | Missing:
         return self._runner.run(self._store.get_into_async(key, out, byte_range=byte_range))
 
-    def head(self, key: str) -> ObjectMetadata | None:
+    def head(self, key: str) -> ObjectMetadata | Missing:
         return self._runner.run(self._store.head_async(key))
 
     def exists(self, key: str) -> bool:
         return self._runner.run(self._store.exists_async(key))
 
-    def put(
-        self,
-        key: str,
-        value: Buffer,
-        *,
-        if_match: Generation | None = None,
-        if_none_match: bool = False,
-    ) -> PutResult:
-        return self._runner.run(
-            self._store.put_async(key, value, if_match=if_match, if_none_match=if_none_match)
-        )
+    def put(self, key: str, value: Buffer) -> Written:
+        return self._runner.run(self._store.put_async(key, value))
 
-    def delete(self, key: str, *, if_match: Generation | None = None) -> DeleteResult:
-        return self._runner.run(self._store.delete_async(key, if_match=if_match))
+    def put_if_absent(self, key: str, value: Buffer) -> Written | Rejected:
+        return self._runner.run(self._store.put_if_absent_async(key, value))
+
+    def put_if_match(
+        self, key: str, value: Buffer, generation: Generation
+    ) -> Written | Rejected | Missing:
+        return self._runner.run(self._store.put_if_match_async(key, value, generation))
+
+    def delete(self, key: str) -> Deleted | Missing:
+        return self._runner.run(self._store.delete_async(key))
+
+    def delete_if_match(self, key: str, generation: Generation) -> Deleted | Rejected | Missing:
+        store = cast("Store[DeletableIfMatchAsync]", self._store)
+        return self._runner.run(store.delete_if_match_async(key, generation))
 
     def delete_dir(self, directory: str = "") -> None:
         self._runner.run(self._store.delete_dir_async(directory))

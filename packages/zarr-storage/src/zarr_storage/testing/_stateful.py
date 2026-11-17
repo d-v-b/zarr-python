@@ -17,7 +17,19 @@ from hypothesis.stateful import RuleBasedStateMachine, initialize, invariant, pr
 
 from zarr_storage._errors import KeyConflictError
 from zarr_storage._keys import join
-from zarr_storage._types import Generation, Key, Prefix
+from zarr_storage._types import (
+    Deleted,
+    Found,
+    Generation,
+    Key,
+    Missing,
+    ObjectMetadata,
+    Prefix,
+    Rejected,
+    Unchanged,
+    Written,
+)
+from zarr_storage.testing._api import delete_if_match
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -91,13 +103,24 @@ class StoreMachine(RuleBasedStateMachine):
     def _expect_conflict(self, root: str, key: str, value: bytes) -> None:
         """A write to a path that collides with a stored key raises, whatever its preconditions."""
         try:
-            (self.store / root).put(key, value, if_match=Generation(object()))
+            (self.store / root).put_if_match(key, value, Generation(object()))
         except KeyConflictError:
             return
         raise AssertionError(f"put({join(root, key)!r}) should have raised KeyConflictError")
 
-    def _record(self, path: str, value: bytes, generation: Generation | None) -> None:
-        assert generation is not None
+    def _refusal(self, path: str) -> Rejected | Missing:
+        """What a conditional write or delete whose precondition fails returns for `path`."""
+        current = self.generations.get(path)
+        return Missing() if current is None else Rejected(current)
+
+    def _check_refused(self, result: object, path: str) -> None:
+        expected = self._refusal(path)
+        if isinstance(expected, Missing):
+            assert isinstance(result, Missing), result
+        else:
+            assert result == expected
+
+    def _record(self, path: str, value: bytes, generation: Generation) -> None:
         if self._capabilities.unique_generations:
             assert generation not in self.retired, "a retired generation was handed out again"
         assert generation != self.generations.get(path)
@@ -123,26 +146,23 @@ class StoreMachine(RuleBasedStateMachine):
                 return
             raise AssertionError(f"put({path!r}) should have raised KeyConflictError")
         result = (self.store / root).put(key, value)
-        assert result.applied
         self._record(path, value, result.generation)
 
     @rule(data=st.data(), value=VALUES)
-    def put_if_none_match(self, data: st.DataObject, value: bytes) -> None:
+    def put_if_absent(self, data: st.DataObject, value: bytes) -> None:
         root, key = self._target(data)
         path = join(root, key)
         if self._conflicts(path):
             try:
-                (self.store / root).put(key, value, if_none_match=True)
+                (self.store / root).put_if_absent(key, value)
             except KeyConflictError:
                 return
-            raise AssertionError(
-                f"put({path!r}, if_none_match) should have raised KeyConflictError"
-            )
-        result = (self.store / root).put(key, value, if_none_match=True)
+            raise AssertionError(f"put_if_absent({path!r}) should have raised KeyConflictError")
+        result = (self.store / root).put_if_absent(key, value)
         if path in self.values:
-            assert (result.applied, result.generation) == (False, self.generations[path])
+            assert result == Rejected(self.generations[path])
         else:
-            assert result.applied
+            assert isinstance(result, Written)
             self._record(path, value, result.generation)
 
     @precondition(lambda self: self._capabilities.conditional_put)
@@ -155,12 +175,12 @@ class StoreMachine(RuleBasedStateMachine):
             return
         current = self.generations.get(path)
         expected = Generation(object()) if stale or current is None else current
-        result = (self.store / root).put(key, value, if_match=expected)
+        result = (self.store / root).put_if_match(key, value, expected)
         if not stale and current is not None:
-            assert result.applied
+            assert isinstance(result, Written)
             self._record(path, value, result.generation)
         else:
-            assert (result.applied, result.generation) == (False, current)
+            self._check_refused(result, path)
 
     @precondition(
         lambda self: (
@@ -177,8 +197,8 @@ class StoreMachine(RuleBasedStateMachine):
             self._expect_conflict(root, key, value)
             return
         retired = data.draw(st.sampled_from(self.retired), label="retired generation")
-        result = (self.store / root).put(key, value, if_match=retired)
-        assert (result.applied, result.generation) == (False, self.generations.get(join(root, key)))
+        result = (self.store / root).put_if_match(key, value, retired)
+        self._check_refused(result, join(root, key))
 
     @rule(data=st.data())
     def delete(self, data: st.DataObject) -> None:
@@ -186,10 +206,10 @@ class StoreMachine(RuleBasedStateMachine):
         path = join(root, key)
         result = (self.store / root).delete(key)
         if path in self.values:
-            assert (result.applied, result.generation) == (True, self.generations[path])
+            assert result == Deleted(self.generations[path])
             self._forget(path)
         else:
-            assert (result.applied, result.generation) == (False, None)
+            assert isinstance(result, Missing)
 
     @precondition(lambda self: self._capabilities.conditional_delete)
     @rule(data=st.data(), stale=st.booleans())
@@ -198,12 +218,12 @@ class StoreMachine(RuleBasedStateMachine):
         path = join(root, key)
         current = self.generations.get(path)
         expected = Generation(object()) if stale or current is None else current
-        result = (self.store / root).delete(key, if_match=expected)
+        result = delete_if_match(self.store / root, key, expected)
         if not stale and current is not None:
-            assert (result.applied, result.generation) == (True, current)
+            assert result == Deleted(current)
             self._forget(path)
         else:
-            assert (result.applied, result.generation) == (False, current)
+            self._check_refused(result, path)
 
     @precondition(
         lambda self: (
@@ -216,8 +236,8 @@ class StoreMachine(RuleBasedStateMachine):
     def delete_if_match_retired(self, data: st.DataObject) -> None:
         root, key = self._target(data)
         retired = data.draw(st.sampled_from(self.retired), label="retired generation")
-        result = (self.store / root).delete(key, if_match=retired)
-        assert (result.applied, result.generation) == (False, self.generations.get(join(root, key)))
+        result = delete_if_match(self.store / root, key, retired)
+        self._check_refused(result, join(root, key))
 
     @rule(root=ROOTS, directory=DIRECTORIES)
     def delete_dir(self, root: str, directory: str) -> None:
@@ -259,12 +279,16 @@ class StoreMachine(RuleBasedStateMachine):
             return
         assert set(self.store.list()) == set(self.values)
         for path, value in self.values.items():
+            generation = self.generations[path]
             result = self.store.get(path)
-            assert result is not None
-            assert (bytes(result.value), result.generation) == (value, self.generations[path])
+            assert isinstance(result, Found)
+            assert (bytes(result.value), result.generation) == (value, generation)
             meta = self.store.head(path)
-            assert meta is not None
-            assert (meta.size, meta.generation) == (len(value), self.generations[path])
+            assert isinstance(meta, ObjectMetadata)
+            assert (meta.size, meta.generation) == (len(value), generation)
+            unchanged = self.store.get_if_changed(path, generation)
+            assert isinstance(unchanged, Unchanged)
+            assert unchanged.generation == generation
 
     def teardown(self) -> None:
         if hasattr(self, "store"):

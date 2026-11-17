@@ -4,7 +4,7 @@ A backend's test class subclasses `StoreSuite` and overrides `make_store` to ret
 writable `Store` over a fresh backend; it adds the mixin for each optional capability the backend has
 (`ConditionalPutSuite`, `ConditionalDeleteSuite`, `ConditionalRaceSuite`, `KeyAndDirectorySuite`,
 `PickleSuite`, `UniqueGenerationsSuite`) or the one
-that checks it refuses it cleanly (`NoConditionalPutSuite`, `NoConditionalDeleteSuite`,
+that checks it refuses it cleanly (`NoConditionalPutSuite`,
 `KeyDirectoryConflictSuite`). Every test runs through the sync methods and again through the async
 methods. Install the `testing` extra for pytest and Hypothesis.
 """
@@ -16,7 +16,6 @@ from zarr_storage.testing._suite import (
     ConditionalRaceSuite,
     KeyAndDirectorySuite,
     KeyDirectoryConflictSuite,
-    NoConditionalDeleteSuite,
     NoConditionalPutSuite,
     PickleSuite,
     StoreSuite,
@@ -31,7 +30,6 @@ __all__ = [
     "FullBackend",
     "KeyAndDirectorySuite",
     "KeyDirectoryConflictSuite",
-    "NoConditionalDeleteSuite",
     "NoConditionalPutSuite",
     "PickleSuite",
     "StoreAPI",
