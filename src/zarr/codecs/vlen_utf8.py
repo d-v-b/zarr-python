@@ -3,11 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-import numpy as np
 from numcodecs.vlen import VLenBytes, VLenUTF8
 
-from zarr._compat import _reshape_view
 from zarr.abc.codec import ArrayBytesCodec
+from zarr.codecs._numcodec_arrays import decode_array_bytes, encode_array_bytes
 from zarr.core.common import JSON, parse_named_configuration
 
 if TYPE_CHECKING:
@@ -45,9 +44,9 @@ class VLenUTF8Codec(ArrayBytesCodec):
         chunk_bytes: Buffer,
         chunk_spec: ArraySpec,
     ) -> NDBuffer:
-        raw_bytes = chunk_bytes.as_array_like()
-        decoded = _vlen_utf8_codec.decode(raw_bytes)
-        decoded = _reshape_view(decoded, chunk_spec.shape)
+        decoded = decode_array_bytes(
+            _vlen_utf8_codec, chunk_bytes.as_array_like(), chunk_spec.shape
+        )
         as_string_dtype = decoded.astype(chunk_spec.dtype.to_native_dtype(), copy=False)
         return chunk_spec.prototype.nd_buffer.from_numpy_array(as_string_dtype)
 
@@ -63,10 +62,8 @@ class VLenUTF8Codec(ArrayBytesCodec):
         chunk_array: NDBuffer,
         chunk_spec: ArraySpec,
     ) -> Buffer | None:
-        # numcodecs vlen codecs flatten with order="A", so an F-contiguous chunk
-        # would be encoded in transposed element order (gh-3558)
         return chunk_spec.prototype.buffer.from_bytes(
-            _vlen_utf8_codec.encode(np.ascontiguousarray(chunk_array.as_numpy_array()))
+            encode_array_bytes(_vlen_utf8_codec, chunk_array.as_numpy_array())
         )
 
     async def _encode_single(
@@ -102,9 +99,9 @@ class VLenBytesCodec(ArrayBytesCodec):
         chunk_bytes: Buffer,
         chunk_spec: ArraySpec,
     ) -> NDBuffer:
-        raw_bytes = chunk_bytes.as_array_like()
-        decoded = _vlen_bytes_codec.decode(raw_bytes)
-        decoded = _reshape_view(decoded, chunk_spec.shape)
+        decoded = decode_array_bytes(
+            _vlen_bytes_codec, chunk_bytes.as_array_like(), chunk_spec.shape
+        )
         return chunk_spec.prototype.nd_buffer.from_numpy_array(decoded)
 
     async def _decode_single(
@@ -119,10 +116,8 @@ class VLenBytesCodec(ArrayBytesCodec):
         chunk_array: NDBuffer,
         chunk_spec: ArraySpec,
     ) -> Buffer | None:
-        # numcodecs vlen codecs flatten with order="A", so an F-contiguous chunk
-        # would be encoded in transposed element order (gh-3558)
         return chunk_spec.prototype.buffer.from_bytes(
-            _vlen_bytes_codec.encode(np.ascontiguousarray(chunk_array.as_numpy_array()))
+            encode_array_bytes(_vlen_bytes_codec, chunk_array.as_numpy_array())
         )
 
     async def _encode_single(
