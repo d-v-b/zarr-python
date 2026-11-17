@@ -4,9 +4,11 @@ import contextlib
 import pickle
 from typing import TYPE_CHECKING, Any
 
+import numcodecs
 import numpy as np
 import pytest
 from numcodecs import GZip
+from packaging.version import Version
 
 from zarr import config, create_array, open_array
 from zarr.abc.numcodec import _is_numcodec, _is_numcodec_cls
@@ -122,6 +124,50 @@ def test_generic_compressor(codec_class: type[_numcodecs._NumcodecsBytesBytesCod
 
     a[:, :] = data.copy()
     np.testing.assert_array_equal(data, a[:, :])
+
+
+@pytest.mark.parametrize(
+    ("dtype", "compressors", "typesize"),
+    [
+        ("uint8", [_numcodecs.Blosc()], 1),
+        ("uint16", [_numcodecs.Blosc()], 2),
+        ("float64", [_numcodecs.Blosc()], 8),
+        # a preceding checksum leaves bytes that do not divide into float64 items
+        ("float64", [_numcodecs.CRC32(location="end"), _numcodecs.Blosc()], 1),
+        pytest.param(
+            "uint16",
+            [_numcodecs.Blosc(typesize=4)],
+            4,
+            marks=pytest.mark.skipif(
+                Version(numcodecs.__version__) < Version("0.16.0"),
+                reason="numcodecs.Blosc accepts typesize from numcodecs 0.16",
+            ),
+        ),
+    ],
+    ids=["uint8", "uint16", "float64", "after-crc32", "configured"],
+)
+def test_blosc_typesize(
+    dtype: str, compressors: list[_numcodecs._NumcodecsBytesBytesCodec], typesize: int
+) -> None:
+    """
+    numcodecs.blosc compresses with the item size of the chunk's data type as its
+    typesize unless the configuration sets one, and the data round-trips.
+    """
+    data = np.arange(256, dtype=dtype).reshape((16, 16))
+    store: dict[str, Any] = {}
+    a = create_array(
+        store,
+        shape=data.shape,
+        chunks=(16, 16),
+        dtype=data.dtype,
+        fill_value=0,
+        compressors=compressors,
+    )
+    a[:, :] = data
+    chunk = store["c/0/0"].to_bytes()
+    # byte 3 of a blosc1 chunk header holds the typesize
+    assert chunk[3] == typesize
+    np.testing.assert_array_equal(open_array(store, mode="r")[:, :], data)
 
 
 @pytest.mark.parametrize(
