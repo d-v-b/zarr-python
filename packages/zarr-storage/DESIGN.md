@@ -347,8 +347,11 @@ resources are passed in a store's context.
 - Listings hold no slot of the context's limiter.
 - `get_ranges_into`, `put_from`, and a GPU direct storage backend whose `get_into_many` submits one
   cuFile batch.
-- Caching: range reads of values the pool doesn't hold whole go to the source. Caching ranges (shard
-  indexes) needs entries keyed by key, range and generation.
+- Caching: range reads of values the pool doesn't hold whole go to the source. Shard indexes are the
+  case that matters, and they belong to the codec pipeline, not here: the sharding codec knows where
+  an index is and can cache it decoded, keyed by store, key and generation. The storage layer gives
+  it what it needs: the generation of every read, and `get_if_changed` with a byte range to
+  revalidate one.
 - Caching: a disk tier starts cold in every process, because the index lives in memory.
 - Caching: a pool over a memory backend copies values for no gain; nothing stops one yet.
 
