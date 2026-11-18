@@ -264,6 +264,76 @@ object-store requests by wrapping the store in object_store's `LimitStore` and s
   `data_copy_concurrency`): compute waiting on I/O in one pool starves it. A context holds the I/O
   pool; zarr-python's codec pipeline would take its own.
 
+## Caching
+
+Planned for iteration 3; not built yet. A cache is a resource of the store's context, like
+TensorStore's `cache_pool`. It is neither a store class that wraps another store (zarr-python's
+`CacheStore`) nor a hook on store methods:
+
+- **A wrapper can't get its capabilities right.** A Python class can't have exactly the capabilities
+  of the backend it wraps. It would need one class per combination, or it would claim every
+  capability and raise at runtime, losing the typed capabilities.
+- **A hook that caches is a wrapper.** To serve a hit, a hook has to skip the read and supply the
+  result, and then it is a wrapper.
+
+The rule: wrapping is for layers that change what keys mean (zip, sharding). Policies that leave
+the meaning alone (limits, caching, retries) are context resources.
+
+- **A `CachePool(tier, total_bytes)` is a context resource**, set with `Context(cache=...)` or
+  `ctx.child(cache=...)`. The default pool holds 0 bytes, so caching is off until a context gives it
+  a budget. Stores sharing a context share its pool: one byte budget, one eviction order.
+- **The cached bytes live in a store, the tier.** The tier is a memory store by default, a local
+  store for a disk cache, or any other writable store. Each cached value is a value in the tier, so
+  the cache gets the following from the tier without new code:
+  - byte-range reads and `get_ranges`, served from one cached whole value;
+  - batches, for the hits of a batch;
+  - thread safety and both surfaces (a memory tier answers an `AsyncStore` inline);
+  - the conformance suite, as the tier's tests.
+
+  zarr-python's `CacheStore` keeps its bytes in a store too; what changes is where the cache sits.
+- **A cache is more than a store.** Beside the tier, the pool keeps an index in memory for what a
+  store can't hold. Per entry, the index records:
+  - the source's generation (the tier mints its own);
+  - the source's `read_at`;
+  - the entry's size and recency;
+  - absences: a `Missing` from the source has no bytes to store.
+
+  The index also runs eviction, and it combines concurrent misses on one key into one source read.
+- **Tier keys are opaque and written once.** The index names each entry's bytes with a fresh key
+  under a random per-pool prefix. Tier keys don't come from source keys, because the key grammar
+  has no way to name the source backend. A refresh writes a new key and points the index at it.
+  Eviction removes the index entry, then deletes the key. So no reader sees a tier value change
+  under it, and a tier read that returns `Missing` (evicted, or a disk tier someone else cleaned) is
+  a miss. Pools sharing a disk tier don't collide.
+- **Entries are keyed by backend instance and path**, the identity `shares_backend` uses. Closing a
+  backend drops its entries.
+- **Each view decides how stale a read may be**, with `store.with_max_age(seconds)`, default `0`.
+  TensorStore makes the same split (`recheck_cached_metadata`, `recheck_cached_data`), because
+  metadata and chunks need different answers.
+  - A hit younger than `max_age` returns without touching the source.
+  - An older hit revalidates with `get_if_changed(key, generation)`. On object stores that's a
+    conditional GET: one round trip, no bytes.
+  - `math.inf` trusts the cache forever, for values that are never rewritten.
+  - An absence ages like a value, but only a full read can revalidate it, so caching absences pays
+    only when `max_age > 0`: zarr's metadata probes for format versions, for example.
+- **Writes keep a pool coherent.** A write or delete through a view whose context holds the pool
+  drops that key's entry, and `delete_dir` drops every entry under its prefix. Writes also bump a
+  per-key epoch, and a read that started before a write to its key returns its result but
+  doesn't fill the cache. So a view
+  sees its pool's own writes whatever its `max_age`. Writes from other processes, other pools, or
+  straight to the backend show up only through revalidation, as in TensorStore.
+- **Hits hold no source slot.** The tier runs under a context of the pool's own, so a hit waits on
+  neither the source's limiter nor the process-wide `memory` limiter. A revalidation or a miss holds
+  a source slot like any other read.
+- Listings are never cached, and neither is a value larger than the budget.
+- Pickling a pool pickles its budget and its tier's configuration, never its contents. The
+  receiver starts with an empty index and an empty tier.
+- `get_into` into a buffer type the tier can't write (device memory, with a host tier) bypasses
+  the pool.
+- Every `StoreSuite` runs again through a cached view (a pool with a budget, `max_age=0`), where the
+  cache must be invisible. The state machine adds writes made straight to the backend, which only
+  revalidation can catch.
+
 ## Configuration
 
 No global configuration. Every knob is a constructor parameter with its default in the signature;
@@ -277,11 +347,15 @@ resources are passed in a store's context.
 - Listings hold no slot of the context's limiter.
 - `get_ranges_into`, `put_from`, and a GPU direct storage backend whose `get_into_many` submits one
   cuFile batch.
+- Caching: range reads of values the pool doesn't hold whole go to the source. Caching ranges (shard
+  indexes) needs entries keyed by key, range and generation.
+- Caching: a disk tier starts cold in every process, because the index lives in memory.
+- Caching: a pool over a memory backend copies values for no gain; nothing stops one yet.
 
 ## Iterations
 
 1. **Core:** types, `Store`, the memory and local backends, the conformance suite in
    `zarr_storage.testing`, pickling.
 2. **Remote and archive backends:** obstore (S3, GCS, Azure, HTTP; async-native), fsspec, zip.
-3. **Composition:** range coalescing, caching, retry, a sync bridge for async-only backends, URL specs.
+3. **Composition:** range coalescing, caching (see Caching), retry, a sync bridge for async-only backends, URL specs.
 4. **Transactions:** staged writes committed with generations, memory first.
