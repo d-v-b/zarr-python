@@ -604,7 +604,7 @@ KNOWN_DIVERGENCES: tuple[KnownDivergence, ...] = (
         witness=(("set", ("d/k", b"v")), ("get", ("d", None))),
     ),
     KnownDivergence(
-        stores=_windows_only(frozenset({"local", "latency-local", "fsspec-local"})),
+        stores=_windows_only(frozenset({"fsspec-local"})),
         summary="get() on a directory raises PermissionError (Windows opens it as a file)",
         accepts=_raises_for_a_directory("PermissionError"),
         witness=(("set", ("d/k", b"v")), ("get", ("d", None))),

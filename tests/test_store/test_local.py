@@ -16,7 +16,7 @@ import pytest
 import zarr
 import zarr.storage._local
 from zarr import create_array
-from zarr.core.buffer import Buffer, cpu
+from zarr.core.buffer import Buffer, cpu, default_buffer_prototype
 from zarr.storage import LocalStore
 from zarr.storage._local import _RETRY_DELAYS, _atomic_write, _move_with_retry
 from zarr.testing.store import StoreTests
@@ -24,6 +24,9 @@ from zarr.testing.utils import assert_bytes_equal
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+
+    from zarr.abc.store import ByteRequest
+    from zarr.core.buffer import BufferPrototype
 
 _LOCAL_STORE_FILE = zarr.storage._local.__file__
 _ASYNC_CODE_FLAGS = inspect.CO_COROUTINE | inspect.CO_ASYNC_GENERATOR
@@ -151,8 +154,8 @@ class TestLocalStore(StoreTests[LocalStore, cpu.Buffer]):
         [
             ("open", "_ensure_root"),
             ("lazy_open", "_ensure_root"),
-            ("get", "_get"),
-            ("get_partial_values", "_get"),
+            ("get", "_get_or_none"),
+            ("get_partial_values", "_get_or_none"),
             ("set", "_put"),
             ("set_if_not_exists", "_put"),
             ("exists", "_exists"),
@@ -283,6 +286,39 @@ class TestLocalStore(StoreTests[LocalStore, cpu.Buffer]):
         observed = await store.get(key, prototype=None)
         assert_bytes_equal(observed, data_buf)
 
+    @pytest.mark.parametrize("reader", ["get", "get_sync", "get_partial_values"])
+    @pytest.mark.parametrize("windows_error", [False, True], ids=["native", "windows-error"])
+    @pytest.mark.parametrize("name", ["d", "missing", "d/k/below"])
+    async def test_read_returns_none_for_a_name_without_a_file(
+        self,
+        store: LocalStore,
+        monkeypatch: pytest.MonkeyPatch,
+        reader: str,
+        windows_error: bool,
+        name: str,
+    ) -> None:
+        """Reading a directory, a missing key or a name below a key returns `None`.
+
+        Windows raises `PermissionError` when it opens a directory as a file. The
+        `windows-error` cases make opening a directory raise it, so that branch runs on
+        every OS.
+        """
+        await self.set(store, "d/k", self.buffer_cls.from_bytes(b"v"))
+        if windows_error:
+            monkeypatch.setattr(zarr.storage._local, "_get", _get_as_on_windows)
+        observed = await _read(store, reader, name)
+        assert observed is None
+
+    @pytest.mark.parametrize("reader", ["get", "get_sync", "get_partial_values"])
+    async def test_read_raises_permission_error_for_a_file(
+        self, store: LocalStore, monkeypatch: pytest.MonkeyPatch, reader: str
+    ) -> None:
+        """A `PermissionError` on a file is a real error, not a missing key."""
+        await self.set(store, "k", self.buffer_cls.from_bytes(b"v"))
+        monkeypatch.setattr(zarr.storage._local, "_get", _raise_permission_error)
+        with pytest.raises(PermissionError, match="denied"):
+            await _read(store, reader, "k")
+
     @pytest.mark.parametrize("ndim", [0, 1, 3])
     @pytest.mark.parametrize(
         "destination", ["destination", "foo/bar/destintion", pathlib.Path("foo/bar/destintion")]
@@ -317,6 +353,35 @@ class TestLocalStore(StoreTests[LocalStore, cpu.Buffer]):
             FileExistsError, match=re.escape(f"Destination root {destination} already exists")
         ):
             await store2.move(destination)
+
+
+_GET = zarr.storage._local._get
+
+
+def _get_as_on_windows(
+    path: pathlib.Path, prototype: BufferPrototype, byte_range: ByteRequest | None
+) -> Buffer:
+    """Read like `_get`, but raise what Windows raises when it opens a directory as a file."""
+    if path.is_dir():
+        raise PermissionError(13, "Permission denied", str(path))
+    return _GET(path, prototype, byte_range)
+
+
+def _raise_permission_error(
+    path: pathlib.Path, prototype: BufferPrototype, byte_range: ByteRequest | None
+) -> Buffer:
+    raise PermissionError(13, "Permission denied", str(path))
+
+
+async def _read(store: LocalStore, reader: str, key: str) -> Buffer | None:
+    """Read `key` from `store` with the named read method."""
+    prototype = default_buffer_prototype()
+    if reader == "get":
+        return await store.get(key, prototype=prototype)
+    if reader == "get_sync":
+        return store.get_sync(key, prototype=prototype)
+    (value,) = await store.get_partial_values(prototype, [(key, None)])
+    return value
 
 
 @pytest.mark.parametrize("exclusive", [True, False])
