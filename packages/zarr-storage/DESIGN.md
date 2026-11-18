@@ -35,8 +35,10 @@ AsyncStore   the same names as coroutines; `aclose()`, `async with`; `as_sync()`
 
 A **backend** is an object that implements some capability protocols (`Readable`, `Writable`,
 `Listable`, `WritableIfMatch`, `DeletableIfMatch`, and their async twins) on *backend paths*:
-`/`-separated strings, already joined with the root. Backends never see relative keys and never join or strip paths. They hold everything that must exist once: the dict,
-the filesystem root, a client, locks, concurrency limits.
+`/`-separated strings, already joined with the root. Backends never see relative keys and never
+join or strip paths. They hold everything that must exist once per backend: the dict, the
+filesystem root, a client, locks. Thread pools and limits on operations in flight are shared
+resources the backend is given (see below).
 
 A **`Store`** or **`AsyncStore`** is the only object users hold. Each is a view: a backend plus a
 root. All key validation, root joining, listing relativization and read-only enforcement happen in
@@ -166,10 +168,12 @@ key (`a/b` when `a` is a key): that reads as absent.
 | `LocalBackend` | `(dev, inode, mtime_ns, size)`, with each write stamping a unique ns mtime | yes / yes, on filesystems that keep ns times | no (`KeyConflictError`) | the root |
 | `ObjectStoreBackend` | ETag and version (obstore's `LocalStore` ETag can repeat on ext4) | if the store supports it / not implemented | as the store does | as the store does |
 
-Every backend has `put_if_absent` and `get_if_changed`. `LocalBackend` runs batches, sync and
-async, `concurrency` operations at once on its threads; `ObjectStoreBackend` keeps `concurrency`
-requests of an async batch in flight and runs sync batches one request at a time; `MemoryBackend`
-uses `Store`'s serial batches, which are as fast for it.
+Every backend has `put_if_absent` and `get_if_changed`. `LocalBackend` runs its async operations
+and its batches, sync and async, on its `threads`, as many batch operations at once as the pool has
+threads. `ObjectStoreBackend` holds a slot of its `concurrency` limiter for every operation, sync
+and async, single and batched; async batches start at most `concurrency.limit` operations at once,
+and sync batches run one at a time. `MemoryBackend` uses `Store`'s serial batches, which are as fast
+for it.
 
 `LocalBackend` stages each write in a reserved directory under the root and renames it into place,
 holding the lock of the key's directory; the lock lives in that directory, so overlapping roots and
@@ -210,10 +214,39 @@ step, each stored key reads back as the model says, through `get` and `get_many`
 `get_if_changed` with its generation is `Unchanged`. The obstore
 tests also fail any async run that makes a blocking obstore call.
 
+## Shared resources
+
+Threads and limits on operations in flight are resources that backends share, after TensorStore's
+context resources (`file_io_concurrency`, `s3_request_concurrency`). zarrs has no I/O limits of its
+own (its `Resources` carry only a compute target, from Rayon's global pool); it bounds object-store
+requests by wrapping the store in object_store's `LimitStore` and sharing that store.
+
+- `ThreadPool(max_workers)` runs blocking work: `LocalBackend(root, threads=...)`.
+- `Limiter(limit)` caps operations in flight, for threads and tasks on any event loop in one
+  first-come, first-served queue: `ObjectStoreBackend(store, concurrency=...)`. `limiter.slot()` is
+  a sync or async context manager. A slot is held for a whole operation, and an operation that calls
+  another through a limiter it already holds takes no second slot (a context variable records the
+  slots an operation holds), so `get_into`, which reads through `get`, can't wait on itself.
+- Pass one resource to several backends to bound them together. Left out, a backend uses a
+  process-wide default, as TensorStore does: `ThreadPool.default()` of `max(4, cpu_count)` threads,
+  and one `Limiter(32)` per obstore store class, so every S3 backend in a process shares one limit
+  and an HTTP backend doesn't share it. A default is shared state, but it changes only speed, never
+  what an operation does; pass your own resource to isolate a backend.
+- Whoever creates a resource owns it: a backend never shuts down a pool it was given, and closing a
+  `LocalBackend` refuses new operations without stopping the pool. The default pool can't be shut
+  down.
+- Pickling a resource pickles its settings, and pickle stores each object once, so backends that
+  shared a resource share one new resource after a round trip; a default unpickles as the receiving
+  process's default.
+- A batch started on one of its pool's own threads runs on that thread, one operation at a time:
+  waiting there for work queued on the same pool could wait forever once every thread does it.
+- Thread pools for I/O and for compute should stay separate (TensorStore's `file_io_concurrency`
+  and `data_copy_concurrency`): compute waiting on I/O in one pool starves it.
+
 ## Configuration
 
-No global configuration. Every knob (local I/O concurrency, how many requests an obstore batch
-keeps in flight) is a constructor parameter with its default in the signature.
+No global configuration. Every knob is a constructor parameter with its default in the signature;
+the shared resources above are passed the same way.
 
 ## Open
 

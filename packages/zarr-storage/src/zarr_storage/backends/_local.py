@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import errno
 import os
@@ -12,10 +11,8 @@ import sys
 import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
-from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, ParamSpec, TypedDict, TypeVar
+from typing import TYPE_CHECKING, TypedDict, TypeVar, TypeVarTuple
 
 from zarr_storage._batch import run_many, run_many_async
 from zarr_storage._buffers import byte_view
@@ -26,6 +23,7 @@ from zarr_storage._errors import (
     StoreClosedError,
     UnsupportedOperationError,
 )
+from zarr_storage._resources import ThreadPool, default_thread_pool
 from zarr_storage._types import (
     Copied,
     Deleted,
@@ -73,14 +71,14 @@ _WINDOWS_DEVICE_NAMES = frozenset(
 )
 _WINDOWS_FORBIDDEN_CHARACTERS = frozenset('<>:"\\|?*') | frozenset(chr(i) for i in range(32))
 
-P = ParamSpec("P")
+Ts = TypeVarTuple("Ts")
 R = TypeVar("R")
 T = TypeVar("T")
 
 
 class _State(TypedDict):
     root: str
-    concurrency: int
+    threads: ThreadPool
     closed: bool
 
 
@@ -396,24 +394,26 @@ class LocalBackend:
     create
         Create `root` if it doesn't exist. With `create=False`, a missing root raises
         `FileNotFoundError`.
-    concurrency
-        The number of threads that run the async methods' file operations, and the number of
-        operations a batch (`get_many`, `put_many`, ...) runs at once.
+    threads
+        The threads that run the async methods' file operations and the operations of batches
+        (`get_many`, `put_many`, ...), which run as many at once as the pool has threads. Share one
+        pool between backends to bound their threads together; the default is the process-wide
+        `ThreadPool.default()`. The backend never shuts the pool down.
     """
 
     def __init__(
-        self, root: str | os.PathLike[str], *, create: bool = True, concurrency: int = 16
+        self,
+        root: str | os.PathLike[str],
+        *,
+        create: bool = True,
+        threads: ThreadPool | None = None,
     ) -> None:
-        if concurrency < 1:
-            raise ValueError(f"concurrency must be >= 1; got {concurrency}.")
         self._root = Path(root).resolve()
         if create:
             self._root.mkdir(parents=True, exist_ok=True)
         elif not self._root.is_dir():
             raise FileNotFoundError(f"The root directory {str(self._root)!r} does not exist.")
-        self._concurrency = concurrency
-        self._executor: ThreadPoolExecutor | None = None
-        self._executor_lock = threading.Lock()
+        self._threads = default_thread_pool() if threads is None else threads
         self._probe_lock = threading.Lock()
         self._exact_times: bool | None = None
         self._closed = False
@@ -423,17 +423,20 @@ class LocalBackend:
         """The directory that holds the keys."""
         return self._root
 
+    @property
+    def threads(self) -> ThreadPool:
+        """The threads that run the async methods and batches."""
+        return self._threads
+
     def __repr__(self) -> str:
         return f"LocalBackend({str(self._root)!r})"
 
     def __getstate__(self) -> _State:
-        return {"root": str(self._root), "concurrency": self._concurrency, "closed": self._closed}
+        return {"root": str(self._root), "threads": self._threads, "closed": self._closed}
 
     def __setstate__(self, state: _State) -> None:
         self._root = Path(state["root"])
-        self._concurrency = state["concurrency"]
-        self._executor = None
-        self._executor_lock = threading.Lock()
+        self._threads = state["threads"]
         self._probe_lock = threading.Lock()
         self._exact_times = None
         self._closed = state["closed"]
@@ -449,15 +452,8 @@ class LocalBackend:
         return True
 
     def close(self) -> None:
-        with self._executor_lock:
-            self._closed = True
-            executor, self._executor = self._executor, None
-        if executor is not None:
-            executor.shutdown(wait=True)
-
-    async def aclose(self) -> None:
-        """`close` on a worker thread: it waits for running file operations to finish."""
-        await asyncio.to_thread(self.close)
+        """Refuse further operations. Operations already running finish; the pool stays up."""
+        self._closed = True
 
     # --- paths
 
@@ -710,39 +706,38 @@ class LocalBackend:
                 return iter(())
         return _classify(entries)
 
-    # --- batches: the operations above, `concurrency` at once on the backend's threads
+    # --- batches: the operations above, as many at once as the pool has threads
 
     def get_many(
         self, requests: Sequence[tuple[str, ByteRange | None]]
     ) -> Iterator[tuple[int, Found | Missing]]:
-        return run_many(self.get, requests, self._pool(), self._concurrency)
+        return run_many(self.get, requests, self._open_threads(), self._threads.max_workers)
 
     def get_into_many(
         self, requests: Sequence[tuple[str, Buffer, ByteRange | None]]
     ) -> Iterator[tuple[int, Copied | Missing]]:
-        return run_many(self.get_into, requests, self._pool(), self._concurrency)
+        return run_many(self.get_into, requests, self._open_threads(), self._threads.max_workers)
 
     def put_many(self, requests: Sequence[tuple[str, memoryview]]) -> Iterator[tuple[int, Written]]:
-        return run_many(self.put, requests, self._pool(), self._concurrency)
+        return run_many(self.put, requests, self._open_threads(), self._threads.max_workers)
 
     def delete_many(self, paths: Sequence[str]) -> Iterator[tuple[int, Deleted | Missing]]:
-        return run_many(self.delete, [(path,) for path in paths], self._pool(), self._concurrency)
+        return run_many(
+            self.delete,
+            [(path,) for path in paths],
+            self._open_threads(),
+            self._threads.max_workers,
+        )
 
     # --- async twins: run the sync methods on the backend's threads
 
-    def _pool(self) -> ThreadPoolExecutor:
-        with self._executor_lock:
-            if self._closed:
-                raise StoreClosedError(f"{self!r} is closed.")
-            if self._executor is None:
-                self._executor = ThreadPoolExecutor(
-                    max_workers=self._concurrency, thread_name_prefix="zarr-storage-local"
-                )
-            return self._executor
+    def _open_threads(self) -> ThreadPool:
+        if self._closed:
+            raise StoreClosedError(f"{self!r} is closed.")
+        return self._threads
 
-    async def _run(self, fn: Callable[P, T], *args: P.args, **kwargs: P.kwargs) -> T:
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self._pool(), partial(fn, *args, **kwargs))
+    async def _run(self, fn: Callable[[*Ts], T], *args: *Ts) -> T:
+        return await self._open_threads().run(fn, *args)
 
     async def get_async(self, path: str, byte_range: ByteRange | None) -> Found | Missing:
         return await self._run(self.get, path, byte_range)
@@ -790,22 +785,24 @@ class LocalBackend:
     def get_many_async(
         self, requests: Sequence[tuple[str, ByteRange | None]]
     ) -> AsyncIterator[tuple[int, Found | Missing]]:
-        return run_many_async(self.get_async, requests, self._concurrency)
+        return run_many_async(self.get_async, requests, self._threads.max_workers)
 
     def get_into_many_async(
         self, requests: Sequence[tuple[str, Buffer, ByteRange | None]]
     ) -> AsyncIterator[tuple[int, Copied | Missing]]:
-        return run_many_async(self.get_into_async, requests, self._concurrency)
+        return run_many_async(self.get_into_async, requests, self._threads.max_workers)
 
     def put_many_async(
         self, requests: Sequence[tuple[str, memoryview]]
     ) -> AsyncIterator[tuple[int, Written]]:
-        return run_many_async(self.put_async, requests, self._concurrency)
+        return run_many_async(self.put_async, requests, self._threads.max_workers)
 
     def delete_many_async(
         self, paths: Sequence[str]
     ) -> AsyncIterator[tuple[int, Deleted | Missing]]:
-        return run_many_async(self.delete_async, [(path,) for path in paths], self._concurrency)
+        return run_many_async(
+            self.delete_async, [(path,) for path in paths], self._threads.max_workers
+        )
 
     async def list_async(self, directory: str) -> AsyncIterator[str]:
         for path in await self._run(_materialize, self.list(directory)):

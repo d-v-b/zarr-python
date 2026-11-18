@@ -5,13 +5,13 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
 import pytest
 
 from zarr_storage import BatchError
 from zarr_storage._batch import run_many, run_many_async
+from zarr_storage._resources import ThreadPool
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -64,8 +64,11 @@ def _run(tracker: _Tracker, mode: str, window: int, n: int, into: list[tuple[int
     if mode == "serial":
         into.extend(run_many(tracker, requests))
     elif mode == "threads":
-        with ThreadPoolExecutor(8) as executor:
-            into.extend(run_many(tracker, requests, executor, window))
+        pool = ThreadPool(8)
+        try:
+            into.extend(run_many(tracker, requests, pool, window))
+        finally:
+            pool.shutdown()
     else:
         asyncio.run(_collect(run_many_async(tracker.call_async, requests, window), into))
 

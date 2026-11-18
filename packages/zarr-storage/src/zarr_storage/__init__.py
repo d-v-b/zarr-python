@@ -39,6 +39,7 @@ from zarr_storage._protocols import (
     WritableMany,
     WritableManyAsync,
 )
+from zarr_storage._resources import Limiter, ThreadPool
 from zarr_storage._store import AsyncStore, Store
 from zarr_storage._types import (
     ByteRange,
@@ -79,6 +80,7 @@ __all__ = [
     "InvalidKeyError",
     "Key",
     "KeyConflictError",
+    "Limiter",
     "ListItem",
     "Listable",
     "ListableAsync",
@@ -101,6 +103,7 @@ __all__ = [
     "Store",
     "StoreClosedError",
     "SuffixRequest",
+    "ThreadPool",
     "Unchanged",
     "UnsupportedOperationError",
     "Writable",

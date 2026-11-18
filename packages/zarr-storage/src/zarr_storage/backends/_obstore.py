@@ -29,6 +29,7 @@ from zarr_storage._buffers import byte_view, copy_into
 from zarr_storage._byte_range import resolve
 from zarr_storage._errors import InvalidKeyError, KeyConflictError, UnsupportedOperationError
 from zarr_storage._keys import check_key, relativize
+from zarr_storage._resources import Limiter, default_limiter
 from zarr_storage._types import (
     Deleted,
     Found,
@@ -268,17 +269,26 @@ class ObjectStoreBackend:
     writable
         Whether to accept writes. Defaults to `False` for `HTTPStore`, `True` otherwise.
     concurrency
-        The number of requests an async batch (`get_many_async`, `put_many_async`, ...) keeps in
-        flight. Sync batches run one request at a time.
+        The limit on this backend's operations in flight, sync and async, single and batched
+        (listings are not counted). Share one `Limiter` between backends to bound them together.
+        The default is a process-wide limiter for the store's class, so that every S3 backend in
+        the process shares one limit, as TensorStore's `s3_request_concurrency` does. Async batches
+        start at most `concurrency.limit` operations at once; sync batches run one at a time.
     """
 
     def __init__(
-        self, store: ObjectStore, *, writable: bool | None = None, concurrency: int = 32
+        self,
+        store: ObjectStore,
+        *,
+        writable: bool | None = None,
+        concurrency: Limiter | None = None,
     ) -> None:
-        if concurrency < 1:
-            raise ValueError(f"concurrency must be >= 1; got {concurrency}.")
         self._store = store
-        self._concurrency = concurrency
+        self._concurrency = (
+            default_limiter(f"obstore.{type(store).__name__}")
+            if concurrency is None
+            else concurrency
+        )
         self._writable = not isinstance(store, HTTPStore) if writable is None else writable
         # Only a filesystem refuses a path that lies under a file; elsewhere a refusal is an error.
         self._filesystem = isinstance(store, LocalStore)
@@ -288,6 +298,11 @@ class ObjectStoreBackend:
     def store(self) -> ObjectStore:
         """The obstore store."""
         return self._store
+
+    @property
+    def concurrency(self) -> Limiter:
+        """The limit on this backend's operations in flight."""
+        return self._concurrency
 
     def __repr__(self) -> str:
         return f"ObjectStoreBackend({self._store!r})"
@@ -403,59 +418,67 @@ class ObjectStoreBackend:
     # --- Readable
 
     def head(self, path: str) -> ObjectMetadata | Missing:
-        try:
-            return _metadata(obstore.head(self._store, path))
-        except FileNotFoundError:
-            return Missing(time.time())
-        except GenericError as e:
-            if self._refused_under_a_key(e, path):
+        with self._concurrency.slot():
+            try:
+                return _metadata(obstore.head(self._store, path))
+            except FileNotFoundError:
                 return Missing(time.time())
-            raise
+            except GenericError as e:
+                if self._refused_under_a_key(e, path):
+                    return Missing(time.time())
+                raise
 
     async def head_async(self, path: str) -> ObjectMetadata | Missing:
-        try:
-            return _metadata(await obstore.head_async(self._store, path))
-        except FileNotFoundError:
-            return Missing(time.time())
-        except GenericError as e:
-            if await self._refused_under_a_key_async(e, path):
+        async with self._concurrency.slot():
+            try:
+                return _metadata(await obstore.head_async(self._store, path))
+            except FileNotFoundError:
                 return Missing(time.time())
-            raise
+            except GenericError as e:
+                if await self._refused_under_a_key_async(e, path):
+                    return Missing(time.time())
+                raise
 
     def get(self, path: str, byte_range: ByteRange | None) -> Found | Missing:
-        return self._get(path, byte_range, {})
+        with self._concurrency.slot():
+            return self._get(path, byte_range, {})
 
     async def get_async(self, path: str, byte_range: ByteRange | None) -> Found | Missing:
-        return await self._get_async(path, byte_range, {})
+        async with self._concurrency.slot():
+            return await self._get_async(path, byte_range, {})
 
     def get_into(self, path: str, out: Buffer, byte_range: ByteRange | None) -> Copied | Missing:
         """A read, copied into `out`: obstore can't read into a caller's buffer."""
-        view = byte_view(out, writable=True)
-        return copy_into(self.get(path, byte_range), view)
+        with self._concurrency.slot():
+            view = byte_view(out, writable=True)
+            return copy_into(self.get(path, byte_range), view)
 
     async def get_into_async(
         self, path: str, out: Buffer, byte_range: ByteRange | None
     ) -> Copied | Missing:
-        view = byte_view(out, writable=True)
-        return copy_into(await self.get_async(path, byte_range), view)
+        async with self._concurrency.slot():
+            view = byte_view(out, writable=True)
+            return copy_into(await self.get_async(path, byte_range), view)
 
     def get_if_changed(
         self, path: str, generation: Generation, byte_range: ByteRange | None
     ) -> Found | Missing | Unchanged:
-        try:
-            result = self._get(path, byte_range, _if_none_match(generation))
-        except NotModifiedError:
-            return Unchanged(generation, time.time())
-        return _unless_unchanged(result, generation)
+        with self._concurrency.slot():
+            try:
+                result = self._get(path, byte_range, _if_none_match(generation))
+            except NotModifiedError:
+                return Unchanged(generation, time.time())
+            return _unless_unchanged(result, generation)
 
     async def get_if_changed_async(
         self, path: str, generation: Generation, byte_range: ByteRange | None
     ) -> Found | Missing | Unchanged:
-        try:
-            result = await self._get_async(path, byte_range, _if_none_match(generation))
-        except NotModifiedError:
-            return Unchanged(generation, time.time())
-        return _unless_unchanged(result, generation)
+        async with self._concurrency.slot():
+            try:
+                result = await self._get_async(path, byte_range, _if_none_match(generation))
+            except NotModifiedError:
+                return Unchanged(generation, time.time())
+            return _unless_unchanged(result, generation)
 
     def _get(self, path: str, byte_range: ByteRange | None, options: GetOptions) -> Found | Missing:
         """A read with extra `options`; raises `NotModifiedError` if they include a matching
@@ -486,26 +509,29 @@ class ObjectStoreBackend:
         return _found(result, memoryview(await result.bytes_async()))
 
     def get_ranges(self, path: str, ranges: Sequence[ByteRange]) -> FoundRanges | Missing:
-        if len(ranges) == 0 or _is_empty_request(ranges[0]):
-            return self._read_whole_and_slice(path, ranges)
-        try:
-            first = obstore.get(self._store, path, options=_get_options(ranges[0]))
-        except FileNotFoundError:
-            return Missing(time.time())
-        except GenericError:
-            # The first range starts at the end of the value; one whole read answers every range.
-            return self._read_whole_and_slice(path, ranges)
-        meta = first.meta
-        generation = _generation(meta["e_tag"], meta["version"])
-        pinned = _pinned(generation)
-        if pinned is None:
-            return self._read_whole_and_slice(path, ranges)
-        try:
-            rest = [self._read_pinned(path, pinned, *resolve(r, meta["size"])) for r in ranges[1:]]
-        except (PreconditionError, FileNotFoundError):
-            # The value changed after the first read; one whole read is consistent by itself.
-            return self._read_whole_and_slice(path, ranges)
-        return FoundRanges((memoryview(first.bytes()), *rest), generation, time.time())
+        with self._concurrency.slot():
+            if len(ranges) == 0 or _is_empty_request(ranges[0]):
+                return self._read_whole_and_slice(path, ranges)
+            try:
+                first = obstore.get(self._store, path, options=_get_options(ranges[0]))
+            except FileNotFoundError:
+                return Missing(time.time())
+            except GenericError:
+                # The first range starts at the end of the value; one whole read answers every range.
+                return self._read_whole_and_slice(path, ranges)
+            meta = first.meta
+            generation = _generation(meta["e_tag"], meta["version"])
+            pinned = _pinned(generation)
+            if pinned is None:
+                return self._read_whole_and_slice(path, ranges)
+            try:
+                rest = [
+                    self._read_pinned(path, pinned, *resolve(r, meta["size"])) for r in ranges[1:]
+                ]
+            except (PreconditionError, FileNotFoundError):
+                # The value changed after the first read; one whole read is consistent by itself.
+                return self._read_whole_and_slice(path, ranges)
+            return FoundRanges((memoryview(first.bytes()), *rest), generation, time.time())
 
     def _read_pinned(self, path: str, pinned: GetOptions, start: int, end: int) -> memoryview:
         if start == end:
@@ -531,29 +557,32 @@ class ObjectStoreBackend:
     async def get_ranges_async(
         self, path: str, ranges: Sequence[ByteRange]
     ) -> FoundRanges | Missing:
-        if len(ranges) == 0 or _is_empty_request(ranges[0]):
-            return await self._read_whole_and_slice_async(path, ranges)
-        try:
-            first = await obstore.get_async(self._store, path, options=_get_options(ranges[0]))
-        except FileNotFoundError:
-            return Missing(time.time())
-        except GenericError:
-            return await self._read_whole_and_slice_async(path, ranges)
-        meta = first.meta
-        generation = _generation(meta["e_tag"], meta["version"])
-        pinned = _pinned(generation)
-        if pinned is None:
-            return await self._read_whole_and_slice_async(path, ranges)
-        try:
-            rest = await asyncio.gather(
-                *(
-                    _read_pinned_async(self._store, path, pinned, *resolve(r, meta["size"]))
-                    for r in ranges[1:]
+        async with self._concurrency.slot():
+            if len(ranges) == 0 or _is_empty_request(ranges[0]):
+                return await self._read_whole_and_slice_async(path, ranges)
+            try:
+                first = await obstore.get_async(self._store, path, options=_get_options(ranges[0]))
+            except FileNotFoundError:
+                return Missing(time.time())
+            except GenericError:
+                return await self._read_whole_and_slice_async(path, ranges)
+            meta = first.meta
+            generation = _generation(meta["e_tag"], meta["version"])
+            pinned = _pinned(generation)
+            if pinned is None:
+                return await self._read_whole_and_slice_async(path, ranges)
+            try:
+                rest = await asyncio.gather(
+                    *(
+                        _read_pinned_async(self._store, path, pinned, *resolve(r, meta["size"]))
+                        for r in ranges[1:]
+                    )
                 )
+            except (PreconditionError, FileNotFoundError):
+                return await self._read_whole_and_slice_async(path, ranges)
+            return FoundRanges(
+                (memoryview(await first.bytes_async()), *rest), generation, time.time()
             )
-        except (PreconditionError, FileNotFoundError):
-            return await self._read_whole_and_slice_async(path, ranges)
-        return FoundRanges((memoryview(await first.bytes_async()), *rest), generation, time.time())
 
     async def _read_whole_and_slice_async(
         self, path: str, ranges: Sequence[ByteRange]
@@ -573,32 +602,38 @@ class ObjectStoreBackend:
     # --- Writable
 
     def put(self, path: str, value: memoryview) -> Written:
-        return self._put(path, value, None, always)
+        with self._concurrency.slot():
+            return self._put(path, value, None, always)
 
     async def put_async(self, path: str, value: memoryview) -> Written:
-        return await self._put_async(path, value, None, always)
+        async with self._concurrency.slot():
+            return await self._put_async(path, value, None, always)
 
     def put_if_absent(self, path: str, value: memoryview) -> Written | Rejected:
-        return self._put(path, value, "create", if_absent)
+        with self._concurrency.slot():
+            return self._put(path, value, "create", if_absent)
 
     async def put_if_absent_async(self, path: str, value: memoryview) -> Written | Rejected:
-        return await self._put_async(path, value, "create", if_absent)
+        async with self._concurrency.slot():
+            return await self._put_async(path, value, "create", if_absent)
 
     def put_if_match(
         self, path: str, value: memoryview, generation: Generation
     ) -> Written | Rejected | Missing:
-        mode = _if_match_mode(generation)
-        if mode is None:
-            return _refuse(self.head(path))
-        return self._put(path, value, mode, IfMatch(generation))
+        with self._concurrency.slot():
+            mode = _if_match_mode(generation)
+            if mode is None:
+                return _refuse(self.head(path))
+            return self._put(path, value, mode, IfMatch(generation))
 
     async def put_if_match_async(
         self, path: str, value: memoryview, generation: Generation
     ) -> Written | Rejected | Missing:
-        mode = _if_match_mode(generation)
-        if mode is None:
-            return _refuse(await self.head_async(path))
-        return await self._put_async(path, value, mode, IfMatch(generation))
+        async with self._concurrency.slot():
+            mode = _if_match_mode(generation)
+            if mode is None:
+                return _refuse(await self.head_async(path))
+            return await self._put_async(path, value, mode, IfMatch(generation))
 
     def _put(
         self,
@@ -676,67 +711,73 @@ class ObjectStoreBackend:
         raise OSError(f"Gave up writing {path!r}: the store kept refusing it.")
 
     def delete(self, path: str) -> Deleted | Missing:
-        meta = self.head(path)
-        if isinstance(meta, Missing):
-            return meta
-        try:
-            obstore.delete(self._store, path)
-        except FileNotFoundError:
-            return Missing(time.time())
-        return Deleted(meta.generation)
+        with self._concurrency.slot():
+            meta = self.head(path)
+            if isinstance(meta, Missing):
+                return meta
+            try:
+                obstore.delete(self._store, path)
+            except FileNotFoundError:
+                return Missing(time.time())
+            return Deleted(meta.generation)
 
     async def delete_async(self, path: str) -> Deleted | Missing:
-        meta = await self.head_async(path)
-        if isinstance(meta, Missing):
-            return meta
-        try:
-            await obstore.delete_async(self._store, path)
-        except FileNotFoundError:
-            return Missing(time.time())
-        return Deleted(meta.generation)
+        async with self._concurrency.slot():
+            meta = await self.head_async(path)
+            if isinstance(meta, Missing):
+                return meta
+            try:
+                await obstore.delete_async(self._store, path)
+            except FileNotFoundError:
+                return Missing(time.time())
+            return Deleted(meta.generation)
 
     def delete_dir(self, directory: str) -> None:
-        paths = list(self._paths(directory))
-        try:
-            if paths:
-                obstore.delete(self._store, paths)
-        except FileNotFoundError:
-            # A concurrent delete removed some first; delete the rest one at a time.
-            for path in paths:
-                with contextlib.suppress(FileNotFoundError):
-                    obstore.delete(self._store, path)
+        with self._concurrency.slot():
+            paths = list(self._paths(directory))
+            try:
+                if paths:
+                    obstore.delete(self._store, paths)
+            except FileNotFoundError:
+                # A concurrent delete removed some first; delete the rest one at a time.
+                for path in paths:
+                    with contextlib.suppress(FileNotFoundError):
+                        obstore.delete(self._store, path)
 
     async def delete_dir_async(self, directory: str) -> None:
-        paths = [path async for path in self._paths_async(directory)]
-        try:
-            if paths:
-                await obstore.delete_async(self._store, paths)
-        except FileNotFoundError:
-            for path in paths:
-                with contextlib.suppress(FileNotFoundError):
-                    await obstore.delete_async(self._store, path)
+        async with self._concurrency.slot():
+            paths = [path async for path in self._paths_async(directory)]
+            try:
+                if paths:
+                    await obstore.delete_async(self._store, paths)
+            except FileNotFoundError:
+                for path in paths:
+                    with contextlib.suppress(FileNotFoundError):
+                        await obstore.delete_async(self._store, path)
 
-    # --- async batches: the async operations, `concurrency` at once
+    # --- async batches: the async operations, at most `concurrency.limit` started at once
 
     def get_many_async(
         self, requests: Sequence[tuple[str, ByteRange | None]]
     ) -> AsyncIterator[tuple[int, Found | Missing]]:
-        return run_many_async(self.get_async, requests, self._concurrency)
+        return run_many_async(self.get_async, requests, self._concurrency.limit)
 
     def get_into_many_async(
         self, requests: Sequence[tuple[str, Buffer, ByteRange | None]]
     ) -> AsyncIterator[tuple[int, Copied | Missing]]:
-        return run_many_async(self.get_into_async, requests, self._concurrency)
+        return run_many_async(self.get_into_async, requests, self._concurrency.limit)
 
     def put_many_async(
         self, requests: Sequence[tuple[str, memoryview]]
     ) -> AsyncIterator[tuple[int, Written]]:
-        return run_many_async(self.put_async, requests, self._concurrency)
+        return run_many_async(self.put_async, requests, self._concurrency.limit)
 
     def delete_many_async(
         self, paths: Sequence[str]
     ) -> AsyncIterator[tuple[int, Deleted | Missing]]:
-        return run_many_async(self.delete_async, [(path,) for path in paths], self._concurrency)
+        return run_many_async(
+            self.delete_async, [(path,) for path in paths], self._concurrency.limit
+        )
 
     # --- Listable
 
