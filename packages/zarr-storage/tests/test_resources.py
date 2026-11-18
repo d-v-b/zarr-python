@@ -1,4 +1,4 @@
-"""Shared resources: thread pools and limiters, alone and as backends use them."""
+"""Contexts and their resources, alone and as stores draw on them."""
 
 from __future__ import annotations
 
@@ -10,16 +10,18 @@ from functools import partial
 from typing import TYPE_CHECKING
 
 import pytest
-from obstore.store import LocalStore, MemoryStore
+from obstore.store import MemoryStore
 
-from zarr_storage import Copied, Deleted, Found, Limiter, Missing, Store, ThreadPool
-from zarr_storage.backends import LocalBackend, ObjectStoreBackend
+from zarr_storage import Context, Found, Limiter, Missing, Store, ThreadPool
+from zarr_storage._resources import default_limiter
+from zarr_storage.backends import LocalBackend, MemoryBackend, ObjectStoreBackend
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
     from zarr_storage import ByteRange
+    from zarr_storage.testing import FullBackend
 
 
 class _Peak:
@@ -42,11 +44,13 @@ class _Peak:
             self.done += 1
 
 
-def _hold_sync(limiter: Limiter, peak: _Peak) -> None:
+def _hold_sync(limiter: Limiter, peaks: list[_Peak]) -> None:
     with limiter.slot():
-        peak.enter()
+        for peak in peaks:
+            peak.enter()
         time.sleep(0.002)
-        peak.leave()
+        for peak in peaks:
+            peak.leave()
 
 
 async def _hold_async(limiter: Limiter, peak: _Peak) -> None:
@@ -72,6 +76,13 @@ def _finishes(fn: Callable[[], object]) -> bool:
     return not worker.is_alive()
 
 
+def _join_all(threads: list[threading.Thread]) -> None:
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+
 # ---------------------------------------------------------------------------- Limiter
 
 
@@ -79,30 +90,45 @@ def _finishes(fn: Callable[[], object]) -> bool:
 def test_limiter_bounds_threads_and_tasks_together(limit: int) -> None:
     """Threads and tasks on two event loops never hold more than `limit` slots at once."""
     limiter, peak = Limiter(limit), _Peak()
-    workers = [threading.Thread(target=_hold_sync, args=(limiter, peak)) for _ in range(8)]
+    workers = [threading.Thread(target=_hold_sync, args=(limiter, [peak])) for _ in range(8)]
     workers += [threading.Thread(target=_run_loop, args=(limiter, peak, 8)) for _ in range(2)]
-    for worker in workers:
-        worker.start()
-    for worker in workers:
-        worker.join()
+    _join_all(workers)
     assert (peak.done, peak.most, limiter.in_use) == (24, limit, 0)
 
 
-async def _nested_async(limiter: Limiter) -> int:
-    async with limiter.slot(), limiter.slot():
-        return limiter.in_use
+def test_nested_limiter_holds_slots_of_both() -> None:
+    """A limiter `within` another is bounded by its own limit, and shares the wider one."""
+    wide = Limiter(3)
+    narrow = Limiter(2, within=wide)
+    narrow_peak, wide_peak = _Peak(), _Peak()
+    workers = [
+        threading.Thread(target=_hold_sync, args=(narrow, [narrow_peak, wide_peak]))
+        for _ in range(8)
+    ]
+    workers += [threading.Thread(target=_hold_sync, args=(wide, [wide_peak])) for _ in range(8)]
+    _join_all(workers)
+    assert (narrow_peak.most, wide_peak.most, wide_peak.done) == (2, 3, 16)
+    assert (narrow.in_use, wide.in_use) == (0, 0)
 
 
-def _nested_sync(limiter: Limiter, seen: list[int]) -> None:
-    with limiter.slot(), limiter.slot():
-        seen.append(limiter.in_use)
-    seen.append(asyncio.run(_nested_async(limiter)))
+def _wait_for_slot(limiter: Limiter) -> None:
+    with limiter.slot():
+        pass
 
 
-def test_slot_inside_a_slot_takes_no_second_slot() -> None:
-    limiter, seen = Limiter(1), []
-    assert _finishes(partial(_nested_sync, limiter, seen))
-    assert (seen, limiter.in_use) == ([1, 1], 0)
+def test_waiting_on_a_narrow_limit_holds_none_of_the_wide_one() -> None:
+    """Slots are taken innermost first, so a burst queued on a narrow limit leaves the wide one
+    free for everyone else."""
+    wide = Limiter(2)
+    narrow = Limiter(1, within=wide)
+    with narrow.slot():
+        waiter = threading.Thread(target=_wait_for_slot, args=(narrow,))
+        waiter.start()
+        waiter.join(0.05)
+        assert waiter.is_alive()
+        assert wide.in_use == 1
+    waiter.join(10)
+    assert (narrow.in_use, wide.in_use) == (0, 0)
 
 
 async def _take_in_order(limiter: Limiter, name: str, order: list[str]) -> None:
@@ -144,6 +170,28 @@ def test_cancelled_waiter_gives_back_its_slot(granted_first: bool) -> None:
     assert asyncio.run(_cancel_while_waiting(granted_first)) == 0
 
 
+async def _cancel_between_slots() -> tuple[int, int]:
+    wide = Limiter(1)
+    narrow = Limiter(1, within=wide)
+    await wide.acquire_async()
+    entering = asyncio.create_task(_wait_for_slot_async(narrow))
+    await asyncio.sleep(0)  # holds the narrow slot, waits for the wide one
+    entering.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await entering
+    wide.release()
+    return narrow.in_use, wide.in_use
+
+
+async def _wait_for_slot_async(limiter: Limiter) -> None:
+    async with limiter.slot():
+        pass
+
+
+def test_cancelled_while_taking_a_nested_slot_gives_back_the_inner_one() -> None:
+    assert asyncio.run(_cancel_between_slots()) == (0, 0)
+
+
 @pytest.mark.parametrize(("limit", "error"), [(0, ValueError), (1.5, TypeError), (True, TypeError)])
 def test_limiter_of_a_bad_limit_raises(limit: object, error: type[Exception]) -> None:
     with pytest.raises(error):
@@ -172,11 +220,149 @@ def test_thread_pool_knows_its_own_threads() -> None:
         other.shutdown()
 
 
+@pytest.mark.parametrize(("size", "error"), [(0, ValueError), (2.0, TypeError)])
+def test_thread_pool_of_a_bad_size_raises(size: object, error: type[Exception]) -> None:
+    with pytest.raises(error):
+        ThreadPool(size)  # pyright: ignore[reportArgumentType]
+
+
+def test_shutting_down_the_default_pool_raises() -> None:
+    with pytest.raises(ValueError, match="shared"):
+        ThreadPool.default().shutdown()
+
+
+# ---------------------------------------------------------------------------- Context
+
+
+def test_context_resolves_resources_through_its_parents() -> None:
+    """Own resources first, then the parent's, then the process-wide defaults."""
+    pool, a, b = ThreadPool(2), Limiter(4), Limiter(5)
+    default = Context.default()
+    assert default.threads is ThreadPool.default()
+    assert default.limiter("x") is default_limiter("x")
+    own = Context(threads=pool, limits={"a": a})
+    assert (own.threads, own.limiter("a"), own.limiter("x")) == (pool, a, default_limiter("x"))
+    child = own.child(limits={"b": b})
+    assert (child.threads, child.limiter("a"), child.limiter("b")) == (pool, a, b)
+    assert child.child(threads=ThreadPool.default()).threads is ThreadPool.default()
+    narrowed = child.limited("a", 2).limiter("a")
+    assert (narrowed.limit, narrowed.within) == (2, a)
+
+
+@pytest.mark.parametrize(
+    "make",
+    [
+        partial(Context, limits={"a": 4}),  # pyright: ignore[reportArgumentType]
+        partial(Context, threads=4),  # pyright: ignore[reportArgumentType]
+    ],
+    ids=["limit-not-a-limiter", "threads-not-a-pool"],
+)
+def test_context_of_a_bad_resource_raises(make: Callable[[], Context]) -> None:
+    with pytest.raises(TypeError):
+        make()
+
+
+def test_views_carry_their_context() -> None:
+    """Views keep their context; `with_context` and `limited` change it and nothing else."""
+    context = Context(limits={"memory": Limiter(8)})
+    store = Store(MemoryBackend(), root="r", context=context)
+    for view in (store / "a", store.with_read_only(), store.as_async(), store.as_async().as_sync()):
+        assert view.context is context
+    other = Context()
+    assert store.with_context(other).context is other
+    limited = store.limited(2)
+    assert limited.context.parent is context
+    assert limited.context.limiter("memory").limit == 2
+    assert limited.context.limiter("memory").within is context.limiter("memory")
+    assert (limited.root, limited.shares_backend(store)) == ("r", True)
+
+
+def test_pickling_keeps_resources_shared(tmp_path: Path) -> None:
+    """Stores that shared a context share one after a round trip; defaults stay defaults."""
+    wide = Limiter(8)
+    context = Context(threads=ThreadPool(2), limits={"local": Limiter(3, within=wide)})
+    stores = (
+        Store(LocalBackend(tmp_path / "a"), context=context),
+        Store(LocalBackend(tmp_path / "b"), context=context),
+        Store(LocalBackend(tmp_path / "c")),
+    )
+    a, b, c = pickle.loads(pickle.dumps(stores))
+    assert a.context is b.context
+    assert a.context is not context
+    limiter = a.context.limiter("local")
+    assert (a.context.threads.max_workers, limiter.limit, limiter.within.limit) == (2, 3, 8)
+    assert c.context is Context.default()
+
+
+# ---------------------------------------------------------------------------- stores under limits
+
+
+def _get_in_thread(store: Store[FullBackend], results: list[object]) -> None:
+    results.append(store.get("k"))
+
+
+async def _get_async_while_held(store: Store[FullBackend]) -> bool:
+    try:
+        await asyncio.wait_for(store.as_async().get("k"), 0.05)
+    except TimeoutError:
+        return True
+    return False
+
+
+@pytest.mark.parametrize("backend", ["local", "obstore"])
+def test_operations_wait_for_the_contexts_limiter(tmp_path: Path, backend: str) -> None:
+    """Sync and async operations, on native-async and sync-only backends, wait for a slot."""
+    raw: FullBackend = (
+        LocalBackend(tmp_path) if backend == "local" else ObjectStoreBackend(MemoryStore())
+    )
+    pool, limiter = ThreadPool(2), Limiter(1)
+    store = Store(raw, context=Context(threads=pool, limits={raw.resource_key: limiter}))
+    store.put("k", b"x")
+    limiter.acquire()  # some other operation under this context holds the only slot
+    results: list[object] = []
+    reader = threading.Thread(target=_get_in_thread, args=(store, results))
+    reader.start()
+    reader.join(0.05)
+    assert reader.is_alive()
+    assert asyncio.run(_get_async_while_held(store))
+    limiter.release()
+    reader.join(10)
+    pool.shutdown()  # the timed-out async read's thread finishes too
+    assert isinstance(results[0], Found)
+    assert limiter.in_use == 0
+
+
+class _PeakBackend(MemoryBackend):
+    """A memory backend whose reads take a moment and record how many overlap."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.peak = _Peak()
+
+    def get(self, path: str, byte_range: ByteRange | None) -> Found | Missing:
+        self.peak.enter()
+        time.sleep(0.005)
+        self.peak.leave()
+        return super().get(path, byte_range)
+
+
+def test_limited_view_bounds_its_batches() -> None:
+    backend = _PeakBackend()
+    store = Store(backend, context=Context(threads=ThreadPool(8)))
+    keys = [f"k{i}" for i in range(24)]
+    store.put_many((key, b"x") for key in keys)
+    assert len(list(store.limited(2).get_many(keys))) == 24
+    assert backend.peak.most == 2
+    backend.peak.most = 0
+    assert len(list(store.get_many(keys))) == 24
+    assert backend.peak.most > 2
+
+
 class _RecordingBackend(LocalBackend):
     """A local backend that records which threads its reads run on."""
 
-    def __init__(self, root: Path, threads: ThreadPool) -> None:
-        super().__init__(root, threads=threads)
+    def __init__(self, root: Path) -> None:
+        super().__init__(root)
         self.read_on: set[int] = set()
 
     def get(self, path: str, byte_range: ByteRange | None) -> Found | Missing:
@@ -193,10 +379,11 @@ def test_batch_from_a_thread_of_its_own_pool_runs_on_that_thread(tmp_path: Path)
     """A batch started on one of its pool's threads must not wait for the pool's other threads,
     which may all be waiting the same way; it runs its reads on the thread that started it."""
     pool = ThreadPool(2)
-    backend = _RecordingBackend(tmp_path, pool)
-    store = Store(backend)
+    backend = _RecordingBackend(tmp_path)
+    store = Store(backend, context=Context(threads=pool))
     keys = [f"k{i}" for i in range(4)]
     store.put_many((key, b"x") for key in keys)
+    backend.read_on.clear()
     try:
         worker = pool.submit(_batch_here, store, keys).result(timeout=10)
     finally:
@@ -204,96 +391,41 @@ def test_batch_from_a_thread_of_its_own_pool_runs_on_that_thread(tmp_path: Path)
     assert backend.read_on == {worker}
 
 
-@pytest.mark.parametrize(("size", "error"), [(0, ValueError), (2.0, TypeError)])
-def test_thread_pool_of_a_bad_size_raises(size: object, error: type[Exception]) -> None:
-    with pytest.raises(error):
-        ThreadPool(size)  # pyright: ignore[reportArgumentType]
+def _read_batch(store: Store[LocalBackend], results: list[object]) -> None:
+    results.extend(result for _, result in store.get_many(["k"]))
 
 
-def test_shutting_down_the_default_pool_raises() -> None:
-    with pytest.raises(ValueError, match="shared"):
-        ThreadPool.default().shutdown()
+def _read_async(store: Store[LocalBackend], results: list[object]) -> None:
+    results.append(asyncio.run(store.as_async().get("k")))
 
 
-# ---------------------------------------------------------------------------- sharing
+def _settle() -> None:
+    time.sleep(0.05)
 
 
-def test_backends_share_resources_as_given(tmp_path: Path) -> None:
-    """Left out, resources are process-wide defaults; given, they are exactly what was given."""
-    assert LocalBackend(tmp_path / "a").threads is ThreadPool.default()
-    pool = ThreadPool(2)
-    assert LocalBackend(tmp_path / "b", threads=pool).threads is pool
-    memory = [ObjectStoreBackend(MemoryStore()).concurrency for _ in range(2)]
-    local = ObjectStoreBackend(LocalStore(str(tmp_path))).concurrency
-    assert memory[0] is memory[1]
-    assert local is not memory[0]
-    limiter = Limiter(3)
-    assert ObjectStoreBackend(MemoryStore(), concurrency=limiter).concurrency is limiter
-
-
-def test_pickling_keeps_resources_shared(tmp_path: Path) -> None:
-    """Backends that shared a resource share one after a round trip; defaults stay defaults."""
-    pool, limiter = ThreadPool(2), Limiter(3)
-    objects = str(tmp_path)  # obstore's `MemoryStore` can't be pickled; its `LocalStore` can
-    backends = (
-        LocalBackend(tmp_path / "a", threads=pool),
-        LocalBackend(tmp_path / "b", threads=pool),
-        ObjectStoreBackend(LocalStore(objects), concurrency=limiter),
-        ObjectStoreBackend(LocalStore(objects), concurrency=limiter),
-        LocalBackend(tmp_path / "c"),
-        ObjectStoreBackend(LocalStore(objects)),
-    )
-    a, b, c, d, e, f = pickle.loads(pickle.dumps(backends))
-    assert a.threads is b.threads
-    assert a.threads is not pool
-    assert a.threads.max_workers == 2
-    assert c.concurrency is d.concurrency
-    assert c.concurrency is not limiter
-    assert c.concurrency.limit == 3
-    assert e.threads is ThreadPool.default()
-    assert f.concurrency is backends[5].concurrency
-
-
-def _get_in_thread(store: Store[ObjectStoreBackend], results: list[object]) -> None:
-    results.append(store.get("k"))
-
-
-async def _get_async_while_held(store: Store[ObjectStoreBackend]) -> bool:
-    try:
-        await asyncio.wait_for(store.as_async().get("k"), 0.05)
-    except TimeoutError:
-        return True
-    return False
-
-
-def test_obstore_operations_wait_for_a_shared_limit() -> None:
-    """Every operation, sync or async, of every backend sharing a limiter waits for a slot."""
-    limiter = Limiter(1)
-    first = Store(ObjectStoreBackend(MemoryStore(), concurrency=limiter))
-    second = Store(ObjectStoreBackend(MemoryStore(), concurrency=limiter))
-    second.put("k", b"x")
-    limiter.acquire()  # another backend's operation holds the only slot
-    results: list[object] = []
-    reader = threading.Thread(target=_get_in_thread, args=(second, results))
-    reader.start()
-    reader.join(0.05)
-    assert reader.is_alive()
-    assert asyncio.run(_get_async_while_held(first))
-    limiter.release()
-    reader.join(10)
-    assert isinstance(results[0], Found)
+def test_async_read_of_a_sync_backend_holds_no_slot_while_it_waits_for_a_thread(
+    tmp_path: Path,
+) -> None:
+    """One thread, one slot. A sync batch's read is queued on the thread, then an async read of the
+    sync backend is queued behind it. Had the async read taken the slot before its turn on the
+    thread, the batch's read, which runs first, would wait for that slot forever."""
+    pool, limiter = ThreadPool(1), Limiter(1)
+    store = Store(LocalBackend(tmp_path), context=Context(threads=pool, limits={"local": limiter}))
+    store.put("k", b"x")
+    gate = threading.Event()
+    pool.submit(gate.wait)  # keeps the only thread busy while the reads queue up
+    batch: list[object] = []
+    single: list[object] = []
+    batch_reader = threading.Thread(target=_read_batch, args=(store, batch), daemon=True)
+    async_reader = threading.Thread(target=_read_async, args=(store, single), daemon=True)
+    batch_reader.start()
+    _settle()  # the batch's read is queued
+    async_reader.start()
+    _settle()  # the async read is queued behind it
+    gate.set()
+    batch_reader.join(10)
+    async_reader.join(10)
+    assert not batch_reader.is_alive()
+    assert not async_reader.is_alive()
+    assert [type(r) for r in batch + single] == [Found, Found]
     assert limiter.in_use == 0
-
-
-def _nested_operations(store: Store[ObjectStoreBackend], results: list[object]) -> None:
-    store.put("k", b"xy")
-    results.append(store.get_into("k", bytearray(2)))
-    results.append(store.delete("k"))
-
-
-def test_obstore_operation_that_calls_another_takes_one_slot() -> None:
-    """`get_into` reads through `get` and `delete` looks with `head`: with one slot, neither waits."""
-    store = Store(ObjectStoreBackend(MemoryStore(), concurrency=Limiter(1)))
-    results: list[object] = []
-    assert _finishes(partial(_nested_operations, store, results))
-    assert [type(r) for r in results] == [Copied, Deleted]

@@ -1,35 +1,46 @@
-"""Resources that backends share: thread pools and limits on operations in flight.
+"""The resources a store's operations draw on: thread pools, limits on operations in flight, and the
+context that holds them.
 
-Modeled on TensorStore's context resources (`file_io_concurrency`, `s3_request_concurrency`): a
-resource is an object you create and pass to as many backends as should share it. A backend never
-closes a resource it was given. Left out, a backend uses a process-wide default, as TensorStore
-does, because threads and request slots are process-wide in the end; pass your own to isolate a
-backend from the rest of the process. A resource changes how fast operations run, never what they
-do.
+Modeled on TensorStore's `Context`: a context maps resource keys to resource objects, a store view
+carries one, and every operation through the view takes its resources from it. A backend names the
+key its operations are limited under (`Backend.resource_key`) and never holds resources itself.
+Resources change how fast operations run, never what they do, so a context is not part of a store's
+identity.
 
-Pickling a resource pickles its settings. Pickle stores each object once, so backends that shared
-a resource before pickling share one new resource after; a default resource unpickles as the
-default of the receiving process.
+A context left out is `Context.default()`, which resolves every key to a process-wide default, as
+TensorStore's thread pools and request limits are shared across independent contexts by default.
+
+Pickling a resource pickles its settings. Pickle stores each object once, so stores that shared a
+resource before pickling share one new resource after; a default unpickles as the receiving
+process's default.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import os
 import threading
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-from contextvars import ContextVar
 from functools import partial
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, TypeVar, TypeVarTuple
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
     from concurrent.futures import Future
-    from contextvars import Token
     from types import TracebackType
 
-__all__ = ["Limiter", "Slot", "ThreadPool", "default_limiter", "default_thread_pool"]
+__all__ = [
+    "Context",
+    "Limiter",
+    "Slot",
+    "ThreadPool",
+    "default_context",
+    "default_limiter",
+    "default_thread_pool",
+]
 
 R = TypeVar("R")
 Ts = TypeVarTuple("Ts")
@@ -59,10 +70,11 @@ def _mark_worker(pool: ThreadPool) -> None:
 
 
 class ThreadPool:
-    """Threads that run blocking operations, such as file I/O, for the backends given it.
+    """Threads that run blocking operations, such as file I/O.
 
-    The threads start when first needed. Whoever creates a pool owns it and may `shutdown` it once
-    no backend needs it; the default pool lives as long as the process.
+    The threads start when first needed. Work runs in a copy of the submitter's `contextvars`
+    context, as `asyncio.to_thread` does. Whoever creates a pool owns it and may `shutdown` it once
+    nothing needs it; the default pool lives as long as the process.
 
     Parameters
     ----------
@@ -78,7 +90,7 @@ class ThreadPool:
 
     @classmethod
     def default(cls) -> ThreadPool:
-        """The process-wide pool that backends use when given none."""
+        """The process-wide pool, of `DEFAULT_THREADS` threads."""
         return default_thread_pool()
 
     @property
@@ -106,18 +118,20 @@ class ThreadPool:
         """Whether the calling thread is one of this pool's.
 
         Work started from one of the pool's own threads must not wait for other work queued on the
-        pool, which may never start; the batch runners run such work inline.
+        pool, which may never start; stores run such work inline.
         """
         return getattr(_worker, "pool", None) is self
 
     def submit(self, fn: Callable[[*Ts], R], /, *args: *Ts) -> Future[R]:
         """Run `fn(*args)` on one of the pool's threads."""
-        return self._pool().submit(fn, *args)
+        context = contextvars.copy_context()
+        return self._pool().submit(context.run, fn, *args)
 
     async def run(self, fn: Callable[[*Ts], R], /, *args: *Ts) -> R:
         """Await `fn(*args)`, run on one of the pool's threads."""
+        context = contextvars.copy_context()
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self._pool(), partial(fn, *args))
+        return await loop.run_in_executor(self._pool(), partial(context.run, fn, *args))
 
     def shutdown(self, *, wait: bool = True) -> None:
         """Stop the pool's threads; with `wait`, after the work already given them.
@@ -141,24 +155,19 @@ class _DefaultThreadPool(ThreadPool):
         raise ValueError("The default thread pool is shared by the whole process.")
 
 
-_default_pool_lock = threading.Lock()
+_defaults_lock = threading.Lock()
 _default_pool: list[ThreadPool] = []
 
 
 def default_thread_pool() -> ThreadPool:
-    """The process-wide `ThreadPool`, with `DEFAULT_THREADS` threads."""
-    with _default_pool_lock:
+    """The process-wide `ThreadPool`, of `DEFAULT_THREADS` threads."""
+    with _defaults_lock:
         if not _default_pool:
             _default_pool.append(_DefaultThreadPool(DEFAULT_THREADS))
         return _default_pool[0]
 
 
 # ---------------------------------------------------------------------------- limiters
-
-_held: ContextVar[frozenset[Limiter]] = ContextVar(
-    "zarr_storage_held_limiters", default=frozenset()
-)
-"""The limiters whose slots the current operation holds, so nested operations don't wait again."""
 
 
 class _ThreadWaiter:
@@ -200,20 +209,29 @@ class _TaskWaiter:
         return True
 
 
-class Limiter:
-    """A limit on how many operations run at once, across every backend given it.
+def _limiter(limit: int, within: Limiter | None) -> Limiter:
+    return Limiter(limit, within=within)
 
-    Threads and tasks on any event loop wait in one first-come, first-served queue.
+
+class Limiter:
+    """A limit on how many operations run at once.
+
+    Threads and tasks on any event loop wait in one first-come, first-served queue. A limiter
+    `within` another takes a slot of that one too, so a scoped limit can't exceed the limit it
+    narrows.
 
     Parameters
     ----------
     limit
         The most operations that run at once.
+    within
+        A limiter whose slots this one's operations also hold.
     """
 
-    def __init__(self, limit: int) -> None:
+    def __init__(self, limit: int, *, within: Limiter | None = None) -> None:
         _check_size("limit", limit)
         self._limit = limit
+        self._within = within
         self._lock = threading.Lock()
         self._in_use = 0
         self._waiters: deque[_ThreadWaiter | _TaskWaiter] = deque()
@@ -221,6 +239,11 @@ class Limiter:
     @property
     def limit(self) -> int:
         return self._limit
+
+    @property
+    def within(self) -> Limiter | None:
+        """The limiter whose slots this one's operations also hold, if any."""
+        return self._within
 
     @property
     def in_use(self) -> int:
@@ -231,14 +254,25 @@ class Limiter:
         return f"{type(self).__name__}(limit={self._limit}, in_use={self._in_use})"
 
     def __reduce__(self) -> tuple[object, ...]:
-        return (Limiter, (self._limit,))
+        return (_limiter, (self._limit, self._within))
+
+    def chain(self) -> tuple[Limiter, ...]:
+        """This limiter and each it lies within, innermost first."""
+        chain: list[Limiter] = []
+        current: Limiter | None = self
+        while current is not None:
+            chain.append(current)
+            current = current.within
+        return tuple(chain)
 
     def slot(self) -> Slot:
-        """A context manager, sync (`with`) or async (`async with`), that holds one slot.
+        """A context manager, sync (`with`) or async (`async with`), holding a slot of this limiter
+        and of each limiter it lies within.
 
-        Prefer it to `acquire` and `release`: it releases on error, and inside an operation that
-        already holds a slot of this limiter it takes no second one, so an operation that calls
-        another can't wait on itself.
+        Slots are taken innermost first, so an operation waiting on a narrow limit holds none of the
+        wider one it narrows. A slot is not re-entrant: code holding one that starts work waiting
+        for another slot of the same limiter can wait forever, as with a lock. Stores take one slot
+        per operation; to bound a burst of operations, use a limited view (`Store.limited`).
         """
         return Slot(self)
 
@@ -250,7 +284,7 @@ class Limiter:
         return False
 
     def acquire(self) -> None:
-        """Take a slot, blocking the calling thread until one is free."""
+        """Take a slot of this limiter alone, blocking the calling thread until one is free."""
         with self._lock:
             if self._take():
                 return
@@ -259,7 +293,7 @@ class Limiter:
         waiter.wait()
 
     async def acquire_async(self) -> None:
-        """Take a slot, waiting without blocking the event loop until one is free."""
+        """Take a slot of this limiter alone, waiting without blocking the event loop."""
         with self._lock:
             if self._take():
                 return
@@ -278,7 +312,7 @@ class Limiter:
             raise
 
     def release(self) -> None:
-        """Give back a slot, to the longest waiter if there is one.
+        """Give back a slot of this limiter, to the longest waiter if there is one.
 
         Raises `RuntimeError` if no slot is held.
         """
@@ -291,32 +325,31 @@ class Limiter:
             self._in_use -= 1
 
 
-class Slot:
-    """One use of a `Limiter`: holds a slot from entry to exit, unless the operation holds one."""
+def _release_all(limiters: list[Limiter]) -> None:
+    for limiter in reversed(limiters):
+        limiter.release()
 
-    __slots__ = ("_limiter", "_token")
+
+class Slot:
+    """One use of a `Limiter`: holds a slot of it and of each limiter it lies within, innermost
+    first, from entry to exit."""
+
+    __slots__ = ("_chain", "_taken")
 
     def __init__(self, limiter: Limiter) -> None:
-        self._limiter = limiter
-        self._token: Token[frozenset[Limiter]] | None = None
-
-    def _needed(self) -> bool:
-        return self._limiter not in _held.get()
-
-    def _mark(self) -> None:
-        self._token = _held.set(_held.get() | {self._limiter})
-
-    def _unmark(self) -> None:
-        if self._token is None:
-            return
-        _held.reset(self._token)
-        self._token = None
-        self._limiter.release()
+        self._chain = limiter.chain()
+        self._taken: list[Limiter] = []
 
     def __enter__(self) -> None:
-        if self._needed():
-            self._limiter.acquire()
-            self._mark()
+        taken: list[Limiter] = []
+        try:
+            for limiter in self._chain:
+                limiter.acquire()
+                taken.append(limiter)
+        except BaseException:
+            _release_all(taken)
+            raise
+        self._taken = taken
 
     def __exit__(
         self,
@@ -324,12 +357,19 @@ class Slot:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
-        self._unmark()
+        taken, self._taken = self._taken, []
+        _release_all(taken)
 
     async def __aenter__(self) -> None:
-        if self._needed():
-            await self._limiter.acquire_async()
-            self._mark()
+        taken: list[Limiter] = []
+        try:
+            for limiter in self._chain:
+                await limiter.acquire_async()
+                taken.append(limiter)
+        except BaseException:
+            _release_all(taken)
+            raise
+        self._taken = taken
 
     async def __aexit__(
         self,
@@ -337,7 +377,8 @@ class Slot:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
-        self._unmark()
+        taken, self._taken = self._taken, []
+        _release_all(taken)
 
 
 class _DefaultLimiter(Limiter):
@@ -351,14 +392,128 @@ class _DefaultLimiter(Limiter):
         return (default_limiter, (self._key,))
 
 
-_default_limiters_lock = threading.Lock()
 _default_limiters: dict[str, Limiter] = {}
 
 
 def default_limiter(key: str) -> Limiter:
-    """The process-wide `Limiter` for `key` (such as an obstore store class), of `DEFAULT_LIMIT`."""
-    with _default_limiters_lock:
+    """The process-wide `Limiter` for `key`, of `DEFAULT_LIMIT`."""
+    with _defaults_lock:
         limiter = _default_limiters.get(key)
         if limiter is None:
             limiter = _default_limiters[key] = _DefaultLimiter(key)
         return limiter
+
+
+# ---------------------------------------------------------------------------- contexts
+
+
+def _context(
+    threads: ThreadPool | None, limits: Mapping[str, Limiter], parent: Context | None
+) -> Context:
+    return Context(threads=threads, limits=limits, parent=parent)
+
+
+class Context:
+    """The resources operations draw on: a thread pool, and a limiter per resource key.
+
+    A context is immutable. `child` makes one that overrides some resources and takes the rest from
+    its parent; a context with no parent takes the rest from the process-wide defaults. Every store
+    view carries a context (`Store.context`); `with_context` and `limited` return views under
+    another one.
+
+    Parameters
+    ----------
+    threads
+        The pool that runs blocking work: a sync backend's operations called through an
+        `AsyncStore`, and the operations of batches. Left out, the parent's.
+    limits
+        A `Limiter` for each resource key it names (a backend's `resource_key`). Keys left out
+        resolve through the parent.
+    parent
+        The context to take unnamed resources from. Left out, the process-wide defaults.
+    """
+
+    __slots__ = ("_limits", "_parent", "_threads")
+
+    def __init__(
+        self,
+        *,
+        threads: ThreadPool | None = None,
+        limits: Mapping[str, Limiter] | None = None,
+        parent: Context | None = None,
+    ) -> None:
+        own = {} if limits is None else dict(limits)
+        for key, limiter in own.items():
+            if not isinstance(limiter, Limiter):  # pyright: ignore[reportUnnecessaryIsInstance]
+                raise TypeError(f"limits[{key!r}] must be a Limiter; got {type(limiter).__name__}.")
+        if threads is not None and not isinstance(threads, ThreadPool):  # pyright: ignore[reportUnnecessaryIsInstance]
+            raise TypeError(f"threads must be a ThreadPool; got {type(threads).__name__}.")
+        self._threads = threads
+        self._limits: Mapping[str, Limiter] = MappingProxyType(own)
+        self._parent = parent
+
+    @classmethod
+    def default(cls) -> Context:
+        """The process-wide context: every key resolves to its process-wide default."""
+        return default_context()
+
+    @property
+    def parent(self) -> Context | None:
+        return self._parent
+
+    @property
+    def threads(self) -> ThreadPool:
+        """The pool that runs blocking work under this context."""
+        context: Context | None = self
+        while context is not None:
+            if context._threads is not None:
+                return context._threads
+            context = context._parent
+        return default_thread_pool()
+
+    def limiter(self, key: str) -> Limiter:
+        """The limiter for resource key `key` under this context."""
+        context: Context | None = self
+        while context is not None:
+            limiter = context._limits.get(key)
+            if limiter is not None:
+                return limiter
+            context = context._parent
+        return default_limiter(key)
+
+    def child(
+        self, *, threads: ThreadPool | None = None, limits: Mapping[str, Limiter] | None = None
+    ) -> Context:
+        """A context with these resources, taking the rest from this one."""
+        return Context(threads=threads, limits=limits, parent=self)
+
+    def limited(self, key: str, limit: int) -> Context:
+        """A child whose limiter for `key` allows `limit` operations, within this context's."""
+        return self.child(limits={key: Limiter(limit, within=self.limiter(key))})
+
+    def __repr__(self) -> str:
+        own = ", ".join(f"{key!r}: {limiter!r}" for key, limiter in self._limits.items())
+        return f"{type(self).__name__}(threads={self._threads!r}, limits={{{own}}})"
+
+    def __reduce__(self) -> tuple[object, ...]:
+        return (_context, (self._threads, dict(self._limits), self._parent))
+
+
+class _DefaultContext(Context):
+    """The process-wide context; unpickled as the receiver's own."""
+
+    __slots__ = ()
+
+    def __reduce__(self) -> tuple[object, ...]:
+        return (default_context, ())
+
+
+_default_context: list[Context] = []
+
+
+def default_context() -> Context:
+    """The process-wide `Context`."""
+    with _defaults_lock:
+        if not _default_context:
+            _default_context.append(_DefaultContext())
+        return _default_context[0]

@@ -27,8 +27,9 @@ Sources, and what each contributed:
 ```
 Backend      capability protocols over backend paths; owns shared state and lifecycle
    ▲
-_View        (backend, root, read_only, owner): validates keys, applies the root, relativizes
-   ▲         listings, enforces read-only; `store / "a"` is a view on the same backend
+_View        (backend, root, read_only, context, owner): validates keys, applies the root,
+   ▲         relativizes listings, enforces read-only, limits and schedules every operation with
+             its context's resources; `store / "a"` is a view on the same backend
 Store        the operations as sync methods; `close()`, `with`; `as_async()`
 AsyncStore   the same names as coroutines; `aclose()`, `async with`; `as_sync()`
 ```
@@ -37,18 +38,22 @@ A **backend** is an object that implements some capability protocols (`Readable`
 `Listable`, `WritableIfMatch`, `DeletableIfMatch`, and their async twins) on *backend paths*:
 `/`-separated strings, already joined with the root. Backends never see relative keys and never
 join or strip paths. They hold everything that must exist once per backend: the dict, the
-filesystem root, a client, locks. Thread pools and limits on operations in flight are shared
-resources the backend is given (see below).
+filesystem root, a client, locks. They hold no thread pools or limits: a backend names the
+`resource_key` its operations are limited under, and the store draws the resources from its
+context (see "Contexts"). Backends must be thread-safe.
 
 A **`Store`** or **`AsyncStore`** is the only object users hold. Each is a view: a backend plus a
-root. All key validation, root joining, listing relativization and read-only enforcement happen in
-their shared base, once, so no backend can get them wrong on its own (the source of most bugs in the legacy API: #2190, #2467, #3639, #3922, #4204,
+root, under a context. All key validation, root joining, listing relativization, read-only
+enforcement and resource limiting happen in their shared base, once, so no backend can get them
+wrong on its own (the source of most bugs in the legacy API: #2190, #2467, #3639, #3922, #4204,
 #4452).
 
 **Sync and async are two classes** (as zarrs has separate sync and async storage traits): `Store`
-calls a backend's sync protocols and `AsyncStore` its async ones, under the same method names, so
-`store.get(k)` and `await astore.get(k)` read the same way and neither class carries the other's
-methods. A backend with both surfaces serves both; `store.as_async()` and `astore.as_sync()` are
+calls a backend's sync protocols, and `AsyncStore` its async ones where the backend has them and
+its sync ones on the context's thread pool otherwise (zarrs's `SyncToAsyncStorageAdapter`, with
+the pool in place of its `spawn_blocking`), under the same method names, so `store.get(k)` and
+`await astore.get(k)` read the same way and neither class carries the other's methods. A backend
+that only blocks, such as a filesystem, needs no async code. Every backend serves both; `store.as_async()` and `astore.as_sync()` are
 views on the same backend that don't own it. Lifecycle differs too: `Store` has `close()` and
 `with`, `AsyncStore` has `await aclose()` and `async with`, which awaits a `ClosableAsync`
 backend's `aclose` (a backend whose cleanup awaits a client session) and calls `close` on any other.
@@ -123,13 +128,16 @@ landed with their results and whose `remaining` holds the requests that failed o
 (`except*` keeps both). Conditional operations have no batch form: compare-and-swap coordinates
 single documents, and a batch of it belongs to transactions.
 
-`Store` provides every batch method for any backend that can read or write, running the single
-operation one at a time; a backend that has a batch capability (`ReadableMany`,
-`ReadableIntoMany[O]`, `WritableMany`, and async twins) is used instead. The rule for such
-fallbacks: `Store` may fall back when only speed differs, never when behavior does. A serial batch
-returns what a concurrent one would; a `get_into` that read and then copied would not put the bytes
-where the backend's buffer type says, which is why `get_into` has no fallback. The batch runners in
-`zarr_storage._batch` implement the windowing and failure rule once, for `Store` and backends alike.
+`Store` provides every batch method for any backend that can read or write, running single
+operations concurrently under the view's context: `Store` on the context's thread pool, `AsyncStore`
+as tasks, at most the context limiter's `limit` at once, each holding its own slot. A backend with
+a batch capability (`ReadableMany`, `ReadableIntoMany[O]`, `WritableMany`, and async twins) is
+used instead, for batching the store itself can do (one request for many keys, one GPU
+submission); it receives the context so it can draw on the same resources. The rule for any
+fallback: `Store` may fall back when only speed differs, never when behavior does. A batch of single
+operations returns what a native batch would; a `get_into` that read and then copied would not put
+the bytes where the backend's buffer type says, which is why `get_into` has no fallback. The batch
+runners in `zarr_storage._batch` implement the windowing and failure rule once.
 
 Listing arguments are checked when the method is called; the items are produced lazily, and taking
 one after the store closes raises `StoreClosedError`.
@@ -143,8 +151,9 @@ raises `InvalidByteRangeError`; a suffix longer than the value returns the whole
 
 ## Views, lifecycle, identity
 
-- `store / "a"`, `store.with_read_only(True)` and `store.as_async()` (or `as_sync()`) return views
-  on the same backend. A view of a
+- `store / "a"`, `store.with_read_only(True)`, `store.with_context(ctx)`, `store.limited(n)` and
+  `store.as_async()` (or `as_sync()`) return views on the same backend. A view keeps its context
+  unless it is given another. A view of a
   read-only store is read-only; `with_read_only(False)` on one raises `ReadOnlyError`.
 - The store the user constructed owns the backend. `close()` (`aclose()` on an `AsyncStore`) on it
   closes the backend; on a derived view it does nothing. After the backend closes, every view raises `StoreClosedError`.
@@ -168,12 +177,10 @@ key (`a/b` when `a` is a key): that reads as absent.
 | `LocalBackend` | `(dev, inode, mtime_ns, size)`, with each write stamping a unique ns mtime | yes / yes, on filesystems that keep ns times | no (`KeyConflictError`) | the root |
 | `ObjectStoreBackend` | ETag and version (obstore's `LocalStore` ETag can repeat on ext4) | if the store supports it / not implemented | as the store does | as the store does |
 
-Every backend has `put_if_absent` and `get_if_changed`. `LocalBackend` runs its async operations
-and its batches, sync and async, on its `threads`, as many batch operations at once as the pool has
-threads. `ObjectStoreBackend` holds a slot of its `concurrency` limiter for every operation, sync
-and async, single and batched; async batches start at most `concurrency.limit` operations at once,
-and sync batches run one at a time. `MemoryBackend` uses `Store`'s serial batches, which are as fast
-for it.
+Every backend has `put_if_absent` and `get_if_changed`. `LocalBackend` is sync only; `AsyncStore`
+runs its operations on the context's pool. `MemoryBackend` and `ObjectStoreBackend` are also
+natively async. Their resource keys are `"local"`, `"memory"`, and `"obstore."` plus the obstore
+store's class name, so every S3 backend in a process shares one limit by default.
 
 `LocalBackend` stages each write in a reserved directory under the root and renames it into place,
 holding the lock of the key's directory; the lock lives in that directory, so overlapping roots and
@@ -214,47 +221,60 @@ step, each stored key reads back as the model says, through `get` and `get_many`
 `get_if_changed` with its generation is `Unchanged`. The obstore
 tests also fail any async run that makes a blocking obstore call.
 
-## Shared resources
+## Contexts
 
-Threads and limits on operations in flight are resources that backends share, after TensorStore's
-context resources (`file_io_concurrency`, `s3_request_concurrency`). zarrs has no I/O limits of its
-own (its `Resources` carry only a compute target, from Rayon's global pool); it bounds object-store
-requests by wrapping the store in object_store's `LimitStore` and sharing that store.
+Resource limits are part of a store's context, as in TensorStore. zarrs has no I/O limits of its
+own (its per-call `Resources` carry only a compute target, from Rayon's global pool); it bounds
+object-store requests by wrapping the store in object_store's `LimitStore` and sharing that store.
 
-- `ThreadPool(max_workers)` runs blocking work: `LocalBackend(root, threads=...)`.
-- `Limiter(limit)` caps operations in flight, for threads and tasks on any event loop in one
-  first-come, first-served queue: `ObjectStoreBackend(store, concurrency=...)`. `limiter.slot()` is
-  a sync or async context manager. A slot is held for a whole operation, and an operation that calls
-  another through a limiter it already holds takes no second slot (a context variable records the
-  slots an operation holds), so `get_into`, which reads through `get`, can't wait on itself.
-- Pass one resource to several backends to bound them together. Left out, a backend uses a
-  process-wide default, as TensorStore does: `ThreadPool.default()` of `max(4, cpu_count)` threads,
-  and one `Limiter(32)` per obstore store class, so every S3 backend in a process shares one limit
-  and an HTTP backend doesn't share it. A default is shared state, but it changes only speed, never
-  what an operation does; pass your own resource to isolate a backend.
-- Whoever creates a resource owns it: a backend never shuts down a pool it was given, and closing a
-  `LocalBackend` refuses new operations without stopping the pool. The default pool can't be shut
-  down.
-- Pickling a resource pickles its settings, and pickle stores each object once, so backends that
-  shared a resource share one new resource after a round trip; a default unpickles as the receiving
-  process's default.
+- A **`Context`** holds a `ThreadPool` and a `Limiter` per resource key. It is immutable;
+  `ctx.child(threads=..., limits={...})` overrides some resources and takes the rest from its
+  parent, and a context with no parent takes the rest from the process-wide defaults
+  (`Context.default()`): `ThreadPool.default()` of `max(4, cpu_count)` threads (TensorStore's
+  `file_io_concurrency` default) and one `Limiter(32)` per resource key (its
+  `s3_request_concurrency` default). A default is shared state, but it changes only speed, never
+  what an operation does.
+- **Every view carries a context**, `Context.default()` unless given one (`Store(backend,
+  context=...)`, `store.with_context(ctx)`). Every operation through the view holds a slot of
+  `context.limiter(backend.resource_key)`; blocking work (a sync backend called through an
+  `AsyncStore`, and the operations of a `Store` batch) runs on `context.threads`. Stores sharing a
+  context share its limits, whatever their backends. Like TensorStore's, a context is not part of a
+  store's identity: `shares_backend` and `overlaps` ignore it.
+- **`store.limited(n)`** is a view whose operations, together, run at most `n` at once, for a burst
+  of work: its context is a child whose limiter for the backend's key is `Limiter(n, within=...)`
+  the parent's. A limiter `within` another holds a slot of both, so a scoped limit never exceeds the
+  limit it narrows. Here the design departs from TensorStore, where a child context's resource
+  replaces the parent's: replacing would let a scoped limit escape the process-wide one.
+- **Slots are taken innermost first**, so work queued on a narrow limit holds none of the wide one,
+  and **where the work runs**: a sync backend's operation called through an `AsyncStore` takes its
+  slot on the pool thread that runs it. No operation holds a slot while it waits for a thread, so
+  pool threads waiting for slots and slot holders waiting for threads can't block each other.
+- `limiter.slot()` is a sync or async context manager, and a slot is not re-entrant, as with a lock:
+  stores take exactly one slot per operation, and never call each other while holding one. An
+  earlier draft made slots re-entrant through a context variable; that leaked into every task and
+  thread inheriting the context (`asyncio.gather`, and new threads on free-threaded Python 3.14),
+  letting a fan-out run unbounded under one slot.
 - A batch started on one of its pool's own threads runs on that thread, one operation at a time:
   waiting there for work queued on the same pool could wait forever once every thread does it.
-- Thread pools for I/O and for compute should stay separate (TensorStore's `file_io_concurrency`
-  and `data_copy_concurrency`): compute waiting on I/O in one pool starves it.
+- Whoever creates a resource owns it; the default pool can't be shut down. Pickling a context
+  pickles its resources' settings, and pickle stores each object once, so stores that shared a
+  context or a resource share one after a round trip; a default unpickles as the receiving
+  process's default.
+- Pools for I/O and for compute should stay separate (TensorStore's `file_io_concurrency` and
+  `data_copy_concurrency`): compute waiting on I/O in one pool starves it. A context holds the I/O
+  pool; zarr-python's codec pipeline would take its own.
 
 ## Configuration
 
 No global configuration. Every knob is a constructor parameter with its default in the signature;
-the shared resources above are passed the same way.
+resources are passed in a store's context.
 
 ## Open
 
 - Durability: no backend syncs to disk; a `sync` option on `LocalBackend` would.
 - Staged files left by a crash are never read but are never removed either.
 - Windows rules are implemented and unit-tested, not yet run on Windows.
-- Sync batches over obstore run one request at a time; a thread pool, or a native batch call,
-  would overlap them.
+- Listings hold no slot of the context's limiter.
 - `get_ranges_into`, `put_from`, and a GPU direct storage backend whose `get_into_many` submits one
   cuFile batch.
 

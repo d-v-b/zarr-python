@@ -12,18 +12,15 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import TYPE_CHECKING, TypedDict, TypeVar, TypeVarTuple
+from typing import TYPE_CHECKING, TypedDict, TypeVar
 
-from zarr_storage._batch import run_many, run_many_async
 from zarr_storage._buffers import byte_view
 from zarr_storage._byte_range import resolve
 from zarr_storage._errors import (
     InvalidKeyError,
     KeyConflictError,
-    StoreClosedError,
     UnsupportedOperationError,
 )
-from zarr_storage._resources import ThreadPool, default_thread_pool
 from zarr_storage._types import (
     Copied,
     Deleted,
@@ -40,7 +37,7 @@ from zarr_storage._types import (
 from zarr_storage.backends._common import IfMatch, always, if_absent
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Generator, Iterator, Sequence
+    from collections.abc import Callable, Generator, Iterator, Sequence
     from io import BufferedReader
 
     from typing_extensions import Buffer
@@ -71,14 +68,12 @@ _WINDOWS_DEVICE_NAMES = frozenset(
 )
 _WINDOWS_FORBIDDEN_CHARACTERS = frozenset('<>:"\\|?*') | frozenset(chr(i) for i in range(32))
 
-Ts = TypeVarTuple("Ts")
 R = TypeVar("R")
 T = TypeVar("T")
 
 
 class _State(TypedDict):
     root: str
-    threads: ThreadPool
     closed: bool
 
 
@@ -394,11 +389,6 @@ class LocalBackend:
     create
         Create `root` if it doesn't exist. With `create=False`, a missing root raises
         `FileNotFoundError`.
-    threads
-        The threads that run the async methods' file operations and the operations of batches
-        (`get_many`, `put_many`, ...), which run as many at once as the pool has threads. Share one
-        pool between backends to bound their threads together; the default is the process-wide
-        `ThreadPool.default()`. The backend never shuts the pool down.
     """
 
     def __init__(
@@ -406,14 +396,12 @@ class LocalBackend:
         root: str | os.PathLike[str],
         *,
         create: bool = True,
-        threads: ThreadPool | None = None,
     ) -> None:
         self._root = Path(root).resolve()
         if create:
             self._root.mkdir(parents=True, exist_ok=True)
         elif not self._root.is_dir():
             raise FileNotFoundError(f"The root directory {str(self._root)!r} does not exist.")
-        self._threads = default_thread_pool() if threads is None else threads
         self._probe_lock = threading.Lock()
         self._exact_times: bool | None = None
         self._closed = False
@@ -423,25 +411,23 @@ class LocalBackend:
         """The directory that holds the keys."""
         return self._root
 
-    @property
-    def threads(self) -> ThreadPool:
-        """The threads that run the async methods and batches."""
-        return self._threads
-
     def __repr__(self) -> str:
         return f"LocalBackend({str(self._root)!r})"
 
     def __getstate__(self) -> _State:
-        return {"root": str(self._root), "threads": self._threads, "closed": self._closed}
+        return {"root": str(self._root), "closed": self._closed}
 
     def __setstate__(self, state: _State) -> None:
         self._root = Path(state["root"])
-        self._threads = state["threads"]
         self._probe_lock = threading.Lock()
         self._exact_times = None
         self._closed = state["closed"]
 
     # --- Backend
+
+    @property
+    def resource_key(self) -> str:
+        return "local"
 
     @property
     def closed(self) -> bool:
@@ -452,7 +438,7 @@ class LocalBackend:
         return True
 
     def close(self) -> None:
-        """Refuse further operations. Operations already running finish; the pool stays up."""
+        """Refuse further operations; operations already running finish."""
         self._closed = True
 
     # --- paths
@@ -705,116 +691,6 @@ class LocalBackend:
             except (FileNotFoundError, NotADirectoryError):
                 return iter(())
         return _classify(entries)
-
-    # --- batches: the operations above, as many at once as the pool has threads
-
-    def get_many(
-        self, requests: Sequence[tuple[str, ByteRange | None]]
-    ) -> Iterator[tuple[int, Found | Missing]]:
-        return run_many(self.get, requests, self._open_threads(), self._threads.max_workers)
-
-    def get_into_many(
-        self, requests: Sequence[tuple[str, Buffer, ByteRange | None]]
-    ) -> Iterator[tuple[int, Copied | Missing]]:
-        return run_many(self.get_into, requests, self._open_threads(), self._threads.max_workers)
-
-    def put_many(self, requests: Sequence[tuple[str, memoryview]]) -> Iterator[tuple[int, Written]]:
-        return run_many(self.put, requests, self._open_threads(), self._threads.max_workers)
-
-    def delete_many(self, paths: Sequence[str]) -> Iterator[tuple[int, Deleted | Missing]]:
-        return run_many(
-            self.delete,
-            [(path,) for path in paths],
-            self._open_threads(),
-            self._threads.max_workers,
-        )
-
-    # --- async twins: run the sync methods on the backend's threads
-
-    def _open_threads(self) -> ThreadPool:
-        if self._closed:
-            raise StoreClosedError(f"{self!r} is closed.")
-        return self._threads
-
-    async def _run(self, fn: Callable[[*Ts], T], *args: *Ts) -> T:
-        return await self._open_threads().run(fn, *args)
-
-    async def get_async(self, path: str, byte_range: ByteRange | None) -> Found | Missing:
-        return await self._run(self.get, path, byte_range)
-
-    async def get_if_changed_async(
-        self, path: str, generation: Generation, byte_range: ByteRange | None
-    ) -> Found | Missing | Unchanged:
-        return await self._run(self.get_if_changed, path, generation, byte_range)
-
-    async def get_ranges_async(
-        self, path: str, ranges: Sequence[ByteRange]
-    ) -> FoundRanges | Missing:
-        return await self._run(self.get_ranges, path, ranges)
-
-    async def head_async(self, path: str) -> ObjectMetadata | Missing:
-        return await self._run(self.head, path)
-
-    async def get_into_async(
-        self, path: str, out: Buffer, byte_range: ByteRange | None
-    ) -> Copied | Missing:
-        return await self._run(self.get_into, path, out, byte_range)
-
-    async def put_async(self, path: str, value: memoryview) -> Written:
-        return await self._run(self.put, path, value)
-
-    async def put_if_absent_async(self, path: str, value: memoryview) -> Written | Rejected:
-        return await self._run(self.put_if_absent, path, value)
-
-    async def put_if_match_async(
-        self, path: str, value: memoryview, generation: Generation
-    ) -> Written | Rejected | Missing:
-        return await self._run(self.put_if_match, path, value, generation)
-
-    async def delete_async(self, path: str) -> Deleted | Missing:
-        return await self._run(self.delete, path)
-
-    async def delete_if_match_async(
-        self, path: str, generation: Generation
-    ) -> Deleted | Rejected | Missing:
-        return await self._run(self.delete_if_match, path, generation)
-
-    async def delete_dir_async(self, directory: str) -> None:
-        await self._run(self.delete_dir, directory)
-
-    def get_many_async(
-        self, requests: Sequence[tuple[str, ByteRange | None]]
-    ) -> AsyncIterator[tuple[int, Found | Missing]]:
-        return run_many_async(self.get_async, requests, self._threads.max_workers)
-
-    def get_into_many_async(
-        self, requests: Sequence[tuple[str, Buffer, ByteRange | None]]
-    ) -> AsyncIterator[tuple[int, Copied | Missing]]:
-        return run_many_async(self.get_into_async, requests, self._threads.max_workers)
-
-    def put_many_async(
-        self, requests: Sequence[tuple[str, memoryview]]
-    ) -> AsyncIterator[tuple[int, Written]]:
-        return run_many_async(self.put_async, requests, self._threads.max_workers)
-
-    def delete_many_async(
-        self, paths: Sequence[str]
-    ) -> AsyncIterator[tuple[int, Deleted | Missing]]:
-        return run_many_async(
-            self.delete_async, [(path,) for path in paths], self._threads.max_workers
-        )
-
-    async def list_async(self, directory: str) -> AsyncIterator[str]:
-        for path in await self._run(_materialize, self.list(directory)):
-            yield path
-
-    async def list_dir_async(self, directory: str) -> AsyncIterator[ListItem]:
-        for item in await self._run(_materialize, self.list_dir(directory)):
-            yield item
-
-
-def _materialize(items: Iterator[T]) -> list[T]:
-    return list(items)
 
 
 def _walk(directory: Path, prefix: str) -> Iterator[str]:

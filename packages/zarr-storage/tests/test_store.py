@@ -29,7 +29,7 @@ from zarr_storage.backends import MemoryBackend
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
 
-    from zarr_storage import ByteRange
+    from zarr_storage import ByteRange, Context
 
 
 class _ReadOnlyBackend:
@@ -37,6 +37,10 @@ class _ReadOnlyBackend:
 
     def __init__(self, values: dict[str, bytes]) -> None:
         self._values = values
+
+    @property
+    def resource_key(self) -> str:
+        return "test"
 
     @property
     def closed(self) -> bool:
@@ -117,17 +121,17 @@ def test_get_into_many_device_buffers() -> None:
     """Without a batch method of its own, the backend's `get_into` serves `get_into_many`."""
     store = Store(_DeviceBackend({"a/k": b"0123", "a/j": b"45"})) / "a"
     whole, part = _DeviceBuffer(4), _DeviceBuffer(1)
-    results = [
-        (request[0], result)
+    results = {
+        request[0]: result
         for request, result in store.get_into_many(
             [("k", whole), ("j", part, SuffixRequest(1)), ("missing", _DeviceBuffer(1))]
         )
-    ]
-    assert results == [
-        ("k", Copied(4, Generation(0))),
-        ("j", Copied(1, Generation(0))),
-        ("missing", Missing()),
-    ]
+    }
+    assert results == {
+        "k": Copied(4, Generation(0)),
+        "j": Copied(1, Generation(0)),
+        "missing": Missing(),
+    }
     assert (whole.download(4), part.download(1)) == (b"0123", b"5")
 
 
@@ -139,7 +143,7 @@ class _BatchBackend(_ReadOnlyBackend):
         self.asked: list[tuple[str, ByteRange | None]] = []
 
     def get_many(
-        self, requests: Sequence[tuple[str, ByteRange | None]]
+        self, requests: Sequence[tuple[str, ByteRange | None]], context: Context
     ) -> Iterator[tuple[int, Found | Missing]]:
         self.asked.extend(requests)
         for index in reversed(range(len(requests))):
@@ -179,7 +183,7 @@ class _FailingBackend(MemoryBackend):
 
 def test_put_many_failure_stops_the_batch_and_reports_it() -> None:
     backend = _FailingBackend()
-    store = Store(backend) / "r"
+    store = Store(backend).limited(1) / "r"  # one at a time, so the order is known
     with pytest.raises(BatchError) as caught:
         store.put_many([("ok", b"1"), ("bad", b"2"), ("later", b"3")])
     error = caught.value
@@ -192,7 +196,7 @@ def test_put_many_failure_stops_the_batch_and_reports_it() -> None:
 
 def test_get_many_failure_raises_after_the_reads_before_it() -> None:
     backend = _FailingBackend()
-    store = Store(backend) / "r"
+    store = Store(backend).limited(1) / "r"  # one at a time, so the order is known
     store.put("ok", b"1")
     backend.attempted.clear()
     results = store.get_many(["ok", "bad", "later"])
@@ -334,4 +338,5 @@ async def _static_surface_checks(
     store.get_async("k")  # pyright: ignore[reportAttributeAccessIssue]
     store.aclose()  # pyright: ignore[reportAttributeAccessIssue]
     astore.close()  # pyright: ignore[reportAttributeAccessIssue]
-    AsyncStore(_ReadOnlyBackend({})).get("k")  # pyright: ignore[reportAttributeAccessIssue]
+    await AsyncStore(_ReadOnlyBackend({})).get("k")  # a sync backend serves async callers
+    await AsyncStore(_ReadOnlyBackend({})).put("k", b"")  # pyright: ignore[reportAttributeAccessIssue]

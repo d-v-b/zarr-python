@@ -80,6 +80,10 @@ class MemoryBackend:
     # --- Backend
 
     @property
+    def resource_key(self) -> str:
+        return "memory"
+
+    @property
     def closed(self) -> bool:
         return self._closed
 

@@ -13,15 +13,10 @@ from typing_extensions import Buffer
 
 from zarr_storage._protocols import (
     Listable,
-    ListableAsync,
     Readable,
-    ReadableAsync,
     ReadableInto,
-    ReadableIntoAsync,
     Writable,
-    WritableAsync,
     WritableIfMatch,
-    WritableIfMatchAsync,
 )
 from zarr_storage._store import AsyncStore
 
@@ -59,15 +54,12 @@ class FullBackend(
     Writable,
     WritableIfMatch,
     Listable,
-    ReadableAsync,
-    ReadableIntoAsync[Buffer],
-    WritableAsync,
-    WritableIfMatchAsync,
-    ListableAsync,
     Protocol,
 ):
-    """A backend with every capability the suite needs of all backends, sync and async.
+    """A backend with every capability the suite needs of all backends.
 
+    Only the sync protocols: `AsyncStore` uses a backend's async twins where it has them and runs
+    its sync methods on its context's thread pool otherwise, so the suite's async run covers both.
     `DeletableIfMatch` is left out, since object stores lack it; `delete_if_match` reaches it.
     """
 
