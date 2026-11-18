@@ -14,7 +14,9 @@ from typing import TYPE_CHECKING, Any, TypeVar, TypeVarTuple, Unpack
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Coroutine, Iterator, Sequence
-    from concurrent.futures import Executor, Future
+    from concurrent.futures import Future
+
+    from zarr_storage._resources import ThreadPool
 
 __all__ = ["run_many", "run_many_async"]
 
@@ -27,13 +29,17 @@ _MESSAGE = "Operations of a batch failed."
 def run_many(
     fn: Callable[[Unpack[Ts]], R],
     requests: Sequence[tuple[*Ts]],
-    executor: Executor | None = None,
+    pool: ThreadPool | None = None,
     window: int = 1,
 ) -> Iterator[tuple[int, R]]:
-    """Call `fn(*request)` for each request: one at a time, or on `executor`, `window` at once."""
-    if executor is None:
+    """Call `fn(*request)` for each request: one at a time, or on `pool`, `window` at once.
+
+    Called from one of `pool`'s own threads, it runs one at a time on that thread: waiting there
+    for work queued behind it on the same pool could wait forever.
+    """
+    if pool is None or pool.in_worker():
         return _run_serially(fn, requests)
-    return _run_on(executor, fn, requests, window)
+    return _run_on(pool, fn, requests, window)
 
 
 def _run_serially(
@@ -48,7 +54,7 @@ def _run_serially(
 
 
 def _run_on(
-    executor: Executor,
+    pool: ThreadPool,
     fn: Callable[[Unpack[Ts]], R],
     requests: Sequence[tuple[*Ts]],
     window: int,
@@ -59,7 +65,7 @@ def _run_on(
     try:
         while pending or (not errors and started < len(requests)):
             while not errors and started < len(requests) and len(pending) < window:
-                pending[executor.submit(fn, *requests[started])] = started
+                pending[pool.submit(fn, *requests[started])] = started
                 started += 1
             done, _ = wait(pending, return_when=FIRST_COMPLETED)
             for future in done:

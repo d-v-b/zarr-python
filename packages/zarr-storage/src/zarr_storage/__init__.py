@@ -3,8 +3,8 @@
 A `Store` is a view of a backend at a root directory, used through sync methods; an `AsyncStore`
 is the same view used through coroutines, with the same method names. Backends implement capability
 protocols (`Readable`, `Writable`, `Listable`, their batch variants, and async twins) over backend
-paths; the stores validate keys, apply their root, enforce read-only access, and are the only
-objects most callers need.
+paths; the stores validate keys, apply their root, enforce read-only access, schedule and limit
+operations with the resources of their `Context`, and are the only objects most callers need.
 """
 
 from zarr_storage._errors import (
@@ -39,6 +39,7 @@ from zarr_storage._protocols import (
     WritableMany,
     WritableManyAsync,
 )
+from zarr_storage._resources import Context, Limiter, ThreadPool
 from zarr_storage._store import AsyncStore, Store
 from zarr_storage._types import (
     ByteRange,
@@ -67,6 +68,7 @@ __all__ = [
     "BatchError",
     "ByteRange",
     "ClosableAsync",
+    "Context",
     "Copied",
     "DeletableIfMatch",
     "DeletableIfMatchAsync",
@@ -79,6 +81,7 @@ __all__ = [
     "InvalidKeyError",
     "Key",
     "KeyConflictError",
+    "Limiter",
     "ListItem",
     "Listable",
     "ListableAsync",
@@ -101,6 +104,7 @@ __all__ = [
     "Store",
     "StoreClosedError",
     "SuffixRequest",
+    "ThreadPool",
     "Unchanged",
     "UnsupportedOperationError",
     "Writable",

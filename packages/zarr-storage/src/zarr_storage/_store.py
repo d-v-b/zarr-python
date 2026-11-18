@@ -1,13 +1,21 @@
-"""`Store` and `AsyncStore`: views of a backend at a root, through sync methods or coroutines.
+"""`Store` and `AsyncStore`: views of a backend at a root, under a context, through sync methods or
+coroutines.
 
 They are where the key grammar, the root, read-only access and the closed check are enforced,
-once, for every backend. A backend only sees backend paths.
+once, for every backend; a backend only sees backend paths. They are also where operations are
+scheduled and limited: every operation holds a slot of the view's context's limiter for the
+backend's `resource_key`, and blocking work runs on the context's thread pool.
+
+A slot is taken where the work runs. A sync backend's operation called through an `AsyncStore`
+takes its slot on the pool thread that runs it, so no operation ever holds a slot while it waits
+for a thread: pool threads waiting for slots and slot holders waiting for threads can't block each
+other.
 """
 
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator, Generator
-from typing import TYPE_CHECKING, Final, Generic, Self, TypeVar, cast, final
+from typing import TYPE_CHECKING, Final, Generic, Self, TypeVar, TypeVarTuple, cast, final
 
 from zarr_storage._batch import run_many, run_many_async
 from zarr_storage._buffers import byte_view
@@ -16,35 +24,37 @@ from zarr_storage._keys import check_key, is_within, join, normalize_directory, 
 from zarr_storage._protocols import (
     Backend,
     ClosableAsync,
+    DeletableIfMatchAsync,
+    ListableAsync,
+    ReadableAsync,
+    ReadableIntoAsync,
     ReadableIntoMany,
     ReadableIntoManyAsync,
     ReadableMany,
     ReadableManyAsync,
+    WritableAsync,
+    WritableIfMatchAsync,
     WritableMany,
     WritableManyAsync,
 )
+from zarr_storage._resources import default_context
 from zarr_storage._types import Missing
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterable, Iterator, Sequence
+    from collections.abc import AsyncIterator, Callable, Iterable, Iterator, Sequence
     from types import TracebackType
 
     from typing_extensions import Buffer
 
     from zarr_storage._protocols import (
         DeletableIfMatch,
-        DeletableIfMatchAsync,
         Listable,
-        ListableAsync,
         Readable,
-        ReadableAsync,
         ReadableInto,
-        ReadableIntoAsync,
         Writable,
-        WritableAsync,
         WritableIfMatch,
-        WritableIfMatchAsync,
     )
+    from zarr_storage._resources import Context, Limiter, Slot
     from zarr_storage._types import (
         ByteRange,
         Copied,
@@ -65,19 +75,40 @@ B_co = TypeVar("B_co", bound=Backend, covariant=True)
 O = TypeVar("O")
 T = TypeVar("T")
 R = TypeVar("R")
+Ts = TypeVarTuple("Ts")
 Q = TypeVar("Q", bound="str | tuple[str, ByteRange | None]")
 """A `get_many` request: a key, or a key and the part of its value to read."""
 
 
+def _limited(limiter: Limiter, fn: Callable[[*Ts], R], *args: *Ts) -> R:
+    """`fn(*args)`, holding a slot of `limiter`, on the calling thread."""
+    with limiter.slot():
+        return fn(*args)
+
+
+def _list_all(fn: Callable[[str], Iterator[T]], directory: str) -> list[T]:
+    return list(fn(directory))
+
+
 class _View(Generic[B_co]):
-    """What `Store` and `AsyncStore` share: a backend, a root, read-only access, ownership."""
+    """What `Store` and `AsyncStore` share: a backend, a root, read-only access, a context, and
+    ownership."""
 
-    __slots__ = ("_backend", "_owner", "_read_only", "_root")
+    __slots__ = ("_backend", "_context", "_limiter", "_owner", "_read_only", "_root")
 
-    def __init__(self, backend: B_co, *, root: str = "", read_only: bool = False) -> None:
+    def __init__(
+        self,
+        backend: B_co,
+        *,
+        root: str = "",
+        read_only: bool = False,
+        context: Context | None = None,
+    ) -> None:
         self._backend: Final[B_co] = backend
         self._root: Final[str] = normalize_directory(root)
         self._read_only: Final[bool] = read_only or not backend.writable
+        self._context: Final[Context] = default_context() if context is None else context
+        self._limiter: Final[Limiter] = self._context.limiter(backend.resource_key)
         self._owner = True
 
     # ----------------------------------------------------------------- views and identity
@@ -98,19 +129,26 @@ class _View(Generic[B_co]):
         return self._read_only
 
     @property
+    def context(self) -> Context:
+        """The resources this store's operations draw on."""
+        return self._context
+
+    @property
     def closed(self) -> bool:
         """Whether the backend has been closed."""
         return self._backend.closed
 
-    def _view(self, *, root: str, read_only: bool) -> Self:
-        view = type(self)(self._backend, root=root, read_only=read_only)
+    def _view(self, *, root: str, read_only: bool, context: Context) -> Self:
+        view = type(self)(self._backend, root=root, read_only=read_only, context=context)
         view._owner = False
         return view
 
     def __truediv__(self, directory: str) -> Self:
         """A view on the same backend, rooted at `directory` under this store's root."""
         return self._view(
-            root=join(self._root, normalize_directory(directory)), read_only=self._read_only
+            root=join(self._root, normalize_directory(directory)),
+            read_only=self._read_only,
+            context=self._context,
         )
 
     def with_read_only(self, read_only: bool = True) -> Self:
@@ -121,7 +159,19 @@ class _View(Generic[B_co]):
         """
         if self._read_only and not read_only:
             raise ReadOnlyError(f"{self!r} is read-only; its views are read-only too.")
-        return self._view(root=self._root, read_only=read_only)
+        return self._view(root=self._root, read_only=read_only, context=self._context)
+
+    def with_context(self, context: Context) -> Self:
+        """A view on the same backend and root whose operations draw on `context`."""
+        return self._view(root=self._root, read_only=self._read_only, context=context)
+
+    def limited(self, limit: int) -> Self:
+        """A view whose operations, together, run at most `limit` at once.
+
+        The limit narrows this view's: an operation holds a slot of both. Batches through the view
+        start at most `limit` operations at once.
+        """
+        return self.with_context(self._context.limited(self._backend.resource_key, limit))
 
     def shares_backend(self, other: _View[Backend]) -> bool:
         """Whether `other` reads and writes through the same backend object."""
@@ -138,7 +188,10 @@ class _View(Generic[B_co]):
         return f"{type(self).__name__}({self._backend!r}, root={self._root!r}{flags})"
 
     def __reduce__(self) -> tuple[object, ...]:
-        return (_restore_store, (type(self), self._backend, self._root, self._read_only))
+        return (
+            _restore_store,
+            (type(self), self._backend, self._root, self._read_only, self._context),
+        )
 
     # ----------------------------------------------------------------- path handling
 
@@ -154,16 +207,8 @@ class _View(Generic[B_co]):
         self._check_open()
         return join(self._root, normalize_directory(directory))
 
-    def _open_items(self, items: Iterator[T]) -> Iterator[T]:
-        """`items`, refusing to continue once the backend closes."""
-        for item in items:
-            self._check_open()
-            yield item
-
-    async def _open_items_async(self, items: AsyncIterator[T]) -> AsyncIterator[T]:
-        async for item in items:
-            self._check_open()
-            yield item
+    def _slot(self) -> Slot:
+        return self._limiter.slot()
 
     def _writable_path(self, key: str) -> str:
         path = self._path(key)
@@ -207,20 +252,33 @@ class _View(Generic[B_co]):
             seen.add(path)
         return paths
 
+    def _put_requests(
+        self, items: Iterable[tuple[str, Buffer]]
+    ) -> tuple[list[str], list[tuple[str, memoryview]]]:
+        batch = list(items)
+        keys = [key for key, _ in batch]
+        paths = self._writable_paths(keys)
+        views = [byte_view(value, writable=False) for _, value in batch]
+        return keys, list(zip(paths, views, strict=True))
+
 
 @final
 class Store(_View[B_co]):
-    """A backend seen from a root directory, through sync methods.
+    """A backend seen from a root directory, under a context, through sync methods.
 
     Construct a store from a backend; the store you construct owns the backend and closes it.
-    `store / "a"`, `with_read_only()` and `as_async()` return views on the same backend, which
-    share its state and never close it. A view of a read-only store is read-only too.
+    `store / "a"`, `with_read_only()`, `with_context()`, `limited()` and `as_async()` return views
+    on the same backend, which share its state and never close it. A view of a read-only store is
+    read-only too.
 
     Which methods a store offers depends on its backend's capabilities: a method whose capability
     the backend lacks is a type error. `AsyncStore` offers the same operations as coroutines.
 
-    `backend` gives direct access to the backend, which bypasses the key grammar, the root, and
-    read-only and closed checks.
+    Every operation holds a slot of the context's limiter for the backend's `resource_key`; batches
+    run their operations on the context's thread pool, at most the limiter's limit at once.
+
+    `backend` gives direct access to the backend, which bypasses the key grammar, the root, the
+    read-only and closed checks, and the context's limits.
 
     Stores have no value equality: `==` is identity. Use `shares_backend` and `overlaps` to compare
     stores.
@@ -234,16 +292,27 @@ class Store(_View[B_co]):
     read_only
         Refuse writes through this store. A backend that can't write makes every store over it
         read-only.
+    context
+        The resources operations draw on. Left out, `Context.default()`.
     """
 
     __slots__ = ()
 
-    def __init__(self, backend: B_co, *, root: str = "", read_only: bool = False) -> None:
-        super().__init__(backend, root=root, read_only=read_only)
+    def __init__(
+        self,
+        backend: B_co,
+        *,
+        root: str = "",
+        read_only: bool = False,
+        context: Context | None = None,
+    ) -> None:
+        super().__init__(backend, root=root, read_only=read_only, context=context)
 
     def as_async(self) -> AsyncStore[B_co]:
-        """An `AsyncStore` view on the same backend and root; it doesn't own the backend."""
-        view = AsyncStore(self._backend, root=self._root, read_only=self._read_only)
+        """An `AsyncStore` view on the same backend, root and context; it doesn't own the backend."""
+        view = AsyncStore(
+            self._backend, root=self._root, read_only=self._read_only, context=self._context
+        )
         view._owner = False
         return view
 
@@ -265,7 +334,13 @@ class Store(_View[B_co]):
     ) -> None:
         self.close()
 
-    # ----------------------------------------------------------------- batch results
+    # ----------------------------------------------------------------- batch plumbing
+
+    def _run_many(
+        self, fn: Callable[[*Ts], R], requests: Sequence[tuple[*Ts]]
+    ) -> Iterator[tuple[int, R]]:
+        """`fn` over `requests` on the context's pool, at most the limiter's limit at once."""
+        return run_many(fn, requests, self._context.threads, self._limiter.limit)
 
     def _streamed(
         self, batch: Sequence[T], results: Iterator[tuple[int, R]]
@@ -299,13 +374,33 @@ class Store(_View[B_co]):
             raise _batch_error(group, batch, completed, completed.keys()) from None
         return [(request, completed[index]) for index, request in enumerate(batch)]
 
+    # ----------------------------------------------------------------- operations on backend paths
+
+    def _get(self: Store[Readable], path: str, byte_range: ByteRange | None) -> Found | Missing:
+        with self._slot():
+            return self._backend.get(path, byte_range)
+
+    def _get_into(
+        self: Store[ReadableInto[O]], path: str, out: O, byte_range: ByteRange | None
+    ) -> Copied | Missing:
+        with self._slot():
+            return self._backend.get_into(path, out, byte_range)
+
+    def _put(self: Store[Writable], path: str, value: memoryview) -> Written:
+        with self._slot():
+            return self._backend.put(path, value)
+
+    def _delete(self: Store[Writable], path: str) -> Deleted | Missing:
+        with self._slot():
+            return self._backend.delete(path)
+
     # ----------------------------------------------------------------- reads
 
     def get(
         self: Store[Readable], key: str, *, byte_range: ByteRange | None = None
     ) -> Found | Missing:
         """The value at `key`, or the part `byte_range` selects."""
-        return self._backend.get(self._path(key), byte_range)
+        return self._get(self._path(key), byte_range)
 
     def get_if_changed(
         self: Store[Readable],
@@ -318,13 +413,17 @@ class Store(_View[B_co]):
 
         This revalidates a cached copy, as an HTTP `If-None-Match` request does.
         """
-        return self._backend.get_if_changed(self._path(key), generation, byte_range)
+        path = self._path(key)
+        with self._slot():
+            return self._backend.get_if_changed(path, generation, byte_range)
 
     def get_ranges(
         self: Store[Readable], key: str, ranges: Sequence[ByteRange]
     ) -> FoundRanges | Missing:
         """Several parts of the value at `key`, all from one generation."""
-        return self._backend.get_ranges(self._path(key), ranges)
+        path = self._path(key)
+        with self._slot():
+            return self._backend.get_ranges(path, ranges)
 
     def get_into(
         self: Store[ReadableInto[O]], key: str, out: O, *, byte_range: ByteRange | None = None
@@ -335,11 +434,13 @@ class Store(_View[B_co]):
         for the built-in backends, device memory for a GPU direct storage backend. Raises
         `ValueError` if `out` is shorter than the bytes to copy or can't be written.
         """
-        return self._backend.get_into(self._path(key), out, byte_range)
+        return self._get_into(self._path(key), out, byte_range)
 
     def head(self: Store[Readable], key: str) -> ObjectMetadata | Missing:
         """The size and generation of the value at `key`."""
-        return self._backend.head(self._path(key))
+        path = self._path(key)
+        with self._slot():
+            return self._backend.head(path)
 
     def exists(self: Store[Readable], key: str) -> bool:
         """Whether `key` holds a value."""
@@ -349,13 +450,14 @@ class Store(_View[B_co]):
 
     def put(self: Store[Writable], key: str, value: Buffer) -> Written:
         """Write `value` at `key`."""
-        return self._backend.put(self._writable_path(key), byte_view(value, writable=False))
+        return self._put(self._writable_path(key), byte_view(value, writable=False))
 
     def put_if_absent(self: Store[Writable], key: str, value: Buffer) -> Written | Rejected:
         """Write `value` at `key` if the key holds no value; `Rejected` if it holds one."""
-        return self._backend.put_if_absent(
-            self._writable_path(key), byte_view(value, writable=False)
-        )
+        path = self._writable_path(key)
+        view = byte_view(value, writable=False)
+        with self._slot():
+            return self._backend.put_if_absent(path, view)
 
     def put_if_match(
         self: Store[WritableIfMatch], key: str, value: Buffer, generation: Generation
@@ -364,23 +466,28 @@ class Store(_View[B_co]):
 
         `Rejected` if the key holds another generation, `Missing` if it holds no value.
         """
-        return self._backend.put_if_match(
-            self._writable_path(key), byte_view(value, writable=False), generation
-        )
+        path = self._writable_path(key)
+        view = byte_view(value, writable=False)
+        with self._slot():
+            return self._backend.put_if_match(path, view, generation)
 
     def delete(self: Store[Writable], key: str) -> Deleted | Missing:
         """Delete the key `key`. A directory is not a key: deleting one finds it `Missing`."""
-        return self._backend.delete(self._writable_path(key))
+        return self._delete(self._writable_path(key))
 
     def delete_if_match(
         self: Store[DeletableIfMatch], key: str, generation: Generation
     ) -> Deleted | Rejected | Missing:
         """Delete the key `key` if its value has `generation`."""
-        return self._backend.delete_if_match(self._writable_path(key), generation)
+        path = self._writable_path(key)
+        with self._slot():
+            return self._backend.delete_if_match(path, generation)
 
     def delete_dir(self: Store[Writable], directory: str = "") -> None:
         """Delete every key under `directory` (by default, every key in this store)."""
-        self._backend.delete_dir(self._writable_directory(directory))
+        path = self._writable_directory(directory)
+        with self._slot():
+            self._backend.delete_dir(path)
 
     # ----------------------------------------------------------------- batches
 
@@ -391,9 +498,10 @@ class Store(_View[B_co]):
 
         A request is a key, or a `(key, byte_range)` pair, and comes back as it was given, so
         `dict(store.get_many(keys))` maps keys to results. Keys are checked when `get_many` is
-        called; the reads happen as the pairs are taken, in no particular order. A batch is not
-        atomic: each read is its own `get`, from whatever generation it finds (`get_ranges` reads
-        several parts of one value from one generation).
+        called; the reads run on the context's thread pool as the pairs are taken, at most the
+        limiter's limit at once, in no particular order. A batch is not atomic: each read is its own
+        `get`, from whatever generation it finds (`get_ranges` reads several parts of one value from
+        one generation).
 
         If reads raise, the iterator yields the reads already running that succeed, then raises
         `BatchError` with the requests left in `remaining`; its `completed` is empty, since those
@@ -404,8 +512,8 @@ class Store(_View[B_co]):
         paths = [self._read_request(request) for request in batch]
         backend = self._backend
         if isinstance(backend, ReadableMany):
-            return self._streamed(batch, backend.get_many(paths))
-        return self._streamed(batch, run_many(backend.get, paths))
+            return self._streamed(batch, backend.get_many(paths, self._context))
+        return self._streamed(batch, self._run_many(self._get, paths))
 
     def get_into_many(
         self: Store[ReadableInto[O]],
@@ -421,8 +529,8 @@ class Store(_View[B_co]):
         backend = self._backend
         if isinstance(backend, ReadableIntoMany):
             many = cast("ReadableIntoMany[O]", backend)
-            return self._streamed(batch, many.get_into_many(paths))
-        return self._streamed(batch, run_many(backend.get_into, paths))
+            return self._streamed(batch, many.get_into_many(paths, self._context))
+        return self._streamed(batch, self._run_many(self._get_into, paths))
 
     def put_many(
         self: Store[Writable], items: Iterable[tuple[str, Buffer]]
@@ -434,17 +542,11 @@ class Store(_View[B_co]):
         finish, no others start, and `BatchError` reports the keys written (`completed`, with their
         results) and the rest (`remaining`).
         """
-        batch = list(items)
-        keys = [key for key, _ in batch]
-        paths = self._writable_paths(keys)
-        requests = [
-            (path, byte_view(value, writable=False))
-            for path, (_, value) in zip(paths, batch, strict=True)
-        ]
+        keys, requests = self._put_requests(items)
         backend = self._backend
         if isinstance(backend, WritableMany):
-            return self._finished(keys, backend.put_many(requests))
-        return self._finished(keys, run_many(backend.put, requests))
+            return self._finished(keys, backend.put_many(requests, self._context))
+        return self._finished(keys, self._run_many(self._put, requests))
 
     def delete_many(
         self: Store[Writable], keys: Iterable[str]
@@ -454,16 +556,22 @@ class Store(_View[B_co]):
         paths = self._writable_paths(batch)
         backend = self._backend
         if isinstance(backend, WritableMany):
-            return self._finished(batch, backend.delete_many(paths))
-        return self._finished(batch, run_many(backend.delete, [(path,) for path in paths]))
+            return self._finished(batch, backend.delete_many(paths, self._context))
+        return self._finished(batch, self._run_many(self._delete, [(path,) for path in paths]))
 
     # ----------------------------------------------------------------- listing
+
+    def _open_items(self, items: Iterator[T]) -> Iterator[T]:
+        """`items`, refusing to continue once the backend closes."""
+        for item in items:
+            self._check_open()
+            yield item
 
     def list(self: Store[Listable], directory: str = "") -> Iterator[str]:
         """Every key under `directory`, relative to this store's root, in no particular order.
 
         The directory is checked when `list` is called; iterating after the store closes raises
-        `StoreClosedError`.
+        `StoreClosedError`. Listings hold no slot of the context's limiter.
         """
         paths = self._backend.list(self._directory(directory))
         return self._open_items(relativize(path, self._root) for path in paths)
@@ -479,12 +587,13 @@ class Store(_View[B_co]):
 
 @final
 class AsyncStore(_View[B_co]):
-    """A backend seen from a root directory, through coroutines.
+    """A backend seen from a root directory, under a context, through coroutines.
 
-    The async twin of `Store`: the same operations under the same names, awaited, over the
-    backend's async capabilities (`ReadableAsync`, `WritableAsync`, ...). Listings and lazy batches
-    are async iterators. Construct one from a backend, or take `store.as_async()`; `as_sync()`
-    goes back. Close it with `await store.aclose()` or `async with`.
+    The async twin of `Store`: the same operations under the same names, awaited. A backend's async
+    methods are used where it has them; otherwise its sync methods run on the context's thread
+    pool, so a backend that only blocks needs no async code. Listings and lazy batches are async
+    iterators. Construct one from a backend, or take `store.as_async()`; `as_sync()` goes back.
+    Close it with `await store.aclose()` or `async with`.
 
     Parameters
     ----------
@@ -495,16 +604,27 @@ class AsyncStore(_View[B_co]):
     read_only
         Refuse writes through this store. A backend that can't write makes every store over it
         read-only.
+    context
+        The resources operations draw on. Left out, `Context.default()`.
     """
 
     __slots__ = ()
 
-    def __init__(self, backend: B_co, *, root: str = "", read_only: bool = False) -> None:
-        super().__init__(backend, root=root, read_only=read_only)
+    def __init__(
+        self,
+        backend: B_co,
+        *,
+        root: str = "",
+        read_only: bool = False,
+        context: Context | None = None,
+    ) -> None:
+        super().__init__(backend, root=root, read_only=read_only, context=context)
 
     def as_sync(self) -> Store[B_co]:
-        """A `Store` view on the same backend and root; it doesn't own the backend."""
-        view = Store(self._backend, root=self._root, read_only=self._read_only)
+        """A `Store` view on the same backend, root and context; it doesn't own the backend."""
+        view = Store(
+            self._backend, root=self._root, read_only=self._read_only, context=self._context
+        )
         view._owner = False
         return view
 
@@ -534,7 +654,11 @@ class AsyncStore(_View[B_co]):
     ) -> None:
         await self.aclose()
 
-    # ----------------------------------------------------------------- batch results
+    # ----------------------------------------------------------------- batch plumbing
+
+    async def _in_thread(self, fn: Callable[[*Ts], R], *args: *Ts) -> R:
+        """`fn(*args)` on the context's pool, holding a slot taken on the pool thread."""
+        return await self._context.threads.run(_limited, self._limiter, fn, *args)
 
     async def _streamed(
         self, batch: Sequence[T], results: AsyncIterator[tuple[int, R]]
@@ -567,102 +691,195 @@ class AsyncStore(_View[B_co]):
             raise _batch_error(group, batch, completed, completed.keys()) from None
         return [(request, completed[index]) for index, request in enumerate(batch)]
 
+    # ----------------------------------------------------------------- operations on backend paths
+
+    async def _get(
+        self: AsyncStore[ReadableAsync] | AsyncStore[Readable],
+        path: str,
+        byte_range: ByteRange | None,
+    ) -> Found | Missing:
+        backend = self._backend
+        if isinstance(backend, ReadableAsync):
+            async with self._slot():
+                return await backend.get_async(path, byte_range)
+        return await self._in_thread(backend.get, path, byte_range)
+
+    async def _get_into(
+        self: AsyncStore[ReadableIntoAsync[O]] | AsyncStore[ReadableInto[O]],
+        path: str,
+        out: O,
+        byte_range: ByteRange | None,
+    ) -> Copied | Missing:
+        backend = self._backend
+        if isinstance(backend, ReadableIntoAsync):
+            async with self._slot():
+                return await backend.get_into_async(path, out, byte_range)
+        return await self._in_thread(backend.get_into, path, out, byte_range)
+
+    async def _put(
+        self: AsyncStore[WritableAsync] | AsyncStore[Writable], path: str, value: memoryview
+    ) -> Written:
+        backend = self._backend
+        if isinstance(backend, WritableAsync):
+            async with self._slot():
+                return await backend.put_async(path, value)
+        return await self._in_thread(backend.put, path, value)
+
+    async def _delete(
+        self: AsyncStore[WritableAsync] | AsyncStore[Writable], path: str
+    ) -> Deleted | Missing:
+        backend = self._backend
+        if isinstance(backend, WritableAsync):
+            async with self._slot():
+                return await backend.delete_async(path)
+        return await self._in_thread(backend.delete, path)
+
     # ----------------------------------------------------------------- reads
 
     async def get(
-        self: AsyncStore[ReadableAsync], key: str, *, byte_range: ByteRange | None = None
+        self: AsyncStore[ReadableAsync] | AsyncStore[Readable],
+        key: str,
+        *,
+        byte_range: ByteRange | None = None,
     ) -> Found | Missing:
         """As `Store.get`."""
-        return await self._backend.get_async(self._path(key), byte_range)
+        return await self._get(self._path(key), byte_range)
 
     async def get_if_changed(
-        self: AsyncStore[ReadableAsync],
+        self: AsyncStore[ReadableAsync] | AsyncStore[Readable],
         key: str,
         generation: Generation,
         *,
         byte_range: ByteRange | None = None,
     ) -> Found | Missing | Unchanged:
         """As `Store.get_if_changed`."""
-        return await self._backend.get_if_changed_async(self._path(key), generation, byte_range)
+        path = self._path(key)
+        backend = self._backend
+        if isinstance(backend, ReadableAsync):
+            async with self._slot():
+                return await backend.get_if_changed_async(path, generation, byte_range)
+        return await self._in_thread(backend.get_if_changed, path, generation, byte_range)
 
     async def get_ranges(
-        self: AsyncStore[ReadableAsync], key: str, ranges: Sequence[ByteRange]
+        self: AsyncStore[ReadableAsync] | AsyncStore[Readable],
+        key: str,
+        ranges: Sequence[ByteRange],
     ) -> FoundRanges | Missing:
         """As `Store.get_ranges`."""
-        return await self._backend.get_ranges_async(self._path(key), ranges)
+        path = self._path(key)
+        backend = self._backend
+        if isinstance(backend, ReadableAsync):
+            async with self._slot():
+                return await backend.get_ranges_async(path, ranges)
+        return await self._in_thread(backend.get_ranges, path, ranges)
 
     async def get_into(
-        self: AsyncStore[ReadableIntoAsync[O]],
+        self: AsyncStore[ReadableIntoAsync[O]] | AsyncStore[ReadableInto[O]],
         key: str,
         out: O,
         *,
         byte_range: ByteRange | None = None,
     ) -> Copied | Missing:
         """As `Store.get_into`."""
-        return await self._backend.get_into_async(self._path(key), out, byte_range)
+        return await self._get_into(self._path(key), out, byte_range)
 
-    async def head(self: AsyncStore[ReadableAsync], key: str) -> ObjectMetadata | Missing:
+    async def head(
+        self: AsyncStore[ReadableAsync] | AsyncStore[Readable], key: str
+    ) -> ObjectMetadata | Missing:
         """As `Store.head`."""
-        return await self._backend.head_async(self._path(key))
+        path = self._path(key)
+        backend = self._backend
+        if isinstance(backend, ReadableAsync):
+            async with self._slot():
+                return await backend.head_async(path)
+        return await self._in_thread(backend.head, path)
 
-    async def exists(self: AsyncStore[ReadableAsync], key: str) -> bool:
+    async def exists(self: AsyncStore[ReadableAsync] | AsyncStore[Readable], key: str) -> bool:
         """As `Store.exists`."""
         return not isinstance(await self.head(key), Missing)
 
     # ----------------------------------------------------------------- writes
 
-    async def put(self: AsyncStore[WritableAsync], key: str, value: Buffer) -> Written:
+    async def put(
+        self: AsyncStore[WritableAsync] | AsyncStore[Writable], key: str, value: Buffer
+    ) -> Written:
         """As `Store.put`."""
-        return await self._backend.put_async(
-            self._writable_path(key), byte_view(value, writable=False)
-        )
+        return await self._put(self._writable_path(key), byte_view(value, writable=False))
 
     async def put_if_absent(
-        self: AsyncStore[WritableAsync], key: str, value: Buffer
+        self: AsyncStore[WritableAsync] | AsyncStore[Writable], key: str, value: Buffer
     ) -> Written | Rejected:
         """As `Store.put_if_absent`."""
-        return await self._backend.put_if_absent_async(
-            self._writable_path(key), byte_view(value, writable=False)
-        )
+        path = self._writable_path(key)
+        view = byte_view(value, writable=False)
+        backend = self._backend
+        if isinstance(backend, WritableAsync):
+            async with self._slot():
+                return await backend.put_if_absent_async(path, view)
+        return await self._in_thread(backend.put_if_absent, path, view)
 
     async def put_if_match(
-        self: AsyncStore[WritableIfMatchAsync], key: str, value: Buffer, generation: Generation
+        self: AsyncStore[WritableIfMatchAsync] | AsyncStore[WritableIfMatch],
+        key: str,
+        value: Buffer,
+        generation: Generation,
     ) -> Written | Rejected | Missing:
         """As `Store.put_if_match`."""
-        return await self._backend.put_if_match_async(
-            self._writable_path(key), byte_view(value, writable=False), generation
-        )
+        path = self._writable_path(key)
+        view = byte_view(value, writable=False)
+        backend = self._backend
+        if isinstance(backend, WritableIfMatchAsync):
+            async with self._slot():
+                return await backend.put_if_match_async(path, view, generation)
+        return await self._in_thread(backend.put_if_match, path, view, generation)
 
-    async def delete(self: AsyncStore[WritableAsync], key: str) -> Deleted | Missing:
+    async def delete(
+        self: AsyncStore[WritableAsync] | AsyncStore[Writable], key: str
+    ) -> Deleted | Missing:
         """As `Store.delete`."""
-        return await self._backend.delete_async(self._writable_path(key))
+        return await self._delete(self._writable_path(key))
 
     async def delete_if_match(
-        self: AsyncStore[DeletableIfMatchAsync], key: str, generation: Generation
+        self: AsyncStore[DeletableIfMatchAsync] | AsyncStore[DeletableIfMatch],
+        key: str,
+        generation: Generation,
     ) -> Deleted | Rejected | Missing:
         """As `Store.delete_if_match`."""
-        return await self._backend.delete_if_match_async(self._writable_path(key), generation)
+        path = self._writable_path(key)
+        backend = self._backend
+        if isinstance(backend, DeletableIfMatchAsync):
+            async with self._slot():
+                return await backend.delete_if_match_async(path, generation)
+        return await self._in_thread(backend.delete_if_match, path, generation)
 
-    async def delete_dir(self: AsyncStore[WritableAsync], directory: str = "") -> None:
+    async def delete_dir(
+        self: AsyncStore[WritableAsync] | AsyncStore[Writable], directory: str = ""
+    ) -> None:
         """As `Store.delete_dir`."""
-        await self._backend.delete_dir_async(self._writable_directory(directory))
+        path = self._writable_directory(directory)
+        backend = self._backend
+        if isinstance(backend, WritableAsync):
+            async with self._slot():
+                await backend.delete_dir_async(path)
+            return
+        await self._in_thread(backend.delete_dir, path)
 
     # ----------------------------------------------------------------- batches
 
     def get_many(
-        self: AsyncStore[ReadableAsync], requests: Iterable[Q]
+        self: AsyncStore[ReadableAsync] | AsyncStore[Readable], requests: Iterable[Q]
     ) -> AsyncIterator[tuple[Q, Found | Missing]]:
-        """As `Store.get_many`."""
+        """As `Store.get_many`; the reads run as tasks, at most the limiter's limit at once."""
         batch = list(requests)
         self._check_open()
         paths = [self._read_request(request) for request in batch]
         backend = self._backend
         if isinstance(backend, ReadableManyAsync):
-            return self._streamed(batch, backend.get_many_async(paths))
-        return self._streamed(batch, run_many_async(backend.get_async, paths))
+            return self._streamed(batch, backend.get_many_async(paths, self._context))
+        return self._streamed(batch, run_many_async(self._get, paths, self._limiter.limit))
 
     def get_into_many(
-        self: AsyncStore[ReadableIntoAsync[O]],
+        self: AsyncStore[ReadableIntoAsync[O]] | AsyncStore[ReadableInto[O]],
         requests: Iterable[tuple[str, O] | tuple[str, O, ByteRange | None]],
     ) -> AsyncIterator[tuple[tuple[str, O] | tuple[str, O, ByteRange | None], Copied | Missing]]:
         """As `Store.get_into_many`."""
@@ -672,48 +889,69 @@ class AsyncStore(_View[B_co]):
         backend = self._backend
         if isinstance(backend, ReadableIntoManyAsync):
             many = cast("ReadableIntoManyAsync[O]", backend)
-            return self._streamed(batch, many.get_into_many_async(paths))
-        return self._streamed(batch, run_many_async(backend.get_into_async, paths))
+            return self._streamed(batch, many.get_into_many_async(paths, self._context))
+        return self._streamed(batch, run_many_async(self._get_into, paths, self._limiter.limit))
 
     async def put_many(
-        self: AsyncStore[WritableAsync], items: Iterable[tuple[str, Buffer]]
+        self: AsyncStore[WritableAsync] | AsyncStore[Writable],
+        items: Iterable[tuple[str, Buffer]],
     ) -> list[tuple[str, Written]]:
         """As `Store.put_many`."""
-        batch = list(items)
-        keys = [key for key, _ in batch]
-        paths = self._writable_paths(keys)
-        requests = [
-            (path, byte_view(value, writable=False))
-            for path, (_, value) in zip(paths, batch, strict=True)
-        ]
+        keys, requests = self._put_requests(items)
         backend = self._backend
         if isinstance(backend, WritableManyAsync):
-            return await self._finished(keys, backend.put_many_async(requests))
-        return await self._finished(keys, run_many_async(backend.put_async, requests))
+            return await self._finished(keys, backend.put_many_async(requests, self._context))
+        return await self._finished(keys, run_many_async(self._put, requests, self._limiter.limit))
 
     async def delete_many(
-        self: AsyncStore[WritableAsync], keys: Iterable[str]
+        self: AsyncStore[WritableAsync] | AsyncStore[Writable], keys: Iterable[str]
     ) -> list[tuple[str, Deleted | Missing]]:
         """As `Store.delete_many`."""
         batch = list(keys)
         paths = self._writable_paths(batch)
         backend = self._backend
         if isinstance(backend, WritableManyAsync):
-            return await self._finished(batch, backend.delete_many_async(paths))
+            return await self._finished(batch, backend.delete_many_async(paths, self._context))
+        requests = [(path,) for path in paths]
         return await self._finished(
-            batch, run_many_async(backend.delete_async, [(path,) for path in paths])
+            batch, run_many_async(self._delete, requests, self._limiter.limit)
         )
 
     # ----------------------------------------------------------------- listing
 
-    def list(self: AsyncStore[ListableAsync], directory: str = "") -> AsyncIterator[str]:
-        """As `Store.list`."""
-        paths = self._backend.list_async(self._directory(directory))
-        return self._open_items_async(_relativized(paths, self._root))
+    async def _open_items(self, items: AsyncIterator[T]) -> AsyncIterator[T]:
+        async for item in items:
+            self._check_open()
+            yield item
 
-    def list_dir(self: AsyncStore[ListableAsync], directory: str = "") -> AsyncIterator[ListItem]:
+    async def _listed_in_thread(
+        self, fn: Callable[[str], Iterator[T]], directory: str
+    ) -> AsyncIterator[T]:
+        """A sync listing, taken whole on the context's pool."""
+        for item in await self._context.threads.run(_list_all, fn, directory):
+            yield item
+
+    def list(
+        self: AsyncStore[ListableAsync] | AsyncStore[Listable], directory: str = ""
+    ) -> AsyncIterator[str]:
+        """As `Store.list`."""
+        path = self._directory(directory)
+        backend = self._backend
+        if isinstance(backend, ListableAsync):
+            paths = backend.list_async(path)
+        else:
+            paths = self._listed_in_thread(backend.list, path)
+        return self._open_items(_relativized(paths, self._root))
+
+    def list_dir(
+        self: AsyncStore[ListableAsync] | AsyncStore[Listable], directory: str = ""
+    ) -> AsyncIterator[ListItem]:
         """As `Store.list_dir`."""
-        return self._open_items_async(self._backend.list_dir_async(self._directory(directory)))
+        path = self._directory(directory)
+        backend = self._backend
+        if isinstance(backend, ListableAsync):
+            return self._open_items(backend.list_dir_async(path))
+        return self._open_items(self._listed_in_thread(backend.list_dir, path))
 
 
 def _batch_error(
@@ -737,6 +975,6 @@ async def _relativized(paths: AsyncIterator[str], root: str) -> AsyncIterator[st
 
 
 def _restore_store(
-    cls: type[_View[Backend]], backend: Backend, root: str, read_only: bool
+    cls: type[_View[Backend]], backend: Backend, root: str, read_only: bool, context: Context
 ) -> _View[Backend]:
-    return cls(backend, root=root, read_only=read_only)
+    return cls(backend, root=root, read_only=read_only, context=context)

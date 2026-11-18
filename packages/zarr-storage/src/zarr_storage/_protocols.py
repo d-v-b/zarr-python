@@ -8,15 +8,22 @@ Directories are passed normalized: `""` for the backend's root, otherwise a key 
 `/`.
 
 Each capability has a sync protocol and an async twin whose methods end in `_async`. A backend
-implements whichever it can. `Store` calls the sync protocols and `AsyncStore` the async ones, and
-their methods are typed so that calling one the backend lacks is a type error. Compare-and-swap on a generation (`WritableIfMatch`, `DeletableIfMatch`) is a capability
-of its own, since many stores can't do it; `put_if_absent` is part of `Writable`.
+implements whichever it can. `Store` calls the sync protocols. `AsyncStore` calls the async twin
+where the backend has it and otherwise runs the sync method on its context's thread pool, so a
+backend that only blocks (a filesystem) needs no async code. Methods are typed so that calling one
+the backend lacks is a type error. Compare-and-swap on a generation (`WritableIfMatch`,
+`DeletableIfMatch`) is a capability of its own, since many stores can't do it; `put_if_absent` is
+part of `Writable`.
+
+Backends hold no thread pools or limits: the store schedules and limits every operation with the
+resources of its `Context`, under the backend's `resource_key`. Backends must be thread-safe, since
+a store runs their sync methods on many threads at once.
 
 The batch capabilities (`ReadableMany`, `ReadableIntoMany`, `WritableMany` and their async twins)
-are optional and change only speed: `Store.get_many` and its siblings work on any backend that
-can read or write, one operation at a time, and use a backend's batch methods when it has them. A
-batch method yields `(index, result)` pairs as operations finish and follows the failure rule of
-`zarr_storage._batch`, whose runners implement it.
+are for batching the store itself can do (one request for many keys, one GPU submission): without
+them, `Store.get_many` and its siblings run single operations concurrently under the context's
+resources. A batch method receives that context, so it can draw on the same resources; it yields
+`(index, result)` pairs as operations finish and follows the failure rule of `zarr_storage._batch`.
 """
 
 from __future__ import annotations
@@ -26,6 +33,7 @@ from typing import TYPE_CHECKING, Protocol, TypeVar, runtime_checkable
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator, Sequence
 
+    from zarr_storage._resources import Context
     from zarr_storage._types import (
         ByteRange,
         Copied,
@@ -70,7 +78,17 @@ O_contra = TypeVar("O_contra", contravariant=True)
 
 
 class Backend(Protocol):
-    """What every backend provides: a lifecycle and whether it accepts writes at all."""
+    """What every backend provides: a lifecycle, whether it accepts writes, and the key its
+    operations are limited under."""
+
+    @property
+    def resource_key(self) -> str:
+        """The key of the `Limiter` that stores take from their context for this backend.
+
+        Backends that should share a limit by default share a key: every obstore S3 backend uses
+        `"obstore.S3Store"`, so a process's S3 requests are bounded together.
+        """
+        ...
 
     @property
     def closed(self) -> bool:
@@ -171,7 +189,7 @@ class DeletableIfMatch(Backend, Protocol):
 @runtime_checkable
 class ReadableMany(Backend, Protocol):
     def get_many(
-        self, requests: Sequence[tuple[str, ByteRange | None]]
+        self, requests: Sequence[tuple[str, ByteRange | None]], context: Context
     ) -> Iterator[tuple[int, Found | Missing]]:
         """`get` for each `(path, byte_range)`, yielding `(index, result)` as each finishes."""
         ...
@@ -180,7 +198,7 @@ class ReadableMany(Backend, Protocol):
 @runtime_checkable
 class ReadableIntoMany(Backend, Protocol[O_contra]):
     def get_into_many(
-        self, requests: Sequence[tuple[str, O_contra, ByteRange | None]]
+        self, requests: Sequence[tuple[str, O_contra, ByteRange | None]], context: Context
     ) -> Iterator[tuple[int, Copied | Missing]]:
         """`get_into` for each `(path, out, byte_range)`, yielding `(index, result)`."""
         ...
@@ -188,11 +206,15 @@ class ReadableIntoMany(Backend, Protocol[O_contra]):
 
 @runtime_checkable
 class WritableMany(Backend, Protocol):
-    def put_many(self, requests: Sequence[tuple[str, memoryview]]) -> Iterator[tuple[int, Written]]:
+    def put_many(
+        self, requests: Sequence[tuple[str, memoryview]], context: Context
+    ) -> Iterator[tuple[int, Written]]:
         """`put` for each `(path, value)`, yielding `(index, result)` as each finishes."""
         ...
 
-    def delete_many(self, paths: Sequence[str]) -> Iterator[tuple[int, Deleted | Missing]]:
+    def delete_many(
+        self, paths: Sequence[str], context: Context
+    ) -> Iterator[tuple[int, Deleted | Missing]]:
         """`delete` for each path, yielding `(index, result)` as each finishes."""
         ...
 
@@ -207,6 +229,7 @@ class Listable(Backend, Protocol):
         ...
 
 
+@runtime_checkable
 class ReadableAsync(Backend, Protocol):
     async def get_async(self, path: str, byte_range: ByteRange | None) -> Found | Missing: ...
 
@@ -221,12 +244,14 @@ class ReadableAsync(Backend, Protocol):
     async def head_async(self, path: str) -> ObjectMetadata | Missing: ...
 
 
+@runtime_checkable
 class ReadableIntoAsync(Backend, Protocol[O_contra]):
     async def get_into_async(
         self, path: str, out: O_contra, byte_range: ByteRange | None
     ) -> Copied | Missing: ...
 
 
+@runtime_checkable
 class WritableAsync(Backend, Protocol):
     async def put_async(self, path: str, value: memoryview) -> Written: ...
 
@@ -237,12 +262,14 @@ class WritableAsync(Backend, Protocol):
     async def delete_dir_async(self, directory: str) -> None: ...
 
 
+@runtime_checkable
 class WritableIfMatchAsync(Backend, Protocol):
     async def put_if_match_async(
         self, path: str, value: memoryview, generation: Generation
     ) -> Written | Rejected | Missing: ...
 
 
+@runtime_checkable
 class DeletableIfMatchAsync(Backend, Protocol):
     async def delete_if_match_async(
         self, path: str, generation: Generation
@@ -252,28 +279,29 @@ class DeletableIfMatchAsync(Backend, Protocol):
 @runtime_checkable
 class ReadableManyAsync(Backend, Protocol):
     def get_many_async(
-        self, requests: Sequence[tuple[str, ByteRange | None]]
+        self, requests: Sequence[tuple[str, ByteRange | None]], context: Context
     ) -> AsyncIterator[tuple[int, Found | Missing]]: ...
 
 
 @runtime_checkable
 class ReadableIntoManyAsync(Backend, Protocol[O_contra]):
     def get_into_many_async(
-        self, requests: Sequence[tuple[str, O_contra, ByteRange | None]]
+        self, requests: Sequence[tuple[str, O_contra, ByteRange | None]], context: Context
     ) -> AsyncIterator[tuple[int, Copied | Missing]]: ...
 
 
 @runtime_checkable
 class WritableManyAsync(Backend, Protocol):
     def put_many_async(
-        self, requests: Sequence[tuple[str, memoryview]]
+        self, requests: Sequence[tuple[str, memoryview]], context: Context
     ) -> AsyncIterator[tuple[int, Written]]: ...
 
     def delete_many_async(
-        self, paths: Sequence[str]
+        self, paths: Sequence[str], context: Context
     ) -> AsyncIterator[tuple[int, Deleted | Missing]]: ...
 
 
+@runtime_checkable
 class ListableAsync(Backend, Protocol):
     def list_async(self, directory: str) -> AsyncIterator[str]: ...
 

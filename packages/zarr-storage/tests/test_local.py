@@ -145,11 +145,6 @@ def test_overlong_key_raises(tmp_path: Path) -> None:
         Store(LocalBackend(tmp_path)).put("a" * 1000, b"x")
 
 
-def test_zero_concurrency_raises(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="concurrency"):
-        LocalBackend(tmp_path, concurrency=0)
-
-
 def _create(
     store: Store[LocalBackend], key: str, barrier: threading.Barrier, results: list[bool]
 ) -> None:
