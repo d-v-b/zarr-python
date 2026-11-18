@@ -45,6 +45,25 @@ def _get(path: Path, prototype: BufferPrototype, byte_range: ByteRequest | None)
         return prototype.buffer.from_bytes(f.read())
 
 
+def _get_or_none(
+    path: Path, prototype: BufferPrototype, byte_range: ByteRequest | None
+) -> Buffer | None:
+    """Read the file at `path`, or return `None` when no file is there.
+
+    Opening a directory raises `IsADirectoryError` on POSIX and `PermissionError` on Windows.
+    A `PermissionError` counts as a missing key only when `path` is a directory, so a file the
+    process may not read still raises.
+    """
+    try:
+        return _get(path, prototype, byte_range)
+    except (FileNotFoundError, IsADirectoryError, NotADirectoryError):
+        return None
+    except PermissionError:
+        if path.is_dir():
+            return None
+        raise
+
+
 if sys.platform == "win32":
     # Per the os.rename docs:
     # On Windows, if dst exists a FileExistsError is always raised.
@@ -319,11 +338,7 @@ class LocalStore(Store):
         if prototype is None:
             prototype = default_buffer_prototype()
         self._ensure_open_sync()
-        path = self.root / key
-        try:
-            return _get(path, prototype, byte_range)
-        except (FileNotFoundError, IsADirectoryError, NotADirectoryError):
-            return None
+        return _get_or_none(self.root / key, prototype, byte_range)
 
     def set_sync(self, key: str, value: Buffer) -> None:
         self._ensure_open_sync()
@@ -351,12 +366,7 @@ class LocalStore(Store):
         if prototype is None:
             prototype = default_buffer_prototype()
         await self._ensure_open()
-        path = self.root / key
-
-        try:
-            return await asyncio.to_thread(_get, path, prototype, byte_range)
-        except (FileNotFoundError, IsADirectoryError, NotADirectoryError):
-            return None
+        return await asyncio.to_thread(_get_or_none, self.root / key, prototype, byte_range)
 
     async def get_partial_values(
         self,
@@ -367,7 +377,7 @@ class LocalStore(Store):
         args = []
         for key, byte_range in key_ranges:
             path = self.root / key
-            args.append((_get, path, prototype, byte_range))
+            args.append((_get_or_none, path, prototype, byte_range))
         return await concurrent_map(args, asyncio.to_thread, limit=None)  # TODO: fix limit
 
     async def set(self, key: str, value: Buffer) -> None:
