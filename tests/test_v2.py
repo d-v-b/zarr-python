@@ -325,6 +325,14 @@ def test_other_dtype_roundtrip(fill_value: bytes | None, tmp_path: Path) -> None
     assert (a == za[:]).all()
 
 
+# numcodecs deprecates the Pickle codec and emits a DeprecationWarning whenever one is
+# constructed, including through `get_codec` when array metadata names it. The tests below
+# construct the codec on purpose to exercise zarr's pickle opt-in.
+ignore_pickle_deprecation = pytest.mark.filterwarnings(
+    "ignore:The Pickle codec is deprecated:DeprecationWarning"
+)
+
+
 def _pickle_compressed_array() -> zarr.Array[Any]:
     # Writing with the pickle codec is allowed without opting in, only decoding is gated.
     arr = zarr.create_array(
@@ -351,6 +359,7 @@ def allow_numcodecs_unpickle(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(numcodecs.pickles, "ALLOW_UNSAFE_PICKLE_DECODE", True)
 
 
+@ignore_pickle_deprecation
 def test_pickle_codec_read_disabled_by_default() -> None:
     """Reading data encoded with the pickle codec fails unless the user opts in."""
     arr = _pickle_compressed_array()
@@ -362,6 +371,7 @@ def test_pickle_codec_read_disabled_by_default() -> None:
     assert "ALLOW_UNSAFE_PICKLE_DECODE" in str(excinfo.value)
 
 
+@ignore_pickle_deprecation
 def test_pickle_codec_read_does_not_unpickle() -> None:
     """A malicious chunk is not unpickled when the pickle codec is disabled."""
 
@@ -389,6 +399,7 @@ def test_pickle_codec_read_does_not_unpickle() -> None:
         arr[:]
 
 
+@ignore_pickle_deprecation
 def test_pickle_codec_zarr_opt_in_does_not_bypass_numcodecs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -402,6 +413,7 @@ def test_pickle_codec_zarr_opt_in_does_not_bypass_numcodecs(
         arr[:]
 
 
+@ignore_pickle_deprecation
 @pytest.mark.usefixtures("allow_numcodecs_unpickle")
 def test_pickle_codec_read_enabled_via_config() -> None:
     arr = _pickle_compressed_array()
@@ -409,6 +421,7 @@ def test_pickle_codec_read_enabled_via_config() -> None:
         np.testing.assert_array_equal(arr[:], np.array(["a", "bb", "ccc"]))
 
 
+@ignore_pickle_deprecation
 @pytest.mark.usefixtures("allow_numcodecs_unpickle")
 @pytest.mark.parametrize(("env_value", "allowed"), [("True", True), ("false", False)])
 def test_pickle_codec_read_enabled_via_env_var(
